@@ -25,6 +25,8 @@ Abstract:
 #include <fwpmk.h>
 #include <initguid.h>
 
+#define DP_UDP_HEADER_SIZE 8
+
 DEFINE_GUID(
     DP_WFP_SUBLAYER_GUID,
     0x8c5d1d24, 0x23b7, 0x4d97, 0x9b, 0x3d, 0xaa, 0x46, 0x30, 0x91, 0x10, 0x71);
@@ -109,6 +111,54 @@ DpNetFilterLowerWide(
 
 static
 BOOLEAN
+DpNetFilterDomainPatternMatches(
+    _In_reads_(PatternLength) PCWSTR Pattern,
+    _In_ SIZE_T PatternLength,
+    _In_ PCWSTR Domain,
+    _In_ SIZE_T DomainLength
+    )
+{
+    SIZE_T patternIndex = 0;
+    SIZE_T domainIndex = 0;
+    SIZE_T starIndex = (SIZE_T)-1;
+    SIZE_T retryDomainIndex = 0;
+
+    while (domainIndex < DomainLength) {
+        if (patternIndex < PatternLength && Pattern[patternIndex] == L'*') {
+            starIndex = patternIndex++;
+            retryDomainIndex = domainIndex;
+            continue;
+        }
+
+        if (patternIndex < PatternLength &&
+            (Pattern[patternIndex] == L'?' ||
+             DpNetFilterLowerWide(Pattern[patternIndex]) ==
+                DpNetFilterLowerWide(Domain[domainIndex]))) {
+
+            patternIndex++;
+            domainIndex++;
+            continue;
+        }
+
+        if (starIndex != (SIZE_T)-1) {
+            patternIndex = starIndex + 1;
+            retryDomainIndex++;
+            domainIndex = retryDomainIndex;
+            continue;
+        }
+
+        return FALSE;
+    }
+
+    while (patternIndex < PatternLength && Pattern[patternIndex] == L'*') {
+        patternIndex++;
+    }
+
+    return patternIndex == PatternLength;
+}
+
+static
+BOOLEAN
 DpNetFilterEqualDomain(
     _In_ PCUNICODE_STRING RuleDomain,
     _In_ PCWSTR Domain
@@ -116,7 +166,6 @@ DpNetFilterEqualDomain(
 {
     SIZE_T domainLength = 0;
     SIZE_T ruleLength;
-    SIZE_T index;
 
     if (RuleDomain == NULL ||
         RuleDomain->Buffer == NULL ||
@@ -133,38 +182,10 @@ DpNetFilterEqualDomain(
 
     ruleLength = RuleDomain->Length / sizeof(WCHAR);
 
-    if (ruleLength > 1 && RuleDomain->Buffer[0] == L'*') {
-        PCWSTR suffix = RuleDomain->Buffer + 1;
-        SIZE_T suffixLength = ruleLength - 1;
-
-        if (domainLength < suffixLength) {
-            return FALSE;
-        }
-
-        for (index = 0; index < suffixLength; index++) {
-            if (DpNetFilterLowerWide(suffix[index]) !=
-                DpNetFilterLowerWide(Domain[domainLength - suffixLength + index])) {
-
-                return FALSE;
-            }
-        }
-
-        return TRUE;
-    }
-
-    if (domainLength != ruleLength) {
-        return FALSE;
-    }
-
-    for (index = 0; index < ruleLength; index++) {
-        if (DpNetFilterLowerWide(RuleDomain->Buffer[index]) !=
-            DpNetFilterLowerWide(Domain[index])) {
-
-            return FALSE;
-        }
-    }
-
-    return TRUE;
+    return DpNetFilterDomainPatternMatches(RuleDomain->Buffer,
+                                           ruleLength,
+                                           Domain,
+                                           domainLength);
 }
 
 static
@@ -501,7 +522,7 @@ DpNetFilterDnsClassify(
     USHORT remotePort;
     UCHAR protocol;
     ULONG directionValue;
-    ULONG transportHeaderSize = 0;
+    ULONG transportHeaderSize = DP_UDP_HEADER_SIZE;
     WCHAR domain[260];
     DP_NETWORK_ACTION action;
 
@@ -558,7 +579,8 @@ DpNetFilterDnsClassify(
     }
 
     if (InMetaValues != NULL &&
-        FWPS_IS_METADATA_FIELD_PRESENT(InMetaValues, FWPS_METADATA_FIELD_TRANSPORT_HEADER_SIZE)) {
+        FWPS_IS_METADATA_FIELD_PRESENT(InMetaValues, FWPS_METADATA_FIELD_TRANSPORT_HEADER_SIZE) &&
+        InMetaValues->transportHeaderSize != 0) {
 
         transportHeaderSize = InMetaValues->transportHeaderSize;
     }
