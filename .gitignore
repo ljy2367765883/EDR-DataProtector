@@ -1,0 +1,51 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+[Bb]in/
+[Oo]bj/
+x64/
+x86/
+Win32/
+Debug/
+Release/
+publish/
+
+# Driver/package generated files
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.sys
+*.cat
+*.cer
+*.pfx
+*.log
+*.tlog
+*.lastbuildstate
+*.recipe
+*.manifest
+*.cache
+
+# NuGet/package restore
+packages/
+*.nupkg
+
+# Local diagnostics and captures
+Logfile.XML
+*.etl
+*.evtx
+*.dmp
+*.mdmp
+*.tmp
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo

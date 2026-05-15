@@ -1,0 +1,16 @@
+LIBRARY "DataProtectorPolicyApi"
+
+EXPORTS
+    DpPolicyCheckConnection
+    DpPolicyAddProcessNameRule
+    DpPolicyAddProcessNameRuleEx
+    DpPolicyRemoveProcessNameRule
+    DpPolicyRemoveProcessNameRuleEx
+    DpPolicyAddProcessDirectoryRule
+    DpPolicyAddProcessDirectoryRuleEx
+    DpPolicyRemoveProcessDirectoryRule
+    DpPolicyRemoveProcessDirectoryRuleEx
+    DpPolicyClearProcessRules
+    DpPolicyQueryProcessRules
+    DpPolicyConvertDosPathToNtPath
+    DpPolicyGetLastErrorMessage

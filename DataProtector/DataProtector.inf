@@ -1,0 +1,94 @@
+;;;
+;;; DataProtector
+;;;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "Encryption"
+ClassGuid   = {a0a701c0-a511-42ff-aa6c-06dc0395576f}
+Provider    = %ManufacturerName%
+DriverVer   = 05/14/2026,1.0.0.0
+CatalogFile = DataProtector.cat
+
+[DestinationDirs]
+DefaultDestDir          = 12
+MiniFilter.DriverFiles  = 12            ;%windir%\system32\drivers
+
+;;
+;; Default install sections
+;;
+
+[DefaultInstall]
+OptionDesc          = %ServiceDescription%
+CopyFiles           = MiniFilter.DriverFiles
+
+[DefaultInstall.Services]
+AddService          = %ServiceName%,,MiniFilter.Service
+
+;;
+;; Default uninstall sections
+;;
+
+[DefaultUninstall]
+DelFiles   = MiniFilter.DriverFiles
+
+[DefaultUninstall.Services]
+DelService = %ServiceName%,0x200      ;Ensure service is stopped before deleting
+
+;
+; Services Section
+;
+
+[MiniFilter.Service]
+DisplayName      = %ServiceName%
+Description      = %ServiceDescription%
+ServiceBinary    = %12%\%DriverName%.sys        ;%windir%\system32\drivers\
+Dependencies     = "FltMgr"
+ServiceType      = 2                            ;SERVICE_FILE_SYSTEM_DRIVER
+StartType        = 3                            ;SERVICE_DEMAND_START
+ErrorControl     = 1                            ;SERVICE_ERROR_NORMAL
+LoadOrderGroup = "FSFilter Encryption"
+AddReg           = MiniFilter.AddRegistry
+
+;
+; Registry Modifications
+;
+
+[MiniFilter.AddRegistry]
+HKR,,"DebugFlags",0x00010001 ,0x0
+HKR,,"SupportedFeatures",0x00010001,0x3
+HKR,,"TrustedProcessNames",0x00010000,"cmd.exe","powershell.exe","notepad.exe","wpp.exe"
+HKR,,"TrustedProcessDirectories",0x00010000
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%Instance1.Name%,"Altitude",0x00000000,%Instance1.Altitude%
+HKR,"Instances\"%Instance1.Name%,"Flags",0x00010001,%Instance1.Flags%
+
+;
+; Copy Files
+;
+
+[MiniFilter.DriverFiles]
+%DriverName%.sys
+
+[SourceDisksFiles]
+DataProtector.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskId1%,,,
+
+;;
+;; String Section
+;;
+
+[Strings]
+ManufacturerName        = "DataProtector"
+ServiceDescription      = "DataProtector Transparent Encryption Mini-Filter Driver"
+ServiceName             = "DataProtector"
+DriverName              = "DataProtector"
+DiskId1                 = "DataProtector Device Installation Disk"
+
+;Instances specific information.
+DefaultInstance         = "DataProtector Instance"
+Instance1.Name          = "DataProtector Instance"
+Instance1.Altitude       = "141000"
+Instance1.Flags         = 0x0              ; Allow all attachments
