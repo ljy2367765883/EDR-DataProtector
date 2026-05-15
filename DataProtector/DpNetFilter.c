@@ -337,7 +337,7 @@ DpNetFilterAleClassify(
     }
 
     if (!gDpNetFilterInitialized) {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
@@ -356,12 +356,12 @@ DpNetFilterAleClassify(
         remotePort = InFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_IP_REMOTE_PORT].value.uint16;
         protocol = InFixedValues->incomingValue[FWPS_FIELD_ALE_AUTH_RECV_ACCEPT_V4_IP_PROTOCOL].value.uint8;
     } else {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
     if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP) {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
@@ -377,7 +377,7 @@ DpNetFilterAleClassify(
         ClassifyOut->actionType = FWP_ACTION_BLOCK;
         ClassifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
     } else {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
     }
 }
 
@@ -517,20 +517,20 @@ DpNetFilterDnsClassify(
     }
 
     if (!gDpNetFilterInitialized) {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
     directionValue = InFixedValues->incomingValue[FWPS_FIELD_DATAGRAM_DATA_V4_DIRECTION].value.uint32;
     if (directionValue != FWP_DIRECTION_OUTBOUND) {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
     protocol = InFixedValues->incomingValue[FWPS_FIELD_DATAGRAM_DATA_V4_IP_PROTOCOL].value.uint8;
     remotePort = InFixedValues->incomingValue[FWPS_FIELD_DATAGRAM_DATA_V4_IP_REMOTE_PORT].value.uint16;
     if (protocol != IPPROTO_UDP) {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
@@ -553,7 +553,7 @@ DpNetFilterDnsClassify(
     }
 
     if (remotePort != 53) {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
@@ -568,7 +568,7 @@ DpNetFilterDnsClassify(
                                   domain,
                                   RTL_NUMBER_OF(domain))) {
 
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
 
@@ -584,7 +584,7 @@ DpNetFilterDnsClassify(
         ClassifyOut->actionType = FWP_ACTION_BLOCK;
         ClassifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
     } else {
-        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
     }
 }
 
