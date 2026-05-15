@@ -8,10 +8,13 @@ namespace DataProtectorAdmin.Models
         {
             ProcessNameRules = new ObservableCollection<PolicyRule>();
             ProcessDirectoryRules = new ObservableCollection<PolicyRule>();
+            ExcludedDirectoryRules = new ObservableCollection<PolicyRule>();
         }
 
         public ObservableCollection<PolicyRule> ProcessNameRules { get; private set; }
 
         public ObservableCollection<PolicyRule> ProcessDirectoryRules { get; private set; }
+
+        public ObservableCollection<PolicyRule> ExcludedDirectoryRules { get; private set; }
     }
 }

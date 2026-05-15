@@ -887,6 +887,13 @@ DpShadowPreCreate(
             goto Exit;
         }
 
+        if (!DpPolicyNameIsProtected(&createContext->OriginalName)) {
+            DpShadowFreeCreateContext(createContext);
+            createContext = NULL;
+            status = STATUS_ACCESS_DENIED;
+            goto Exit;
+        }
+
         trusted = DpProcessPolicyIsTrusted(Data, &createContext->OriginalName);
         if (!trusted) {
             DpShadowFreeCreateContext(createContext);

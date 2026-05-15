@@ -21,6 +21,7 @@ extern "C" {
 
 #define DP_POLICY_API_RULE_PROCESS_NAME         1u
 #define DP_POLICY_API_RULE_PROCESS_DIRECTORY    2u
+#define DP_POLICY_API_RULE_EXCLUDED_DIRECTORY   3u
 
 typedef struct _DP_POLICY_API_RULE {
     DWORD RuleType;
@@ -80,6 +81,32 @@ DpPolicyRemoveProcessDirectoryRule(
 DP_POLICY_API
 DWORD
 DpPolicyRemoveProcessDirectoryRuleEx(
+    _In_z_ LPCWSTR directoryPath,
+    _In_z_ LPCWSTR extension
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyAddExcludedDirectoryRule(
+    _In_z_ LPCWSTR directoryPath
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyAddExcludedDirectoryRuleEx(
+    _In_z_ LPCWSTR directoryPath,
+    _In_z_ LPCWSTR extension
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyRemoveExcludedDirectoryRule(
+    _In_z_ LPCWSTR directoryPath
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyRemoveExcludedDirectoryRuleEx(
     _In_z_ LPCWSTR directoryPath,
     _In_z_ LPCWSTR extension
     );

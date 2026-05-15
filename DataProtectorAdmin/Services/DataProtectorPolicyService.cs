@@ -15,6 +15,7 @@ namespace DataProtectorAdmin.Services
         private const uint BufferTooSmallStatus = 0xE0010005;
         private const uint RuleTypeProcessName = 1;
         private const uint RuleTypeProcessDirectory = 2;
+        private const uint RuleTypeExcludedDirectory = 3;
         private const int MessageBufferChars = 512;
         private const int PathBufferChars = 1024;
 
@@ -40,6 +41,7 @@ namespace DataProtectorAdmin.Services
                 AdminDiagnostics.Log("Query process rules from driver: begin.");
                 List<PolicyRule> processNameRules = new List<PolicyRule>();
                 List<PolicyRule> processDirectoryRules = new List<PolicyRule>();
+                List<PolicyRule> excludedDirectoryRules = new List<PolicyRule>();
                 uint ruleCount;
                 uint stringCharsRequired;
                 uint status = DataProtectorPolicyNative.DpPolicyQueryProcessRules(
@@ -99,6 +101,11 @@ namespace DataProtectorAdmin.Services
                             AddRuleToList(processDirectoryRules,
                                           new PolicyRule(PolicyRuleKind.ProcessDirectory, value, value, extension));
                         }
+                        else if (nativeRules[index].RuleType == RuleTypeExcludedDirectory)
+                        {
+                            AddRuleToList(excludedDirectoryRules,
+                                          new PolicyRule(PolicyRuleKind.ExcludedDirectory, value, value, extension));
+                        }
                     }
 
                     PolicyOperationResult result = CommitLocalChange(
@@ -108,6 +115,7 @@ namespace DataProtectorAdmin.Services
                         {
                             Settings.ProcessNameRules.Clear();
                             Settings.ProcessDirectoryRules.Clear();
+                            Settings.ExcludedDirectoryRules.Clear();
 
                             foreach (PolicyRule rule in processNameRules)
                             {
@@ -117,6 +125,11 @@ namespace DataProtectorAdmin.Services
                             foreach (PolicyRule rule in processDirectoryRules)
                             {
                                 Settings.ProcessDirectoryRules.Add(rule);
+                            }
+
+                            foreach (PolicyRule rule in excludedDirectoryRules)
+                            {
+                                Settings.ExcludedDirectoryRules.Add(rule);
                             }
                         });
 
@@ -251,6 +264,65 @@ namespace DataProtectorAdmin.Services
             return result;
         }
 
+        public PolicyOperationResult AddExcludedDirectoryRule(string directoryPath, string extension)
+        {
+            string trimmed = directoryPath == null ? string.Empty : directoryPath.Trim();
+            string normalizedExtension = NormalizeExtension(extension);
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return new PolicyOperationResult(false, 1, "请选择或输入排除目录。");
+            }
+
+            DirectoryConversionResult conversion = ConvertDirectoryPath(trimmed);
+            if (!conversion.Succeeded || string.IsNullOrWhiteSpace(conversion.DriverValue))
+            {
+                return new PolicyOperationResult(false, conversion.Status, conversion.Message);
+            }
+
+            if (RunOnUiThread(() => Settings.ExcludedDirectoryRules.Any(rule => RuleEquals(rule, conversion.DriverValue, normalizedExtension))))
+            {
+                return PolicyOperationResult.Success("排除目录规则已经存在。");
+            }
+
+            PolicyOperationResult result = InvokeNative(
+                () => DataProtectorPolicyNative.DpPolicyAddExcludedDirectoryRuleEx(trimmed, normalizedExtension),
+                "排除目录规则已下发。");
+
+            if (result.Succeeded || IsAlreadyExists(result.Status))
+            {
+                string message = result.Succeeded
+                    ? result.Message
+                    : "驱动中已存在该排除目录，已补齐本地配置。";
+
+                return CommitLocalChange(message, "排除目录已下发到驱动，但本地配置保存失败：", () =>
+                    Settings.ExcludedDirectoryRules.Add(new PolicyRule(
+                        PolicyRuleKind.ExcludedDirectory,
+                        trimmed,
+                        conversion.DriverValue,
+                        normalizedExtension)));
+            }
+
+            return result;
+        }
+
+        public PolicyOperationResult RemoveExcludedDirectoryRule(PolicyRule rule)
+        {
+            PolicyOperationResult result = InvokeNative(
+                () => DataProtectorPolicyNative.DpPolicyRemoveExcludedDirectoryRuleEx(rule.DriverValue, rule.Extension),
+                "排除目录规则已移除。");
+
+            if (result.Succeeded || IsNotFound(result.Status))
+            {
+                string message = result.Succeeded
+                    ? result.Message
+                    : "本地排除目录已移除，驱动中未找到该规则。";
+
+                return CommitLocalChange(message, "驱动规则已处理，但本地配置保存失败：", () => Settings.ExcludedDirectoryRules.Remove(rule));
+            }
+
+            return result;
+        }
+
         public PolicyOperationResult ClearRules()
         {
             PolicyOperationResult result = InvokeNative(DataProtectorPolicyNative.DpPolicyClearProcessRules, "驱动规则已清空。");
@@ -260,6 +332,7 @@ namespace DataProtectorAdmin.Services
                 {
                     Settings.ProcessNameRules.Clear();
                     Settings.ProcessDirectoryRules.Clear();
+                    Settings.ExcludedDirectoryRules.Clear();
                 });
             }
 
@@ -276,6 +349,7 @@ namespace DataProtectorAdmin.Services
 
             List<PolicyRule> processNameRules = RunOnUiThread(() => Settings.ProcessNameRules.ToList());
             List<PolicyRule> processDirectoryRules = RunOnUiThread(() => Settings.ProcessDirectoryRules.ToList());
+            List<PolicyRule> excludedDirectoryRules = RunOnUiThread(() => Settings.ExcludedDirectoryRules.ToList());
 
             foreach (PolicyRule rule in processNameRules)
             {
@@ -301,7 +375,19 @@ namespace DataProtectorAdmin.Services
                 }
             }
 
-            return PolicyOperationResult.Success("所有可信规则已同步到驱动。");
+            foreach (PolicyRule rule in excludedDirectoryRules)
+            {
+                PolicyOperationResult result = InvokeNative(
+                    () => DataProtectorPolicyNative.DpPolicyAddExcludedDirectoryRuleEx(rule.DriverValue, rule.Extension),
+                    "排除目录规则已同步。");
+
+                if (!result.Succeeded)
+                {
+                    return result;
+                }
+            }
+
+            return PolicyOperationResult.Success("所有策略规则已同步到驱动。");
         }
 
         private static string NormalizeProcessName(string processName)
@@ -448,6 +534,11 @@ namespace DataProtectorAdmin.Services
             foreach (PolicyRule rule in Settings.ProcessDirectoryRules)
             {
                 snapshot.ProcessDirectoryRules.Add(rule);
+            }
+
+            foreach (PolicyRule rule in Settings.ExcludedDirectoryRules)
+            {
+                snapshot.ExcludedDirectoryRules.Add(rule);
             }
 
             return snapshot;

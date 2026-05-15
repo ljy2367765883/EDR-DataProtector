@@ -44,7 +44,16 @@ DpPolicyNameIsProtected(
     _In_ PCUNICODE_STRING Name
     )
 {
-    return DpProcessPolicyNameHasProtectedExtension(Name);
+    return DpProcessPolicyNameHasProtectedExtension(Name) &&
+           !DpProcessPolicyNameIsExcluded(Name);
+}
+
+BOOLEAN
+DpPolicyNameIsExcluded(
+    _In_ PCUNICODE_STRING Name
+    )
+{
+    return DpProcessPolicyNameIsExcluded(Name);
 }
 
 BOOLEAN

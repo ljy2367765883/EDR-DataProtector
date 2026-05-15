@@ -18,6 +18,10 @@ namespace DataProtectorAdmin.Services
 
         PolicyOperationResult RemoveProcessDirectoryRule(PolicyRule rule);
 
+        PolicyOperationResult AddExcludedDirectoryRule(string directoryPath, string extension);
+
+        PolicyOperationResult RemoveExcludedDirectoryRule(PolicyRule rule);
+
         PolicyOperationResult ClearRules();
 
         PolicyOperationResult SynchronizeRules();

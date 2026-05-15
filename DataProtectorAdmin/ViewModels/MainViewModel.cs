@@ -20,14 +20,20 @@ namespace DataProtectorAdmin.ViewModels
         private readonly RelayCommand addDirectoryCommand;
         private readonly RelayCommand browseDirectoryCommand;
         private readonly RelayCommand removeDirectoryCommand;
+        private readonly RelayCommand addExcludedDirectoryCommand;
+        private readonly RelayCommand browseExcludedDirectoryCommand;
+        private readonly RelayCommand removeExcludedDirectoryCommand;
         private readonly RelayCommand clearRulesCommand;
 
         private string newProcessName = string.Empty;
         private string newDirectoryPath = string.Empty;
+        private string newExcludedDirectoryPath = string.Empty;
         private string newProcessExtension = ".dpf";
         private string newDirectoryExtension = ".dpf";
+        private string newExcludedDirectoryExtension = ".dpf";
         private PolicyRule selectedProcessNameRule;
         private PolicyRule selectedDirectoryRule;
+        private PolicyRule selectedExcludedDirectoryRule;
         private bool driverConnected;
         private bool isBusy;
         private string statusMessage = "正在检测驱动状态...";
@@ -40,6 +46,7 @@ namespace DataProtectorAdmin.ViewModels
 
             ProcessNameRules = policyService.Settings.ProcessNameRules;
             ProcessDirectoryRules = policyService.Settings.ProcessDirectoryRules;
+            ExcludedDirectoryRules = policyService.Settings.ExcludedDirectoryRules;
 
             checkConnectionCommand = new RelayCommand(async _ => await CheckConnectionAsync(), _ => !IsBusy);
             queryRulesCommand = new RelayCommand(async _ => await QueryRulesFromDriverAsync(), _ => !IsBusy);
@@ -49,6 +56,9 @@ namespace DataProtectorAdmin.ViewModels
             addDirectoryCommand = new RelayCommand(async _ => await AddDirectoryAsync(), _ => !IsBusy);
             browseDirectoryCommand = new RelayCommand(_ => BrowseDirectory(), _ => !IsBusy);
             removeDirectoryCommand = new RelayCommand(async _ => await RemoveSelectedDirectoryAsync(), _ => !IsBusy && SelectedDirectoryRule != null);
+            addExcludedDirectoryCommand = new RelayCommand(async _ => await AddExcludedDirectoryAsync(), _ => !IsBusy);
+            browseExcludedDirectoryCommand = new RelayCommand(_ => BrowseExcludedDirectory(), _ => !IsBusy);
+            removeExcludedDirectoryCommand = new RelayCommand(async _ => await RemoveSelectedExcludedDirectoryAsync(), _ => !IsBusy && SelectedExcludedDirectoryRule != null);
             clearRulesCommand = new RelayCommand(async _ => await ClearRulesAsync(), _ => !IsBusy);
             NavigateCommand = new RelayCommand(parameter => ActivePage = parameter == null ? "Dashboard" : parameter.ToString());
 
@@ -58,6 +68,8 @@ namespace DataProtectorAdmin.ViewModels
         public ObservableCollection<PolicyRule> ProcessNameRules { get; private set; }
 
         public ObservableCollection<PolicyRule> ProcessDirectoryRules { get; private set; }
+
+        public ObservableCollection<PolicyRule> ExcludedDirectoryRules { get; private set; }
 
         public ICommand CheckConnectionCommand
         {
@@ -99,6 +111,21 @@ namespace DataProtectorAdmin.ViewModels
             get { return removeDirectoryCommand; }
         }
 
+        public ICommand AddExcludedDirectoryCommand
+        {
+            get { return addExcludedDirectoryCommand; }
+        }
+
+        public ICommand BrowseExcludedDirectoryCommand
+        {
+            get { return browseExcludedDirectoryCommand; }
+        }
+
+        public ICommand RemoveExcludedDirectoryCommand
+        {
+            get { return removeExcludedDirectoryCommand; }
+        }
+
         public ICommand ClearRulesCommand
         {
             get { return clearRulesCommand; }
@@ -118,6 +145,12 @@ namespace DataProtectorAdmin.ViewModels
             set { SetProperty(ref newDirectoryPath, value); }
         }
 
+        public string NewExcludedDirectoryPath
+        {
+            get { return newExcludedDirectoryPath; }
+            set { SetProperty(ref newExcludedDirectoryPath, value); }
+        }
+
         public string NewProcessExtension
         {
             get { return newProcessExtension; }
@@ -128,6 +161,12 @@ namespace DataProtectorAdmin.ViewModels
         {
             get { return newDirectoryExtension; }
             set { SetProperty(ref newDirectoryExtension, value); }
+        }
+
+        public string NewExcludedDirectoryExtension
+        {
+            get { return newExcludedDirectoryExtension; }
+            set { SetProperty(ref newExcludedDirectoryExtension, value); }
         }
 
         public PolicyRule SelectedProcessNameRule
@@ -150,6 +189,18 @@ namespace DataProtectorAdmin.ViewModels
                 if (SetProperty(ref selectedDirectoryRule, value))
                 {
                     removeDirectoryCommand.RaiseCanExecuteChanged();
+                }
+            }
+        }
+
+        public PolicyRule SelectedExcludedDirectoryRule
+        {
+            get { return selectedExcludedDirectoryRule; }
+            set
+            {
+                if (SetProperty(ref selectedExcludedDirectoryRule, value))
+                {
+                    removeExcludedDirectoryCommand.RaiseCanExecuteChanged();
                 }
             }
         }
@@ -211,6 +262,7 @@ namespace DataProtectorAdmin.ViewModels
                     OnPropertyChanged("IsDashboardVisible");
                     OnPropertyChanged("IsTrustedAppsVisible");
                     OnPropertyChanged("IsFoldersVisible");
+                    OnPropertyChanged("IsExcludedFoldersVisible");
                     OnPropertyChanged("IsSettingsVisible");
                 }
             }
@@ -231,6 +283,11 @@ namespace DataProtectorAdmin.ViewModels
             get { return ActivePage == "Folders"; }
         }
 
+        public bool IsExcludedFoldersVisible
+        {
+            get { return ActivePage == "ExcludedFolders"; }
+        }
+
         public bool IsSettingsVisible
         {
             get { return ActivePage == "Settings"; }
@@ -238,7 +295,7 @@ namespace DataProtectorAdmin.ViewModels
 
         public int TotalRuleCount
         {
-            get { return ProcessNameRules.Count + ProcessDirectoryRules.Count; }
+            get { return ProcessNameRules.Count + ProcessDirectoryRules.Count + ExcludedDirectoryRules.Count; }
         }
 
         public int ProcessRuleCount
@@ -249,6 +306,11 @@ namespace DataProtectorAdmin.ViewModels
         public int DirectoryRuleCount
         {
             get { return ProcessDirectoryRules.Count; }
+        }
+
+        public int ExcludedDirectoryRuleCount
+        {
+            get { return ExcludedDirectoryRules.Count; }
         }
 
         public string LastSyncText
@@ -328,14 +390,57 @@ namespace DataProtectorAdmin.ViewModels
 
         private void BrowseDirectory()
         {
+            BrowseFolder("选择可信程序所在文件夹", value => NewDirectoryPath = value);
+        }
+
+        private async Task AddExcludedDirectoryAsync()
+        {
+            string directoryPath = NewExcludedDirectoryPath;
+            string extension = NewExcludedDirectoryExtension;
+
+            await RunPolicyOperationAsync(
+                () => policyService.AddExcludedDirectoryRule(directoryPath, extension),
+                () =>
+                {
+                    NewExcludedDirectoryPath = string.Empty;
+                    RefreshRuleCounters();
+                },
+                null);
+        }
+
+        private void BrowseExcludedDirectory()
+        {
+            BrowseFolder("选择不加解密的排除目录", value => NewExcludedDirectoryPath = value);
+        }
+
+        private async Task RemoveSelectedExcludedDirectoryAsync()
+        {
+            PolicyRule selectedRule = SelectedExcludedDirectoryRule;
+            if (selectedRule == null)
+            {
+                return;
+            }
+
+            await RunPolicyOperationAsync(
+                () => policyService.RemoveExcludedDirectoryRule(selectedRule),
+                () =>
+                {
+                    SelectedExcludedDirectoryRule = null;
+                    RefreshRuleCounters();
+                },
+                null);
+        }
+
+        private void BrowseFolder(string description, Action<string> assign)
+        {
             using (FolderBrowserDialog dialog = new FolderBrowserDialog())
             {
-                dialog.Description = "选择可信程序所在文件夹";
+                dialog.Description = description;
                 dialog.ShowNewFolderButton = false;
 
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
-                    NewDirectoryPath = dialog.SelectedPath;
+                    assign(dialog.SelectedPath);
                 }
             }
         }
@@ -417,6 +522,7 @@ namespace DataProtectorAdmin.ViewModels
             OnPropertyChanged("TotalRuleCount");
             OnPropertyChanged("ProcessRuleCount");
             OnPropertyChanged("DirectoryRuleCount");
+            OnPropertyChanged("ExcludedDirectoryRuleCount");
         }
 
         private void RaiseCommandStatesChanged()
@@ -429,6 +535,9 @@ namespace DataProtectorAdmin.ViewModels
             addDirectoryCommand.RaiseCanExecuteChanged();
             browseDirectoryCommand.RaiseCanExecuteChanged();
             removeDirectoryCommand.RaiseCanExecuteChanged();
+            addExcludedDirectoryCommand.RaiseCanExecuteChanged();
+            browseExcludedDirectoryCommand.RaiseCanExecuteChanged();
+            removeExcludedDirectoryCommand.RaiseCanExecuteChanged();
             clearRulesCommand.RaiseCanExecuteChanged();
         }
     }

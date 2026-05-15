@@ -139,6 +139,14 @@
                     </Button>
                     <Button Style="{StaticResource DpNavButtonStyle}"
                             Command="{Binding NavigateCommand}"
+                            CommandParameter="ExcludedFolders">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ui:SymbolIcon Symbol="FolderProhibited24" Width="24" Foreground="{StaticResource DpDangerBrush}" />
+                            <TextBlock Text="排除目录" Margin="12,0,0,0" />
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource DpNavButtonStyle}"
+                            Command="{Binding NavigateCommand}"
                             CommandParameter="Settings">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                             <ui:SymbolIcon Symbol="Settings24" Width="24" Foreground="{StaticResource DpMutedBrush}" />
@@ -312,7 +320,7 @@
                                            FontSize="13"
                                            LineHeight="21"
                                            TextWrapping="Wrap"
-                                           Text="授权进程打开匹配扩展名的受保护文件时访问解密后的影子数据，非授权进程保持读取原始密文。策略中心负责维护进程名/程序目录与文件扩展名绑定的运行时规则。" />
+                                           Text="授权进程打开匹配扩展名的受保护文件时访问解密后的影子数据，非授权进程保持读取原始密文。策略中心负责维护进程名、程序目录、排除目录与文件扩展名绑定的运行时规则。" />
 
                                 <Grid Margin="0,28,0,0">
                                     <Grid.ColumnDefinitions>
@@ -368,11 +376,13 @@
                                 <StackPanel>
                                     <TextBlock Text="当前策略结构" Style="{StaticResource DpSectionTitleStyle}" />
                                     <Grid Margin="0,16,0,0">
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                        </Grid.RowDefinitions>
+                                       <Grid.RowDefinitions>
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                       </Grid.RowDefinitions>
 
                                         <Grid>
                                             <Grid.ColumnDefinitions>
@@ -389,7 +399,7 @@
                                                 Height="1"
                                                 Background="{StaticResource DpLineBrush}"
                                                 Margin="0,12,0,12" />
-                                        <Grid Grid.Row="2">
+                                        <Grid Grid.Row="2" Margin="0,0,0,12">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
@@ -397,6 +407,21 @@
                                             <TextBlock Text="文件夹规则" Style="{StaticResource DpCaptionStyle}" />
                                             <TextBlock Grid.Column="1"
                                                        Text="{Binding DirectoryRuleCount}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{StaticResource DpInkBrush}" />
+                                        </Grid>
+                                        <Border Grid.Row="3"
+                                                Height="1"
+                                                Background="{StaticResource DpLineBrush}"
+                                                Margin="0,0,0,12" />
+                                        <Grid Grid.Row="4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="排除目录" Style="{StaticResource DpCaptionStyle}" />
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding ExcludedDirectoryRuleCount}"
                                                        FontWeight="SemiBold"
                                                        Foreground="{StaticResource DpInkBrush}" />
                                         </Grid>
@@ -578,6 +603,96 @@
                             <DataGrid Grid.Row="1"
                                       ItemsSource="{Binding ProcessDirectoryRules}"
                                       SelectedItem="{Binding SelectedDirectoryRule}"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      CanUserDeleteRows="False"
+                                      IsReadOnly="True"
+                                      RowHeight="38"
+                                      GridLinesVisibility="Horizontal"
+                                      HeadersVisibility="Column"
+                                      BorderThickness="0"
+                                      Background="Transparent">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="显示路径"
+                                                        Binding="{Binding DisplayValue}"
+                                                        Width="*" />
+                                    <DataGridTextColumn Header="驱动 NT 路径"
+                                                        Binding="{Binding DriverValue}"
+                                                        Width="1.45*" />
+                                    <DataGridTextColumn Header="扩展名"
+                                                        Binding="{Binding Extension}"
+                                                        Width="120" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <Grid Visibility="{Binding IsExcludedFoldersVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,0,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="排除目录" Style="{StaticResource DpTitleStyle}" />
+                                <TextBlock Text="命中排除目录时，即使扩展名受保护也保持原始读写，不进入透明加解密。"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,7,0,0" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox Width="380"
+                                         Height="36"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewExcludedDirectoryPath, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox Width="88"
+                                         Height="36"
+                                         Margin="8,0,0,0"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewExcludedDirectoryExtension, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button Command="{Binding BrowseExcludedDirectoryCommand}"
+                                        Margin="10,0,0,0"
+                                        ToolTip="选择排除目录"
+                                        Style="{StaticResource DpIconButtonStyle}">
+                                    <ui:SymbolIcon Symbol="FolderOpen24" />
+                                </Button>
+                                <Button Command="{Binding AddExcludedDirectoryCommand}"
+                                        Margin="8,0,0,0"
+                                        Padding="16,7"
+                                        Background="{StaticResource DpCommandBrush}"
+                                        Foreground="White">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="Add24" Foreground="White" Width="22" />
+                                        <TextBlock Text="添加排除" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource DpPanelStyle}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,14">
+                                <TextBlock Text="排除目录规则列表" Style="{StaticResource DpSectionTitleStyle}" />
+                                <Button Command="{Binding RemoveExcludedDirectoryCommand}"
+                                        HorizontalAlignment="Right"
+                                        ToolTip="移除选中的排除目录"
+                                        Style="{StaticResource DpIconButtonStyle}">
+                                    <ui:SymbolIcon Symbol="Delete24" />
+                                </Button>
+                            </Grid>
+                            <DataGrid Grid.Row="1"
+                                      ItemsSource="{Binding ExcludedDirectoryRules}"
+                                      SelectedItem="{Binding SelectedExcludedDirectoryRule}"
                                       AutoGenerateColumns="False"
                                       CanUserAddRows="False"
                                       CanUserDeleteRows="False"

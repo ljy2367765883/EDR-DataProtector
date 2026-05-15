@@ -69,6 +69,22 @@ namespace DataProtectorAdmin.Services
                         settings.ProcessDirectoryRules.Add(new PolicyRule(PolicyRuleKind.ProcessDirectory, displayValue, driverValue, extension));
                     }
                 }
+
+                foreach (XElement element in root.Element("ExcludedDirectoryRules") != null
+                    ? root.Element("ExcludedDirectoryRules").Elements("Rule")
+                    : Enumerable.Empty<XElement>())
+                {
+                    string displayValue = (string)element.Attribute("DisplayValue");
+                    string driverValue = (string)element.Attribute("DriverValue");
+                    string extension = NormalizeExtension((string)element.Attribute("Extension"));
+
+                    if (!string.IsNullOrWhiteSpace(displayValue) &&
+                        !string.IsNullOrWhiteSpace(driverValue) &&
+                        !settings.ExcludedDirectoryRules.Any(rule => RuleEquals(rule, driverValue, extension)))
+                    {
+                        settings.ExcludedDirectoryRules.Add(new PolicyRule(PolicyRuleKind.ExcludedDirectory, displayValue, driverValue, extension));
+                    }
+                }
             }
             catch
             {
@@ -98,6 +114,14 @@ namespace DataProtectorAdmin.Services
                                 new XAttribute("Extension", group.First().Extension)))),
                     new XElement("ProcessDirectoryRules",
                         settings.ProcessDirectoryRules
+                            .GroupBy(rule => BuildRuleKey(rule), StringComparer.OrdinalIgnoreCase)
+                            .OrderBy(group => group.First().DisplayValue, StringComparer.OrdinalIgnoreCase)
+                            .Select(group => new XElement("Rule",
+                                new XAttribute("DisplayValue", group.First().DisplayValue),
+                                new XAttribute("DriverValue", group.First().DriverValue),
+                                new XAttribute("Extension", group.First().Extension)))),
+                    new XElement("ExcludedDirectoryRules",
+                        settings.ExcludedDirectoryRules
                             .GroupBy(rule => BuildRuleKey(rule), StringComparer.OrdinalIgnoreCase)
                             .OrderBy(group => group.First().DisplayValue, StringComparer.OrdinalIgnoreCase)
                             .Select(group => new XElement("Rule",

@@ -118,7 +118,8 @@ typedef struct _DP_CREATE_CONTEXT {
 
 typedef enum _DP_PROCESS_TRUST_RULE_TYPE {
     DpProcessTrustRuleImageName = 1,
-    DpProcessTrustRuleImageDirectory = 2
+    DpProcessTrustRuleImageDirectory = 2,
+    DpProcessTrustRuleExcludedDirectory = 3
 } DP_PROCESS_TRUST_RULE_TYPE;
 
 typedef enum _DP_POLICY_COMMAND {
@@ -127,7 +128,9 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandAddProcessDirectoryRule = 3,
     DpPolicyCommandRemoveProcessDirectoryRule = 4,
     DpPolicyCommandClearProcessRules = 5,
-    DpPolicyCommandQueryProcessRules = 6
+    DpPolicyCommandQueryProcessRules = 6,
+    DpPolicyCommandAddExcludedDirectoryRule = 7,
+    DpPolicyCommandRemoveExcludedDirectoryRule = 8
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -285,6 +288,11 @@ DpProcessPolicyNameHasProtectedExtension(
     _In_ PCUNICODE_STRING Name
     );
 
+BOOLEAN
+DpProcessPolicyNameIsExcluded(
+    _In_ PCUNICODE_STRING Name
+    );
+
 NTSTATUS
 DpProcessPolicyInitialize(
     _In_ PUNICODE_STRING RegistryPath
@@ -385,6 +393,11 @@ DpCryptoTransformBuffer(
 
 BOOLEAN
 DpPolicyNameIsProtected(
+    _In_ PCUNICODE_STRING Name
+    );
+
+BOOLEAN
+DpPolicyNameIsExcluded(
     _In_ PCUNICODE_STRING Name
     );
 

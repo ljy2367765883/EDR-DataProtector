@@ -16,6 +16,7 @@ Abstract:
 
 #define DP_TRUSTED_PROCESS_NAMES_VALUE L"TrustedProcessNames"
 #define DP_TRUSTED_PROCESS_DIRS_VALUE  L"TrustedProcessDirectories"
+#define DP_EXCLUDED_DIRS_VALUE         L"ExcludedDirectories"
 
 typedef struct _DP_PROCESS_RULE {
     LIST_ENTRY Link;
@@ -124,7 +125,8 @@ DpProcessPolicyNormalizeRuleValue(
         return status;
     }
 
-    if (RuleType == DpProcessTrustRuleImageDirectory) {
+    if (RuleType == DpProcessTrustRuleImageDirectory ||
+        RuleType == DpProcessTrustRuleExcludedDirectory) {
         DpProcessPolicyTrimTrailingSlash(NormalizedValue);
         if (NormalizedValue->Length == 0) {
             DpProcessPolicyFreeUnicodeString(NormalizedValue);
@@ -671,7 +673,7 @@ DpProcessPolicyLoadRulesFromRegistry(
     _In_ PUNICODE_STRING RegistryPath
     )
 {
-    RTL_QUERY_REGISTRY_TABLE queryTable[3];
+    RTL_QUERY_REGISTRY_TABLE queryTable[4];
 
     if (RegistryPath == NULL || RegistryPath->Buffer == NULL) {
         return;
@@ -686,6 +688,10 @@ DpProcessPolicyLoadRulesFromRegistry(
     queryTable[1].QueryRoutine = DpProcessPolicyRegistryCallback;
     queryTable[1].Name = DP_TRUSTED_PROCESS_DIRS_VALUE;
     queryTable[1].EntryContext = (PVOID)(ULONG_PTR)DpProcessTrustRuleImageDirectory;
+
+    queryTable[2].QueryRoutine = DpProcessPolicyRegistryCallback;
+    queryTable[2].Name = DP_EXCLUDED_DIRS_VALUE;
+    queryTable[2].EntryContext = (PVOID)(ULONG_PTR)DpProcessTrustRuleExcludedDirectory;
 
     (VOID)RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
                                  RegistryPath->Buffer,
@@ -707,7 +713,8 @@ DpProcessPolicyAddRule(
     UNICODE_STRING normalizedExtension;
 
     if (RuleType != DpProcessTrustRuleImageName &&
-        RuleType != DpProcessTrustRuleImageDirectory) {
+        RuleType != DpProcessTrustRuleImageDirectory &&
+        RuleType != DpProcessTrustRuleExcludedDirectory) {
 
         return STATUS_INVALID_PARAMETER;
     }
@@ -769,7 +776,8 @@ DpProcessPolicyRemoveRule(
     UNICODE_STRING normalizedExtension;
 
     if (RuleType != DpProcessTrustRuleImageName &&
-        RuleType != DpProcessTrustRuleImageDirectory) {
+        RuleType != DpProcessTrustRuleImageDirectory &&
+        RuleType != DpProcessTrustRuleExcludedDirectory) {
 
         return STATUS_INVALID_PARAMETER;
     }
@@ -928,7 +936,8 @@ DpProcessPolicyNameHasProtectedExtension(
     for (link = gDpProcessRules.Flink; link != &gDpProcessRules; link = link->Flink) {
         PDP_PROCESS_RULE rule = CONTAINING_RECORD(link, DP_PROCESS_RULE, Link);
 
-        if (DpProcessPolicyNameHasExtension(Name, &rule->Extension)) {
+        if (rule->Type != DpProcessTrustRuleExcludedDirectory &&
+            DpProcessPolicyNameHasExtension(Name, &rule->Extension)) {
             protectedExtension = TRUE;
             break;
         }
@@ -937,6 +946,37 @@ DpProcessPolicyNameHasProtectedExtension(
     FltReleasePushLock(&gDpProcessPolicyLock);
 
     return protectedExtension;
+}
+
+BOOLEAN
+DpProcessPolicyNameIsExcluded(
+    _In_ PCUNICODE_STRING Name
+    )
+{
+    PLIST_ENTRY link;
+    BOOLEAN excluded = FALSE;
+
+    if (Name == NULL || Name->Buffer == NULL || Name->Length == 0) {
+        return FALSE;
+    }
+
+    FltAcquirePushLockShared(&gDpProcessPolicyLock);
+
+    for (link = gDpProcessRules.Flink; link != &gDpProcessRules; link = link->Flink) {
+        PDP_PROCESS_RULE rule = CONTAINING_RECORD(link, DP_PROCESS_RULE, Link);
+
+        if (rule->Type == DpProcessTrustRuleExcludedDirectory &&
+            DpProcessPolicyNameHasExtension(Name, &rule->Extension) &&
+            DpProcessPolicyDirectoryMatches(&rule->Value, Name)) {
+
+            excluded = TRUE;
+            break;
+        }
+    }
+
+    FltReleasePushLock(&gDpProcessPolicyLock);
+
+    return excluded;
 }
 
 BOOLEAN

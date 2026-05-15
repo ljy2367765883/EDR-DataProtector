@@ -18,7 +18,9 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandAddProcessDirectoryRule = 3,
     DpPolicyCommandRemoveProcessDirectoryRule = 4,
     DpPolicyCommandClearProcessRules = 5,
-    DpPolicyCommandQueryProcessRules = 6
+    DpPolicyCommandQueryProcessRules = 6,
+    DpPolicyCommandAddExcludedDirectoryRule = 7,
+    DpPolicyCommandRemoveExcludedDirectoryRule = 8
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -574,6 +576,90 @@ DpPolicyRemoveProcessDirectoryRuleEx(
                                  NULL,
                                  0,
                                  NULL);
+    HeapFree(GetProcessHeap(), 0, normalizedExtension);
+    HeapFree(GetProcessHeap(), 0, ntPath);
+
+    return result;
+}
+
+DWORD
+DpPolicyAddExcludedDirectoryRule(
+    _In_z_ LPCWSTR DirectoryPath
+    )
+{
+    return DpPolicyAddExcludedDirectoryRuleEx(DirectoryPath, DP_POLICY_DEFAULT_EXTENSION);
+}
+
+DWORD
+DpPolicyAddExcludedDirectoryRuleEx(
+    _In_z_ LPCWSTR DirectoryPath,
+    _In_z_ LPCWSTR Extension
+    )
+{
+    DWORD result;
+    LPWSTR ntPath = NULL;
+    LPWSTR normalizedExtension = NULL;
+
+    result = DpPolicyConvertDosPathToNtPathAlloc(DirectoryPath, &ntPath);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    result = DpPolicyNormalizeExtensionAlloc(Extension, &normalizedExtension);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, ntPath);
+        return result;
+    }
+
+    result = DpPolicySendMessage(DpPolicyCommandAddExcludedDirectoryRule,
+                                 ntPath,
+                                 normalizedExtension,
+                                 NULL,
+                                 0,
+                                 NULL);
+
+    HeapFree(GetProcessHeap(), 0, normalizedExtension);
+    HeapFree(GetProcessHeap(), 0, ntPath);
+
+    return result;
+}
+
+DWORD
+DpPolicyRemoveExcludedDirectoryRule(
+    _In_z_ LPCWSTR DirectoryPath
+    )
+{
+    return DpPolicyRemoveExcludedDirectoryRuleEx(DirectoryPath, DP_POLICY_DEFAULT_EXTENSION);
+}
+
+DWORD
+DpPolicyRemoveExcludedDirectoryRuleEx(
+    _In_z_ LPCWSTR DirectoryPath,
+    _In_z_ LPCWSTR Extension
+    )
+{
+    DWORD result;
+    LPWSTR ntPath = NULL;
+    LPWSTR normalizedExtension = NULL;
+
+    result = DpPolicyConvertDosPathToNtPathAlloc(DirectoryPath, &ntPath);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    result = DpPolicyNormalizeExtensionAlloc(Extension, &normalizedExtension);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, ntPath);
+        return result;
+    }
+
+    result = DpPolicySendMessage(DpPolicyCommandRemoveExcludedDirectoryRule,
+                                 ntPath,
+                                 normalizedExtension,
+                                 NULL,
+                                 0,
+                                 NULL);
+
     HeapFree(GetProcessHeap(), 0, normalizedExtension);
     HeapFree(GetProcessHeap(), 0, ntPath);
 

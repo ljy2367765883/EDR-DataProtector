@@ -132,6 +132,14 @@ DpControlMessageNotify(
         status = DpProcessPolicyRemoveRule(DpProcessTrustRuleImageDirectory, &value, &extension);
         break;
 
+    case DpPolicyCommandAddExcludedDirectoryRule:
+        status = DpProcessPolicyAddRule(DpProcessTrustRuleExcludedDirectory, &value, &extension);
+        break;
+
+    case DpPolicyCommandRemoveExcludedDirectoryRule:
+        status = DpProcessPolicyRemoveRule(DpProcessTrustRuleExcludedDirectory, &value, &extension);
+        break;
+
     case DpPolicyCommandClearProcessRules:
         DpProcessPolicyClearRules();
         status = STATUS_SUCCESS;

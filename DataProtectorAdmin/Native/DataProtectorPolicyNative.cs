@@ -35,6 +35,18 @@ namespace DataProtectorAdmin.Native
         internal static extern uint DpPolicyRemoveProcessDirectoryRuleEx(string directoryPath, string extension);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyAddExcludedDirectoryRule(string directoryPath);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyAddExcludedDirectoryRuleEx(string directoryPath, string extension);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyRemoveExcludedDirectoryRule(string directoryPath);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyRemoveExcludedDirectoryRuleEx(string directoryPath, string extension);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyClearProcessRules();
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
