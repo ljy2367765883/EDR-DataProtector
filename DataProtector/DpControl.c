@@ -91,6 +91,42 @@ DpControlMessageNotify(
                                          ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryNetworkRules) {
+        return DpNetFilterQueryRules(OutputBuffer,
+                                     OutputBufferLength,
+                                     ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandAddNetworkRule) {
+        PDP_NETWORK_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_NETWORK_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_NETWORK_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_NETWORK_RULE_MESSAGE)message->Data;
+        return DpNetFilterAddRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandRemoveNetworkRule) {
+        PULONG ruleId = (PULONG)message->Data;
+
+        if (message->ValueLengthBytes != sizeof(ULONG) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(ULONG)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        return DpNetFilterRemoveRule(*ruleId);
+    }
+
+    if (message->Command == DpPolicyCommandClearNetworkRules) {
+        DpNetFilterClearRules();
+        return STATUS_SUCCESS;
+    }
+
     if (message->Command != DpPolicyCommandClearProcessRules) {
         if (message->ValueLengthBytes == 0 ||
             message->ValueLengthBytes > DP_POLICY_MAX_RULE_BYTES ||

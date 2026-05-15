@@ -42,6 +42,24 @@ namespace DataProtectorWebBridge.Native
             out uint stringBufferCharsRequired);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyAddNetworkRule(ref NativeNetworkRule rule);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyRemoveNetworkRule(uint ruleId);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyClearNetworkRules();
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryNetworkRules(
+            [Out] NativeNetworkRule[] rules,
+            uint ruleCapacity,
+            out uint ruleCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyGetLastErrorMessage(StringBuilder buffer, uint bufferChars);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -50,6 +68,23 @@ namespace DataProtectorWebBridge.Native
             public uint RuleType;
             public IntPtr Value;
             public IntPtr Extension;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeNetworkRule
+        {
+            public uint RuleId;
+            public uint Kind;
+            public uint Action;
+            public uint Protocol;
+            public uint Direction;
+            public uint LocalAddress;
+            public uint LocalAddressMask;
+            public uint RemoteAddress;
+            public uint RemoteAddressMask;
+            public ushort LocalPort;
+            public ushort RemotePort;
+            public IntPtr Domain;
         }
     }
 }

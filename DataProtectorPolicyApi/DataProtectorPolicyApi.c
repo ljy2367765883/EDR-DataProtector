@@ -10,6 +10,7 @@
 #define DP_POLICY_QUERY_VERSION 1u
 #define DP_POLICY_MAX_RULE_BYTES (1024u * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64u * sizeof(WCHAR))
+#define DP_POLICY_MAX_DOMAIN_BYTES (260u * sizeof(WCHAR))
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 
 typedef enum _DP_POLICY_COMMAND {
@@ -20,7 +21,11 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandClearProcessRules = 5,
     DpPolicyCommandQueryProcessRules = 6,
     DpPolicyCommandAddExcludedDirectoryRule = 7,
-    DpPolicyCommandRemoveExcludedDirectoryRule = 8
+    DpPolicyCommandRemoveExcludedDirectoryRule = 8,
+    DpPolicyCommandAddNetworkRule = 20,
+    DpPolicyCommandRemoveNetworkRule = 21,
+    DpPolicyCommandClearNetworkRules = 22,
+    DpPolicyCommandQueryNetworkRules = 23
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -44,6 +49,52 @@ typedef struct _DP_POLICY_QUERY_ENTRY {
     ULONG ExtensionLengthBytes;
     WCHAR Data[1];
 } DP_POLICY_QUERY_ENTRY, *PDP_POLICY_QUERY_ENTRY;
+
+#pragma pack(push, 1)
+typedef struct _DP_NETWORK_RULE_MESSAGE {
+    ULONG Version;
+    ULONG RuleId;
+    ULONG Kind;
+    ULONG Action;
+    ULONG Protocol;
+    ULONG Direction;
+    ULONG LocalAddress;
+    ULONG LocalAddressMask;
+    ULONG RemoteAddress;
+    ULONG RemoteAddressMask;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG DomainLengthBytes;
+    WCHAR Domain[260];
+} DP_NETWORK_RULE_MESSAGE, *PDP_NETWORK_RULE_MESSAGE;
+
+typedef struct _DP_NETWORK_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_NETWORK_RULE_QUERY_HEADER, *PDP_NETWORK_RULE_QUERY_HEADER;
+
+typedef struct _DP_NETWORK_RULE_QUERY_ENTRY {
+    ULONG RuleId;
+    ULONG Kind;
+    ULONG Action;
+    ULONG Protocol;
+    ULONG Direction;
+    ULONG LocalAddress;
+    ULONG LocalAddressMask;
+    ULONG RemoteAddress;
+    ULONG RemoteAddressMask;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG DomainLengthBytes;
+    WCHAR Domain[1];
+} DP_NETWORK_RULE_QUERY_ENTRY, *PDP_NETWORK_RULE_QUERY_ENTRY;
+#pragma pack(pop)
+
+#define DP_NETWORK_RULE_MESSAGE_VERSION 1u
+#define DP_NETWORK_RULE_QUERY_VERSION 1u
+#define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
 
 static WCHAR gLastErrorMessage[512];
 
@@ -355,6 +406,86 @@ DpPolicySendMessage(
 
     if (extensionLengthBytes != 0) {
         CopyMemory((PBYTE)message->Data + valueLengthBytes, ExtensionValue, extensionLengthBytes);
+    }
+
+    hr = FilterConnectCommunicationPort(DP_POLICY_PORT_NAME,
+                                        0,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        &port);
+    if (FAILED(hr)) {
+        DpPolicySetLastErrorFromCode((DWORD)hr, L"Cannot connect to DataProtector driver");
+        result = (DWORD)hr;
+        goto Exit;
+    }
+
+    hr = FilterSendMessage(port,
+                           message,
+                           messageLength,
+                           OutputBuffer,
+                           OutputBufferLength,
+                           bytesReturned);
+    if (FAILED(hr)) {
+        DpPolicySetLastErrorFromCode((DWORD)hr, L"Driver rejected the policy command");
+        result = (DWORD)hr;
+        goto Exit;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+
+Exit:
+    if (port != INVALID_HANDLE_VALUE) {
+        CloseHandle(port);
+    }
+
+    if (message != NULL) {
+        HeapFree(GetProcessHeap(), 0, message);
+    }
+
+    return result;
+}
+
+static
+DWORD
+DpPolicySendRawPolicyMessage(
+    _In_ ULONG Command,
+    _In_reads_bytes_opt_(PayloadLength) const VOID *Payload,
+    _In_ ULONG PayloadLength,
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *BytesReturned) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_opt_ PULONG BytesReturned
+    )
+{
+    DWORD result = DP_POLICY_API_SUCCESS;
+    HRESULT hr;
+    HANDLE port = INVALID_HANDLE_VALUE;
+    PDP_POLICY_MESSAGE message = NULL;
+    ULONG messageLength;
+    ULONG localBytesReturned = 0;
+    PULONG bytesReturned = BytesReturned != NULL ? BytesReturned : &localBytesReturned;
+
+    *bytesReturned = 0;
+
+    if (PayloadLength != 0 && Payload == NULL) {
+        DpPolicySetLastErrorMessage(L"Policy payload is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    messageLength = (ULONG)FIELD_OFFSET(DP_POLICY_MESSAGE, Data) + PayloadLength;
+    message = (PDP_POLICY_MESSAGE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, messageLength);
+    if (message == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    message->Version = DP_POLICY_MESSAGE_VERSION;
+    message->Command = Command;
+    message->ValueLengthBytes = PayloadLength;
+    message->ExtensionLengthBytes = 0;
+
+    if (PayloadLength != 0) {
+        CopyMemory(message->Data, Payload, PayloadLength);
     }
 
     hr = FilterConnectCommunicationPort(DP_POLICY_PORT_NAME,
@@ -824,6 +955,259 @@ DpPolicyQueryProcessRules(
                        extensionSource,
                        entry->ExtensionLengthBytes);
             copiedStringChars += extensionChars;
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+
+        cursor += entryBytes;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (RuleCapacity < header->RuleCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyAddNetworkRule(
+    _In_ const DP_POLICY_API_NETWORK_RULE *Rule
+    )
+{
+    DP_NETWORK_RULE_MESSAGE message;
+    size_t domainLength = 0;
+
+    if (Rule == NULL ||
+        Rule->RuleId == 0 ||
+        (Rule->Kind != DP_POLICY_API_NETWORK_RULE_IP && Rule->Kind != DP_POLICY_API_NETWORK_RULE_DOMAIN) ||
+        (Rule->Action != DP_POLICY_API_NETWORK_ACTION_ALLOW && Rule->Action != DP_POLICY_API_NETWORK_ACTION_BLOCK) ||
+        (Rule->Protocol != DP_POLICY_API_NETWORK_PROTOCOL_ANY &&
+         Rule->Protocol != DP_POLICY_API_NETWORK_PROTOCOL_TCP &&
+         Rule->Protocol != DP_POLICY_API_NETWORK_PROTOCOL_UDP) ||
+        (Rule->Direction != DP_POLICY_API_NETWORK_DIRECTION_INBOUND &&
+         Rule->Direction != DP_POLICY_API_NETWORK_DIRECTION_OUTBOUND &&
+         Rule->Direction != DP_POLICY_API_NETWORK_DIRECTION_BOTH)) {
+
+        DpPolicySetLastErrorMessage(L"Network rule is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_NETWORK_RULE_MESSAGE_VERSION;
+    message.RuleId = Rule->RuleId;
+    message.Kind = Rule->Kind;
+    message.Action = Rule->Action;
+    message.Protocol = Rule->Protocol;
+    message.Direction = Rule->Direction;
+    message.LocalAddress = Rule->LocalAddress;
+    message.LocalAddressMask = Rule->LocalAddressMask;
+    message.RemoteAddress = Rule->RemoteAddress;
+    message.RemoteAddressMask = Rule->RemoteAddressMask;
+    message.LocalPort = Rule->LocalPort;
+    message.RemotePort = Rule->RemotePort;
+
+    if (Rule->Domain != NULL) {
+        domainLength = wcslen(Rule->Domain);
+    }
+
+    if (Rule->Kind == DP_POLICY_API_NETWORK_RULE_DOMAIN && domainLength == 0) {
+        DpPolicySetLastErrorMessage(L"Domain network rules require a domain name.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (domainLength * sizeof(WCHAR) > DP_POLICY_MAX_DOMAIN_BYTES) {
+        DpPolicySetLastErrorMessage(L"Domain value is too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    if (domainLength != 0) {
+        CopyMemory(message.Domain, Rule->Domain, domainLength * sizeof(WCHAR));
+        message.DomainLengthBytes = (ULONG)(domainLength * sizeof(WCHAR));
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandAddNetworkRule,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyRemoveNetworkRule(
+    _In_ DWORD RuleId
+    )
+{
+    if (RuleId == 0) {
+        DpPolicySetLastErrorMessage(L"Network rule id is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandRemoveNetworkRule,
+                                        &RuleId,
+                                        sizeof(RuleId),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyClearNetworkRules(void)
+{
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandClearNetworkRules,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryNetworkRules(
+    _Out_writes_opt_(RuleCapacity) DP_POLICY_API_NETWORK_RULE *Rules,
+    _In_ DWORD RuleCapacity,
+    _Out_opt_ DWORD *RuleCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_NETWORK_RULE_QUERY_HEADER header;
+    DP_NETWORK_RULE_QUERY_HEADER sizingHeader;
+    PBYTE cursor;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
+
+    if (RuleCount != NULL) {
+        *RuleCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((RuleCapacity != 0 && Rules == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryNetworkRules,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_NETWORK_RULE_QUERY_HEADER) ||
+        sizingHeader.Version != DP_NETWORK_RULE_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_NETWORK_RULE_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid network rule snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryNetworkRules,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_NETWORK_RULE_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid network rule snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_NETWORK_RULE_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_NETWORK_RULE_QUERY_VERSION) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported network rule snapshot version.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (RuleCount != NULL) {
+        *RuleCount = header->RuleCount;
+    }
+
+    cursor = queryBuffer + sizeof(DP_NETWORK_RULE_QUERY_HEADER);
+
+    for (index = 0; index < header->RuleCount; index++) {
+        PDP_NETWORK_RULE_QUERY_ENTRY entry;
+        DWORD domainChars;
+        DWORD entryBytes;
+
+        if ((ULONG_PTR)(cursor - queryBuffer) + DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE > bytesReturned) {
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned a truncated network rule snapshot.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        entry = (PDP_NETWORK_RULE_QUERY_ENTRY)cursor;
+        entryBytes = (DWORD)DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE + entry->DomainLengthBytes;
+        if ((ULONG_PTR)(cursor - queryBuffer) + entryBytes > bytesReturned ||
+            entry->DomainLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid network rule entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        domainChars = entry->DomainLengthBytes / sizeof(WCHAR);
+        requiredStringChars += domainChars + 1;
+
+        if (index < RuleCapacity && StringBuffer != NULL && copiedStringChars + domainChars + 1 <= StringBufferChars) {
+            Rules[index].RuleId = entry->RuleId;
+            Rules[index].Kind = entry->Kind;
+            Rules[index].Action = entry->Action;
+            Rules[index].Protocol = entry->Protocol;
+            Rules[index].Direction = entry->Direction;
+            Rules[index].LocalAddress = entry->LocalAddress;
+            Rules[index].LocalAddressMask = entry->LocalAddressMask;
+            Rules[index].RemoteAddress = entry->RemoteAddress;
+            Rules[index].RemoteAddressMask = entry->RemoteAddressMask;
+            Rules[index].LocalPort = entry->LocalPort;
+            Rules[index].RemotePort = entry->RemotePort;
+            Rules[index].Domain = StringBuffer + copiedStringChars;
+            if (domainChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry->Domain, entry->DomainLengthBytes);
+                copiedStringChars += domainChars;
+            }
             StringBuffer[copiedStringChars++] = L'\0';
         }
 

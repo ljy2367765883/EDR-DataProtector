@@ -97,7 +97,10 @@ namespace DataProtectorWebBridge.Services
 
             if (response.policyVersion != appliedPolicyVersion)
             {
-                ApplyPolicy(response.rules ?? new PolicyBridgeService.PolicyRuleDto[0], response.policyVersion);
+                ApplyPolicy(
+                    response.rules ?? new PolicyBridgeService.PolicyRuleDto[0],
+                    response.networkRules ?? new PolicyBridgeService.NetworkRuleDto[0],
+                    response.policyVersion);
             }
 
             pendingTaskResults.Clear();
@@ -143,13 +146,25 @@ namespace DataProtectorWebBridge.Services
             pendingTaskResults.Clear();
         }
 
-        private void ApplyPolicy(PolicyBridgeService.PolicyRuleDto[] rules, long policyVersion)
+        private void ApplyPolicy(
+            PolicyBridgeService.PolicyRuleDto[] rules,
+            PolicyBridgeService.NetworkRuleDto[] networkRules,
+            long policyVersion)
         {
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
             if (!clear.succeeded)
             {
                 lastApplyStatus = clear.statusText;
                 lastApplyMessage = "Cannot clear local policy before central apply: " + clear.message;
+                SaveState();
+                return;
+            }
+
+            clear = policyService.ClearNetworkRules("central-agent");
+            if (!clear.succeeded)
+            {
+                lastApplyStatus = clear.statusText;
+                lastApplyMessage = "Cannot clear local network policy before central apply: " + clear.message;
                 SaveState();
                 return;
             }
@@ -173,9 +188,35 @@ namespace DataProtectorWebBridge.Services
                 }
             }
 
+            foreach (PolicyBridgeService.NetworkRuleDto rule in networkRules)
+            {
+                PolicyBridgeService.OperationResult result = policyService.AddNetworkRule(new PolicyBridgeService.NetworkRuleRequest
+                {
+                    ruleId = rule.ruleId,
+                    kind = rule.kind,
+                    action = rule.action,
+                    protocol = rule.protocol,
+                    direction = rule.direction,
+                    localAddress = rule.localAddress,
+                    localPort = rule.localPort,
+                    remoteAddress = rule.remoteAddress,
+                    remotePort = rule.remotePort,
+                    domain = rule.domain,
+                    actor = "central-agent"
+                });
+
+                if (!result.succeeded)
+                {
+                    lastApplyStatus = result.statusText;
+                    lastApplyMessage = "Cannot apply central network rule " + rule.kind + " " + rule.displayTarget + ": " + result.message;
+                    SaveState();
+                    return;
+                }
+            }
+
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. Rules: " + rules.Length;
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length;
             SaveState();
         }
 

@@ -23,11 +23,40 @@ extern "C" {
 #define DP_POLICY_API_RULE_PROCESS_DIRECTORY    2u
 #define DP_POLICY_API_RULE_EXCLUDED_DIRECTORY   3u
 
+#define DP_POLICY_API_NETWORK_RULE_IP           1u
+#define DP_POLICY_API_NETWORK_RULE_DOMAIN       2u
+
+#define DP_POLICY_API_NETWORK_ACTION_ALLOW      0u
+#define DP_POLICY_API_NETWORK_ACTION_BLOCK      1u
+
+#define DP_POLICY_API_NETWORK_PROTOCOL_ANY      0u
+#define DP_POLICY_API_NETWORK_PROTOCOL_TCP      6u
+#define DP_POLICY_API_NETWORK_PROTOCOL_UDP      17u
+
+#define DP_POLICY_API_NETWORK_DIRECTION_INBOUND  0u
+#define DP_POLICY_API_NETWORK_DIRECTION_OUTBOUND 1u
+#define DP_POLICY_API_NETWORK_DIRECTION_BOTH     2u
+
 typedef struct _DP_POLICY_API_RULE {
     DWORD RuleType;
     LPCWSTR Value;
     LPCWSTR Extension;
 } DP_POLICY_API_RULE, *PDP_POLICY_API_RULE;
+
+typedef struct _DP_POLICY_API_NETWORK_RULE {
+    DWORD RuleId;
+    DWORD Kind;
+    DWORD Action;
+    DWORD Protocol;
+    DWORD Direction;
+    DWORD LocalAddress;
+    DWORD LocalAddressMask;
+    DWORD RemoteAddress;
+    DWORD RemoteAddressMask;
+    WORD LocalPort;
+    WORD RemotePort;
+    LPCWSTR Domain;
+} DP_POLICY_API_NETWORK_RULE, *PDP_POLICY_API_NETWORK_RULE;
 
 DP_POLICY_API
 DWORD
@@ -119,6 +148,33 @@ DP_POLICY_API
 DWORD
 DpPolicyQueryProcessRules(
     _Out_writes_opt_(ruleCapacity) DP_POLICY_API_RULE *rules,
+    _In_ DWORD ruleCapacity,
+    _Out_opt_ DWORD *ruleCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyAddNetworkRule(
+    _In_ const DP_POLICY_API_NETWORK_RULE *rule
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyRemoveNetworkRule(
+    _In_ DWORD ruleId
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyClearNetworkRules(void);
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryNetworkRules(
+    _Out_writes_opt_(ruleCapacity) DP_POLICY_API_NETWORK_RULE *rules,
     _In_ DWORD ruleCapacity,
     _Out_opt_ DWORD *ruleCount,
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,

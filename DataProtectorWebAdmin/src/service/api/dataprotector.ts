@@ -60,6 +60,36 @@ export function fetchClearPolicyRules() {
   });
 }
 
+export function fetchNetworkRules() {
+  return request<Api.DataProtector.NetworkRule[]>({
+    url: '/network/rules',
+    method: 'get'
+  });
+}
+
+export function fetchAddNetworkRule(data: Api.DataProtector.NetworkRuleRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/network/rules',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchRemoveNetworkRule(data: Pick<Api.DataProtector.NetworkRule, 'ruleId'> & { actor?: string }) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/network/rules',
+    method: 'delete',
+    data
+  });
+}
+
+export function fetchClearNetworkRules() {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/network/clear',
+    method: 'post'
+  });
+}
+
 export function fetchAuditEvents(limit = 200) {
   return request<Api.DataProtector.AuditRecord[]>({
     url: '/audit/events',

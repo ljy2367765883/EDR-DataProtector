@@ -238,6 +238,15 @@ DriverEntry(
         }
     }
 
+    if (NT_SUCCESS(status)) {
+        NTSTATUS netStatus = DpNetFilterInitialize(DriverObject);
+        if (!NT_SUCCESS(netStatus)) {
+            DP_DBG_PRINT(DP_TRACE_POLICY,
+                         ("DataProtector!DriverEntry: network filter initialization failed 0x%08X\n",
+                          netStatus));
+        }
+    }
+
     if (!NT_SUCCESS(status)) {
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
@@ -255,6 +264,8 @@ DataProtectorUnload(
     UNREFERENCED_PARAMETER(Flags);
 
     PAGED_CODE();
+
+    DpNetFilterUninitialize();
 
     DpControlUninitialize();
 

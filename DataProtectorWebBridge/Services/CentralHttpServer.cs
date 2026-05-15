@@ -114,6 +114,37 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/network/rules")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryNetworkRules());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/network/rules")
+                {
+                    PolicyBridgeService.NetworkRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.NetworkRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.AddNetworkRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/network/rules")
+                {
+                    PolicyBridgeService.NetworkRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.NetworkRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveNetworkRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/network/clear")
+                {
+                    PolicyBridgeService.OperationResult result = store.ClearNetworkRules(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     int limit = ParseLimit(context.Request.QueryString["limit"]);

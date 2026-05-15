@@ -28,9 +28,13 @@ Abstract:
 #define DP_TAG_POLICY_RULE     'rPpD'
 #define DP_TAG_PROCESS_ENTRY   'pPpD'
 #define DP_TAG_FOOTER_BUFFER   'fPpD'
+#define DP_TAG_NET_RULE        'rNpD'
+#define DP_TAG_NET_BUFFER      'bNpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
+#define DP_POLICY_MAX_NETWORK_RULES 1024
+#define DP_POLICY_MAX_DOMAIN_BYTES (260 * sizeof(WCHAR))
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
 #define DP_PROTECTION_MAGIC 0x32465044u
@@ -171,7 +175,11 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandClearProcessRules = 5,
     DpPolicyCommandQueryProcessRules = 6,
     DpPolicyCommandAddExcludedDirectoryRule = 7,
-    DpPolicyCommandRemoveExcludedDirectoryRule = 8
+    DpPolicyCommandRemoveExcludedDirectoryRule = 8,
+    DpPolicyCommandAddNetworkRule = 20,
+    DpPolicyCommandRemoveNetworkRule = 21,
+    DpPolicyCommandClearNetworkRules = 22,
+    DpPolicyCommandQueryNetworkRules = 23
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -201,6 +209,72 @@ typedef struct _DP_POLICY_QUERY_ENTRY {
 
 #define DP_POLICY_QUERY_VERSION 1
 #define DP_POLICY_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_POLICY_QUERY_ENTRY, Data)
+
+typedef enum _DP_NETWORK_RULE_KIND {
+    DpNetworkRuleIp = 1,
+    DpNetworkRuleDomain = 2
+} DP_NETWORK_RULE_KIND;
+
+typedef enum _DP_NETWORK_ACTION {
+    DpNetworkActionAllow = 0,
+    DpNetworkActionBlock = 1
+} DP_NETWORK_ACTION;
+
+typedef enum _DP_NETWORK_PROTOCOL {
+    DpNetworkProtocolAny = 0,
+    DpNetworkProtocolTcp = 6,
+    DpNetworkProtocolUdp = 17
+} DP_NETWORK_PROTOCOL;
+
+typedef enum _DP_NETWORK_DIRECTION {
+    DpNetworkDirectionInbound = 0,
+    DpNetworkDirectionOutbound = 1,
+    DpNetworkDirectionBoth = 2
+} DP_NETWORK_DIRECTION;
+
+typedef struct _DP_NETWORK_RULE_MESSAGE {
+    ULONG Version;
+    ULONG RuleId;
+    ULONG Kind;
+    ULONG Action;
+    ULONG Protocol;
+    ULONG Direction;
+    ULONG LocalAddress;
+    ULONG LocalAddressMask;
+    ULONG RemoteAddress;
+    ULONG RemoteAddressMask;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG DomainLengthBytes;
+    WCHAR Domain[260];
+} DP_NETWORK_RULE_MESSAGE, *PDP_NETWORK_RULE_MESSAGE;
+
+typedef struct _DP_NETWORK_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_NETWORK_RULE_QUERY_HEADER, *PDP_NETWORK_RULE_QUERY_HEADER;
+
+typedef struct _DP_NETWORK_RULE_QUERY_ENTRY {
+    ULONG RuleId;
+    ULONG Kind;
+    ULONG Action;
+    ULONG Protocol;
+    ULONG Direction;
+    ULONG LocalAddress;
+    ULONG LocalAddressMask;
+    ULONG RemoteAddress;
+    ULONG RemoteAddressMask;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG DomainLengthBytes;
+    WCHAR Domain[1];
+} DP_NETWORK_RULE_QUERY_ENTRY, *PDP_NETWORK_RULE_QUERY_ENTRY;
+
+#define DP_NETWORK_RULE_MESSAGE_VERSION 1
+#define DP_NETWORK_RULE_QUERY_VERSION 1
+#define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
 
 EXTERN_C_START
 
@@ -408,6 +482,38 @@ DpControlInitialize(
 VOID
 DpControlUninitialize(
     VOID
+    );
+
+NTSTATUS
+DpNetFilterInitialize(
+    _In_ PDRIVER_OBJECT DriverObject
+    );
+
+VOID
+DpNetFilterUninitialize(
+    VOID
+    );
+
+NTSTATUS
+DpNetFilterAddRule(
+    _In_ const DP_NETWORK_RULE_MESSAGE *Rule
+    );
+
+NTSTATUS
+DpNetFilterRemoveRule(
+    _In_ ULONG RuleId
+    );
+
+VOID
+DpNetFilterClearRules(
+    VOID
+    );
+
+NTSTATUS
+DpNetFilterQueryRules(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
     );
 
 NTSTATUS

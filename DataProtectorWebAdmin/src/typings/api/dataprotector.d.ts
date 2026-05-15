@@ -1,6 +1,10 @@
 declare namespace Api {
   namespace DataProtector {
     type RuleKind = 'processName' | 'processDirectory' | 'excludedDirectory';
+    type NetworkRuleKind = 'ip' | 'domain';
+    type NetworkAction = 'allow' | 'block';
+    type NetworkProtocol = 'any' | 'tcp' | 'udp';
+    type NetworkDirection = 'inbound' | 'outbound' | 'both';
 
     interface BridgeStatus {
       mode?: string;
@@ -40,6 +44,25 @@ declare namespace Api {
 
     interface PolicyRuleRequest extends PolicyRule {
       actor?: string;
+    }
+
+    interface NetworkRule {
+      ruleId: number;
+      kind: NetworkRuleKind;
+      action: NetworkAction;
+      protocol: NetworkProtocol;
+      direction: NetworkDirection;
+      localAddress: string;
+      localPort: number;
+      remoteAddress: string;
+      remotePort: number;
+      domain: string;
+      displayTarget: string;
+      actor?: string;
+    }
+
+    interface NetworkRuleRequest extends Omit<NetworkRule, 'displayTarget'> {
+      displayTarget?: string;
     }
 
     interface OperationResult {

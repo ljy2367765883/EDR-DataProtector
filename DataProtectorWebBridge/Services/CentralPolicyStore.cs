@@ -65,6 +65,17 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public PolicyBridgeService.NetworkRuleDto[] QueryNetworkRules()
+        {
+            lock (syncRoot)
+            {
+                return state.NetworkRules
+                    .Select(CloneNetworkRule)
+                    .OrderBy(rule => rule.ruleId)
+                    .ToArray();
+            }
+        }
+
         public PolicyBridgeService.OperationResult AddRule(PolicyBridgeService.PolicyRuleRequest request)
         {
             PolicyBridgeService.PolicyRuleRequest normalized = NormalizeRequest(request);
@@ -121,6 +132,68 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("All central policy rules cleared.");
+        }
+
+        public PolicyBridgeService.OperationResult AddNetworkRule(PolicyBridgeService.NetworkRuleRequest request)
+        {
+            PolicyBridgeService.NetworkRuleDto normalized = NormalizeNetworkRequest(request, true);
+            lock (syncRoot)
+            {
+                int existing = state.NetworkRules.FindIndex(rule => rule.ruleId == normalized.ruleId);
+                if (existing >= 0)
+                {
+                    state.NetworkRules[existing] = normalized;
+                }
+                else
+                {
+                    state.NetworkRules.Add(normalized);
+                }
+
+                state.PolicyVersion++;
+                AppendAudit(normalized.actor, "central.policy.network.add." + normalized.kind, normalized.displayTarget, string.Empty, true, "0x00000000", "Network rule stored on central server.");
+                Save();
+            }
+
+            return Success("Network rule stored on central server.");
+        }
+
+        public PolicyBridgeService.OperationResult RemoveNetworkRule(PolicyBridgeService.NetworkRuleRequest request)
+        {
+            if (request == null || request.ruleId == 0)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Network rule id is required.");
+            }
+
+            lock (syncRoot)
+            {
+                int removed = state.NetworkRules.RemoveAll(rule => rule.ruleId == request.ruleId);
+                if (removed > 0)
+                {
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(request.actor, "central.policy.network.remove", request.ruleId.ToString(), string.Empty, true, "0x00000000", "Network rule removed from central server.");
+                Save();
+            }
+
+            return Success("Network rule removed from central server.");
+        }
+
+        public PolicyBridgeService.OperationResult ClearNetworkRules(string actor)
+        {
+            lock (syncRoot)
+            {
+                if (state.NetworkRules.Count > 0)
+                {
+                    state.NetworkRules.Clear();
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(actor, "central.policy.network.clear", "*", string.Empty, true, "0x00000000", "All central network rules cleared.");
+                Save();
+            }
+
+            return Success("All central network rules cleared.");
         }
 
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
@@ -280,6 +353,7 @@ namespace DataProtectorWebBridge.Services
                     serverTimeUtc = DateTime.UtcNow.ToString("o"),
                     policyVersion = state.PolicyVersion,
                     rules = QueryRules(),
+                    networkRules = QueryNetworkRules(),
                     tasks = assignedTasks
                 };
             }
@@ -298,6 +372,10 @@ namespace DataProtectorWebBridge.Services
 
                     string json = File.ReadAllText(filePath, Encoding.UTF8);
                     CentralState loaded = serializer.Deserialize<CentralState>(json);
+                    if (loaded != null && loaded.NetworkRules == null)
+                    {
+                        loaded.NetworkRules = new List<PolicyBridgeService.NetworkRuleDto>();
+                    }
                     return loaded ?? new CentralState();
                 }
                 catch
@@ -498,6 +576,115 @@ namespace DataProtectorWebBridge.Services
                 && string.Equals(rule.extension, request.Extension, StringComparison.OrdinalIgnoreCase);
         }
 
+        private static PolicyBridgeService.NetworkRuleDto NormalizeNetworkRequest(PolicyBridgeService.NetworkRuleRequest request, bool assignId)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Network rule request body is required.");
+            }
+
+            string kind = (request.kind ?? string.Empty).Trim().ToLowerInvariant();
+            string action = string.IsNullOrWhiteSpace(request.action) ? "block" : request.action.Trim().ToLowerInvariant();
+            string protocol = string.IsNullOrWhiteSpace(request.protocol) ? "any" : request.protocol.Trim().ToLowerInvariant();
+            string direction = string.IsNullOrWhiteSpace(request.direction) ? "outbound" : request.direction.Trim().ToLowerInvariant();
+            string domain = (request.domain ?? string.Empty).Trim().ToLowerInvariant();
+            string remoteAddress = (request.remoteAddress ?? string.Empty).Trim();
+            string localAddress = (request.localAddress ?? string.Empty).Trim();
+
+            if (kind != "ip" && kind != "domain")
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Network rule kind must be ip or domain.");
+            }
+
+            if (action != "allow" && action != "block")
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Network rule action must be allow or block.");
+            }
+
+            if (protocol != "any" && protocol != "tcp" && protocol != "udp")
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Network protocol must be any, tcp, or udp.");
+            }
+
+            if (direction != "inbound" && direction != "outbound" && direction != "both")
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Network direction must be inbound, outbound, or both.");
+            }
+
+            if (kind == "domain" && string.IsNullOrWhiteSpace(domain))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Domain rule requires a domain.");
+            }
+
+            if (kind == "ip" && string.IsNullOrWhiteSpace(remoteAddress))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "IP rule requires a remote address or CIDR.");
+            }
+
+            uint ruleId = request.ruleId;
+            if (ruleId == 0 && assignId)
+            {
+                ruleId = GenerateRuleId(kind,
+                                        action,
+                                        protocol,
+                                        direction,
+                                        domain,
+                                        localAddress,
+                                        request.localPort,
+                                        remoteAddress,
+                                        request.remotePort);
+            }
+
+            return new PolicyBridgeService.NetworkRuleDto
+            {
+                ruleId = ruleId,
+                kind = kind,
+                action = action,
+                protocol = protocol,
+                direction = direction,
+                localAddress = localAddress,
+                localPort = request.localPort,
+                remoteAddress = remoteAddress,
+                remotePort = request.remotePort,
+                domain = domain,
+                displayTarget = kind == "domain" ? domain : remoteAddress,
+                actor = request.actor
+            };
+        }
+
+        private static uint GenerateRuleId(
+            string kind,
+            string action,
+            string protocol,
+            string direction,
+            string domain,
+            string localAddress,
+            ushort localPort,
+            string remoteAddress,
+            ushort remotePort)
+        {
+            unchecked
+            {
+                string key = (kind ?? string.Empty) +
+                             "|" + (action ?? string.Empty) +
+                             "|" + (protocol ?? string.Empty) +
+                             "|" + (direction ?? string.Empty) +
+                             "|" + (domain ?? string.Empty) +
+                             "|" + (localAddress ?? string.Empty) +
+                             "|" + localPort.ToString() +
+                             "|" + (remoteAddress ?? string.Empty) +
+                             "|" + remotePort.ToString();
+                uint hash = 2166136261u;
+                foreach (char ch in key)
+                {
+                    hash ^= ch;
+                    hash *= 16777619u;
+                }
+
+                return hash == 0 ? 1u : hash;
+            }
+        }
+
         private static PolicyBridgeService.PolicyRuleDto CloneRule(PolicyBridgeService.PolicyRuleDto rule)
         {
             return new PolicyBridgeService.PolicyRuleDto
@@ -505,6 +692,25 @@ namespace DataProtectorWebBridge.Services
                 kind = rule.kind,
                 value = rule.value,
                 extension = rule.extension
+            };
+        }
+
+        private static PolicyBridgeService.NetworkRuleDto CloneNetworkRule(PolicyBridgeService.NetworkRuleDto rule)
+        {
+            return new PolicyBridgeService.NetworkRuleDto
+            {
+                ruleId = rule.ruleId,
+                kind = rule.kind,
+                action = rule.action,
+                protocol = rule.protocol,
+                direction = rule.direction,
+                localAddress = rule.localAddress,
+                localPort = rule.localPort,
+                remoteAddress = rule.remoteAddress,
+                remotePort = rule.remotePort,
+                domain = rule.domain,
+                displayTarget = rule.displayTarget,
+                actor = rule.actor
             };
         }
 
@@ -565,6 +771,7 @@ namespace DataProtectorWebBridge.Services
             {
                 PolicyVersion = 1;
                 Rules = new List<PolicyBridgeService.PolicyRuleDto>();
+                NetworkRules = new List<PolicyBridgeService.NetworkRuleDto>();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 Audit = new List<AuditLog.AuditRecord>();
                 Tasks = new List<RemoteTaskState>();
@@ -572,6 +779,7 @@ namespace DataProtectorWebBridge.Services
 
             public long PolicyVersion { get; set; }
             public List<PolicyBridgeService.PolicyRuleDto> Rules { get; set; }
+            public List<PolicyBridgeService.NetworkRuleDto> NetworkRules { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public List<AuditLog.AuditRecord> Audit { get; set; }
             public List<RemoteTaskState> Tasks { get; set; }
@@ -634,6 +842,7 @@ namespace DataProtectorWebBridge.Services
             public string serverTimeUtc { get; set; }
             public long policyVersion { get; set; }
             public PolicyBridgeService.PolicyRuleDto[] rules { get; set; }
+            public PolicyBridgeService.NetworkRuleDto[] networkRules { get; set; }
             public RemoteTaskDto[] tasks { get; set; }
         }
 
