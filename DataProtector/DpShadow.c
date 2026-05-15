@@ -1197,6 +1197,7 @@ DpShadowCleanupHandle(
     )
 {
     NTSTATUS status;
+    NTSTATUS markerStatus;
 
     if (HandleContext == NULL || !HandleContext->IsShadow || !HandleContext->ShadowDirty) {
         if (HandleContext != NULL && HandleContext->OriginalName.Buffer != NULL) {
@@ -1220,6 +1221,22 @@ DpShadowCleanupHandle(
     status = DpShadowSyncShadowToOriginal(FltObjects->Instance,
                                           &HandleContext->OriginalName,
                                           &HandleContext->ShadowName);
+
+    if (NT_SUCCESS(status)) {
+        markerStatus = DpPolicyWriteProtectionMarker(FltObjects->Instance,
+                                                     &HandleContext->OriginalName);
+        if (!NT_SUCCESS(markerStatus)) {
+            status = markerStatus;
+        }
+
+        DP_TRACE_PPTX_NAME("ShadowCleanupMarker",
+                           &HandleContext->OriginalName,
+                           markerStatus,
+                           HandleContext->IsShadow,
+                           HandleContext->ShadowDirty,
+                           0,
+                           0);
+    }
 
     DP_DBG_PRINT(DP_TRACE_SHADOW,
                  ("DataProtector!DpShadowCleanupHandle: writeback status 0x%08X\n",

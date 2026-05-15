@@ -203,6 +203,74 @@ DpMarkHandleEncryptOnCleanup(
 
 static
 NTSTATUS
+DpArmTrustedPathEncryptOnCleanup(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_z_ PCSTR Operation,
+    _In_ ULONG_PTR Detail1,
+    _In_ ULONG_PTR Detail2
+    )
+{
+    NTSTATUS status;
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+    BOOLEAN pathProtected = FALSE;
+    BOOLEAN trusted = FALSE;
+
+    if (Data == NULL ||
+        FltObjects == NULL ||
+        FltObjects->FileObject == NULL ||
+        FltObjects->FileObject->FsContext == NULL) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = FltGetFileNameInformation(Data,
+                                       FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                       &nameInfo);
+
+    if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_DATA(Operation,
+                           Data,
+                           FltObjects,
+                           status,
+                           0,
+                           0,
+                           Detail1,
+                           Detail2);
+        return status;
+    }
+
+    pathProtected = DpPolicyNameIsProtected(&nameInfo->Name) &&
+                    !DpPolicyNameIsShadow(&nameInfo->Name);
+
+    if (pathProtected) {
+        trusted = DpProcessPolicyIsTrusted(Data, &nameInfo->Name);
+    }
+
+    if (pathProtected && trusted) {
+        status = DpMarkHandleEncryptOnCleanup(FltObjects,
+                                              &nameInfo->Name,
+                                              TRUE,
+                                              TRUE);
+    } else {
+        status = STATUS_SUCCESS;
+    }
+
+    DP_TRACE_PPTX_NAME(Operation,
+                       &nameInfo->Name,
+                       status,
+                       pathProtected,
+                       trusted,
+                       Detail1,
+                       Detail2);
+
+    FltReleaseFileNameInformation(nameInfo);
+
+    return status;
+}
+
+static
+NTSTATUS
 DpFinalizeEncryptOnCleanup(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
@@ -1005,26 +1073,16 @@ DpPreWrite(
 
     (VOID)DpShadowMarkHandleDirty(FltObjects);
 
-    if (!isProtected && isTrusted) {
-        status = DpMarkHandleEncryptOnCleanup(FltObjects,
-                                              NULL,
-                                              TRUE,
-                                              FALSE);
-        DP_TRACE_PPTX_DATA("PreWriteArmExisting",
-                           Data,
-                           FltObjects,
-                           status,
-                           isProtected,
-                           isTrusted,
-                           length,
-                           DpIsPagingIo(Data));
-    }
-
     if (!isProtected) {
+        status = DpArmTrustedPathEncryptOnCleanup(Data,
+                                                  FltObjects,
+                                                  "PreWriteArmPath",
+                                                  length,
+                                                  DpIsPagingIo(Data));
         DP_TRACE_PPTX_DATA("PreWritePlainBypass",
                            Data,
                            FltObjects,
-                           STATUS_SUCCESS,
+                           status,
                            isProtected,
                            isTrusted,
                            length,
@@ -1320,6 +1378,17 @@ DpPreSetInformation(
     switch (informationClass) {
     case FileEndOfFileInformation:
     case FileAllocationInformation:
+        (VOID)DpShadowMarkHandleDirty(FltObjects);
+        status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
+        if (NT_SUCCESS(status) && !isProtected) {
+            (VOID)DpArmTrustedPathEncryptOnCleanup(Data,
+                                                   FltObjects,
+                                                   "PreSetInfoArmPath",
+                                                   informationClass,
+                                                   0);
+        }
+        break;
+
     case FileDispositionInformation:
     case FileDispositionInformationEx:
         (VOID)DpShadowMarkHandleDirty(FltObjects);
