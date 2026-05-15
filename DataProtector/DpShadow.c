@@ -376,6 +376,8 @@ DpShadowCopyTransformed(
     _In_ PFILE_OBJECT SourceFileObject,
     _In_ PFILE_OBJECT DestinationFileObject,
     _In_ BOOLEAN Transform,
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength,
     _In_ LARGE_INTEGER SourceSize
     )
 {
@@ -416,7 +418,16 @@ DpShadowCopyTransformed(
         }
 
         if (Transform) {
-            DpCryptoTransformBuffer(buffer, bytesRead, offset);
+            if (Key == NULL || KeyLength == 0) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            DpCryptoTransformBufferWithKey(buffer,
+                                           bytesRead,
+                                           offset,
+                                           Key,
+                                           KeyLength);
         }
 
         status = DpShadowWriteRaw(Instance,
@@ -460,6 +471,10 @@ DpShadowSyncOriginalToShadow(
     PFILE_OBJECT shadowFileObject = NULL;
     IO_STATUS_BLOCK ioStatus;
     LARGE_INTEGER originalSize;
+    DP_PROTECTION_FOOTER footer;
+    BOOLEAN footerPresent = FALSE;
+    UCHAR fileKey[DP_FILE_KEY_LENGTH];
+    ULONG fileKeyLength;
     NTSTATUS status;
     BOOLEAN copyOriginal = TRUE;
     ACCESS_MASK originalAccess = FILE_READ_DATA | SYNCHRONIZE;
@@ -467,6 +482,8 @@ DpShadowSyncOriginalToShadow(
 
     *ShadowDirty = FALSE;
     originalSize.QuadPart = 0;
+    RtlZeroMemory(fileKey, sizeof(fileKey));
+    DpCryptoGetDefaultFileKey(fileKey, &fileKeyLength);
 
     if (!DpCryptoIsReady()) {
         DP_TRACE_PPTX_NAME("ShadowOriginalToShadowCryptoNotReady",
@@ -617,12 +634,19 @@ CreateShadow:
     }
 
     if (copyOriginal) {
-        status = DpShadowQueryFileSize(Instance,
-                                       originalFileObject,
-                                       &originalSize);
-
-        if (!NT_SUCCESS(status)) {
-            DP_TRACE_PPTX_NAME("ShadowQueryOriginalSizeFailed",
+        status = DpPolicyReadProtectionFooter(Instance,
+                                              OriginalName,
+                                              &footer,
+                                              &footerPresent);
+        if (NT_SUCCESS(status) && footerPresent) {
+            originalSize.QuadPart = (LONGLONG)footer.LogicalSize;
+            fileKeyLength = footer.KeyLength;
+            RtlZeroMemory(fileKey, sizeof(fileKey));
+            RtlCopyMemory(fileKey,
+                          footer.FileKey,
+                          min(footer.KeyLength, (ULONG)DP_FILE_KEY_LENGTH));
+        } else if (!NT_SUCCESS(status)) {
+            DP_TRACE_PPTX_NAME("ShadowReadFooterFailed",
                                OriginalName,
                                status,
                                CreateDisposition,
@@ -630,6 +654,23 @@ CreateShadow:
                                0,
                                0);
             goto Exit;
+        }
+
+        if (!footerPresent) {
+            status = DpShadowQueryFileSize(Instance,
+                                           originalFileObject,
+                                           &originalSize);
+
+            if (!NT_SUCCESS(status)) {
+                DP_TRACE_PPTX_NAME("ShadowQueryOriginalSizeFailed",
+                                   OriginalName,
+                                   status,
+                                   CreateDisposition,
+                                   0,
+                                   0,
+                                   0);
+                goto Exit;
+            }
         }
     }
 
@@ -653,6 +694,8 @@ CreateShadow:
                                          originalFileObject,
                                          shadowFileObject,
                                          TRUE,
+                                         fileKey,
+                                         fileKeyLength,
                                          originalSize);
     }
 
@@ -689,9 +732,13 @@ DpShadowSyncShadowToOriginal(
     PFILE_OBJECT shadowFileObject = NULL;
     IO_STATUS_BLOCK ioStatus;
     LARGE_INTEGER shadowSize;
+    UCHAR fileKey[DP_FILE_KEY_LENGTH];
+    ULONG fileKeyLength;
     NTSTATUS status;
 
     shadowSize.QuadPart = 0;
+    RtlZeroMemory(fileKey, sizeof(fileKey));
+    DpCryptoGetDefaultFileKey(fileKey, &fileKeyLength);
 
     if (!DpCryptoIsReady()) {
         DP_TRACE_PPTX_NAME("ShadowToOriginalCryptoNotReady",
@@ -786,7 +833,20 @@ DpShadowSyncShadowToOriginal(
                                      shadowFileObject,
                                      originalFileObject,
                                      TRUE,
+                                     fileKey,
+                                     fileKeyLength,
                                      shadowSize);
+
+    if (NT_SUCCESS(status)) {
+        status = DpPolicyWriteProtectionMarker(Instance, OriginalName);
+    }
+
+    if (NT_SUCCESS(status)) {
+        status = DpPolicyGetFileLogicalSize(Instance,
+                                            originalFileObject,
+                                            &shadowSize,
+                                            NULL);
+    }
 
     if (NT_SUCCESS(status)) {
         (VOID)FltFlushBuffers(Instance, originalFileObject);
@@ -815,6 +875,9 @@ DpShadowEncryptFileObjectInPlace(
 {
     NTSTATUS status;
     LARGE_INTEGER fileSize;
+    BOOLEAN isProtected = FALSE;
+    UCHAR fileKey[DP_FILE_KEY_LENGTH];
+    ULONG fileKeyLength;
 
     if (Instance == NULL || FileObject == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -826,18 +889,34 @@ DpShadowEncryptFileObjectInPlace(
 
     ExEnterCriticalRegionAndAcquireResourceExclusive(&gDpShadowResource);
 
-    status = DpShadowQueryFileSize(Instance,
-                                   FileObject,
-                                   &fileSize);
+    RtlZeroMemory(fileKey, sizeof(fileKey));
+    DpCryptoGetDefaultFileKey(fileKey, &fileKeyLength);
+
+    status = DpPolicyGetFileLogicalSize(Instance,
+                                        FileObject,
+                                        &fileSize,
+                                        &isProtected);
 
     if (!NT_SUCCESS(status)) {
         goto Exit;
+    }
+
+    if (isProtected) {
+        status = DpShadowSetFileSize(Instance,
+                                     FileObject,
+                                     fileSize);
+
+        if (!NT_SUCCESS(status)) {
+            goto Exit;
+        }
     }
 
     status = DpShadowCopyTransformed(Instance,
                                      FileObject,
                                      FileObject,
                                      TRUE,
+                                     fileKey,
+                                     fileKeyLength,
                                      fileSize);
 
     if (NT_SUCCESS(status)) {
@@ -1242,21 +1321,14 @@ DpShadowCleanupHandle(
                                           &HandleContext->OriginalName,
                                           &HandleContext->ShadowName);
 
-    if (NT_SUCCESS(status)) {
-        markerStatus = DpPolicyWriteProtectionMarker(FltObjects->Instance,
-                                                     &HandleContext->OriginalName);
-        if (!NT_SUCCESS(markerStatus)) {
-            status = markerStatus;
-        }
-
-        DP_TRACE_PPTX_NAME("ShadowCleanupMarker",
-                           &HandleContext->OriginalName,
-                           markerStatus,
-                           HandleContext->IsShadow,
-                           HandleContext->ShadowDirty,
-                           0,
-                           0);
-    }
+    markerStatus = status;
+    DP_TRACE_PPTX_NAME("ShadowCleanupFooter",
+                       &HandleContext->OriginalName,
+                       markerStatus,
+                       HandleContext->IsShadow,
+                       HandleContext->ShadowDirty,
+                       0,
+                       0);
 
     DP_DBG_PRINT(DP_TRACE_SHADOW,
                  ("DataProtector!DpShadowCleanupHandle: writeback status 0x%08X\n",

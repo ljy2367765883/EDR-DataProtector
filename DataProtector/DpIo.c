@@ -75,6 +75,10 @@ typedef struct _DP_RENAME_CONTEXT {
     PFLT_FILE_NAME_INFORMATION TargetNameInfo;
 } DP_RENAME_CONTEXT, *PDP_RENAME_CONTEXT;
 
+typedef struct _DP_DIRECTORY_CONTEXT {
+    UNICODE_STRING DirectoryName;
+} DP_DIRECTORY_CONTEXT, *PDP_DIRECTORY_CONTEXT;
+
 static
 NTSTATUS
 DpDuplicateName(
@@ -121,6 +125,20 @@ DpFreeName(
 }
 
 static
+VOID
+DpFreeDirectoryContext(
+    _In_opt_ PDP_DIRECTORY_CONTEXT DirectoryContext
+    )
+{
+    if (DirectoryContext == NULL) {
+        return;
+    }
+
+    DpFreeName(&DirectoryContext->DirectoryName);
+    ExFreePoolWithTag(DirectoryContext, DP_TAG_NAME_BUFFER);
+}
+
+static
 BOOLEAN
 DpCreateDispositionWillReplaceFile(
     _In_ ULONG CreateDisposition
@@ -130,6 +148,481 @@ DpCreateDispositionWillReplaceFile(
            CreateDisposition == FILE_OVERWRITE ||
            CreateDisposition == FILE_OVERWRITE_IF ||
            CreateDisposition == FILE_SUPERSEDE;
+}
+
+static
+VOID
+DpApplyDefaultFileKeyToHandle(
+    _Inout_ PDP_HANDLE_CONTEXT HandleContext
+    )
+{
+    if (HandleContext == NULL || HandleContext->FileKeyLength != 0) {
+        return;
+    }
+
+    DpCryptoGetDefaultFileKey(HandleContext->FileKey,
+                              &HandleContext->FileKeyLength);
+}
+
+static
+VOID
+DpApplyFooterToHandle(
+    _Inout_ PDP_HANDLE_CONTEXT HandleContext,
+    _In_ const DP_PROTECTION_FOOTER *Footer
+    )
+{
+    if (HandleContext == NULL || Footer == NULL) {
+        return;
+    }
+
+    HandleContext->LogicalSize.QuadPart = (LONGLONG)Footer->LogicalSize;
+    HandleContext->FileKeyLength = Footer->KeyLength;
+    RtlZeroMemory(HandleContext->FileKey, sizeof(HandleContext->FileKey));
+    RtlCopyMemory(HandleContext->FileKey,
+                  Footer->FileKey,
+                  min(Footer->KeyLength, (ULONG)DP_FILE_KEY_LENGTH));
+}
+
+static
+NTSTATUS
+DpGetLogicalSizeForHandle(
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Out_ PLARGE_INTEGER LogicalSize,
+    _Out_opt_ PDP_HANDLE_CONTEXT *ReferencedHandleContext
+    )
+{
+    NTSTATUS status;
+    PDP_HANDLE_CONTEXT handleContext = NULL;
+    BOOLEAN protectedByFooter = FALSE;
+
+    if (ReferencedHandleContext != NULL) {
+        *ReferencedHandleContext = NULL;
+    }
+
+    LogicalSize->QuadPart = 0;
+
+    status = DpGetHandleContext(FltObjects, &handleContext);
+    if (NT_SUCCESS(status) && handleContext != NULL) {
+        if (handleContext->IsProtected && handleContext->LogicalSize.QuadPart >= 0) {
+            *LogicalSize = handleContext->LogicalSize;
+
+            if (ReferencedHandleContext != NULL) {
+                *ReferencedHandleContext = handleContext;
+            } else {
+                DpReleaseHandleContext(handleContext);
+            }
+
+            return STATUS_SUCCESS;
+        }
+
+        DpReleaseHandleContext(handleContext);
+    }
+
+    status = DpPolicyGetFileLogicalSize(FltObjects->Instance,
+                                        FltObjects->FileObject,
+                                        LogicalSize,
+                                        &protectedByFooter);
+
+    UNREFERENCED_PARAMETER(protectedByFooter);
+
+    return status;
+}
+
+static
+VOID
+DpUpdateReferencedHandleLogicalSizeAfterWrite(
+    _Inout_ PDP_HANDLE_CONTEXT HandleContext,
+    _In_ LARGE_INTEGER ByteOffset,
+    _In_ ULONG_PTR BytesWritten
+    )
+{
+    LARGE_INTEGER endOffset;
+
+    if (HandleContext == NULL) {
+        return;
+    }
+
+    if (BytesWritten == 0 ||
+        ByteOffset.LowPart == FILE_USE_FILE_POINTER_POSITION ||
+        ByteOffset.LowPart == FILE_WRITE_TO_END_OF_FILE) {
+
+        return;
+    }
+
+    endOffset.QuadPart = ByteOffset.QuadPart + (LONGLONG)BytesWritten;
+
+    if (endOffset.QuadPart > HandleContext->LogicalSize.QuadPart) {
+        HandleContext->LogicalSize = endOffset;
+        HandleContext->FooterDirty = TRUE;
+    }
+}
+
+static
+BOOLEAN
+DpInformationClassHasVisibleSize(
+    _In_ FILE_INFORMATION_CLASS InformationClass
+    )
+{
+    switch (InformationClass) {
+    case FileStandardInformation:
+    case FileAllInformation:
+    case FileNetworkOpenInformation:
+    case FileAllocationInformation:
+    case FileEndOfFileInformation:
+        return TRUE;
+
+    default:
+        return FALSE;
+    }
+}
+
+static
+VOID
+DpHideFooterInAllocationSize(
+    _Inout_ PLARGE_INTEGER AllocationSize,
+    _In_ LARGE_INTEGER LogicalSize
+    )
+{
+    if (AllocationSize->QuadPart >= DP_PROTECTION_FOOTER_SIZE) {
+        AllocationSize->QuadPart -= DP_PROTECTION_FOOTER_SIZE;
+    }
+
+    if (AllocationSize->QuadPart < LogicalSize.QuadPart) {
+        *AllocationSize = LogicalSize;
+    }
+}
+
+static
+VOID
+DpAdjustInformationSizeBuffer(
+    _Inout_updates_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS InformationClass,
+    _In_ LARGE_INTEGER LogicalSize
+    )
+{
+    if (Buffer == NULL) {
+        return;
+    }
+
+    switch (InformationClass) {
+    case FileStandardInformation:
+        if (Length >= sizeof(FILE_STANDARD_INFORMATION)) {
+            PFILE_STANDARD_INFORMATION standardInfo = (PFILE_STANDARD_INFORMATION)Buffer;
+            standardInfo->EndOfFile = LogicalSize;
+            DpHideFooterInAllocationSize(&standardInfo->AllocationSize, LogicalSize);
+        }
+        break;
+
+    case FileAllInformation:
+        if (Length >= (ULONG)FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation)) {
+            PFILE_ALL_INFORMATION allInfo = (PFILE_ALL_INFORMATION)Buffer;
+            allInfo->StandardInformation.EndOfFile = LogicalSize;
+            DpHideFooterInAllocationSize(&allInfo->StandardInformation.AllocationSize, LogicalSize);
+        }
+        break;
+
+    case FileNetworkOpenInformation:
+        if (Length >= sizeof(FILE_NETWORK_OPEN_INFORMATION)) {
+            PFILE_NETWORK_OPEN_INFORMATION networkInfo = (PFILE_NETWORK_OPEN_INFORMATION)Buffer;
+            networkInfo->EndOfFile = LogicalSize;
+            DpHideFooterInAllocationSize(&networkInfo->AllocationSize, LogicalSize);
+        }
+        break;
+
+    case FileAllocationInformation:
+        if (Length >= sizeof(FILE_ALLOCATION_INFORMATION)) {
+            PFILE_ALLOCATION_INFORMATION allocationInfo = (PFILE_ALLOCATION_INFORMATION)Buffer;
+            DpHideFooterInAllocationSize(&allocationInfo->AllocationSize, LogicalSize);
+        }
+        break;
+
+    case FileEndOfFileInformation:
+        if (Length >= sizeof(FILE_END_OF_FILE_INFORMATION)) {
+            ((PFILE_END_OF_FILE_INFORMATION)Buffer)->EndOfFile = LogicalSize;
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+static
+VOID
+DpAdjustDirectoryEntrySize(
+    _Inout_ PVOID Entry,
+    _In_ FILE_INFORMATION_CLASS InformationClass,
+    _In_ LARGE_INTEGER LogicalSize
+    )
+{
+    switch (InformationClass) {
+    case FileDirectoryInformation:
+        ((PFILE_DIRECTORY_INFORMATION)Entry)->EndOfFile = LogicalSize;
+        DpHideFooterInAllocationSize(&((PFILE_DIRECTORY_INFORMATION)Entry)->AllocationSize, LogicalSize);
+        break;
+
+    case FileFullDirectoryInformation:
+        ((PFILE_FULL_DIR_INFORMATION)Entry)->EndOfFile = LogicalSize;
+        DpHideFooterInAllocationSize(&((PFILE_FULL_DIR_INFORMATION)Entry)->AllocationSize, LogicalSize);
+        break;
+
+    case FileBothDirectoryInformation:
+        ((PFILE_BOTH_DIR_INFORMATION)Entry)->EndOfFile = LogicalSize;
+        DpHideFooterInAllocationSize(&((PFILE_BOTH_DIR_INFORMATION)Entry)->AllocationSize, LogicalSize);
+        break;
+
+    case FileIdFullDirectoryInformation:
+        ((PFILE_ID_FULL_DIR_INFORMATION)Entry)->EndOfFile = LogicalSize;
+        DpHideFooterInAllocationSize(&((PFILE_ID_FULL_DIR_INFORMATION)Entry)->AllocationSize, LogicalSize);
+        break;
+
+    case FileIdBothDirectoryInformation:
+        ((PFILE_ID_BOTH_DIR_INFORMATION)Entry)->EndOfFile = LogicalSize;
+        DpHideFooterInAllocationSize(&((PFILE_ID_BOTH_DIR_INFORMATION)Entry)->AllocationSize, LogicalSize);
+        break;
+
+    default:
+        break;
+    }
+}
+
+static
+BOOLEAN
+DpDirectoryClassHasVisibleSize(
+    _In_ FILE_INFORMATION_CLASS InformationClass
+    )
+{
+    switch (InformationClass) {
+    case FileDirectoryInformation:
+    case FileFullDirectoryInformation:
+    case FileBothDirectoryInformation:
+    case FileIdFullDirectoryInformation:
+    case FileIdBothDirectoryInformation:
+        return TRUE;
+
+    default:
+        return FALSE;
+    }
+}
+
+static
+ULONG
+DpGetDirectoryEntryNextOffset(
+    _In_ PVOID Entry,
+    _In_ FILE_INFORMATION_CLASS InformationClass
+    )
+{
+    switch (InformationClass) {
+    case FileDirectoryInformation:
+        return ((PFILE_DIRECTORY_INFORMATION)Entry)->NextEntryOffset;
+
+    case FileFullDirectoryInformation:
+        return ((PFILE_FULL_DIR_INFORMATION)Entry)->NextEntryOffset;
+
+    case FileBothDirectoryInformation:
+        return ((PFILE_BOTH_DIR_INFORMATION)Entry)->NextEntryOffset;
+
+    case FileIdFullDirectoryInformation:
+        return ((PFILE_ID_FULL_DIR_INFORMATION)Entry)->NextEntryOffset;
+
+    case FileIdBothDirectoryInformation:
+        return ((PFILE_ID_BOTH_DIR_INFORMATION)Entry)->NextEntryOffset;
+
+    default:
+        return 0;
+    }
+}
+
+static
+VOID
+DpGetDirectoryEntryFileName(
+    _In_ PVOID Entry,
+    _In_ FILE_INFORMATION_CLASS InformationClass,
+    _Out_ PUNICODE_STRING FileName
+    )
+{
+    FileName->Buffer = NULL;
+    FileName->Length = 0;
+    FileName->MaximumLength = 0;
+
+    switch (InformationClass) {
+    case FileDirectoryInformation:
+        FileName->Buffer = ((PFILE_DIRECTORY_INFORMATION)Entry)->FileName;
+        FileName->Length = (USHORT)min(((PFILE_DIRECTORY_INFORMATION)Entry)->FileNameLength, (ULONG)MAXUSHORT);
+        break;
+
+    case FileFullDirectoryInformation:
+        FileName->Buffer = ((PFILE_FULL_DIR_INFORMATION)Entry)->FileName;
+        FileName->Length = (USHORT)min(((PFILE_FULL_DIR_INFORMATION)Entry)->FileNameLength, (ULONG)MAXUSHORT);
+        break;
+
+    case FileBothDirectoryInformation:
+        FileName->Buffer = ((PFILE_BOTH_DIR_INFORMATION)Entry)->FileName;
+        FileName->Length = (USHORT)min(((PFILE_BOTH_DIR_INFORMATION)Entry)->FileNameLength, (ULONG)MAXUSHORT);
+        break;
+
+    case FileIdFullDirectoryInformation:
+        FileName->Buffer = ((PFILE_ID_FULL_DIR_INFORMATION)Entry)->FileName;
+        FileName->Length = (USHORT)min(((PFILE_ID_FULL_DIR_INFORMATION)Entry)->FileNameLength, (ULONG)MAXUSHORT);
+        break;
+
+    case FileIdBothDirectoryInformation:
+        FileName->Buffer = ((PFILE_ID_BOTH_DIR_INFORMATION)Entry)->FileName;
+        FileName->Length = (USHORT)min(((PFILE_ID_BOTH_DIR_INFORMATION)Entry)->FileNameLength, (ULONG)MAXUSHORT);
+        break;
+
+    default:
+        break;
+    }
+
+    FileName->MaximumLength = FileName->Length;
+}
+
+static
+NTSTATUS
+DpBuildDirectoryChildName(
+    _In_ PCUNICODE_STRING DirectoryName,
+    _In_ PCUNICODE_STRING FileName,
+    _Out_ PUNICODE_STRING ChildName
+    )
+{
+    USHORT separatorLength;
+
+    ChildName->Buffer = NULL;
+    ChildName->Length = 0;
+    ChildName->MaximumLength = 0;
+
+    if (DirectoryName == NULL ||
+        DirectoryName->Buffer == NULL ||
+        FileName == NULL ||
+        FileName->Buffer == NULL ||
+        FileName->Length == 0) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    separatorLength =
+        DirectoryName->Length >= sizeof(WCHAR) &&
+        DirectoryName->Buffer[(DirectoryName->Length / sizeof(WCHAR)) - 1] == L'\\' ?
+        0 :
+        sizeof(WCHAR);
+
+    if (DirectoryName->Length > MAXUSHORT - separatorLength ||
+        FileName->Length > MAXUSHORT - DirectoryName->Length - separatorLength) {
+
+        return STATUS_NAME_TOO_LONG;
+    }
+
+    ChildName->Length = DirectoryName->Length + separatorLength + FileName->Length;
+    ChildName->MaximumLength = ChildName->Length;
+    ChildName->Buffer = ExAllocatePoolWithTag(PagedPool,
+                                              ChildName->MaximumLength,
+                                              DP_TAG_NAME_BUFFER);
+
+    if (ChildName->Buffer == NULL) {
+        ChildName->Length = 0;
+        ChildName->MaximumLength = 0;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlCopyMemory(ChildName->Buffer,
+                  DirectoryName->Buffer,
+                  DirectoryName->Length);
+
+    if (separatorLength != 0) {
+        *(PWCHAR)((PUCHAR)ChildName->Buffer + DirectoryName->Length) = L'\\';
+    }
+
+    RtlCopyMemory((PUCHAR)ChildName->Buffer + DirectoryName->Length + separatorLength,
+                  FileName->Buffer,
+                  FileName->Length);
+
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+DpFreeDirectoryChildName(
+    _Inout_ PUNICODE_STRING ChildName
+    )
+{
+    if (ChildName->Buffer != NULL) {
+        ExFreePoolWithTag(ChildName->Buffer, DP_TAG_NAME_BUFFER);
+        ChildName->Buffer = NULL;
+    }
+
+    ChildName->Length = 0;
+    ChildName->MaximumLength = 0;
+}
+
+static
+VOID
+DpAdjustDirectoryBufferSizes(
+    _Inout_updates_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS InformationClass,
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING DirectoryName
+    )
+{
+    PUCHAR entry;
+    ULONG offset = 0;
+    ULONG nextOffset;
+    UNICODE_STRING fileName;
+    UNICODE_STRING childName;
+    DP_PROTECTION_FOOTER footer;
+    BOOLEAN isProtected;
+    NTSTATUS status;
+
+    if (Buffer == NULL ||
+        Length == 0 ||
+        Instance == NULL ||
+        DirectoryName == NULL ||
+        DirectoryName->Buffer == NULL ||
+        !DpDirectoryClassHasVisibleSize(InformationClass)) {
+
+        return;
+    }
+
+    entry = (PUCHAR)Buffer;
+
+    for (;;) {
+        if (offset >= Length) {
+            break;
+        }
+
+        DpGetDirectoryEntryFileName(entry, InformationClass, &fileName);
+        status = DpBuildDirectoryChildName(DirectoryName, &fileName, &childName);
+        if (NT_SUCCESS(status)) {
+            status = DpPolicyReadProtectionFooter(Instance,
+                                                  &childName,
+                                                  &footer,
+                                                  &isProtected);
+            if (NT_SUCCESS(status) && isProtected) {
+                LARGE_INTEGER logicalSize;
+
+                logicalSize.QuadPart = (LONGLONG)footer.LogicalSize;
+                DpAdjustDirectoryEntrySize(entry,
+                                           InformationClass,
+                                           logicalSize);
+            }
+
+            DpFreeDirectoryChildName(&childName);
+        }
+
+        nextOffset = DpGetDirectoryEntryNextOffset(entry, InformationClass);
+        if (nextOffset == 0) {
+            break;
+        }
+
+        if (nextOffset > Length - offset) {
+            break;
+        }
+
+        offset += nextOffset;
+        entry = (PUCHAR)Buffer + offset;
+    }
 }
 
 static
@@ -188,6 +681,7 @@ DpMarkHandleEncryptOnCleanup(
 
     handleContext->EncryptOnCleanup = TRUE;
     handleContext->IsTrusted = IsTrusted;
+    DpApplyDefaultFileKeyToHandle(handleContext);
 
     if (PendingName != NULL && PendingName->Buffer != NULL) {
         DpFreeName(&handleContext->PendingName);
@@ -355,6 +849,12 @@ DpFinalizeEncryptOnCleanup(
 
     (VOID)DpPolicySetStreamProtection(FltObjects, TRUE);
     HandleContext->IsProtected = TRUE;
+    HandleContext->LogicalSize.QuadPart = 0;
+    (VOID)DpPolicyGetFileLogicalSize(FltObjects->Instance,
+                                     FltObjects->FileObject,
+                                     &HandleContext->LogicalSize,
+                                     NULL);
+    DpApplyDefaultFileKeyToHandle(HandleContext);
     HandleContext->EncryptOnCleanup = FALSE;
 
     DP_TRACE_PPTX_NAME("CleanupEncryptDone",
@@ -655,6 +1155,7 @@ DpPostCreate(
     BOOLEAN markerPresent = FALSE;
     BOOLEAN pathProtected = FALSE;
     BOOLEAN createdOrReplaced = FALSE;
+    DP_PROTECTION_FOOTER footer;
     PDP_HANDLE_CONTEXT handleContext = NULL;
     PDP_CREATE_CONTEXT createContext = (PDP_CREATE_CONTEXT)CompletionContext;
     PFLT_CONTEXT oldContext = NULL;
@@ -714,9 +1215,11 @@ DpPostCreate(
                             !DpPolicyNameIsShadow(&nameInfo->Name);
 
             if (pathProtected) {
-                (VOID)DpPolicyFileHasProtectionMarker(FltObjects->Instance,
-                                                      &nameInfo->Name,
-                                                      &markerPresent);
+                RtlZeroMemory(&footer, sizeof(footer));
+                (VOID)DpPolicyReadProtectionFooter(FltObjects->Instance,
+                                                  &nameInfo->Name,
+                                                  &footer,
+                                                  &markerPresent);
 
                 isProtected = markerPresent;
             }
@@ -742,6 +1245,10 @@ DpPostCreate(
                 RtlZeroMemory(handleContext, sizeof(DP_HANDLE_CONTEXT));
                 handleContext->IsProtected = isProtected;
                 handleContext->IsTrusted = FALSE;
+                DpApplyDefaultFileKeyToHandle(handleContext);
+                if (isProtected && markerPresent) {
+                    DpApplyFooterToHandle(handleContext, &footer);
+                }
 
                 if (nameInfo != NULL) {
                     handleContext->IsTrusted = DpProcessPolicyIsTrusted(Data, &nameInfo->Name);
@@ -759,6 +1266,7 @@ DpPostCreate(
                         handleContext->EncryptOnCleanup = TRUE;
                         (VOID)DpDuplicateName(&nameInfo->Name,
                                               &handleContext->PendingName);
+                        handleContext->LogicalSize.QuadPart = 0;
                     }
 
                     DP_TRACE_PPTX_NAME("PostCreateHandle",
@@ -806,12 +1314,17 @@ DpPreRead(
     BOOLEAN plaintextCacheEnabled;
     NTSTATUS status;
     ULONG length;
+    ULONG originalLength;
+    LARGE_INTEGER logicalSize;
+    LONGLONG readOffset;
     PDP_IO_CONTEXT ioContext;
+    PDP_HANDLE_CONTEXT handleContext = NULL;
     PFLT_IO_PARAMETER_BLOCK iopb = Data->Iopb;
 
     *CompletionContext = NULL;
 
     length = iopb->Parameters.Read.Length;
+    originalLength = length;
 
     if (DpShadowIsInternalIo()) {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
@@ -834,6 +1347,30 @@ DpPreRead(
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
+    status = DpGetLogicalSizeForHandle(FltObjects,
+                                       &logicalSize,
+                                       &handleContext);
+
+    if (NT_SUCCESS(status)) {
+        readOffset = iopb->Parameters.Read.ByteOffset.QuadPart;
+
+        if (readOffset < 0 || readOffset >= logicalSize.QuadPart) {
+            DpReleaseHandleContext(handleContext);
+            Data->IoStatus.Status = STATUS_END_OF_FILE;
+            Data->IoStatus.Information = 0;
+            return FLT_PREOP_COMPLETE;
+        }
+
+        if ((ULONGLONG)length > (ULONGLONG)(logicalSize.QuadPart - readOffset)) {
+            length = (ULONG)(logicalSize.QuadPart - readOffset);
+            iopb->Parameters.Read.Length = length;
+            FLT_SET_CALLBACK_DATA_DIRTY(Data);
+        }
+    } else {
+        DpReleaseHandleContext(handleContext);
+        handleContext = NULL;
+    }
+
 #if DP_ENABLE_UNSAFE_PLAINTEXT_CACHE_FOR_MAPPED_IO
     status = DpPolicyIsPlaintextCacheEnabled(FltObjects, &plaintextCacheEnabled);
     if (!NT_SUCCESS(status)) {
@@ -844,29 +1381,32 @@ DpPreRead(
 #endif
 
     if (!isTrusted && !plaintextCacheEnabled) {
+        DpReleaseHandleContext(handleContext);
         DP_TRACE_PPTX_DATA("PreReadCiphertext",
                            Data,
                            FltObjects,
                            STATUS_SUCCESS,
                            isProtected,
                            isTrusted,
-                           length,
+                           originalLength,
                            DpIsPagingIo(Data));
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     if (!DpIsPagingIo(Data) && isTrusted && plaintextCacheEnabled) {
+        DpReleaseHandleContext(handleContext);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     if (DpIsPagingIo(Data) && !plaintextCacheEnabled) {
+        DpReleaseHandleContext(handleContext);
         DP_TRACE_PPTX_DATA("PreReadPagingBypass",
                            Data,
                            FltObjects,
                            STATUS_SUCCESS,
                            isProtected,
                            isTrusted,
-                           length,
+                           originalLength,
                            plaintextCacheEnabled);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
@@ -878,8 +1418,9 @@ DpPreRead(
                            STATUS_ACCESS_DENIED,
                            isProtected,
                            isTrusted,
-                           length,
+                           originalLength,
                            DpIsPagingIo(Data));
+        DpReleaseHandleContext(handleContext);
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -888,6 +1429,7 @@ DpPreRead(
     if (DpIsPagingIo(Data)) {
         ioContext = DpAllocateIoContext(FltObjects->Instance, DpIoRead, 1);
         if (ioContext == NULL) {
+            DpReleaseHandleContext(handleContext);
             Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
             Data->IoStatus.Information = 0;
             return FLT_PREOP_COMPLETE;
@@ -897,15 +1439,22 @@ DpPreRead(
         ioContext->OriginalMdl = iopb->Parameters.Read.MdlAddress;
         ioContext->ByteOffset = iopb->Parameters.Read.ByteOffset;
         ioContext->Length = length;
+        if (handleContext != NULL && handleContext->FileKeyLength != 0) {
+            ioContext->FileKeyLength = handleContext->FileKeyLength;
+            RtlCopyMemory(ioContext->FileKey,
+                          handleContext->FileKey,
+                          min(handleContext->FileKeyLength, (ULONG)DP_FILE_KEY_LENGTH));
+        }
         ioContext->TransformInPlace = TRUE;
         *CompletionContext = ioContext;
+        DpReleaseHandleContext(handleContext);
         DP_TRACE_PPTX_DATA("PreReadTransformPaging",
                            Data,
                            FltObjects,
                            STATUS_SUCCESS,
                            isProtected,
                            isTrusted,
-                           length,
+                           originalLength,
                            ioContext->ByteOffset.QuadPart);
 
         return FLT_PREOP_SUCCESS_WITH_CALLBACK;
@@ -913,6 +1462,7 @@ DpPreRead(
 
     ioContext = DpAllocateIoContext(FltObjects->Instance, DpIoRead, length);
     if (ioContext == NULL) {
+        DpReleaseHandleContext(handleContext);
         Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -921,6 +1471,14 @@ DpPreRead(
     ioContext->OriginalBuffer = iopb->Parameters.Read.ReadBuffer;
     ioContext->OriginalMdl = iopb->Parameters.Read.MdlAddress;
     ioContext->ByteOffset = iopb->Parameters.Read.ByteOffset;
+    if (handleContext != NULL && handleContext->FileKeyLength != 0) {
+        ioContext->FileKeyLength = handleContext->FileKeyLength;
+        RtlCopyMemory(ioContext->FileKey,
+                      handleContext->FileKey,
+                      min(handleContext->FileKeyLength, (ULONG)DP_FILE_KEY_LENGTH));
+    }
+    ioContext->HandleContext = handleContext;
+    handleContext = NULL;
 
     if (ioContext->OriginalMdl == NULL && Data->RequestorMode != KernelMode) {
         status = FltLockUserBuffer(Data);
@@ -947,7 +1505,7 @@ DpPreRead(
                        STATUS_SUCCESS,
                        isProtected,
                        isTrusted,
-                       length,
+                       originalLength,
                        ioContext->ByteOffset.QuadPart);
 
     return FLT_PREOP_SUCCESS_WITH_CALLBACK;
@@ -996,18 +1554,22 @@ DpPostRead(
                 Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
                 Data->IoStatus.Information = 0;
             } else {
-                DpCryptoTransformBuffer((PUCHAR)destination,
-                                        bytesRead,
-                                        ioContext->ByteOffset);
+                DpCryptoTransformBufferWithKey((PUCHAR)destination,
+                                               bytesRead,
+                                               ioContext->ByteOffset,
+                                               ioContext->FileKey,
+                                               ioContext->FileKeyLength);
             }
 
             DpFreeIoContext(ioContext);
             return FLT_POSTOP_FINISHED_PROCESSING;
         }
 
-        DpCryptoTransformBuffer((PUCHAR)ioContext->SwapBuffer,
-                                bytesRead,
-                                ioContext->ByteOffset);
+        DpCryptoTransformBufferWithKey((PUCHAR)ioContext->SwapBuffer,
+                                       bytesRead,
+                                       ioContext->ByteOffset,
+                                       ioContext->FileKey,
+                                       ioContext->FileKeyLength);
 
         destination = DpGetSystemBufferAddress(Data,
                                                ioContext->OriginalMdl,
@@ -1042,8 +1604,10 @@ DpPreWrite(
     BOOLEAN plaintextCacheEnabled;
     NTSTATUS status;
     ULONG length;
+    LARGE_INTEGER logicalSize;
     PVOID source;
     PDP_IO_CONTEXT ioContext;
+    PDP_HANDLE_CONTEXT handleContext = NULL;
     PFLT_IO_PARAMETER_BLOCK iopb = Data->Iopb;
 
     *CompletionContext = NULL;
@@ -1113,11 +1677,34 @@ DpPreWrite(
         return FLT_PREOP_COMPLETE;
     }
 
+    status = DpGetLogicalSizeForHandle(FltObjects,
+                                       &logicalSize,
+                                       &handleContext);
+    if (handleContext == NULL) {
+        status = STATUS_NOT_FOUND;
+    }
+
+    if (NT_SUCCESS(status) &&
+        iopb->Parameters.Write.ByteOffset.LowPart != FILE_USE_FILE_POINTER_POSITION &&
+        iopb->Parameters.Write.ByteOffset.LowPart != FILE_WRITE_TO_END_OF_FILE) {
+
+        if (iopb->Parameters.Write.ByteOffset.QuadPart > logicalSize.QuadPart) {
+            if (handleContext != NULL && !handleContext->IsShadow) {
+                DpReleaseHandleContext(handleContext);
+                Data->IoStatus.Status = STATUS_INVALID_PARAMETER;
+                Data->IoStatus.Information = 0;
+                return FLT_PREOP_COMPLETE;
+            }
+        }
+    }
+
     if (!DpIsPagingIo(Data) && plaintextCacheEnabled) {
+        DpReleaseHandleContext(handleContext);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     if (DpIsPagingIo(Data) && !plaintextCacheEnabled) {
+        DpReleaseHandleContext(handleContext);
         DP_TRACE_PPTX_DATA("PreWritePagingBypass",
                            Data,
                            FltObjects,
@@ -1130,6 +1717,7 @@ DpPreWrite(
     }
 
     if (!DpCryptoIsReady()) {
+        DpReleaseHandleContext(handleContext);
         DP_TRACE_PPTX_DATA("PreWriteCryptoNotReady",
                            Data,
                            FltObjects,
@@ -1145,6 +1733,7 @@ DpPreWrite(
 
     ioContext = DpAllocateIoContext(FltObjects->Instance, DpIoWrite, length);
     if (ioContext == NULL) {
+        DpReleaseHandleContext(handleContext);
         Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -1153,6 +1742,14 @@ DpPreWrite(
     ioContext->OriginalBuffer = iopb->Parameters.Write.WriteBuffer;
     ioContext->OriginalMdl = iopb->Parameters.Write.MdlAddress;
     ioContext->ByteOffset = iopb->Parameters.Write.ByteOffset;
+    if (handleContext != NULL && handleContext->FileKeyLength != 0) {
+        ioContext->FileKeyLength = handleContext->FileKeyLength;
+        RtlCopyMemory(ioContext->FileKey,
+                      handleContext->FileKey,
+                      min(handleContext->FileKeyLength, (ULONG)DP_FILE_KEY_LENGTH));
+    }
+    ioContext->HandleContext = handleContext;
+    handleContext = NULL;
 
     source = DpGetSystemBufferAddress(Data,
                                       iopb->Parameters.Write.MdlAddress,
@@ -1179,9 +1776,11 @@ DpPreWrite(
     }
 
     RtlCopyMemory(ioContext->SwapBuffer, source, length);
-    DpCryptoTransformBuffer((PUCHAR)ioContext->SwapBuffer,
-                            length,
-                            ioContext->ByteOffset);
+    DpCryptoTransformBufferWithKey((PUCHAR)ioContext->SwapBuffer,
+                                   length,
+                                   ioContext->ByteOffset,
+                                   ioContext->FileKey,
+                                   ioContext->FileKeyLength);
 
     iopb->Parameters.Write.WriteBuffer = ioContext->SwapBuffer;
     iopb->Parameters.Write.MdlAddress = NULL;
@@ -1212,8 +1811,6 @@ DpPostWrite(
 {
     PDP_IO_CONTEXT ioContext = (PDP_IO_CONTEXT)CompletionContext;
 
-    UNREFERENCED_PARAMETER(FltObjects);
-
     if (ioContext == NULL) {
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
@@ -1227,6 +1824,12 @@ DpPostWrite(
                            ioContext->Length,
                            ioContext->ByteOffset.QuadPart,
                            0);
+        if (NT_SUCCESS(Data->IoStatus.Status) && Data->IoStatus.Information > 0) {
+            DpUpdateReferencedHandleLogicalSizeAfterWrite(ioContext->HandleContext,
+                                                          ioContext->ByteOffset,
+                                                          Data->IoStatus.Information);
+        }
+
         Data->Iopb->Parameters.Write.WriteBuffer = ioContext->OriginalBuffer;
         Data->Iopb->Parameters.Write.MdlAddress = ioContext->OriginalMdl;
         FLT_SET_CALLBACK_DATA_DIRTY(Data);
@@ -1386,6 +1989,32 @@ DpPreSetInformation(
                                                    "PreSetInfoArmPath",
                                                    informationClass,
                                                    0);
+        } else if (NT_SUCCESS(status) && isProtected) {
+            PDP_HANDLE_CONTEXT handleContext = NULL;
+
+            status = DpGetHandleContext(FltObjects, &handleContext);
+            if (NT_SUCCESS(status) && handleContext != NULL) {
+                if (informationClass == FileEndOfFileInformation &&
+                    Data->Iopb->Parameters.SetFileInformation.InfoBuffer != NULL &&
+                    Data->Iopb->Parameters.SetFileInformation.Length >= sizeof(FILE_END_OF_FILE_INFORMATION)) {
+
+                    handleContext->LogicalSize =
+                        ((PFILE_END_OF_FILE_INFORMATION)Data->Iopb->Parameters.SetFileInformation.InfoBuffer)->EndOfFile;
+                    handleContext->FooterDirty = TRUE;
+                } else if (informationClass == FileAllocationInformation &&
+                           Data->Iopb->Parameters.SetFileInformation.InfoBuffer != NULL &&
+                           Data->Iopb->Parameters.SetFileInformation.Length >= sizeof(FILE_ALLOCATION_INFORMATION)) {
+
+                    if (((PFILE_ALLOCATION_INFORMATION)Data->Iopb->Parameters.SetFileInformation.InfoBuffer)->AllocationSize.QuadPart <
+                        handleContext->LogicalSize.QuadPart) {
+                        handleContext->LogicalSize =
+                            ((PFILE_ALLOCATION_INFORMATION)Data->Iopb->Parameters.SetFileInformation.InfoBuffer)->AllocationSize;
+                        handleContext->FooterDirty = TRUE;
+                    }
+                }
+
+                DpReleaseHandleContext(handleContext);
+            }
         }
         break;
 
@@ -1432,6 +2061,198 @@ DpPostSetInformation(
     }
 
     DpFreeRenameContext(renameContext);
+
+    return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+FLT_PREOP_CALLBACK_STATUS
+DpPreQueryInformation(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
+    )
+{
+    BOOLEAN isProtected = FALSE;
+    BOOLEAN isTrusted = FALSE;
+    NTSTATUS status;
+    FILE_INFORMATION_CLASS informationClass;
+
+    UNREFERENCED_PARAMETER(isTrusted);
+
+    *CompletionContext = NULL;
+
+    if (DpShadowIsInternalIo() ||
+        FltObjects->FileObject == NULL ||
+        FlagOn(FltObjects->FileObject->Flags, FO_VOLUME_OPEN)) {
+
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    informationClass = Data->Iopb->Parameters.QueryFileInformation.FileInformationClass;
+    if (!DpInformationClassHasVisibleSize(informationClass)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
+    if (!NT_SUCCESS(status) || !isProtected) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    return FLT_PREOP_SYNCHRONIZE;
+}
+
+FLT_PREOP_CALLBACK_STATUS
+DpPreDirectoryControl(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
+    )
+{
+    FILE_INFORMATION_CLASS informationClass;
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+    PDP_DIRECTORY_CONTEXT directoryContext = NULL;
+    NTSTATUS status;
+
+    UNREFERENCED_PARAMETER(FltObjects);
+
+    *CompletionContext = NULL;
+
+    if (DpShadowIsInternalIo() ||
+        Data->Iopb->MinorFunction != IRP_MN_QUERY_DIRECTORY) {
+
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    informationClass = Data->Iopb->Parameters.DirectoryControl.QueryDirectory.FileInformationClass;
+    if (!DpDirectoryClassHasVisibleSize(informationClass)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    status = FltGetFileNameInformation(Data,
+                                       FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                       &nameInfo);
+    if (!NT_SUCCESS(status)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    directoryContext = ExAllocatePoolWithTag(PagedPool,
+                                             sizeof(DP_DIRECTORY_CONTEXT),
+                                             DP_TAG_NAME_BUFFER);
+    if (directoryContext == NULL) {
+        FltReleaseFileNameInformation(nameInfo);
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    RtlZeroMemory(directoryContext, sizeof(DP_DIRECTORY_CONTEXT));
+    status = DpDuplicateName(&nameInfo->Name,
+                             &directoryContext->DirectoryName);
+    FltReleaseFileNameInformation(nameInfo);
+
+    if (!NT_SUCCESS(status)) {
+        DpFreeDirectoryContext(directoryContext);
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    *CompletionContext = directoryContext;
+
+    return FLT_PREOP_SYNCHRONIZE;
+}
+
+FLT_POSTOP_CALLBACK_STATUS
+DpPostDirectoryControl(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_opt_ PVOID CompletionContext,
+    _In_ FLT_POST_OPERATION_FLAGS Flags
+    )
+{
+    PDP_DIRECTORY_CONTEXT directoryContext = (PDP_DIRECTORY_CONTEXT)CompletionContext;
+    FILE_INFORMATION_CLASS informationClass;
+    PVOID buffer;
+    ULONG length;
+
+    if (FlagOn(Flags, FLTFL_POST_OPERATION_DRAINING) ||
+        Data->Iopb->MinorFunction != IRP_MN_QUERY_DIRECTORY) {
+
+        DpFreeDirectoryContext(directoryContext);
+        return FLT_POSTOP_FINISHED_PROCESSING;
+    }
+
+    if (!NT_SUCCESS(Data->IoStatus.Status) ||
+        Data->IoStatus.Information == 0) {
+
+        DpFreeDirectoryContext(directoryContext);
+        return FLT_POSTOP_FINISHED_PROCESSING;
+    }
+
+    if (directoryContext == NULL ||
+        directoryContext->DirectoryName.Buffer == NULL) {
+
+        DpFreeDirectoryContext(directoryContext);
+        return FLT_POSTOP_FINISHED_PROCESSING;
+    }
+
+    informationClass = Data->Iopb->Parameters.DirectoryControl.QueryDirectory.FileInformationClass;
+    length = (ULONG)min(Data->IoStatus.Information,
+                       Data->Iopb->Parameters.DirectoryControl.QueryDirectory.Length);
+    buffer = FltGetNewSystemBufferAddress(Data);
+    if (buffer == NULL) {
+        buffer = Data->Iopb->Parameters.DirectoryControl.QueryDirectory.DirectoryBuffer;
+    }
+
+    DpAdjustDirectoryBufferSizes(buffer,
+                                 length,
+                                 informationClass,
+                                 FltObjects->Instance,
+                                 &directoryContext->DirectoryName);
+    FLT_SET_CALLBACK_DATA_DIRTY(Data);
+    DpFreeDirectoryContext(directoryContext);
+
+    return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+FLT_POSTOP_CALLBACK_STATUS
+DpPostQueryInformation(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_opt_ PVOID CompletionContext,
+    _In_ FLT_POST_OPERATION_FLAGS Flags
+    )
+{
+    NTSTATUS status;
+    LARGE_INTEGER logicalSize;
+    FILE_INFORMATION_CLASS informationClass;
+    PVOID buffer;
+    ULONG length;
+
+    UNREFERENCED_PARAMETER(CompletionContext);
+
+    if (FlagOn(Flags, FLTFL_POST_OPERATION_DRAINING) ||
+        !NT_SUCCESS(Data->IoStatus.Status) ||
+        Data->IoStatus.Information == 0) {
+
+        return FLT_POSTOP_FINISHED_PROCESSING;
+    }
+
+    informationClass = Data->Iopb->Parameters.QueryFileInformation.FileInformationClass;
+    length = Data->Iopb->Parameters.QueryFileInformation.Length;
+    buffer = FltGetNewSystemBufferAddress(Data);
+    if (buffer == NULL) {
+        buffer = Data->Iopb->Parameters.QueryFileInformation.InfoBuffer;
+    }
+
+    status = DpGetLogicalSizeForHandle(FltObjects,
+                                       &logicalSize,
+                                       NULL);
+
+    if (NT_SUCCESS(status)) {
+        DpAdjustInformationSizeBuffer(buffer,
+                                      length,
+                                      informationClass,
+                                      logicalSize);
+
+        FLT_SET_CALLBACK_DATA_DIRTY(Data);
+    }
 
     return FLT_POSTOP_FINISHED_PROCESSING;
 }

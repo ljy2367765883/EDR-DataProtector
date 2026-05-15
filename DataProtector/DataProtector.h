@@ -27,11 +27,18 @@ Abstract:
 #define DP_TAG_RENAME_CONTEXT  'rCpD'
 #define DP_TAG_POLICY_RULE     'rPpD'
 #define DP_TAG_PROCESS_ENTRY   'pPpD'
+#define DP_TAG_FOOTER_BUFFER   'fPpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
+#define DP_PROTECTION_MAGIC 0x32465044u
+#define DP_PROTECTION_FOOTER_SIZE 512
+#define DP_PROTECTION_FOOTER_VERSION 1
+#define DP_FILE_KEY_LENGTH 32
+#define DP_PROTECTION_FOOTER_RESERVED_SIZE \
+    (DP_PROTECTION_FOOTER_SIZE - (sizeof(ULONG) * 6) - sizeof(ULONGLONG) - DP_FILE_KEY_LENGTH)
 
 #define DP_TRACE_ROUTINES      0x00000001
 #define DP_TRACE_IO            0x00000002
@@ -41,7 +48,7 @@ Abstract:
 //
 // Targeted WPS/Office investigation switch. Set to 0 for normal builds.
 // When enabled, the driver emits DbgPrintEx lines only for .pptx paths
-// and their DataProtector ADS streams.
+// and DataProtector internal streams/metadata.
 //
 #define DP_ENABLE_PPTX_OPERATION_TRACE 1
 
@@ -96,12 +103,35 @@ typedef struct _DP_IO_CONTEXT {
     PVOID OriginalBuffer;
     PMDL OriginalMdl;
     LARGE_INTEGER ByteOffset;
+    struct _DP_HANDLE_CONTEXT *HandleContext;
+    ULONG FileKeyLength;
+    UCHAR FileKey[DP_FILE_KEY_LENGTH];
     BOOLEAN TransformInPlace;
 } DP_IO_CONTEXT, *PDP_IO_CONTEXT;
+
+#pragma pack(push, 1)
+typedef struct _DP_PROTECTION_FOOTER {
+    ULONG Magic;
+    ULONG Version;
+    ULONG FooterSize;
+    ULONG Flags;
+    ULONGLONG LogicalSize;
+    ULONG KeyLength;
+    UCHAR FileKey[DP_FILE_KEY_LENGTH];
+    ULONG Checksum;
+    UCHAR Reserved[DP_PROTECTION_FOOTER_RESERVED_SIZE];
+} DP_PROTECTION_FOOTER, *PDP_PROTECTION_FOOTER;
+#pragma pack(pop)
+
+C_ASSERT(sizeof(DP_PROTECTION_FOOTER) == DP_PROTECTION_FOOTER_SIZE);
+C_ASSERT(DP_PROTECTION_FOOTER_RESERVED_SIZE > 0);
 
 typedef struct _DP_STREAM_CONTEXT {
     BOOLEAN IsProtected;
     BOOLEAN PlaintextCacheEnabled;
+    LARGE_INTEGER LogicalSize;
+    ULONG FileKeyLength;
+    UCHAR FileKey[DP_FILE_KEY_LENGTH];
 } DP_STREAM_CONTEXT, *PDP_STREAM_CONTEXT;
 
 typedef struct _DP_HANDLE_CONTEXT {
@@ -110,6 +140,10 @@ typedef struct _DP_HANDLE_CONTEXT {
     BOOLEAN IsShadow;
     BOOLEAN ShadowDirty;
     BOOLEAN EncryptOnCleanup;
+    BOOLEAN FooterDirty;
+    LARGE_INTEGER LogicalSize;
+    ULONG FileKeyLength;
+    UCHAR FileKey[DP_FILE_KEY_LENGTH];
     UNICODE_STRING OriginalName;
     UNICODE_STRING ShadowName;
     UNICODE_STRING PendingName;
@@ -271,6 +305,36 @@ DpPostSetInformation(
     );
 
 FLT_PREOP_CALLBACK_STATUS
+DpPreDirectoryControl(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
+    );
+
+FLT_POSTOP_CALLBACK_STATUS
+DpPostDirectoryControl(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_opt_ PVOID CompletionContext,
+    _In_ FLT_POST_OPERATION_FLAGS Flags
+    );
+
+FLT_PREOP_CALLBACK_STATUS
+DpPreQueryInformation(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
+    );
+
+FLT_POSTOP_CALLBACK_STATUS
+DpPostQueryInformation(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_opt_ PVOID CompletionContext,
+    _In_ FLT_POST_OPERATION_FLAGS Flags
+    );
+
+FLT_PREOP_CALLBACK_STATUS
 DpPreAcquireForSectionSynchronization(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
@@ -398,6 +462,21 @@ DpCryptoTransformBuffer(
     _In_ LARGE_INTEGER ByteOffset
     );
 
+VOID
+DpCryptoTransformBufferWithKey(
+    _Inout_updates_bytes_(Length) PUCHAR Buffer,
+    _In_ ULONG Length,
+    _In_ LARGE_INTEGER ByteOffset,
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength
+    );
+
+VOID
+DpCryptoGetDefaultFileKey(
+    _Out_writes_bytes_(DP_FILE_KEY_LENGTH) UCHAR *Key,
+    _Out_ PULONG KeyLength
+    );
+
 BOOLEAN
 DpPolicyNameIsProtected(
     _In_ PCUNICODE_STRING Name
@@ -424,6 +503,22 @@ DpPolicyFileHasProtectionMarker(
     _In_ PFLT_INSTANCE Instance,
     _In_ PCUNICODE_STRING Name,
     _Out_ PBOOLEAN IsProtected
+    );
+
+NTSTATUS
+DpPolicyReadProtectionFooter(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING Name,
+    _Out_ PDP_PROTECTION_FOOTER Footer,
+    _Out_ PBOOLEAN IsProtected
+    );
+
+NTSTATUS
+DpPolicyGetFileLogicalSize(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PFILE_OBJECT FileObject,
+    _Out_ PLARGE_INTEGER LogicalSize,
+    _Out_opt_ PBOOLEAN IsProtected
     );
 
 NTSTATUS

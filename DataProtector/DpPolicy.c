@@ -13,8 +13,6 @@ Abstract:
 #include "DataProtector.h"
 
 #define DP_SHADOW_SUFFIX       L":DataProtectorShadow"
-#define DP_PROTECTION_MARKER   L":DataProtectorMeta"
-#define DP_PROTECTION_MAGIC    0x50445044u
 
 typedef struct _DP_POLICY_INTERNAL_IO_GUARD {
     PVOID PreviousTopLevelIrp;
@@ -81,61 +79,205 @@ DpPolicyNameIsShadow(
 }
 
 static
-NTSTATUS
-DpPolicyBuildMarkerName(
-    _In_ PCUNICODE_STRING Name,
-    _Out_ PUNICODE_STRING MarkerName
+ULONG
+DpPolicyFooterChecksum(
+    _In_ const DP_PROTECTION_FOOTER *Footer
     )
 {
-    UNICODE_STRING suffix;
+    const UCHAR *bytes;
+    ULONG checksum = 0;
+    ULONG index;
+    ULONG checksumOffset;
 
-    MarkerName->Buffer = NULL;
-    MarkerName->Length = 0;
-    MarkerName->MaximumLength = 0;
-
-    if (Name == NULL ||
-        Name->Buffer == NULL ||
-        Name->Length == 0 ||
-        Name->Length > MAXUSHORT - (sizeof(DP_PROTECTION_MARKER) - sizeof(WCHAR))) {
-
-        return STATUS_INVALID_PARAMETER;
+    if (Footer == NULL) {
+        return 0;
     }
 
-    RtlInitUnicodeString(&suffix, DP_PROTECTION_MARKER);
+    bytes = (const UCHAR *)Footer;
+    checksumOffset = FIELD_OFFSET(DP_PROTECTION_FOOTER, Checksum);
 
-    MarkerName->Length = Name->Length + suffix.Length;
-    MarkerName->MaximumLength = MarkerName->Length;
-    MarkerName->Buffer = ExAllocatePoolWithTag(PagedPool,
-                                               MarkerName->MaximumLength,
-                                               DP_TAG_NAME_BUFFER);
+    for (index = 0; index < sizeof(DP_PROTECTION_FOOTER); index++) {
+        if (index >= checksumOffset &&
+            index < checksumOffset + sizeof(Footer->Checksum)) {
+            continue;
+        }
 
-    if (MarkerName->Buffer == NULL) {
-        MarkerName->Length = 0;
-        MarkerName->MaximumLength = 0;
-        return STATUS_INSUFFICIENT_RESOURCES;
+        checksum = ((checksum << 5) | (checksum >> 27)) + bytes[index];
     }
 
-    RtlCopyMemory(MarkerName->Buffer, Name->Buffer, Name->Length);
-    RtlCopyMemory((PUCHAR)MarkerName->Buffer + Name->Length,
-                  suffix.Buffer,
-                  suffix.Length);
-
-    return STATUS_SUCCESS;
+    return checksum == 0 ? DP_PROTECTION_MAGIC : checksum;
 }
 
 static
 VOID
-DpPolicyFreeMarkerName(
-    _Inout_ PUNICODE_STRING MarkerName
+DpPolicyInitializeFooter(
+    _Out_ PDP_PROTECTION_FOOTER Footer,
+    _In_ LARGE_INTEGER LogicalSize
     )
 {
-    if (MarkerName->Buffer != NULL) {
-        ExFreePoolWithTag(MarkerName->Buffer, DP_TAG_NAME_BUFFER);
-        MarkerName->Buffer = NULL;
+    RtlZeroMemory(Footer, sizeof(*Footer));
+
+    Footer->Magic = DP_PROTECTION_MAGIC;
+    Footer->Version = DP_PROTECTION_FOOTER_VERSION;
+    Footer->FooterSize = DP_PROTECTION_FOOTER_SIZE;
+    Footer->LogicalSize = (ULONGLONG)LogicalSize.QuadPart;
+
+    DpCryptoGetDefaultFileKey(Footer->FileKey, &Footer->KeyLength);
+    Footer->Checksum = DpPolicyFooterChecksum(Footer);
+}
+
+static
+BOOLEAN
+DpPolicyValidateFooter(
+    _In_ const DP_PROTECTION_FOOTER *Footer,
+    _In_ LARGE_INTEGER PhysicalSize
+    )
+{
+    LARGE_INTEGER maximumLogicalSize;
+
+    if (Footer == NULL ||
+        PhysicalSize.QuadPart < DP_PROTECTION_FOOTER_SIZE) {
+
+        return FALSE;
     }
 
-    MarkerName->Length = 0;
-    MarkerName->MaximumLength = 0;
+    if (Footer->Magic != DP_PROTECTION_MAGIC ||
+        Footer->Version != DP_PROTECTION_FOOTER_VERSION ||
+        Footer->FooterSize != DP_PROTECTION_FOOTER_SIZE ||
+        Footer->KeyLength == 0 ||
+        Footer->KeyLength > DP_FILE_KEY_LENGTH ||
+        Footer->Checksum != DpPolicyFooterChecksum(Footer)) {
+
+        return FALSE;
+    }
+
+    maximumLogicalSize.QuadPart = PhysicalSize.QuadPart - DP_PROTECTION_FOOTER_SIZE;
+
+    if (Footer->LogicalSize != (ULONGLONG)maximumLogicalSize.QuadPart) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static
+NTSTATUS
+DpPolicyQueryFileSizeByObject(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PFILE_OBJECT FileObject,
+    _Out_ PLARGE_INTEGER EndOfFile
+    )
+{
+    FILE_STANDARD_INFORMATION standardInfo;
+    DP_POLICY_INTERNAL_IO_GUARD guard;
+    NTSTATUS status;
+
+    DpPolicyBeginInternalIo(&guard);
+
+    status = FltQueryInformationFile(Instance,
+                                     FileObject,
+                                     &standardInfo,
+                                     sizeof(standardInfo),
+                                     FileStandardInformation,
+                                     NULL);
+
+    DpPolicyEndInternalIo(&guard);
+
+    if (NT_SUCCESS(status)) {
+        *EndOfFile = standardInfo.EndOfFile;
+    }
+
+    return status;
+}
+
+static
+NTSTATUS
+DpPolicySetFileSizeByObject(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PFILE_OBJECT FileObject,
+    _In_ LARGE_INTEGER EndOfFile
+    )
+{
+    FILE_END_OF_FILE_INFORMATION eofInfo;
+    DP_POLICY_INTERNAL_IO_GUARD guard;
+    NTSTATUS status;
+
+    eofInfo.EndOfFile = EndOfFile;
+
+    DpPolicyBeginInternalIo(&guard);
+
+    status = FltSetInformationFile(Instance,
+                                   FileObject,
+                                   &eofInfo,
+                                   sizeof(eofInfo),
+                                   FileEndOfFileInformation);
+
+    DpPolicyEndInternalIo(&guard);
+
+    return status;
+}
+
+static
+NTSTATUS
+DpPolicyReadFooterByObject(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PFILE_OBJECT FileObject,
+    _Out_ PDP_PROTECTION_FOOTER Footer,
+    _Out_ PBOOLEAN IsProtected,
+    _Out_opt_ PLARGE_INTEGER PhysicalSize
+    )
+{
+    LARGE_INTEGER fileSize;
+    LARGE_INTEGER offset;
+    DP_POLICY_INTERNAL_IO_GUARD guard;
+    ULONG bytesRead = 0;
+    NTSTATUS status;
+
+    *IsProtected = FALSE;
+    RtlZeroMemory(Footer, sizeof(*Footer));
+
+    status = DpPolicyQueryFileSizeByObject(Instance, FileObject, &fileSize);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (PhysicalSize != NULL) {
+        *PhysicalSize = fileSize;
+    }
+
+    if (fileSize.QuadPart < DP_PROTECTION_FOOTER_SIZE) {
+        return STATUS_SUCCESS;
+    }
+
+    offset.QuadPart = fileSize.QuadPart - DP_PROTECTION_FOOTER_SIZE;
+
+    DpPolicyBeginInternalIo(&guard);
+
+    status = FltReadFile(Instance,
+                         FileObject,
+                         &offset,
+                         sizeof(*Footer),
+                         Footer,
+                         FLTFL_IO_OPERATION_DO_NOT_UPDATE_BYTE_OFFSET,
+                         &bytesRead,
+                         NULL,
+                         NULL);
+
+    DpPolicyEndInternalIo(&guard);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (bytesRead == sizeof(*Footer) &&
+        DpPolicyValidateFooter(Footer, fileSize)) {
+
+        *IsProtected = TRUE;
+    } else {
+        RtlZeroMemory(Footer, sizeof(*Footer));
+    }
+
+    return STATUS_SUCCESS;
 }
 
 static
@@ -213,47 +355,57 @@ DpPolicyFileHasProtectionMarker(
     _Out_ PBOOLEAN IsProtected
     )
 {
-    UNICODE_STRING markerName;
-    HANDLE markerHandle = NULL;
-    PFILE_OBJECT markerFileObject = NULL;
+    DP_PROTECTION_FOOTER footer;
+
+    return DpPolicyReadProtectionFooter(Instance, Name, &footer, IsProtected);
+}
+
+NTSTATUS
+DpPolicyReadProtectionFooter(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING Name,
+    _Out_ PDP_PROTECTION_FOOTER Footer,
+    _Out_ PBOOLEAN IsProtected
+    )
+{
+    HANDLE fileHandle = NULL;
+    PFILE_OBJECT fileObject = NULL;
     IO_STATUS_BLOCK ioStatus;
-    ULONG magic = 0;
-    ULONG bytesRead = 0;
-    LARGE_INTEGER offset;
-    DP_POLICY_INTERNAL_IO_GUARD guard;
+    LARGE_INTEGER physicalSize;
     NTSTATUS status;
 
-    *IsProtected = FALSE;
+    physicalSize.QuadPart = 0;
 
-    if (Instance == NULL || Name == NULL || Name->Buffer == NULL) {
+    if (Instance == NULL ||
+        Name == NULL ||
+        Name->Buffer == NULL ||
+        Footer == NULL ||
+        IsProtected == NULL) {
+
         return STATUS_INVALID_PARAMETER;
     }
 
-    status = DpPolicyBuildMarkerName(Name, &markerName);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
+    *IsProtected = FALSE;
+    RtlZeroMemory(Footer, sizeof(*Footer));
 
     status = DpPolicyOpenFileByName(Instance,
-                                    &markerName,
-                                    FILE_READ_DATA | SYNCHRONIZE,
+                                    Name,
+                                    FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                                     FILE_ATTRIBUTE_NORMAL,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                     FILE_OPEN,
                                     FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-                                    &markerHandle,
-                                    &markerFileObject,
+                                    &fileHandle,
+                                    &fileObject,
                                     &ioStatus);
 
     if (!NT_SUCCESS(status)) {
-        DpPolicyFreeMarkerName(&markerName);
-
         if (status == STATUS_OBJECT_NAME_NOT_FOUND ||
             status == STATUS_OBJECT_PATH_NOT_FOUND ||
             status == STATUS_NO_SUCH_FILE ||
             status == STATUS_NOT_FOUND) {
 
-            DP_TRACE_PPTX_NAME("MarkerMissing",
+            DP_TRACE_PPTX_NAME("FooterMissing",
                                Name,
                                status,
                                0,
@@ -263,7 +415,7 @@ DpPolicyFileHasProtectionMarker(
             return STATUS_SUCCESS;
         }
 
-        DP_TRACE_PPTX_NAME("MarkerOpenFailed",
+        DP_TRACE_PPTX_NAME("FooterOpenFailed",
                            Name,
                            status,
                            0,
@@ -273,35 +425,21 @@ DpPolicyFileHasProtectionMarker(
         return status;
     }
 
-    offset.QuadPart = 0;
-    DpPolicyBeginInternalIo(&guard);
+    status = DpPolicyReadFooterByObject(Instance,
+                                        fileObject,
+                                        Footer,
+                                        IsProtected,
+                                        &physicalSize);
 
-    status = FltReadFile(Instance,
-                         markerFileObject,
-                         &offset,
-                         sizeof(magic),
-                         &magic,
-                         FLTFL_IO_OPERATION_DO_NOT_UPDATE_BYTE_OFFSET,
-                         &bytesRead,
-                         NULL,
-                         NULL);
-
-    DpPolicyEndInternalIo(&guard);
-
-    if (NT_SUCCESS(status) && bytesRead == sizeof(magic) && magic == DP_PROTECTION_MAGIC) {
-        *IsProtected = TRUE;
-    }
-
-    DP_TRACE_PPTX_NAME("MarkerRead",
+    DP_TRACE_PPTX_NAME("FooterRead",
                        Name,
                        status,
                        *IsProtected,
-                       bytesRead,
-                       magic,
-                       0);
+                       physicalSize.QuadPart,
+                       Footer->LogicalSize,
+                       Footer->KeyLength);
 
-    DpPolicyCloseFile(markerHandle, markerFileObject);
-    DpPolicyFreeMarkerName(&markerName);
+    DpPolicyCloseFile(fileHandle, fileObject);
 
     return status;
 }
@@ -312,13 +450,17 @@ DpPolicyWriteProtectionMarker(
     _In_ PCUNICODE_STRING Name
     )
 {
-    UNICODE_STRING markerName;
-    HANDLE markerHandle = NULL;
-    PFILE_OBJECT markerFileObject = NULL;
+    HANDLE fileHandle = NULL;
+    PFILE_OBJECT fileObject = NULL;
     IO_STATUS_BLOCK ioStatus;
-    ULONG magic = DP_PROTECTION_MAGIC;
+    DP_PROTECTION_FOOTER existingFooter;
+    DP_PROTECTION_FOOTER footer;
+    BOOLEAN isProtected = FALSE;
+    LARGE_INTEGER physicalSize;
+    LARGE_INTEGER logicalSize;
+    LARGE_INTEGER footerOffset;
+    LARGE_INTEGER finalSize;
     ULONG bytesWritten = 0;
-    LARGE_INTEGER offset;
     DP_POLICY_INTERNAL_IO_GUARD guard;
     NTSTATUS status;
 
@@ -326,25 +468,19 @@ DpPolicyWriteProtectionMarker(
         return STATUS_INVALID_PARAMETER;
     }
 
-    status = DpPolicyBuildMarkerName(Name, &markerName);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
     status = DpPolicyOpenFileByName(Instance,
-                                    &markerName,
-                                    FILE_READ_DATA | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
-                                    FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+                                    Name,
+                                    FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+                                    FILE_ATTRIBUTE_NORMAL,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                    FILE_OVERWRITE_IF,
+                                    FILE_OPEN,
                                     FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-                                    &markerHandle,
-                                    &markerFileObject,
+                                    &fileHandle,
+                                    &fileObject,
                                     &ioStatus);
 
     if (!NT_SUCCESS(status)) {
-        DpPolicyFreeMarkerName(&markerName);
-        DP_TRACE_PPTX_NAME("MarkerWriteOpenFailed",
+        DP_TRACE_PPTX_NAME("FooterWriteOpenFailed",
                            Name,
                            status,
                            0,
@@ -354,14 +490,33 @@ DpPolicyWriteProtectionMarker(
         return status;
     }
 
-    offset.QuadPart = 0;
+    status = DpPolicyReadFooterByObject(Instance,
+                                        fileObject,
+                                        &existingFooter,
+                                        &isProtected,
+                                        &physicalSize);
+
+    if (!NT_SUCCESS(status)) {
+        goto Exit;
+    }
+
+    if (isProtected) {
+        logicalSize.QuadPart = (LONGLONG)existingFooter.LogicalSize;
+        footerOffset = logicalSize;
+    } else {
+        logicalSize = physicalSize;
+        footerOffset = physicalSize;
+    }
+
+    DpPolicyInitializeFooter(&footer, logicalSize);
+
     DpPolicyBeginInternalIo(&guard);
 
     status = FltWriteFile(Instance,
-                          markerFileObject,
-                          &offset,
-                          sizeof(magic),
-                          &magic,
+                          fileObject,
+                          &footerOffset,
+                          sizeof(footer),
+                          &footer,
                           FLTFL_IO_OPERATION_DO_NOT_UPDATE_BYTE_OFFSET,
                           &bytesWritten,
                           NULL,
@@ -369,26 +524,80 @@ DpPolicyWriteProtectionMarker(
 
     DpPolicyEndInternalIo(&guard);
 
-    if (NT_SUCCESS(status) && bytesWritten != sizeof(magic)) {
+    if (NT_SUCCESS(status) && bytesWritten != sizeof(footer)) {
         status = STATUS_DISK_FULL;
     }
 
-    DP_TRACE_PPTX_NAME("MarkerWrite",
-                       Name,
-                       status,
-                       bytesWritten,
-                       magic,
-                       0,
-                       0);
-
     if (NT_SUCCESS(status)) {
-        (VOID)FltFlushBuffers(Instance, markerFileObject);
+        finalSize.QuadPart = logicalSize.QuadPart + DP_PROTECTION_FOOTER_SIZE;
+        status = DpPolicySetFileSizeByObject(Instance, fileObject, finalSize);
     }
 
-    DpPolicyCloseFile(markerHandle, markerFileObject);
-    DpPolicyFreeMarkerName(&markerName);
+    DP_TRACE_PPTX_NAME("FooterWrite",
+                       Name,
+                       status,
+                       logicalSize.QuadPart,
+                       bytesWritten,
+                       isProtected,
+                       footer.KeyLength);
+
+    if (NT_SUCCESS(status)) {
+        (VOID)FltFlushBuffers(Instance, fileObject);
+    }
+
+Exit:
+    DpPolicyCloseFile(fileHandle, fileObject);
 
     return status;
+}
+
+NTSTATUS
+DpPolicyGetFileLogicalSize(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PFILE_OBJECT FileObject,
+    _Out_ PLARGE_INTEGER LogicalSize,
+    _Out_opt_ PBOOLEAN IsProtected
+    )
+{
+    DP_PROTECTION_FOOTER footer;
+    LARGE_INTEGER physicalSize;
+    BOOLEAN isProtected = FALSE;
+    NTSTATUS status;
+
+    if (LogicalSize == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    LogicalSize->QuadPart = 0;
+    if (IsProtected != NULL) {
+        *IsProtected = FALSE;
+    }
+
+    if (Instance == NULL || FileObject == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = DpPolicyReadFooterByObject(Instance,
+                                        FileObject,
+                                        &footer,
+                                        &isProtected,
+                                        &physicalSize);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (isProtected) {
+        LogicalSize->QuadPart = (LONGLONG)footer.LogicalSize;
+    } else {
+        *LogicalSize = physicalSize;
+    }
+
+    if (IsProtected != NULL) {
+        *IsProtected = isProtected;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -401,14 +610,19 @@ DpPolicyRefreshStreamContext(
     PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
     PDP_STREAM_CONTEXT streamContext = NULL;
     PFLT_CONTEXT oldContext = NULL;
+    DP_PROTECTION_FOOTER footer;
     BOOLEAN isProtected = FALSE;
     BOOLEAN markerPresent = FALSE;
+    LARGE_INTEGER logicalSize;
 
     PAGED_CODE();
 
     if (FltObjects->FileObject == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
+
+    RtlZeroMemory(&footer, sizeof(footer));
+    logicalSize.QuadPart = 0;
 
     status = FltGetFileNameInformation(Data,
                                        FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
@@ -421,11 +635,15 @@ DpPolicyRefreshStreamContext(
     if (DpPolicyNameIsProtected(&nameInfo->Name) &&
         !DpPolicyNameIsShadow(&nameInfo->Name)) {
 
-        status = DpPolicyFileHasProtectionMarker(FltObjects->Instance,
-                                                 &nameInfo->Name,
-                                                 &markerPresent);
+        status = DpPolicyReadProtectionFooter(FltObjects->Instance,
+                                              &nameInfo->Name,
+                                              &footer,
+                                              &markerPresent);
         if (NT_SUCCESS(status)) {
             isProtected = markerPresent;
+            if (markerPresent) {
+                logicalSize.QuadPart = (LONGLONG)footer.LogicalSize;
+            }
         }
     }
 
@@ -452,6 +670,16 @@ DpPolicyRefreshStreamContext(
     RtlZeroMemory(streamContext, sizeof(DP_STREAM_CONTEXT));
     streamContext->IsProtected = isProtected;
     streamContext->PlaintextCacheEnabled = FALSE;
+    if (isProtected && markerPresent) {
+        streamContext->LogicalSize = logicalSize;
+        streamContext->FileKeyLength = footer.KeyLength;
+        RtlCopyMemory(streamContext->FileKey,
+                      footer.FileKey,
+                      min(footer.KeyLength, (ULONG)DP_FILE_KEY_LENGTH));
+    } else {
+        DpCryptoGetDefaultFileKey(streamContext->FileKey,
+                                  &streamContext->FileKeyLength);
+    }
 
     status = FltSetStreamContext(FltObjects->Instance,
                                  FltObjects->FileObject,
@@ -602,6 +830,8 @@ DpPolicySetStreamProtection(
     RtlZeroMemory(streamContext, sizeof(DP_STREAM_CONTEXT));
     streamContext->IsProtected = IsProtected;
     streamContext->PlaintextCacheEnabled = FALSE;
+    DpCryptoGetDefaultFileKey(streamContext->FileKey,
+                              &streamContext->FileKeyLength);
 
     status = FltSetStreamContext(FltObjects->Instance,
                                  FltObjects->FileObject,

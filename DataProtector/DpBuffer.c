@@ -46,6 +46,7 @@ DpAllocateIoContext(
     context->Operation = Operation;
     context->Length = Length;
     context->SwapBufferLength = Length;
+    DpCryptoGetDefaultFileKey(context->FileKey, &context->FileKeyLength);
 
     return context;
 }
@@ -65,6 +66,11 @@ DpFreeIoContext(
                                   Context->SwapBuffer,
                                   DP_TAG_IO_BUFFER);
         Context->SwapBuffer = NULL;
+    }
+
+    if (Context->HandleContext != NULL) {
+        FltReleaseContext(Context->HandleContext);
+        Context->HandleContext = NULL;
     }
 
     ExFreePoolWithTag(Context, DP_TAG_IO_CONTEXT);

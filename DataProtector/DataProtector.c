@@ -61,6 +61,16 @@ CONST FLT_OPERATION_REGISTRATION Callbacks[] = {
       DpPreSetInformation,
       DpPostSetInformation },
 
+    { IRP_MJ_QUERY_INFORMATION,
+      0,
+      DpPreQueryInformation,
+      DpPostQueryInformation },
+
+    { IRP_MJ_DIRECTORY_CONTROL,
+      0,
+      DpPreDirectoryControl,
+      DpPostDirectoryControl },
+
     { IRP_MJ_CLEANUP,
       0,
       DpPreCleanup,
