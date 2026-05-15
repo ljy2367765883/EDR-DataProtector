@@ -59,7 +59,7 @@ namespace DataProtectorWebBridge.Services
             response.ContentType = "application/json; charset=utf-8";
             response.ContentEncoding = Encoding.UTF8;
             response.ContentLength64 = bytes.Length;
-            response.Headers["Access-Control-Allow-Origin"] = "http://localhost:9527";
+            response.Headers["Access-Control-Allow-Origin"] = "*";
             response.Headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS";
             response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
             response.OutputStream.Write(bytes, 0, bytes.Length);

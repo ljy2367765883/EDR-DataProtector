@@ -62,11 +62,11 @@ try {
         Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
     }
 
-    $staticOutput = Join-Path $OutputDirectory "web"
     $bridgePublish = Join-Path $OutputDirectory "bridge"
+    $staticOutput = Join-Path $bridgePublish "web"
     New-Item -ItemType Directory -Force -Path $staticOutput, $bridgePublish | Out-Null
 
-    Copy-Item -LiteralPath (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
+    Copy-Item -Path (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
 
     $bridgeFiles = @(
         "DataProtectorWebBridge.exe",
@@ -85,15 +85,22 @@ try {
 DataProtector Web Admin
 =======================
 
-Run bridge\DataProtectorWebBridge.exe before opening the web UI.
+Run bridge\DataProtectorWebBridge.exe on the protected server.
+
+Default remote web console:
+http://<server-ip>:17643/
 
 Default bridge API:
-http://127.0.0.1:17643/api
+http://<server-ip>:17643/api
 
 Default audit log:
 C:\ProgramData\DataProtector\WebAudit.jsonl
 
-For local static hosting, serve the web directory with any HTTP server.
+The bridge listens on all server interfaces by default using the HTTP.sys
+wildcard prefix http://+:17643/, which is the Windows equivalent of binding to
+0.0.0.0. It serves the web UI from bridge\web. Allow inbound TCP 17643 through
+Windows Firewall.
+
 During development use:
 pnpm dev
 

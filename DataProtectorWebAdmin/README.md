@@ -48,7 +48,7 @@ pnpm install
 pnpm dev
 ```
 
-Default endpoints:
+Default development endpoints:
 
 ```text
 Web UI:      http://localhost:9527
@@ -56,11 +56,24 @@ Bridge API:  http://127.0.0.1:17643/api
 Audit file:  C:\ProgramData\DataProtector\WebAudit.jsonl
 ```
 
+Default deployment endpoint:
+
+```text
+http://<server-ip>:17643/
+```
+
+In deployment, `DataProtectorWebBridge.exe` listens on all interfaces by
+default and serves both the static web UI and the `/api` backend. The listener
+uses the HTTP.sys wildcard prefix, which is the Windows equivalent of binding a
+socket server to `0.0.0.0`.
+
 If `HttpListener` cannot bind without elevation, reserve the URL:
 
 ```cmd
-netsh http add urlacl url=http://127.0.0.1:17643/ user=%USERNAME%
+netsh http add urlacl url=http://+:17643/ user=%USERNAME%
 ```
+
+For remote management, allow inbound TCP port `17643` on the server firewall.
 
 ## Bridge API
 
