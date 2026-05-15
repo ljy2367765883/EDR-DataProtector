@@ -1,64 +1,246 @@
 # DataProtector
 
-DataProtector is a Windows transparent file encryption project built around a
-kernel-mode minifilter driver, a native user-mode policy API, and a WPF
-administration application. It is designed to demonstrate a modular and
-extensible transparent encryption pipeline where trusted processes receive
-decrypted content and untrusted processes continue to see ciphertext.
+DataProtector is a Windows transparent file encryption system implemented as a
+kernel-mode minifilter driver, a native policy API, and a WPF administration
+application. Its central idea is representation switching: trusted processes
+receive a decrypted logical view of protected files, while untrusted processes
+receive the original encrypted representation without being denied ordinary read
+access.
 
-The repository is intentionally organized as a full product-style codebase:
-kernel I/O interception, policy management, user-mode administration, build
-automation, publish packaging, diagnostics, and release artifacts are kept in
-separate modules so each part can evolve independently.
+This README is written as a technical paper and engineering handbook. It
+describes the design problem, the differences from traditional encryption
+products, the novel implementation points, the kernel workflows, and the current
+production hardening gaps.
 
-> Important: the current cryptographic provider is a test XOR transform used to
-> validate the I/O pipeline. It must be replaced with a real authenticated,
-> key-managed cryptographic provider before production deployment.
+> Security notice: the current cryptographic provider is a development XOR
+> transform used to validate the minifilter pipeline. The architecture is
+> intended to host a real authenticated, key-managed provider, but the current
+> transform must not be treated as production cryptography.
+
+## Abstract
+
+Transparent file encryption on Windows is deceptively difficult. A simple
+filter can encrypt bytes on disk, but real desktop applications read through
+cached I/O, memory-mapped files, temporary-file save patterns, rename-based
+commit protocols, and directory queries that must continue to report stable
+file metadata. If plaintext is placed in the system cache, untrusted processes
+may observe it. If metadata is stored in alternate data streams, portability and
+interoperability suffer. If access is denied to untrusted applications, many
+business workflows break because inspection, backup, copy, and transfer tools
+cannot operate normally.
+
+DataProtector explores a different model. It stores encrypted payloads in the
+main file stream, appends a fixed 512-byte private footer for protection
+metadata, virtualizes the logical file size, and performs per-handle trust
+classification in the minifilter. Trusted handles are served through decrypting
+paths or a mapped-I/O shadow workflow. Untrusted handles are served ciphertext
+from the original stream and never receive the private footer. The result is a
+dual-view file model: one physical file, two process-dependent representations.
+
+The implementation is intentionally modular. The driver owns I/O-path decisions,
+the policy API owns the stable user-mode ABI, and the WPF admin app owns the
+operator experience. This separation allows the cryptographic provider, policy
+source, UI, installer, and compatibility layers to evolve independently.
+
+## Keywords
+
+Windows minifilter, transparent encryption, double buffering, ciphertext view,
+plaintext view, trusted process policy, logical EOF virtualization, footer
+metadata, rename-aware encryption, memory-mapped I/O, shadow stream, WPF
+administration.
 
 ## Table of Contents
 
-- [Project Goals](#project-goals)
-- [Repository Layout](#repository-layout)
-- [System Architecture](#system-architecture)
-- [Core Concepts](#core-concepts)
-- [Transparent Encryption Workflow](#transparent-encryption-workflow)
-- [Protected File Format](#protected-file-format)
-- [Policy Model](#policy-model)
-- [Process Trust Workflow](#process-trust-workflow)
-- [Kernel Driver Design](#kernel-driver-design)
-- [User-Mode API Design](#user-mode-api-design)
-- [Administration Application](#administration-application)
-- [Build Requirements](#build-requirements)
-- [Build Instructions](#build-instructions)
-- [Installation and Runtime Workflow](#installation-and-runtime-workflow)
-- [Manual Test Matrix](#manual-test-matrix)
-- [Diagnostics and Troubleshooting](#diagnostics-and-troubleshooting)
-- [Current Limitations](#current-limitations)
-- [Production Hardening Roadmap](#production-hardening-roadmap)
+- [1. Problem Statement](#1-problem-statement)
+- [2. How This Differs from Traditional Designs](#2-how-this-differs-from-traditional-designs)
+- [3. Contributions and Novel Points](#3-contributions-and-novel-points)
+- [4. Repository Layout](#4-repository-layout)
+- [5. System Architecture](#5-system-architecture)
+- [6. Formal Model](#6-formal-model)
+- [7. Protected File Format](#7-protected-file-format)
+- [8. Policy Model](#8-policy-model)
+- [9. Kernel State Model](#9-kernel-state-model)
+- [10. End-to-End Workflows](#10-end-to-end-workflows)
+- [11. Kernel Callback Design](#11-kernel-callback-design)
+- [12. Algorithms](#12-algorithms)
+- [13. User-Mode Policy API](#13-user-mode-policy-api)
+- [14. Administration Application](#14-administration-application)
+- [15. Build and Packaging](#15-build-and-packaging)
+- [16. Installation and Runtime](#16-installation-and-runtime)
+- [17. Validation Matrix](#17-validation-matrix)
+- [18. Diagnostics](#18-diagnostics)
+- [19. Current Limitations](#19-current-limitations)
+- [20. Production Hardening Roadmap](#20-production-hardening-roadmap)
+- [21. Engineering Principles](#21-engineering-principles)
+- [22. Status](#22-status)
 
-## Project Goals
+## 1. Problem Statement
 
-DataProtector focuses on the following engineering goals:
+The project targets a practical endpoint encryption problem:
 
-- Provide transparent file encryption for selected file extensions.
-- Return plaintext only to trusted processes.
-- Return ciphertext to untrusted processes without blocking normal read access.
-- Support process trust rules by executable name and executable directory.
-- Bind trust rules and exclusion rules to file extensions.
-- Support excluded directories where target extensions are left untouched.
-- Preserve encrypted files as portable files by storing protection metadata
-  inside the main file stream.
-- Avoid exposing internal metadata through normal read and file information
+> Given a normal Windows file, protect selected file types so that authorized
+> applications see plaintext, unauthorized applications see ciphertext, and the
+> file remains portable when moved outside its original directory.
+
+The system must satisfy several constraints at the same time:
+
+- Applications must continue to use ordinary Win32 file APIs.
+- Trusted applications must not need plug-ins or file-format changes.
+- Untrusted tools must still be able to copy, back up, upload, hash, or inspect
+  protected files as ciphertext.
+- Protection metadata must travel with the file.
+- Private metadata must be hidden from normal reads and file information
   queries.
-- Keep the driver, policy API, and UI separately replaceable.
-- Keep the implementation understandable enough for kernel debugging and
-  productization.
+- Office-style save workflows must be supported, including temporary files and
+  final renames.
+- The design must avoid placing plaintext into the original file cache where an
+  untrusted process could observe it.
+- The codebase must remain modular enough for commercial hardening.
 
-The project does not currently claim to provide production cryptography,
-tamper-proof policy storage, enterprise key management, or hardened endpoint
-self-defense. Those are explicit roadmap items.
+The resulting design is not just "encrypt before write and decrypt after read."
+It is an operating-system mediation problem where file contents, file size,
+process identity, cache behavior, rename semantics, and policy updates all need
+to be modeled together.
 
-## Repository Layout
+## 2. How This Differs from Traditional Designs
+
+### 2.1 Whole-Disk Encryption
+
+Whole-disk encryption protects data at rest when the machine is powered off or
+the volume is unavailable. Once Windows is running and the volume is unlocked,
+all processes generally see the same plaintext file content.
+
+DataProtector instead performs process-sensitive representation switching at
+file access time.
+
+| Property | Whole-disk encryption | DataProtector |
+| --- | --- | --- |
+| Protection granularity | Volume or disk | File extension and path policy |
+| Process-specific view | No | Yes |
+| Untrusted process result | Plaintext after unlock | Ciphertext payload |
+| File portability | Depends on volume | Footer travels with file |
+| Main problem solved | Offline theft | Runtime process separation |
+
+### 2.2 Application Plug-ins and Document DRM
+
+Application plug-ins can understand specific formats such as Office documents,
+but they bind security to one application ecosystem. Files opened by other tools
+may fail, leak, or bypass the plug-in.
+
+DataProtector works below applications. It does not require Notepad, WPS,
+Office, command-line tools, or backup software to be modified.
+
+### 2.3 User-Mode API Hooking
+
+User-mode hooks are fragile. Applications can bypass them through native APIs,
+direct system calls, alternate runtime libraries, memory mapping, or helper
+processes. Hooking is also hard to make reliable across updates and security
+products.
+
+DataProtector performs policy enforcement in a kernel minifilter, below normal
+user-mode file APIs.
+
+### 2.4 Naive Minifilter Encryption
+
+A naive minifilter often implements only two paths:
+
+1. Encrypt every write.
+2. Decrypt every read.
+
+That model is insufficient for transparent encryption because every process
+receives plaintext. It also struggles with cached I/O, mapped sections, file
+size queries, and rename-based saves.
+
+DataProtector adds:
+
+- Per-handle trust decisions.
+- Ciphertext view for untrusted readers.
+- Logical EOF virtualization to hide the footer.
+- Rename-aware deferred encryption.
+- Shadow workflow for trusted mapped-I/O applications.
+
+### 2.5 Deny-Based DLP
+
+Many endpoint DLP systems deny access when a process is not authorized. Denial
+is sometimes correct, but it is disruptive for workflows where ciphertext
+handling is safe and useful. For example, backup software may need to copy the
+file without understanding its plaintext.
+
+DataProtector favors non-disruptive confidentiality:
+
+```text
+trusted process   -> plaintext logical file
+untrusted process -> ciphertext logical file
+```
+
+### 2.6 ADS-Based Metadata
+
+Alternate data streams can store metadata without changing the main stream, but
+they are not portable across all copy tools, archives, upload paths, file
+systems, and synchronization systems.
+
+DataProtector stores protection metadata in a fixed 512-byte footer inside the
+main data stream. The file carries its own protection information when moved.
+
+### 2.7 Header-Based Metadata
+
+A header at the beginning of the file is easy to locate, but it shifts every
+application-visible byte offset. That creates unnecessary risk for structured
+formats, random-access reads, and memory-mapped applications.
+
+DataProtector uses a footer so offset zero remains the first byte of the
+encrypted payload. Normal caller offsets map directly to payload offsets.
+
+## 3. Contributions and Novel Points
+
+The current implementation contributes the following design points:
+
+1. Dual-view transparent encryption.
+
+   A protected file has one physical encrypted representation, but the driver
+   exposes either plaintext or ciphertext depending on the requestor's trust
+   state.
+
+2. Footer-resident file metadata.
+
+   Protection information is stored in the final 512 bytes of the main stream,
+   not in an alternate stream. The driver hides this footer from normal reads,
+   file-size queries, and directory listings.
+
+3. Logical EOF virtualization.
+
+   The driver separates physical EOF from logical EOF. Applications operate on
+   the logical payload size. The footer remains a private implementation detail.
+
+4. Extension-scoped trust policy.
+
+   Process-name rules, process-directory rules, and excluded-directory rules are
+   bound to extensions. A process can be trusted for `.dpf` without being
+   trusted for `.pptx`.
+
+5. Rename-aware deferred protection.
+
+   Commercial document editors often save to a temporary extension and rename
+   to the final extension. The driver observes rename operations and arms
+   encryption for cleanup after the destination name becomes protected.
+
+6. Mapped-I/O shadow workflow.
+
+   Trusted memory-mapped applications can be redirected to a plaintext shadow
+   view, avoiding plaintext pollution of the original encrypted file cache.
+
+7. Modular commercial structure.
+
+   Kernel callbacks, policy transport, process policy, crypto provider, WPF UI,
+   publishing scripts, and diagnostics are separate modules.
+
+8. Explicit production hardening boundary.
+
+   Development features such as test crypto, test trusted processes, manual
+   unload, and tracing are clearly isolated behind compile-time switches and
+   documented as non-production defaults.
+
+## 4. Repository Layout
 
 ```text
 DataProtector/
@@ -69,405 +251,870 @@ DataProtector/
 
   DataProtector/
     DataProtector.c          Driver entry, filter registration, lifecycle
-    DataProtector.h          Shared kernel declarations and constants
-    DpBuffer.c               Double-buffer allocation helpers
-    DpControl.c              User-mode communication port
-    DpCrypto.c               Replaceable transform provider
-    DpIo.c                   Read, write, query, cleanup, rename callbacks
-    DpPolicy.c               File protection metadata and stream contexts
-    DpProcessPolicy.c        Trusted process and exclusion rule engine
-    DpShadow.c               Trusted mapped-I/O shadow stream workflow
-    DpTrace.c                Targeted diagnostic tracing
-    DataProtector.inf        Minifilter installation package
+    DataProtector.h          Shared kernel declarations and ABI structures
+    DpBuffer.c               Swap-buffer allocation and cleanup
+    DpControl.c              Filter Manager communication port
+    DpCrypto.c               Replaceable crypto transform provider
+    DpIo.c                   Create, read, write, query, rename, cleanup paths
+    DpPolicy.c               Footer, logical size, stream contexts
+    DpProcessPolicy.c        Process trust and exclusion rule engine
+    DpShadow.c               Mapped-I/O shadow workflow
+    DpTrace.c                Targeted operation tracing
+    DataProtector.inf        Driver installation metadata
 
   DataProtectorPolicyApi/
     DataProtectorPolicyApi.c Native DLL wrapper around the driver port
     DataProtectorPolicyApi.h Public C ABI for policy management
 
   DataProtectorAdmin/
-    MainWindow.xaml          WPF administration surface
+    App.xaml
+    MainWindow.xaml          WPF UI shell
     ViewModels/              UI state and commands
-    Services/                Policy service and local settings persistence
-    Native/                  P/Invoke bridge to DataProtectorPolicyApi.dll
-    Models/                  Policy rule and result models
+    Services/                Driver policy service and local settings
+    Native/                  P/Invoke definitions
+    Models/                  Policy models
     Assets/                  Application icon and visual assets
 ```
 
-## System Architecture
+## 5. System Architecture
 
-```text
-+-----------------------------+
-| DataProtectorAdmin.exe       |
-| WPF policy administration UI |
-+--------------+--------------+
-               |
-               | P/Invoke
-               v
-+--------------+--------------+
-| DataProtectorPolicyApi.dll   |
-| Native C policy client API   |
-+--------------+--------------+
-               |
-               | Filter Manager communication port
-               | \DataProtectorPolicyPort
-               v
-+--------------+--------------+
-| DataProtector.sys            |
-| Windows minifilter driver    |
-+--------------+--------------+
-               |
-               | IRP_MJ_CREATE / READ / WRITE / QUERY_INFORMATION
-               | IRP_MJ_SET_INFORMATION / DIRECTORY_CONTROL / CLEANUP
-               v
-+--------------+--------------+
-| File system                  |
-| NTFS / ReFS / FAT / exFAT    |
-+-----------------------------+
+### 5.1 Layered Architecture
+
+```mermaid
+flowchart TB
+    Admin["DataProtectorAdmin.exe\nWPF operator console"]
+    Api["DataProtectorPolicyApi.dll\nStable native C ABI"]
+    Port["Filter Manager communication port\n\\DataProtectorPolicyPort"]
+    Driver["DataProtector.sys\nMinifilter data-path authority"]
+    Policy["Kernel policy engine\nProcess and directory rules"]
+    Crypto["Crypto provider\nDevelopment XOR today, replaceable"]
+    Shadow["Shadow workflow\nTrusted mapped I/O"]
+    Fs["File systems\nNTFS / ReFS / FAT / exFAT"]
+
+    Admin -->|"P/Invoke"| Api
+    Api -->|"FilterConnectCommunicationPort\nFilterSendMessage"| Port
+    Port --> Driver
+    Driver --> Policy
+    Driver --> Crypto
+    Driver --> Shadow
+    Driver -->|"IRP callbacks"| Fs
 ```
 
-The kernel driver owns all data-path decisions. User mode only configures
-policy. This keeps the trusted/untrusted read behavior consistent even when
-applications access protected files through different Windows APIs.
+The admin application is not on the file data path. It configures policy. The
+driver decides whether each file operation sees plaintext, ciphertext, logical
+metadata, or raw physical metadata.
 
-## Core Concepts
+### 5.2 Data-Path Architecture
 
-### Protected Extension
+```mermaid
+flowchart LR
+    Proc["Requesting process"]
+    Open["IRP_MJ_CREATE\nclassify file and process"]
+    Hctx["Stream-handle context\ntrusted/protected/shadow state"]
+    ReadWrite["IRP_MJ_READ / IRP_MJ_WRITE"]
+    Transform["Double-buffer transform"]
+    Clamp["Logical EOF clamp"]
+    File["Physical file\nciphertext payload + footer"]
 
-A file is a candidate for protection when its extension matches the configured
-policy. The default extension is `.dpf`, and rules may also target formats such
-as `.pptx`.
-
-### Trusted Process
-
-A trusted process is allowed to receive plaintext for a protected file. Trust
-can be granted by executable image name or by executable directory. Rules are
-extension-aware, so a process can be trusted for one file type without being
-trusted for every protected extension.
-
-### Untrusted Process
-
-An untrusted process is allowed to read protected files, but it receives the
-encrypted bytes from the original stream. It should not receive the private
-footer metadata.
-
-### Excluded Directory
-
-An excluded directory rule disables encryption for matching file extensions
-under that directory. Files in excluded locations are read and written as normal
-files, even if their extension is otherwise protected.
-
-### Logical Size vs Physical Size
-
-Protected files store a private 512-byte metadata footer at the end of the main
-data stream. Applications should see the logical file size. The driver uses the
-larger physical file size internally.
-
-```text
-physical file = encrypted payload bytes + 512-byte DataProtector footer
-logical file  = encrypted payload bytes only
+    Proc --> Open
+    Open --> Hctx
+    Hctx --> ReadWrite
+    ReadWrite --> Clamp
+    ReadWrite --> Transform
+    Transform --> File
+    Clamp --> File
 ```
 
-## Transparent Encryption Workflow
+### 5.3 Control-Plane Architecture
 
-### 1. Creating a New Protected File
+```mermaid
+sequenceDiagram
+    participant UI as WPF Admin
+    participant DLL as Policy API DLL
+    participant Port as Filter Manager Port
+    participant Driver as Minifilter
+    participant Rules as Kernel Rule Store
 
-1. A trusted application creates or overwrites a file whose path matches a
-   protected extension.
-2. The driver marks the handle for encryption during cleanup.
-3. The application writes plaintext normally.
-4. On cleanup, the driver transforms the file content into ciphertext.
-5. The driver appends a fixed 512-byte footer containing DataProtector metadata.
-6. The stream context and handle context are updated so later opens recognize
-   the file as protected.
-
-This deferred workflow is important for compatibility with applications that
-create temporary files, write content in multiple phases, and finalize the
-document only at close time.
-
-### 2. Opening an Existing Protected File from a Trusted Process
-
-1. The driver detects the protected footer at the end of the file.
-2. The driver calculates the logical size from the footer.
-3. If the process is trusted for the file extension, reads are redirected
-   through the decrypting path.
-4. For memory-mapped applications, the driver uses the shadow workflow to avoid
-   placing plaintext in the original file cache.
-5. The application receives plaintext and can edit the file normally.
-6. If the shadow content becomes dirty, cleanup writes the encrypted content
-   back to the original file and refreshes the footer.
-
-### 3. Opening an Existing Protected File from an Untrusted Process
-
-1. The driver detects the protected footer.
-2. The process is not trusted for that extension.
-3. Reads are allowed, but they are clamped to the logical payload range.
-4. The caller receives ciphertext bytes.
-5. The private footer is never returned as normal file content.
-
-This behavior is the central transparent encryption model: access is not simply
-blocked; the caller receives the representation it is allowed to see.
-
-### 4. Reading Past Logical EOF
-
-When a protected file has a 512-byte footer, normal callers must not see that
-footer. The read path clamps reads at the logical EOF:
-
-- Reads starting at or beyond logical EOF complete with no payload.
-- Reads crossing logical EOF are shortened.
-- Trusted reads decrypt only the visible payload range.
-- Untrusted reads receive only ciphertext payload bytes.
-
-### 5. Querying File Size
-
-The driver adjusts file information queries for protected streams:
-
-- `FileStandardInformation`
-- `FileAllInformation`
-- `FileNetworkOpenInformation`
-- `FileAllocationInformation`
-- `FileEndOfFileInformation`
-
-Directory enumeration is also adjusted for protected files so tools such as
-Explorer and `dir` see the logical size rather than the physical size.
-
-### 6. Rename-to-Protected Workflows
-
-Many commercial applications save documents by writing a temporary file first
-and then renaming it to the final extension. DataProtector handles this pattern:
-
-1. The driver observes rename information.
-2. If the destination path has a protected extension and is not excluded, the
-   handle is armed for encryption.
-3. After the rename succeeds, final encryption is deferred until cleanup.
-4. The final file receives ciphertext content plus the 512-byte footer.
-
-### 7. Excluded Directory Workflow
-
-If a target file is under an excluded directory rule:
-
-1. The protected extension check is bypassed.
-2. Reads and writes use the original file stream without transformation.
-3. Rename-to-protected behavior is also bypassed when the final target is under
-   an excluded directory.
-
-This is useful for caches, staging folders, compatibility directories, or
-locations that should remain interoperable with external tooling.
-
-## Protected File Format
-
-DataProtector stores protection metadata in the final 512 bytes of the main
-data stream. Alternate data streams are not used for protection metadata.
-
-```text
-+------------------------------+------------------------------+
-| Encrypted payload             | 512-byte protection footer    |
-| Offset 0..LogicalSize-1       | Offset LogicalSize..EOF-1     |
-+------------------------------+------------------------------+
+    UI->>DLL: Add/Remove/Query rule
+    DLL->>DLL: Normalize extension and path
+    DLL->>Port: Connect to \\DataProtectorPolicyPort
+    Port->>Driver: Deliver policy command
+    Driver->>Rules: Mutate or enumerate rules
+    Rules-->>Driver: Status and sizing data
+    Driver-->>Port: NTSTATUS / query payload
+    Port-->>DLL: HRESULT / output bytes
+    DLL-->>UI: Stable DWORD result and message
 ```
 
-The footer currently contains:
+## 6. Formal Model
 
-- Magic value
-- Footer format version
-- Footer size
-- Flags
-- Logical file size
-- File key length
-- File key bytes
-- Footer checksum
-- Reserved bytes for future format expansion
+### 6.1 File Representation
 
-The driver validates the footer before treating a file as protected. Validation
-checks include magic, version, fixed footer size, key length, checksum, and the
-relationship between physical EOF and logical EOF.
+Let `F` be a protected physical file:
 
-The fixed-size footer design was chosen because it avoids shifting every
-application-visible byte offset. A header-based format would require translating
-all caller offsets, which is riskier for complex document formats and memory
-mapped I/O.
+```text
+F = C || M
+```
 
-## Policy Model
+Where:
 
-Policy rules are maintained by the kernel driver and updated through the
-Filter Manager communication port.
+- `C` is the encrypted payload.
+- `M` is the 512-byte DataProtector footer.
+- `PhysicalSize(F) = |C| + 512`.
+- `LogicalSize(F) = |C|`.
 
-Supported rule kinds:
+The driver exposes the following read views:
 
-| Rule kind | Meaning |
+```text
+View(process, F) =
+    Decrypt(C)  if process is trusted for F.extension
+    C           otherwise
+```
+
+The footer `M` is never part of the normal logical view.
+
+### 6.2 Trust Predicate
+
+For a requestor process `P` and file path `N`:
+
+```text
+Trusted(P, N) =
+    ProtectedExtension(N)
+    AND NOT Excluded(N)
+    AND (
+        ImageNameRule(P.image_name, Extension(N))
+        OR ImageDirectoryRule(P.image_directory, Extension(N))
+    )
+```
+
+An excluded directory has priority over protection:
+
+```text
+Excluded(N) => no encryption, no decryption, no footer semantics
+```
+
+### 6.3 Offset Mapping
+
+Because metadata is stored at the end of the file, caller offsets remain stable:
+
+```text
+Application offset A -> physical payload offset A
+```
+
+Only read length and file-size information need adjustment:
+
+```text
+VisibleReadLength = min(RequestedLength, LogicalSize - RequestedOffset)
+VisibleFileSize   = LogicalSize
+PhysicalFileSize  = LogicalSize + 512
+```
+
+This is one of the main reasons the project uses a footer instead of a header.
+
+## 7. Protected File Format
+
+### 7.1 Physical Layout
+
+```text
++-------------------------------+-------------------------------+
+| Encrypted payload              | DataProtector footer          |
+| Offset 0..LogicalSize-1        | Final 512 bytes of stream     |
++-------------------------------+-------------------------------+
+```
+
+The footer is part of the main stream so it moves with the file. Normal
+applications should not see it because the driver virtualizes file size and
+clamps reads.
+
+### 7.2 Footer Structure
+
+The current footer is defined by `DP_PROTECTION_FOOTER` and is packed to exactly
+512 bytes.
+
+| Field | Size | Purpose |
+| --- | ---: | --- |
+| `Magic` | 4 bytes | Identifies a DataProtector protected file |
+| `Version` | 4 bytes | Footer format version |
+| `FooterSize` | 4 bytes | Must equal 512 |
+| `Flags` | 4 bytes | Reserved feature flags |
+| `LogicalSize` | 8 bytes | Payload size visible to applications |
+| `KeyLength` | 4 bytes | Number of valid bytes in `FileKey` |
+| `FileKey` | 32 bytes | File key material for the transform provider |
+| `Checksum` | 4 bytes | Footer integrity check for accidental mismatch |
+| `Reserved` | 448 bytes | Forward-compatible format expansion |
+
+Important constants:
+
+```c
+#define DP_PROTECTION_MAGIC 0x32465044u
+#define DP_PROTECTION_FOOTER_SIZE 512
+#define DP_PROTECTION_FOOTER_VERSION 1
+#define DP_FILE_KEY_LENGTH 32
+```
+
+### 7.3 Footer Validation
+
+A file is treated as protected only if all footer checks pass:
+
+- Physical size is at least 512 bytes.
+- `Magic` matches DataProtector.
+- `Version` matches the supported footer version.
+- `FooterSize` equals 512.
+- `KeyLength` is nonzero and not larger than 32.
+- `Checksum` matches the footer contents.
+- `LogicalSize == PhysicalSize - 512`.
+
+If validation fails, the file is treated as an ordinary file. This fail-open
+classification is important for compatibility: random files with matching
+extensions must not be corrupted by accidental metadata interpretation.
+
+### 7.4 Why a Footer Is Used
+
+Header metadata has a tempting property: it is easy to find. However, it forces
+the filter to translate every application offset:
+
+```text
+Application offset A -> physical offset A + HeaderSize
+```
+
+That translation is dangerous for random access, memory mapping, structured
+archives, and applications that compare file offsets with file sizes.
+
+The footer design keeps payload offsets unchanged:
+
+```text
+Application offset A -> physical offset A
+```
+
+The driver only needs to virtualize EOF and metadata queries.
+
+## 8. Policy Model
+
+### 8.1 Rule Kinds
+
+| Rule kind | Scope | Effect |
+| --- | --- | --- |
+| Process name | `process.exe + extension` | Trust matching executable name |
+| Process directory | `directory + extension` | Trust executables under directory |
+| Excluded directory | `directory + extension` | Disable protection under directory |
+
+Rules are extension-bound. The same process can be trusted for `.dpf` and not
+trusted for `.pptx`.
+
+Example policy:
+
+```text
+notepad.exe                      + .dpf  -> trusted
+C:\Program Files\WPS Office\     + .pptx -> trusted
+D:\Exchange\PlainExports\        + .pptx -> excluded
+```
+
+### 8.2 Rule Priority
+
+```mermaid
+flowchart TD
+    Start["File path N"]
+    Ext{"Has protected extension?"}
+    Excl{"Under excluded directory\nfor this extension?"}
+    Proc{"Process matches name or\ndirectory trust rule?"}
+    Trusted["Trusted plaintext view"]
+    Cipher["Untrusted ciphertext view"]
+    Normal["Normal unprotected I/O"]
+
+    Start --> Ext
+    Ext -- "No" --> Normal
+    Ext -- "Yes" --> Excl
+    Excl -- "Yes" --> Normal
+    Excl -- "No" --> Proc
+    Proc -- "Yes" --> Trusted
+    Proc -- "No" --> Cipher
+```
+
+### 8.3 Path Normalization
+
+The user-mode policy API accepts friendly DOS paths for directory rules and
+converts them to NT device paths before sending them to the driver. This avoids
+mixing user-mode drive letters with kernel file names.
+
+The native API also normalizes extensions:
+
+```text
+"dpf"  -> ".dpf"
+".DPF" -> ".DPF" as a normalized extension string for the rule channel
+```
+
+The kernel side performs case-insensitive matching.
+
+### 8.4 Queryable Rule Store
+
+The policy channel supports querying all rules. The query protocol reports:
+
+- Rule count.
+- Required buffer size.
+- Returned buffer size.
+- Variable-length entries containing rule type, value, and extension.
+
+This matters for a real admin application. The UI must not only push commands;
+it must be able to reconstruct the driver's current state.
+
+## 9. Kernel State Model
+
+### 9.1 Stream Context
+
+The stream context stores file-level facts:
+
+| Field | Meaning |
 | --- | --- |
-| Process name | Trust an executable name for a specific extension |
-| Process directory | Trust all executables under a directory for a specific extension |
-| Excluded directory | Disable protection under a directory for a specific extension |
+| `IsProtected` | The stream has a valid footer |
+| `PlaintextCacheEnabled` | Diagnostic cache mode flag |
+| `LogicalSize` | Application-visible payload size |
+| `FileKeyLength` | Length of key material |
+| `FileKey` | File key bytes copied from footer/provider |
 
-Rules are extension-aware. For example:
+Stream contexts are shared across opens of the same stream.
 
-```text
-notepad.exe      + .dpf   => trusted for .dpf
-C:\OfficeTools\  + .pptx  => trusted for .pptx
-D:\Exports\      + .pptx  => excluded for .pptx
+### 9.2 Stream-Handle Context
+
+The handle context stores per-open decisions:
+
+| Field | Meaning |
+| --- | --- |
+| `IsProtected` | This handle targets protected content |
+| `IsTrusted` | This requestor is trusted for this file extension |
+| `IsShadow` | This handle has been redirected to shadow content |
+| `ShadowDirty` | Shadow must be written back on cleanup |
+| `EncryptOnCleanup` | New or renamed file must be finalized |
+| `FooterDirty` | Footer must be refreshed |
+| `LogicalSize` | Stable logical size for this handle |
+| `FileKey` | Key material used by this handle |
+| `OriginalName` | Original protected stream path |
+| `ShadowName` | Shadow stream path |
+| `PendingName` | Rename destination captured before completion |
+
+This split is essential. One file can be opened at the same time by a trusted
+editor and an untrusted command-line process. They must not share one trust
+decision.
+
+## 10. End-to-End Workflows
+
+### 10.1 Admin Rule Update Workflow
+
+```mermaid
+sequenceDiagram
+    participant Operator
+    participant Admin as WPF Admin
+    participant API as Policy API DLL
+    participant Driver as DataProtector.sys
+    participant Store as Kernel Rule Store
+
+    Operator->>Admin: Add process directory rule
+    Admin->>API: DpPolicyAddProcessDirectoryRuleEx(path, extension)
+    API->>API: Trim, validate, convert DOS path to NT path
+    API->>Driver: Policy message over communication port
+    Driver->>Store: Insert extension-scoped rule
+    Store-->>Driver: STATUS_SUCCESS
+    Driver-->>API: Command status
+    API-->>Admin: Stable API result
+    Admin-->>Operator: Updated rule list
 ```
 
-The policy API supports:
+### 10.2 Trusted New File Creation
 
-- Add process-name trust rule
-- Remove process-name trust rule
-- Add process-directory trust rule
-- Remove process-directory trust rule
-- Add excluded-directory rule
-- Remove excluded-directory rule
-- Clear rules
-- Query all rules
-- Convert DOS paths to NT paths
-- Retrieve the last policy API error message
+This workflow is used when a trusted process creates or overwrites a protected
+extension.
 
-## Process Trust Workflow
+```mermaid
+flowchart TD
+    A["IRP_MJ_CREATE"]
+    B{"Path has protected extension?"}
+    C{"Path excluded?"}
+    D{"Process trusted for extension?"}
+    E["Create handle context"]
+    F["Set EncryptOnCleanup"]
+    G["Application writes plaintext"]
+    H["IRP_MJ_CLEANUP"]
+    I["Encrypt payload in place"]
+    J["Append 512-byte footer"]
+    K["Refresh stream context"]
+    L["Normal unprotected create"]
 
-The trust decision happens when a file is opened or when a protected workflow is
-armed:
+    A --> B
+    B -- "No" --> L
+    B -- "Yes" --> C
+    C -- "Yes" --> L
+    C -- "No" --> D
+    D -- "No" --> E
+    D -- "Yes" --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> J
+    J --> K
+```
 
-1. Normalize the target file path.
-2. Check whether the path has a protected extension.
-3. Check whether the path is excluded.
-4. Resolve the requestor process identity.
-5. Match process-name rules and process-directory rules for the file extension.
-6. Store the trust result in a stream-handle context.
+Rationale: many applications do not write final bytes immediately. Deferring
+initial encryption until cleanup allows the application to complete its normal
+save protocol first.
 
-The handle context allows later reads, writes, cleanup, and rename handling to
-use a stable decision for that open instance.
+### 10.3 Trusted Open of an Existing Protected File
 
-## Kernel Driver Design
+```mermaid
+flowchart TD
+    A["IRP_MJ_CREATE"]
+    B["Read final 512 bytes"]
+    C{"Valid footer?"}
+    D["Ordinary file path"]
+    E["Compute logical size"]
+    F{"Process trusted?"}
+    G{"Mapped-I/O sensitive open?"}
+    H["Redirect to plaintext shadow workflow"]
+    I["Use decrypting read/write path"]
+    J["Create handle context with IsTrusted"]
 
-### Driver Registration
+    A --> B
+    B --> C
+    C -- "No" --> D
+    C -- "Yes" --> E
+    E --> F
+    F -- "No" --> J
+    F -- "Yes" --> G
+    G -- "Yes" --> H
+    G -- "No" --> I
+    H --> J
+    I --> J
+```
 
-`DataProtector.c` registers the minifilter, context types, callbacks, instance
-lifecycle, and unload behavior.
+A trusted caller receives plaintext. The original physical file remains
+ciphertext plus footer.
 
-The driver currently handles:
+### 10.4 Untrusted Open of an Existing Protected File
 
-- `IRP_MJ_CREATE`
-- `IRP_MJ_READ`
-- `IRP_MJ_WRITE`
-- `IRP_MJ_QUERY_INFORMATION`
-- `IRP_MJ_DIRECTORY_CONTROL`
-- `IRP_MJ_SET_INFORMATION`
-- `IRP_MJ_CLEANUP`
-- `IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION`
-- `IRP_MJ_FAST_IO_CHECK_IF_POSSIBLE`
+```mermaid
+flowchart TD
+    A["IRP_MJ_CREATE"]
+    B["Footer validates"]
+    C["Process does not match trust policy"]
+    D["Create handle context\nIsProtected=true, IsTrusted=false"]
+    E["IRP_MJ_READ"]
+    F["Clamp request to logical EOF"]
+    G["Read encrypted payload bytes"]
+    H["Return ciphertext to caller"]
 
-### Double Buffering
+    A --> B --> C --> D --> E --> F --> G --> H
+```
 
-The read/write path uses swap buffers so the file system sees ciphertext while
-trusted callers see plaintext.
+The untrusted process is not blocked. It receives the representation it is
+allowed to see.
 
-Read path:
+### 10.5 Read Path
 
-1. Allocate a swap buffer.
-2. Read ciphertext into the swap buffer.
-3. Transform the buffer for trusted callers.
-4. Copy plaintext to the original caller buffer.
+```mermaid
+flowchart TD
+    A["PreRead"]
+    B{"Protected handle?"}
+    C["Pass through"]
+    D["Clamp read length to logical EOF"]
+    E{"Trusted?"}
+    F["Allocate swap buffer"]
+    G["Read ciphertext into swap buffer"]
+    H["Decrypt swap buffer"]
+    I["Copy plaintext to caller buffer"]
+    J["Read ciphertext directly or through clamped path"]
+    K["Complete"]
 
-Write path:
+    A --> B
+    B -- "No" --> C
+    B -- "Yes" --> D
+    D --> E
+    E -- "Yes" --> F --> G --> H --> I --> K
+    E -- "No" --> J --> K
+```
 
-1. Copy caller plaintext into a swap buffer.
-2. Transform the swap buffer into ciphertext.
-3. Send ciphertext to the file system.
-4. Restore the original caller buffer pointers in post-operation cleanup.
+### 10.6 Write Path
 
-### Stream and Handle Contexts
+```mermaid
+flowchart TD
+    A["PreWrite"]
+    B{"Protected handle?"}
+    C["Pass through"]
+    D{"Trusted?"}
+    E["Copy caller plaintext to swap buffer"]
+    F["Encrypt swap buffer"]
+    G["Send encrypted bytes to file system"]
+    H["Mark footer/logical size dirty if needed"]
+    I["Reject or pass according to policy state"]
+    J["PostWrite restores original buffer state"]
 
-Stream contexts cache file-level state such as protection status and logical
-size. Stream-handle contexts cache per-open state such as trust, shadow state,
-pending rename target, and cleanup encryption state.
+    A --> B
+    B -- "No" --> C
+    B -- "Yes" --> D
+    D -- "Yes" --> E --> F --> G --> H --> J
+    D -- "No" --> I
+```
 
-This separation matters because one protected file can be opened by multiple
-processes with different trust decisions.
+The exact behavior depends on whether the handle is an existing protected
+stream, a newly created stream that will be encrypted on cleanup, or a shadow
+handle.
 
-### Shadow Stream Workflow
+### 10.7 Query Information and Directory Enumeration
 
-Some applications, especially Office-style editors, rely heavily on memory
-mapped I/O and the system file cache. Returning plaintext directly into the
-original protected file cache can compromise the ciphertext-only invariant.
+```mermaid
+flowchart TD
+    A["PostQueryInformation or PostDirectoryControl"]
+    B{"Entry is protected?"}
+    C["Leave information unchanged"]
+    D["Read or use cached logical size"]
+    E["Replace EndOfFile with LogicalSize"]
+    F["Adjust AllocationSize when applicable"]
+    G["Return sanitized metadata"]
 
-For trusted mapped applications, DataProtector redirects compatible opens to a
-plaintext shadow stream:
+    A --> B
+    B -- "No" --> C
+    B -- "Yes" --> D --> E --> F --> G
+```
 
-1. Original ciphertext payload is copied and decrypted into the shadow stream.
-2. The trusted application operates on the shadow stream.
-3. Dirty shadow content is encrypted back to the original file on cleanup.
-4. The original file footer is refreshed.
+This is required because a protected file is physically 512 bytes larger than
+the payload visible to applications.
 
-The shadow stream is an implementation detail for mapped-I/O compatibility. It
-is separate from the persistent protection metadata footer.
+### 10.8 Rename-to-Protected Workflow
 
-## User-Mode API Design
+Commercial document editors frequently use this pattern:
 
-`DataProtectorPolicyApi.dll` exposes a stable C ABI for policy operations. The
-WPF application calls this DLL through P/Invoke, but the DLL can also be reused
-by command-line tools, installers, services, or automated tests.
+```text
+create temporary file -> write content -> rename temporary file to final name
+```
 
-Public API examples:
+DataProtector treats the destination name as the protection decision point.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Driver as Minifilter
+    participant FS as File System
+
+    App->>Driver: SetInformation(FileRenameInformation)
+    Driver->>Driver: Capture destination name
+    Driver->>Driver: Check protected extension and exclusions
+    Driver->>FS: Allow rename
+    FS-->>Driver: Rename succeeded
+    Driver->>Driver: Arm EncryptOnCleanup for final name
+    App->>Driver: Cleanup final handle
+    Driver->>Driver: Encrypt payload and write footer
+```
+
+Without this workflow, `.pptx`, `.docx`, and similar formats may remain
+plaintext because the original write happened under a temporary extension.
+
+### 10.9 Excluded Directory Workflow
+
+```mermaid
+flowchart TD
+    A["Incoming operation on target path"]
+    B{"Extension protected?"}
+    C["Normal I/O"]
+    D{"Path under excluded directory\nfor the extension?"}
+    E["Bypass encryption and footer logic"]
+    F["Apply normal protected workflow"]
+
+    A --> B
+    B -- "No" --> C
+    B -- "Yes" --> D
+    D -- "Yes" --> E
+    D -- "No" --> F
+```
+
+Exclusions are important for staging directories, export folders, compatibility
+folders, and application caches.
+
+### 10.10 Trusted Mapped-I/O Shadow Workflow
+
+Some editors use memory-mapped files and Cache Manager paths. If plaintext is
+allowed into the original file cache, an untrusted process can later observe it
+through another open. DataProtector avoids that design by using a shadow view
+for trusted mapped workflows.
+
+```mermaid
+sequenceDiagram
+    participant App as Trusted editor
+    participant Driver as DataProtector.sys
+    participant Orig as Original stream
+    participant Shadow as Shadow stream
+
+    App->>Driver: Create protected file
+    Driver->>Orig: Read encrypted payload and footer
+    Driver->>Shadow: Create or refresh plaintext shadow
+    Driver-->>App: Redirect open to shadow
+    App->>Shadow: Mapped reads and writes plaintext
+    App->>Driver: Cleanup
+    Driver->>Shadow: Read plaintext shadow
+    Driver->>Orig: Encrypt payload into original stream
+    Driver->>Orig: Refresh 512-byte footer
+```
+
+Current implementation note: the shadow workflow uses an internal
+`:DataProtectorShadow` stream for compatibility. Persistent protection metadata
+does not use ADS; it uses the 512-byte footer. Removing the shadow ADS is a
+future hardening task if a strict zero-ADS product requirement is adopted.
+
+### 10.11 Driver Stop and Raw File Observation
+
+When the driver is stopped, the file system no longer virtualizes reads, sizes,
+or the footer. A protected file should appear as raw ciphertext payload plus
+footer.
+
+```text
+driver running:
+  trusted process   -> plaintext logical bytes
+  untrusted process -> ciphertext logical bytes
+
+driver stopped:
+  any process       -> physical bytes on disk
+                       ciphertext payload + footer
+```
+
+This is expected for transparent encryption. If the driver is stopped and a
+file is still readable as plaintext, the file was not protected or was saved
+outside the protected workflow.
+
+## 11. Kernel Callback Design
+
+The driver registers the following major operations:
+
+| Operation | Purpose |
+| --- | --- |
+| `IRP_MJ_CREATE` | Classify protected files, trust, shadow redirection |
+| `IRP_MJ_READ` | Clamp logical EOF, decrypt for trusted callers |
+| `IRP_MJ_WRITE` | Encrypt trusted writes or mark deferred encryption state |
+| `IRP_MJ_SET_INFORMATION` | Detect rename, EOF, allocation changes |
+| `IRP_MJ_QUERY_INFORMATION` | Virtualize logical file size |
+| `IRP_MJ_DIRECTORY_CONTROL` | Virtualize directory entry sizes |
+| `IRP_MJ_CLEANUP` | Finalize deferred encryption and shadow writeback |
+| `IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION` | Protect mapped-I/O behavior |
+| `IRP_MJ_FAST_IO_CHECK_IF_POSSIBLE` | Control fast I/O compatibility |
+
+The callbacks work together. No single callback is sufficient to implement
+transparent encryption correctly.
+
+## 12. Algorithms
+
+### 12.1 Footer Validation
+
+```text
+ValidateFooter(file):
+    physicalSize = QueryPhysicalSize(file)
+    if physicalSize < 512:
+        return NotProtected
+
+    footer = Read(file, physicalSize - 512, 512)
+
+    if footer.Magic != DP_PROTECTION_MAGIC:
+        return NotProtected
+    if footer.Version != DP_PROTECTION_FOOTER_VERSION:
+        return NotProtected
+    if footer.FooterSize != 512:
+        return NotProtected
+    if footer.KeyLength == 0 or footer.KeyLength > 32:
+        return NotProtected
+    if footer.Checksum != Checksum(footer):
+        return NotProtected
+    if footer.LogicalSize != physicalSize - 512:
+        return NotProtected
+
+    return Protected(footer)
+```
+
+### 12.2 Create Classification
+
+```text
+PreCreate(request):
+    name = NormalizeFileName(request)
+
+    if IsInternalDataProtectorIo(request):
+        pass through
+
+    if IsShadowName(name):
+        allow only trusted shadow workflow
+
+    if not HasProtectedExtension(name):
+        pass through
+
+    if IsExcluded(name):
+        pass through
+
+    protected = HasValidFooter(name)
+    trusted = IsProcessTrusted(request.Process, name.Extension)
+
+    if protected and trusted and RequiresShadow(request):
+        redirect to shadow workflow
+
+    create per-handle context:
+        IsProtected = protected or should protect on cleanup
+        IsTrusted = trusted
+        LogicalSize = footer.LogicalSize if protected
+```
+
+### 12.3 Trusted Read
+
+```text
+TrustedRead(handle, offset, length):
+    if offset >= LogicalSize:
+        return EOF
+
+    visibleLength = min(length, LogicalSize - offset)
+    cipher = ReadPhysical(handle, offset, visibleLength)
+    plain = Transform(cipher, key, offset)
+    return plain
+```
+
+### 12.4 Untrusted Read
+
+```text
+UntrustedRead(handle, offset, length):
+    if offset >= LogicalSize:
+        return EOF
+
+    visibleLength = min(length, LogicalSize - offset)
+    cipher = ReadPhysical(handle, offset, visibleLength)
+    return cipher
+```
+
+### 12.5 Deferred Encryption on Cleanup
+
+```text
+Cleanup(handle):
+    if handle.IsShadow and handle.ShadowDirty:
+        EncryptShadowBackToOriginal(handle)
+        RefreshFooter(handle.OriginalName)
+        return
+
+    if handle.EncryptOnCleanup:
+        logicalSize = QueryCurrentPayloadSize(handle)
+        EncryptPayloadInPlace(handle, 0, logicalSize)
+        AppendOrRefreshFooter(handle, logicalSize)
+        RefreshStreamContext(handle)
+```
+
+### 12.6 Rule Query Sizing
+
+```text
+QueryRules(outputBuffer):
+    required = sizeof(QueryHeader)
+
+    for each rule:
+        required += sizeof(QueryEntryHeader)
+        required += rule.ValueLengthBytes
+        required += rule.ExtensionLengthBytes
+
+    if outputBuffer is header-only:
+        return required size and rule count
+
+    if outputBuffer is too small:
+        return STATUS_BUFFER_TOO_SMALL with required size
+
+    serialize all rules into caller buffer
+```
+
+This two-pass shape allows the admin app to allocate a correctly sized buffer.
+
+## 13. User-Mode Policy API
+
+`DataProtectorPolicyApi.dll` exposes a C ABI that can be consumed by WPF,
+command-line tools, installers, services, or tests.
+
+Representative functions:
 
 ```c
 DWORD DpPolicyCheckConnection(void);
-DWORD DpPolicyAddProcessNameRuleEx(LPCWSTR processName, LPCWSTR extension);
-DWORD DpPolicyAddProcessDirectoryRuleEx(LPCWSTR directoryPath, LPCWSTR extension);
-DWORD DpPolicyAddExcludedDirectoryRuleEx(LPCWSTR directoryPath, LPCWSTR extension);
-DWORD DpPolicyQueryProcessRules(...);
-DWORD DpPolicyGetLastErrorMessage(LPWSTR buffer, DWORD bufferChars);
+
+DWORD DpPolicyAddProcessNameRuleEx(
+    LPCWSTR processName,
+    LPCWSTR extension);
+
+DWORD DpPolicyAddProcessDirectoryRuleEx(
+    LPCWSTR directoryPath,
+    LPCWSTR extension);
+
+DWORD DpPolicyAddExcludedDirectoryRuleEx(
+    LPCWSTR directoryPath,
+    LPCWSTR extension);
+
+DWORD DpPolicyQueryProcessRules(
+    DP_POLICY_API_RULE *rules,
+    DWORD ruleCapacity,
+    DWORD *ruleCount,
+    LPWSTR stringBuffer,
+    DWORD stringBufferChars,
+    DWORD *stringBufferCharsRequired);
+
+DWORD DpPolicyGetLastErrorMessage(
+    LPWSTR buffer,
+    DWORD bufferChars);
 ```
 
-The API translates friendly user-mode inputs into the message format expected
-by the driver port.
+The API is responsible for:
 
-## Administration Application
+- Validating arguments.
+- Normalizing extensions.
+- Converting DOS directory paths to NT paths.
+- Connecting to the driver port.
+- Returning stable application-level error codes.
+- Preserving a human-readable last error message.
 
-`DataProtectorAdmin` is a WPF desktop application using the WPF UI package for
-a more polished management surface.
+## 14. Administration Application
 
-The admin app provides:
+`DataProtectorAdmin` is a WPF application using the `wpf-ui` package. Its role
+is policy administration, not file data transformation.
 
-- Driver connection status
-- Process-name trust rule management
-- Process-directory trust rule management
-- Excluded-directory rule management
-- Extension-bound rule editing
-- Local settings persistence
-- Tray and application icon integration
-- Diagnostic logging support
+Expected capabilities:
 
-The UI is intentionally separated from policy transport. UI state lives in
-view models and services; native driver communication remains in the policy API
-layer.
+- Driver connection status.
+- Process-name trust rules.
+- Process-directory trust rules.
+- Excluded-directory rules.
+- Extension-bound rule editing.
+- Query and refresh rules from the driver.
+- Tray icon and application icon integration.
+- Local UI settings.
+- Clean error reporting when the driver is not loaded.
 
-## Build Requirements
+The admin app follows this separation:
 
-Recommended environment:
+```text
+View/XAML -> ViewModel -> Policy service -> Native P/Invoke -> Policy API DLL -> Driver
+```
 
-- Windows 10 or Windows 11 x64
-- Visual Studio 2019
-- Windows Driver Kit compatible with Visual Studio 2019
-- .NET Framework 4.7.2 or newer for the WPF admin app
-- Administrator privileges for driver installation and service control
-- Test-signing or a valid driver signing workflow for local kernel testing
+The UI must never invent a rule state that the driver has not confirmed. The
+driver is the source of truth.
 
-The included build scripts currently expect MSBuild at:
+## 15. Build and Packaging
+
+### 15.1 Requirements
+
+Recommended build environment:
+
+- Windows 10 or Windows 11 x64.
+- Visual Studio 2019.
+- Windows Driver Kit compatible with Visual Studio 2019.
+- .NET Framework 4.7.2 or newer for the WPF admin app.
+- Administrator privileges for driver installation and service control.
+- Test-signing or a valid driver signing pipeline.
+
+The scripts currently expect MSBuild at:
 
 ```text
 D:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe
 ```
 
-If Visual Studio is installed elsewhere, update `Build-All.ps1` and
-`Publish-Admin.ps1`, or invoke MSBuild directly from your environment.
+Adjust the scripts if Visual Studio is installed elsewhere.
 
-## Build Instructions
-
-Build the complete solution:
+### 15.2 Build Solution
 
 ```powershell
 .\Build-All.ps1 -Configuration Release -Platform x64
 ```
 
-Equivalent direct MSBuild command:
+Equivalent direct command:
 
 ```powershell
 & 'D:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe' `
@@ -477,7 +1124,7 @@ Equivalent direct MSBuild command:
   /m
 ```
 
-Expected key outputs:
+Expected outputs:
 
 ```text
 x64\Release\DataProtector.sys
@@ -486,50 +1133,19 @@ DataProtectorPolicyApi\x64\Release\DataProtectorPolicyApi.dll
 DataProtectorAdmin\bin\x64\Release\DataProtectorAdmin.exe
 ```
 
-Publish the admin application package:
+### 15.3 Publish Admin Package
 
 ```powershell
 .\Publish-Admin.ps1
 ```
 
-Default publish output:
+Default output:
 
 ```text
 publish\DataProtectorAdmin-x64-Release\
 ```
 
-## Installation and Runtime Workflow
-
-### 1. Enable a Kernel Test Environment
-
-Use a VM or dedicated test machine. Kernel minifilter development can crash the
-system while debugging.
-
-For local test signing, configure Windows appropriately for your environment.
-Do not deploy test-signed drivers to production machines.
-
-### 2. Install the Driver Package
-
-Use the generated INF package from the Release output. Installation method may
-vary depending on your signing and test environment.
-
-Typical service control commands after installation:
-
-```cmd
-sc query DataProtector
-net start DataProtector
-net stop DataProtector
-```
-
-### 3. Launch the Admin Application
-
-Run:
-
-```text
-DataProtectorAdmin.exe
-```
-
-The admin package must contain:
+The package must include:
 
 ```text
 DataProtectorAdmin.exe
@@ -538,147 +1154,194 @@ DataProtectorPolicyApi.dll
 Wpf.Ui.dll
 ```
 
-### 4. Configure Rules
+## 16. Installation and Runtime
 
-Example policy intent:
+### 16.1 Test Environment
 
-```text
-Trust notepad.exe for .dpf
-Trust C:\Program Files\WPS Office\ for .pptx
-Exclude C:\Users\Public\Exports\ for .pptx
+Kernel minifilter development should be tested in a VM or dedicated test
+machine. A driver bug can crash the system.
+
+### 16.2 Driver Service Control
+
+Typical commands after installing the INF package:
+
+```cmd
+sc query DataProtector
+net start DataProtector
+net stop DataProtector
+fltmc filters
 ```
 
-### 5. Validate Transparent Encryption
+Manual unload is currently enabled for development convenience. Production
+builds need a safe-stop design that flushes, synchronizes, and prevents
+plaintext cache exposure before unload.
 
-Use one trusted process and one untrusted process to read the same protected
-file. The trusted process should see plaintext. The untrusted process should
-see ciphertext. Both should see the same logical file size.
+### 16.3 Basic Runtime Test
 
-## Manual Test Matrix
+Example:
 
-| Scenario | Expected result |
-| --- | --- |
-| Trusted process creates `.dpf` | File is encrypted on cleanup and receives footer |
-| Trusted process reopens `.dpf` | Plaintext is returned |
-| Untrusted process reads `.dpf` | Ciphertext payload is returned |
-| Read crosses logical EOF | Read is clamped before footer |
-| `dir` lists protected file | Logical size is shown, not physical size |
-| Explorer lists protected file | Logical size is shown |
-| Driver is stopped and file is read | Raw ciphertext file is visible |
-| Protected file is copied elsewhere | Footer travels with the file |
-| Trusted process opens moved file | File can still be recognized and decrypted |
-| File is created with temp extension then renamed to `.pptx` | Encryption is applied after rename/cleanup |
-| File is under excluded directory | File remains unencrypted |
-| Rule is added in admin app | Driver policy receives the rule |
-| Rule is removed in admin app | Driver policy removes the rule |
-| Admin app starts without driver | UI should report connection failure cleanly |
+```text
+1. Start DataProtector.
+2. Add a trusted process rule for notepad.exe + .dpf.
+3. Create test.dpf from Notepad.
+4. Close Notepad so cleanup finalizes encryption.
+5. Reopen test.dpf with Notepad.
+   Expected: plaintext.
+6. Read test.dpf from an untrusted tool.
+   Expected: ciphertext.
+7. Stop DataProtector and read the physical file.
+   Expected: ciphertext payload plus private footer bytes.
+```
 
-## Diagnostics and Troubleshooting
+## 17. Validation Matrix
 
-### Driver Does Not Start
+| Area | Scenario | Expected result |
+| --- | --- | --- |
+| Creation | Trusted process creates `.dpf` | File is encrypted on cleanup |
+| Creation | Unprotected extension is created | No footer is written |
+| Existing read | Trusted process reads protected file | Plaintext logical bytes |
+| Existing read | Untrusted process reads protected file | Ciphertext logical bytes |
+| EOF | Read crosses logical EOF | Read is shortened before footer |
+| EOF | Read starts at logical EOF | EOF or zero payload |
+| File info | `dir` lists protected file | Logical size, not physical size |
+| File info | Explorer properties | Logical size where filtered |
+| Portability | Protected file is moved | Footer travels with file |
+| Portability | Trusted process opens moved file | File is recognized and decrypted |
+| Driver stopped | Raw read of protected file | Ciphertext and footer are visible |
+| Rename | Temporary file renamed to `.pptx` | Protection applied after cleanup |
+| Exclusion | `.pptx` under excluded directory | File remains ordinary plaintext |
+| Policy | Add process-name rule | Driver query returns the rule |
+| Policy | Remove process-directory rule | Driver query no longer returns it |
+| Mapped I/O | Trusted Office-style editor opens file | Shadow workflow protects original cache |
+| Admin | Admin starts without driver | UI reports connection failure cleanly |
 
-Check:
+## 18. Diagnostics
 
-- Driver signing state
-- INF installation result
-- Minifilter altitude conflicts
-- Whether Filter Manager is available
-- Event Viewer system logs
-- `sc query DataProtector`
-- `fltmc filters`
-
-### Admin Cannot Connect
-
-Check:
-
-- `DataProtector.sys` is loaded
-- `\DataProtectorPolicyPort` exists
-- `DataProtectorPolicyApi.dll` is beside the admin executable
-- Admin app bitness is x64
-- The process has enough privileges
-
-### Trusted App Still Reads Ciphertext
+### 18.1 Driver Does Not Start
 
 Check:
 
-- The process-name or process-directory rule matches the actual executable
-- The rule extension matches the target file extension
-- The target path is not under an excluded directory
-- The file has a valid DataProtector footer
-- The trusted application is not opening a different temp path
+- Driver signing state.
+- INF installation result.
+- Minifilter altitude conflicts.
+- Event Viewer system logs.
+- `sc query DataProtector`.
+- `fltmc filters`.
 
-### File Size Looks 512 Bytes Too Large
+### 18.2 Admin Cannot Connect
 
 Check:
 
-- The new driver build is loaded
-- Query information callbacks are registered
-- Directory enumeration is going through the filter
-- The file footer validates successfully
+- `DataProtector.sys` is loaded.
+- `\DataProtectorPolicyPort` is available.
+- `DataProtectorPolicyApi.dll` is beside the admin executable.
+- The admin process is x64.
+- The process has sufficient privileges.
 
-### Office/WPS Save Compatibility
+### 18.3 Trusted Application Still Reads Ciphertext
 
-Office-style applications often save through temporary files and final renames.
-Use process monitor logs and the targeted PPTX trace switch when investigating
-compatibility issues.
+Check:
 
-The project contains a compile-time PPTX tracing switch:
+- The process-name rule matches the real executable name.
+- The process-directory rule matches the actual NT image path.
+- The extension in the rule matches the file extension.
+- The target path is not excluded.
+- The file has a valid footer.
+- The application is not opening a temporary file path outside the rule.
+
+### 18.4 File Size Is 512 Bytes Too Large
+
+Check:
+
+- The newest driver build is loaded.
+- Query information callbacks are registered.
+- Directory enumeration is passing through the filter.
+- The footer validates successfully.
+
+### 18.5 PPTX and Office-Style Save Investigation
+
+The driver contains a targeted compile-time tracing switch:
 
 ```c
 #define DP_ENABLE_PPTX_OPERATION_TRACE 1
 ```
 
-Disable this switch for normal builds after investigation.
+This switch emits `DbgPrintEx` lines for `.pptx` paths and DataProtector
+internal streams. It should be disabled for normal builds after compatibility
+investigation.
 
-## Current Limitations
+Useful tools:
 
-- The current crypto provider is a test XOR transform.
-- There is no production key hierarchy or secure key wrapping.
-- Policy storage and policy authorization are not hardened.
-- The shadow stream workflow still uses an internal alternate stream for mapped
-  I/O compatibility.
-- The project does not yet include automated kernel integration tests.
-- Manual unload is enabled for development convenience and must be revisited for
-  production cache safety.
-- The default trusted process list is intended for local bring-up only.
+- WinDbg kernel debugging.
+- DebugView or kernel debug output capture.
+- Process Monitor with file-system events.
+- Driver Verifier profiles for minifilter stress testing.
 
-## Production Hardening Roadmap
+## 19. Current Limitations
 
-Recommended next engineering milestones:
+The project is not yet a finished commercial security product. Current
+limitations include:
+
+- The crypto provider is a development XOR transform.
+- The file key field exists, but there is no production key hierarchy.
+- There is no authenticated encryption or tamper-proof footer validation.
+- Policy persistence and policy authorization are not hardened.
+- Test trusted processes may be compiled in for local bring-up.
+- Manual unload is enabled for development.
+- The mapped-I/O shadow workflow currently uses an internal alternate stream.
+- Automated kernel integration tests are not yet included.
+- Crash-consistency recovery for interrupted cleanup encryption needs a
+  production journal or transactional design.
+- Installer, upgrade, rollback, and fleet management workflows are not complete.
+
+## 20. Production Hardening Roadmap
+
+Recommended milestones:
 
 1. Replace the XOR provider with authenticated encryption.
-2. Add per-file data keys protected by a master key or enterprise key service.
-3. Add key rotation and footer version migration.
-4. Replace development trust defaults with a signed policy service.
-5. Persist policy in a protected store with integrity validation.
-6. Move shadow storage away from alternate streams if zero-ADS operation is a
-   hard product requirement.
-7. Add stress tests for rename, overwrite, memory mapping, truncation, and
-   concurrent open scenarios.
-8. Add crash dump triage documentation and driver verifier profiles.
-9. Add installer, upgrade, rollback, and service recovery workflows.
-10. Add CI build validation for driver, native API, and WPF admin packaging.
+2. Introduce per-file data keys wrapped by a machine, user, or enterprise key.
+3. Add footer authentication, anti-rollback metadata, and version migration.
+4. Persist policy in a protected store with integrity validation.
+5. Move trust decisions to a signed policy service.
+6. Remove development default trusted process rules.
+7. Design a safe-stop protocol for unload and service upgrades.
+8. Add crash-consistent encryption finalization.
+9. Add stress tests for concurrent open, rename, overwrite, truncation, and
+   memory mapping.
+10. Add compatibility suites for WPS, Office, Notepad, Explorer, copy tools,
+    backup tools, and archive tools.
+11. Replace or redesign the shadow storage mechanism if strict zero-ADS
+    operation is required.
+12. Add CI validation for the driver, policy DLL, WPF package, and installer.
+13. Add signed release packaging and certificate management.
+14. Add telemetry-free local diagnostics suitable for enterprise support.
 
-## Design Principles
+## 21. Engineering Principles
 
-DataProtector is developed with the following design principles:
+DataProtector follows these engineering principles:
 
-- Keep modules small and replaceable.
-- Prefer explicit contexts over global state in I/O paths.
-- Keep policy decisions separate from cryptographic transformation.
-- Hide private metadata from normal application-visible operations.
-- Treat Office-style save behavior as a first-class compatibility requirement.
-- Build features in a way that supports commercial hardening later.
-- Avoid claiming production security until the crypto and policy trust chain are
-  actually production-grade.
+- Keep the data path in the driver and policy configuration in user mode.
+- Keep process trust decisions per handle, not globally per file.
+- Keep persistent metadata portable inside the main stream.
+- Keep private metadata invisible to normal logical file operations.
+- Treat rename, temporary files, and mapped I/O as first-class workflows.
+- Prefer replaceable modules over hard-coded product assumptions.
+- Document development switches clearly.
+- Avoid production-security claims until crypto, keys, policy, installer, and
+  self-protection are hardened.
 
-## Status
+## 22. Status
 
-The repository currently builds successfully for `Release|x64` with Visual
-Studio 2019 and the Windows Driver Kit in the maintained development
-environment.
+The maintained development environment builds `Release|x64` with Visual Studio
+2019 and the Windows Driver Kit.
 
-The latest implemented file format stores DataProtector metadata in a fixed
-512-byte footer at the end of the main file stream. This makes encrypted files
-portable across directories and machines while keeping normal read and query
-operations focused on the logical file payload.
+The latest implemented storage model uses a fixed 512-byte footer in the main
+file stream. This makes protected files portable while preserving normal
+application offsets. Trusted processes receive decrypted logical content.
+Untrusted processes receive ciphertext logical content. The driver hides the
+footer through read clamping, file information virtualization, and directory
+enumeration adjustment.
+
+The codebase should be treated as a serious transparent-encryption prototype
+with a commercial architecture direction, not as a completed production
+security product.
