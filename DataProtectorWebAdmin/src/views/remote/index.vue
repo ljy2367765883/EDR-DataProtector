@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from 'vue';
 import { Icon } from '@iconify/vue';
-import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui';
+import { NButton, NTag, type DataTableColumns } from 'naive-ui';
 import { fetchCreateRemoteTask, fetchDevices, fetchRemoteTasks } from '@/service/api';
 
 defineOptions({
   name: 'RemoteOps'
 });
+
+type WorkbenchTab = 'files' | 'processes' | 'apps' | 'startup' | 'shell' | 'desktop' | 'accounts';
 
 type InstalledApp = {
   displayName: string;
@@ -25,6 +27,17 @@ type StartupItem = {
   enabled: boolean;
 };
 
+type DriveItem = {
+  name: string;
+  path: string;
+  driveType: string;
+  volumeLabel: string;
+  fileSystem: string;
+  isReady: boolean;
+  totalSize: number;
+  freeSpace: number;
+};
+
 type FileItem = {
   name: string;
   path: string;
@@ -33,129 +46,183 @@ type FileItem = {
   lastWriteUtc: string;
 };
 
-const loading = ref(false);
-const submitting = ref(false);
-const devices = ref<Api.DataProtector.Device[]>([]);
-const tasks = ref<Api.DataProtector.RemoteTask[]>([]);
-const selectedTaskId = ref('');
-const formRef = ref<FormInst | null>(null);
-
-const form = reactive({
-  deviceId: '',
-  kind: 'inventory.installedApps',
-  path: 'C:\\',
-  command: 'whoami',
-  username: '',
-  newPassword: '',
-  timeoutSeconds: 30
-});
-
-const taskOptions = [
-  { label: 'Installed apps', value: 'inventory.installedApps' },
-  { label: 'Startup items', value: 'inventory.startupItems' },
-  { label: 'File list', value: 'file.list' },
-  { label: 'Screenshot', value: 'desktop.screenshot' },
-  { label: 'Run command', value: 'cmd.run' },
-  { label: 'Change password', value: 'user.changePassword' },
-  { label: 'Lock screen', value: 'session.lock' }
-];
-
-const formRules: FormRules = {
-  deviceId: { required: true, message: 'Device is required', trigger: 'change' },
-  kind: { required: true, message: 'Task type is required', trigger: 'change' }
+type ProcessItem = {
+  pid: number;
+  name: string;
+  path: string;
+  user: string;
+  memoryBytes: number;
+  startTimeUtc: string;
 };
 
-const deviceOptions = computed(() =>
-  devices.value.map(device => ({
-    label: `${device.machine || device.deviceId} ${device.online ? '(online)' : '(offline)'}`,
-    value: device.deviceId
-  }))
-);
+const devices = ref<Api.DataProtector.Device[]>([]);
+const selectedDeviceId = ref('');
+const activeTab = ref<WorkbenchTab>('files');
+const loadingDevices = ref(false);
+const panelLoading = ref(false);
+const activity = ref<string[]>([]);
 
-const selectedDevice = computed(() => devices.value.find(device => device.deviceId === form.deviceId));
-const selectedTask = computed(
-  () => tasks.value.find(task => task.taskId === selectedTaskId.value) || tasks.value[0] || null
-);
+const drives = ref<DriveItem[]>([]);
+const currentPath = ref('');
+const pathInput = ref('');
+const fileItems = ref<FileItem[]>([]);
+const renameVisible = ref(false);
+const renameName = ref('');
+const renameTarget = ref<FileItem | null>(null);
+const fileContext = reactive({
+  show: false,
+  x: 0,
+  y: 0,
+  row: null as FileItem | null
+});
 
+const processes = ref<ProcessItem[]>([]);
+const processSearch = ref('');
+const apps = ref<InstalledApp[]>([]);
+const startupItems = ref<StartupItem[]>([]);
+const commandText = ref('whoami');
+const commandOutput = ref('');
+const screenshotSrc = ref('');
+const accountForm = reactive({
+  username: '',
+  newPassword: ''
+});
+
+const selectedDevice = computed(() => devices.value.find(device => device.deviceId === selectedDeviceId.value) || null);
 const onlineDevices = computed(() => devices.value.filter(device => device.online).length);
-const successfulTasks = computed(() => tasks.value.filter(task => task.status === 'completed' && task.succeeded).length);
-const failedTasks = computed(() =>
-  tasks.value.filter(task => task.status === 'failed' || (task.status === 'completed' && !task.succeeded)).length
-);
-const pendingTasks = computed(() =>
-  tasks.value.filter(task => task.status !== 'completed' && task.status !== 'failed').length
-);
+const filteredProcesses = computed(() => {
+  const keyword = processSearch.value.trim().toLowerCase();
+  if (!keyword) return processes.value;
+  return processes.value.filter(item =>
+    `${item.pid} ${item.name} ${item.path} ${item.user}`.toLowerCase().includes(keyword)
+  );
+});
 
-const installedApps = computed(() => parseJson<InstalledApp[]>(selectedTask.value?.output, []));
-const startupItems = computed(() => parseJson<StartupItem[]>(selectedTask.value?.output, []));
-const fileItems = computed(() => parseJson<FileItem[]>(selectedTask.value?.output, []));
-const screenshotSrc = computed(() =>
-  selectedTask.value?.kind === 'desktop.screenshot' && selectedTask.value.output
-    ? `data:image/png;base64,${selectedTask.value.output}`
-    : ''
-);
-
-const taskColumns: DataTableColumns<Api.DataProtector.RemoteTask> = [
+const fileMenuOptions = computed(() => [
   {
-    title: 'Status',
-    key: 'status',
-    width: 118,
-    render(row) {
-      return h(NTag, { type: statusType(row), bordered: false }, { default: () => taskStatusLabel(row) });
-    }
+    label: 'Open',
+    key: 'open',
+    disabled: !fileContext.row?.isDirectory
   },
   {
-    title: 'Task',
-    key: 'kind',
-    width: 220,
+    label: 'Rename',
+    key: 'rename'
+  },
+  {
+    label: 'Delete',
+    key: 'delete'
+  }
+]);
+
+const fileColumns: DataTableColumns<FileItem> = [
+  {
+    title: 'Name',
+    key: 'name',
+    minWidth: 260,
+    ellipsis: { tooltip: true },
     render(row) {
-      return h('div', { class: 'task-kind-cell' }, [
-        h(Icon, { icon: taskIcon(row.kind), class: 'task-kind-icon' }),
-        h('span', taskLabel(row.kind))
+      return h('div', { class: 'manager-name-cell' }, [
+        h(Icon, {
+          icon: row.isDirectory ? 'mdi:folder' : 'mdi:file-document-outline',
+          class: row.isDirectory ? 'manager-icon manager-icon-folder' : 'manager-icon'
+        }),
+        h('span', row.name)
       ]);
     }
   },
   {
-    title: 'Device',
-    key: 'deviceId',
-    width: 180,
-    ellipsis: { tooltip: true },
+    title: 'Type',
+    key: 'isDirectory',
+    width: 110,
     render(row) {
-      return deviceName(row.deviceId);
+      return row.isDirectory ? 'Folder' : 'File';
     }
   },
   {
-    title: 'Created',
-    key: 'createdUtc',
-    width: 180,
+    title: 'Size',
+    key: 'size',
+    width: 130,
     render(row) {
-      return formatTime(row.createdUtc);
+      return row.isDirectory ? '-' : formatBytes(row.size);
     }
   },
   {
-    title: 'Result',
-    key: 'result',
-    ellipsis: { tooltip: true },
+    title: 'Modified',
+    key: 'lastWriteUtc',
+    width: 190,
     render(row) {
-      return resultSummary(row);
+      return formatTime(row.lastWriteUtc);
     }
   },
   {
-    title: 'Open',
-    key: 'open',
-    width: 92,
+    title: 'Actions',
+    key: 'actions',
+    width: 220,
+    render(row) {
+      return h('div', { class: 'row-actions' }, [
+        row.isDirectory
+          ? h(
+              NButton,
+              { size: 'small', text: true, type: 'primary', onClick: () => openPath(row.path) },
+              { default: () => 'Open' }
+            )
+          : null,
+        h(
+          NButton,
+          { size: 'small', text: true, onClick: () => showRename(row) },
+          { default: () => 'Rename' }
+        ),
+        h(
+          NButton,
+          { size: 'small', text: true, type: 'error', onClick: () => confirmDelete(row) },
+          { default: () => 'Delete' }
+        )
+      ]);
+    }
+  }
+];
+
+const processColumns: DataTableColumns<ProcessItem> = [
+  { title: 'PID', key: 'pid', width: 100, sorter: 'default' },
+  {
+    title: 'Process',
+    key: 'name',
+    minWidth: 220,
+    sorter: 'default',
+    render(row) {
+      return h('div', { class: 'manager-name-cell' }, [
+        h(Icon, { icon: 'mdi:application-cog-outline', class: 'manager-icon manager-icon-process' }),
+        h('span', row.name)
+      ]);
+    }
+  },
+  {
+    title: 'Memory',
+    key: 'memoryBytes',
+    width: 130,
+    sorter: (a, b) => a.memoryBytes - b.memoryBytes,
+    render(row) {
+      return formatBytes(row.memoryBytes);
+    }
+  },
+  {
+    title: 'Started',
+    key: 'startTimeUtc',
+    width: 190,
+    render(row) {
+      return formatTime(row.startTimeUtc);
+    }
+  },
+  { title: 'Path', key: 'path', minWidth: 360, ellipsis: { tooltip: true } },
+  {
+    title: 'Action',
+    key: 'action',
+    width: 120,
     render(row) {
       return h(
         NButton,
-        {
-          size: 'small',
-          secondary: selectedTaskId.value !== row.taskId,
-          type: selectedTaskId.value === row.taskId ? 'primary' : 'default',
-          onClick: () => {
-            selectedTaskId.value = row.taskId;
-          }
-        },
-        { default: () => 'View' }
+        { size: 'small', type: 'error', secondary: true, onClick: () => confirmKillProcess(row) },
+        { default: () => 'Terminate' }
       );
     }
   }
@@ -164,7 +231,7 @@ const taskColumns: DataTableColumns<Api.DataProtector.RemoteTask> = [
 const startupColumns: DataTableColumns<StartupItem> = [
   { title: 'Location', key: 'location', width: 180 },
   { title: 'Name', key: 'name', width: 220, ellipsis: { tooltip: true } },
-  { title: 'Command', key: 'command', minWidth: 420, ellipsis: { tooltip: true } },
+  { title: 'Command', key: 'command', minWidth: 520, ellipsis: { tooltip: true } },
   {
     title: 'State',
     key: 'enabled',
@@ -179,55 +246,323 @@ const startupColumns: DataTableColumns<StartupItem> = [
   }
 ];
 
-const fileColumns: DataTableColumns<FileItem> = [
-  {
-    title: 'Name',
-    key: 'name',
-    minWidth: 220,
-    ellipsis: { tooltip: true },
-    render(row) {
-      return h('div', { class: 'file-name-cell' }, [
-        h(Icon, {
-          class: row.isDirectory ? 'file-icon file-icon-folder' : 'file-icon',
-          icon: row.isDirectory ? 'mdi:folder' : 'mdi:file-document-outline'
-        }),
-        h('span', row.name)
-      ]);
+async function refreshDevices() {
+  loadingDevices.value = true;
+  try {
+    const { error, data } = await fetchDevices();
+    if (!error) {
+      devices.value = data;
+      if (!selectedDeviceId.value && data.length) {
+        selectedDeviceId.value = data[0].deviceId;
+      }
     }
-  },
-  {
-    title: 'Size',
-    key: 'size',
-    width: 120,
-    render(row) {
-      return row.isDirectory ? '-' : formatBytes(row.size);
-    }
-  },
-  {
-    title: 'Modified',
-    key: 'lastWriteUtc',
-    width: 190,
-    render(row) {
-      return formatTime(row.lastWriteUtc);
-    }
-  },
-  { title: 'Path', key: 'path', minWidth: 360, ellipsis: { tooltip: true } }
-];
+  } finally {
+    loadingDevices.value = false;
+  }
+}
 
-function buildArguments() {
-  if (form.kind === 'file.list') {
-    return { path: form.path, limit: 200 };
+async function selectDevice(deviceId: string) {
+  if (selectedDeviceId.value === deviceId) return;
+  selectedDeviceId.value = deviceId;
+  resetPanelState();
+  await refreshActivePanel();
+}
+
+function resetPanelState() {
+  drives.value = [];
+  fileItems.value = [];
+  currentPath.value = '';
+  pathInput.value = '';
+  processes.value = [];
+  apps.value = [];
+  startupItems.value = [];
+  commandOutput.value = '';
+  screenshotSrc.value = '';
+}
+
+async function refreshActivePanel() {
+  if (!selectedDevice.value) return;
+
+  if (activeTab.value === 'files') {
+    if (currentPath.value) {
+      await openPath(currentPath.value);
+    } else {
+      await loadDrives();
+    }
+    return;
   }
 
-  if (form.kind === 'cmd.run') {
-    return { command: form.command, timeoutSeconds: form.timeoutSeconds };
+  if (activeTab.value === 'processes') {
+    await loadProcesses();
+    return;
   }
 
-  if (form.kind === 'user.changePassword') {
-    return { username: form.username, newPassword: form.newPassword };
+  if (activeTab.value === 'apps') {
+    await loadApps();
+    return;
   }
 
-  return {};
+  if (activeTab.value === 'startup') {
+    await loadStartupItems();
+    return;
+  }
+
+  if (activeTab.value === 'desktop') {
+    await captureScreenshot();
+  }
+}
+
+async function handleTabChange(value: string) {
+  activeTab.value = value as WorkbenchTab;
+  await refreshActivePanel();
+}
+
+async function loadDrives() {
+  panelLoading.value = true;
+  try {
+    const task = await runRemoteTask('file.drives', {});
+    drives.value = parseJson<DriveItem[]>(task.output, []);
+    currentPath.value = '';
+    pathInput.value = '';
+    fileItems.value = [];
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function openPath(path: string) {
+  if (!path) return;
+  panelLoading.value = true;
+  try {
+    const task = await runRemoteTask('file.list', { path, limit: 500 });
+    fileItems.value = parseJson<FileItem[]>(task.output, []);
+    currentPath.value = path;
+    pathInput.value = path;
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function goToPath() {
+  await openPath(pathInput.value.trim());
+}
+
+async function goUp() {
+  const parent = parentPath(currentPath.value);
+  if (parent) {
+    await openPath(parent);
+  } else {
+    await loadDrives();
+  }
+}
+
+function fileRowProps(row: FileItem) {
+  return {
+    onDblclick: () => {
+      if (row.isDirectory) {
+        openPath(row.path);
+      }
+    },
+    onContextmenu: (event: MouseEvent) => {
+      event.preventDefault();
+      fileContext.row = row;
+      fileContext.x = event.clientX;
+      fileContext.y = event.clientY;
+      fileContext.show = true;
+    }
+  };
+}
+
+function handleFileMenuSelect(key: string) {
+  const row = fileContext.row;
+  fileContext.show = false;
+  if (!row) return;
+
+  if (key === 'open' && row.isDirectory) {
+    openPath(row.path);
+  } else if (key === 'rename') {
+    showRename(row);
+  } else if (key === 'delete') {
+    confirmDelete(row);
+  }
+}
+
+function showRename(row: FileItem) {
+  renameTarget.value = row;
+  renameName.value = row.name;
+  renameVisible.value = true;
+}
+
+async function submitRename() {
+  if (!renameTarget.value) return;
+
+  panelLoading.value = true;
+  try {
+    await runRemoteTask('file.rename', {
+      path: renameTarget.value.path,
+      newName: renameName.value
+    });
+    renameVisible.value = false;
+    pushActivity(`Renamed ${renameTarget.value.name}`);
+    await openPath(currentPath.value);
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+function confirmDelete(row: FileItem) {
+  window.$dialog?.warning({
+    title: 'Delete remote item',
+    content: `Delete ${row.path}?`,
+    positiveText: 'Delete',
+    negativeText: 'Cancel',
+    onPositiveClick: async () => {
+      panelLoading.value = true;
+      try {
+        await runRemoteTask('file.delete', { path: row.path });
+        pushActivity(`Deleted ${row.name}`);
+        await openPath(currentPath.value);
+      } finally {
+        panelLoading.value = false;
+      }
+    }
+  });
+}
+
+async function loadProcesses() {
+  panelLoading.value = true;
+  try {
+    const task = await runRemoteTask('process.list', {});
+    processes.value = parseJson<ProcessItem[]>(task.output, []);
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+function confirmKillProcess(row: ProcessItem) {
+  window.$dialog?.warning({
+    title: 'Terminate process',
+    content: `Terminate ${row.name} (${row.pid}) on ${selectedDevice.value?.machine || selectedDeviceId.value}?`,
+    positiveText: 'Terminate',
+    negativeText: 'Cancel',
+    onPositiveClick: async () => {
+      panelLoading.value = true;
+      try {
+        await runRemoteTask('process.kill', { pid: row.pid });
+        pushActivity(`Terminated ${row.name} (${row.pid})`);
+        await loadProcesses();
+      } finally {
+        panelLoading.value = false;
+      }
+    }
+  });
+}
+
+async function loadApps() {
+  panelLoading.value = true;
+  try {
+    const task = await runRemoteTask('inventory.installedApps', {});
+    apps.value = parseJson<InstalledApp[]>(task.output, []);
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function loadStartupItems() {
+  panelLoading.value = true;
+  try {
+    const task = await runRemoteTask('inventory.startupItems', {});
+    startupItems.value = parseJson<StartupItem[]>(task.output, []);
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function runCommand() {
+  if (!commandText.value.trim()) return;
+
+  panelLoading.value = true;
+  commandOutput.value = '';
+  try {
+    const task = await runRemoteTask('cmd.run', { command: commandText.value, timeoutSeconds: 60 });
+    commandOutput.value = task.output || task.error || '';
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function captureScreenshot() {
+  panelLoading.value = true;
+  try {
+    const task = await runRemoteTask('desktop.screenshot', {});
+    screenshotSrc.value = task.output ? `data:image/png;base64,${task.output}` : '';
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function changePassword() {
+  panelLoading.value = true;
+  try {
+    await runRemoteTask('user.changePassword', {
+      username: accountForm.username,
+      newPassword: accountForm.newPassword
+    });
+    pushActivity(`Password changed for ${accountForm.username}`);
+    window.$message?.success('Password change task completed.');
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function lockScreen() {
+  panelLoading.value = true;
+  try {
+    await runRemoteTask('session.lock', {});
+    pushActivity('Remote workstation lock requested');
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+async function runRemoteTask(kind: string, args: Record<string, unknown>) {
+  if (!selectedDevice.value) {
+    throw new Error('Select an endpoint first.');
+  }
+
+  const createResult = await fetchCreateRemoteTask({
+    deviceId: selectedDevice.value.deviceId,
+    kind,
+    argumentsJson: JSON.stringify(args || {}),
+    actor: 'web-admin'
+  });
+
+  if (createResult.error) {
+    throw new Error('Unable to queue remote operation.');
+  }
+
+  const taskId = createResult.data.taskId;
+  pushActivity(`Queued ${operationLabel(kind)}`);
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(1000);
+    const tasksResult = await fetchRemoteTasks({ deviceId: selectedDevice.value.deviceId, limit: 100 });
+    if (tasksResult.error) continue;
+
+    const task = tasksResult.data.find(item => item.taskId === taskId);
+    if (!task) continue;
+
+    if (task.status === 'completed' || task.status === 'failed') {
+      if (task.status === 'completed' && task.succeeded) {
+        pushActivity(`Completed ${operationLabel(kind)}`);
+        return task;
+      }
+
+      throw new Error(task.error || task.output || `${operationLabel(kind)} failed.`);
+    }
+  }
+
+  throw new Error(`${operationLabel(kind)} timed out waiting for the endpoint.`);
 }
 
 function parseJson<T>(value: string | undefined, fallback: T): T {
@@ -239,9 +574,34 @@ function parseJson<T>(value: string | undefined, fallback: T): T {
   }
 }
 
-function deviceName(deviceId: string) {
-  const device = devices.value.find(item => item.deviceId === deviceId);
-  return device?.machine || deviceId;
+function pushActivity(message: string) {
+  activity.value = [`${new Date().toLocaleTimeString()} ${message}`, ...activity.value].slice(0, 8);
+}
+
+function operationLabel(kind: string) {
+  const labels: Record<string, string> = {
+    'file.drives': 'drive inventory',
+    'file.list': 'directory listing',
+    'file.delete': 'file deletion',
+    'file.rename': 'file rename',
+    'process.list': 'process inventory',
+    'process.kill': 'process termination',
+    'inventory.installedApps': 'application inventory',
+    'inventory.startupItems': 'startup inventory',
+    'cmd.run': 'remote command',
+    'desktop.screenshot': 'desktop screenshot',
+    'session.lock': 'screen lock',
+    'user.changePassword': 'password change'
+  };
+  return labels[kind] || kind;
+}
+
+function parentPath(path: string) {
+  const normalized = path.replace(/[\\/]+$/, '');
+  if (!normalized || /^[A-Za-z]:$/.test(normalized)) return '';
+  const lastSlash = Math.max(normalized.lastIndexOf('\\'), normalized.lastIndexOf('/'));
+  if (lastSlash <= 2 && /^[A-Za-z]:/.test(normalized)) return `${normalized.slice(0, 2)}\\`;
+  return lastSlash > 0 ? normalized.slice(0, lastSlash) : '';
 }
 
 function formatTime(value?: string) {
@@ -260,326 +620,319 @@ function formatBytes(value: number) {
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
-function resultSummary(task: Api.DataProtector.RemoteTask) {
-  if (task.status !== 'completed' && task.status !== 'failed') {
-    return task.status === 'sent' ? 'Sent to endpoint' : 'Queued for endpoint';
-  }
-
-  if (task.kind === 'inventory.installedApps') return `${parseJson<InstalledApp[]>(task.output, []).length} apps`;
-  if (task.kind === 'inventory.startupItems') return `${parseJson<StartupItem[]>(task.output, []).length} startup items`;
-  if (task.kind === 'file.list') return `${parseJson<FileItem[]>(task.output, []).length} entries`;
-  if (task.kind === 'desktop.screenshot') return task.output ? 'Screenshot captured' : 'No image';
-  return shortText(task.output || task.error || '-');
+function sleep(ms: number) {
+  return new Promise(resolve => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
-function statusType(task: Api.DataProtector.RemoteTask): 'success' | 'warning' | 'error' {
-  if (task.status === 'completed' && task.succeeded) return 'success';
-  if (task.status === 'failed' || (task.status === 'completed' && !task.succeeded)) return 'error';
-  return 'warning';
-}
-
-function taskLabel(value: string) {
-  return taskOptions.find(item => item.value === value)?.label || value;
-}
-
-function taskIcon(value: string) {
-  const icons: Record<string, string> = {
-    'inventory.installedApps': 'mdi:application-cog',
-    'inventory.startupItems': 'mdi:rocket-launch',
-    'file.list': 'mdi:folder-search',
-    'desktop.screenshot': 'mdi:monitor-screenshot',
-    'cmd.run': 'mdi:console',
-    'user.changePassword': 'mdi:account-key',
-    'session.lock': 'mdi:lock'
-  };
-
-  return icons[value] || 'mdi:clipboard-text-clock';
-}
-
-function taskStatusLabel(task: Api.DataProtector.RemoteTask) {
-  if (task.status === 'completed' && task.succeeded) return 'Completed';
-  if (task.status === 'failed' || (task.status === 'completed' && !task.succeeded)) return 'Failed';
-  if (task.status === 'sent') return 'Sent';
-  return task.status || 'Queued';
-}
-
-function resultStatus(task: Api.DataProtector.RemoteTask): 'success' | 'error' | 'info' {
-  const type = statusType(task);
-  if (type === 'success') return 'success';
-  if (type === 'error') return 'error';
-  return 'info';
-}
-
-function resultTitle(task: Api.DataProtector.RemoteTask) {
-  if (statusType(task) === 'error') return 'Task failed';
-  if (statusType(task) === 'success') return 'Task completed';
-  return task.status === 'sent' ? 'Waiting for endpoint result' : 'Task queued';
-}
-
-function shortText(value: string, maxLength = 160) {
-  if (!value) return '-';
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
-}
-
-function formatJson(value?: string) {
-  if (!value) return '-';
-  try {
-    return JSON.stringify(JSON.parse(value), null, 2);
-  } catch {
-    return value;
-  }
-}
-
-async function refresh() {
-  loading.value = true;
-  try {
-    const [devicesResult, tasksResult] = await Promise.all([fetchDevices(), fetchRemoteTasks({ limit: 100 })]);
-    if (!devicesResult.error) {
-      devices.value = devicesResult.data;
-      if (!form.deviceId && devices.value.length) {
-        form.deviceId = devices.value[0].deviceId;
-      }
-    }
-    if (!tasksResult.error) {
-      tasks.value = tasksResult.data;
-      if (!selectedTaskId.value && tasks.value.length) {
-        selectedTaskId.value = tasks.value[0].taskId;
-      }
-    }
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function submitTask() {
-  await formRef.value?.validate();
-  submitting.value = true;
-  try {
-    const { error, data } = await fetchCreateRemoteTask({
-      deviceId: form.deviceId,
-      kind: form.kind,
-      argumentsJson: JSON.stringify(buildArguments()),
-      actor: 'web-admin'
-    });
-
-    if (!error) {
-      selectedTaskId.value = data.taskId;
-      window.$message?.success('Remote task queued.');
-      await refresh();
-    }
-  } finally {
-    submitting.value = false;
-  }
-}
-
-onMounted(refresh);
+onMounted(async () => {
+  await refreshDevices();
+  await refreshActivePanel();
+});
 </script>
 
 <template>
-  <NSpace vertical :size="16">
-    <NCard :bordered="false" class="card-wrapper">
-      <div class="flex flex-wrap items-center justify-between gap-16px">
+  <div class="remote-workbench">
+    <aside class="endpoint-pane">
+      <div class="pane-header">
         <div>
-          <div class="eyebrow">EDR Response Center</div>
-          <h1 class="m-0 m-t-4px text-24px font-700">Remote Operations</h1>
+          <div class="eyebrow">Endpoints</div>
+          <h2>Clients</h2>
         </div>
-        <NButton type="primary" :loading="loading" @click="refresh">
+        <NButton quaternary circle :loading="loadingDevices" @click="refreshDevices">
           <template #icon><SvgIcon icon="mdi:refresh" /></template>
-          Refresh
         </NButton>
       </div>
-    </NCard>
 
-    <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGi span="24 s:8">
-        <NCard :bordered="false" class="metric-card">
-          <div class="metric-icon metric-icon-blue"><SvgIcon icon="mdi:desktop-tower-monitor" /></div>
-          <NStatistic label="Registered endpoints" :value="devices.length" />
-          <div class="metric-caption">{{ onlineDevices }} online now</div>
-        </NCard>
-      </NGi>
-      <NGi span="24 s:8">
-        <NCard :bordered="false" class="metric-card">
-          <div class="metric-icon metric-icon-green"><SvgIcon icon="mdi:check-decagram" /></div>
-          <NStatistic label="Successful tasks" :value="successfulTasks" />
-          <div class="metric-caption">{{ pendingTasks }} waiting for endpoint</div>
-        </NCard>
-      </NGi>
-      <NGi span="24 s:8">
-        <NCard :bordered="false" class="metric-card">
-          <div class="metric-icon metric-icon-red"><SvgIcon icon="mdi:alert-octagon" /></div>
-          <NStatistic label="Failed tasks" :value="failedTasks" />
-          <div class="metric-caption">Last 100 remote actions</div>
-        </NCard>
-      </NGi>
-    </NGrid>
+      <div class="endpoint-summary">
+        <NTag type="success" :bordered="false">{{ onlineDevices }} online</NTag>
+        <span>{{ devices.length }} registered</span>
+      </div>
 
-    <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGi span="24 m:7">
-        <NCard title="Command Center" :bordered="false" class="card-wrapper">
-          <NForm ref="formRef" :model="form" :rules="formRules" label-placement="top">
-            <NFormItem label="Device" path="deviceId">
-              <NSelect v-model:value="form.deviceId" :options="deviceOptions" filterable />
-            </NFormItem>
-            <NAlert v-if="selectedDevice" :type="selectedDevice.online ? 'success' : 'warning'" class="m-b-16px">
-              <div class="device-alert">
-                <div class="font-600">{{ selectedDevice.machine || selectedDevice.deviceId }}</div>
-                <div class="text-12px">
-                  {{ selectedDevice.user || 'unknown user' }} / {{ selectedDevice.driverStatus || 'unknown driver' }}
-                </div>
-              </div>
-            </NAlert>
-            <NFormItem label="Task" path="kind">
-              <NSelect v-model:value="form.kind" :options="taskOptions" />
-            </NFormItem>
-            <NFormItem v-if="form.kind === 'file.list'" label="Path">
-              <NInput v-model:value="form.path" />
-            </NFormItem>
-            <NFormItem v-if="form.kind === 'cmd.run'" label="Command">
-              <NInput v-model:value="form.command" type="textarea" :autosize="{ minRows: 3, maxRows: 6 }" />
-            </NFormItem>
-            <NFormItem v-if="form.kind === 'cmd.run'" label="Timeout seconds">
-              <NInputNumber v-model:value="form.timeoutSeconds" :min="1" :max="300" class="w-full" />
-            </NFormItem>
-            <NFormItem v-if="form.kind === 'user.changePassword'" label="Username">
-              <NInput v-model:value="form.username" />
-            </NFormItem>
-            <NFormItem v-if="form.kind === 'user.changePassword'" label="New password">
-              <NInput v-model:value="form.newPassword" type="password" show-password-on="click" />
-            </NFormItem>
-            <NButton block type="primary" :loading="submitting" @click="submitTask">
-              <template #icon><SvgIcon icon="mdi:send" /></template>
-              Queue Task
+      <div class="endpoint-list">
+        <button
+          v-for="device in devices"
+          :key="device.deviceId"
+          class="endpoint-item"
+          :class="{ active: device.deviceId === selectedDeviceId }"
+          type="button"
+          @click="selectDevice(device.deviceId)"
+        >
+          <div class="endpoint-icon">
+            <SvgIcon icon="mdi:desktop-tower-monitor" />
+          </div>
+          <div class="endpoint-meta">
+            <div class="endpoint-name">{{ device.machine || device.deviceId }}</div>
+            <div class="endpoint-sub">{{ device.user || '-' }} / {{ device.driverStatus || 'driver unknown' }}</div>
+          </div>
+          <span class="status-dot" :class="{ online: device.online }"></span>
+        </button>
+        <NEmpty v-if="!devices.length" description="No registered endpoints" />
+      </div>
+    </aside>
+
+    <main class="operation-pane">
+      <NCard :bordered="false" class="selected-device-card">
+        <div class="selected-device">
+          <div>
+            <div class="eyebrow">Remote Management</div>
+            <h1>{{ selectedDevice?.machine || 'Select an endpoint' }}</h1>
+            <p v-if="selectedDevice">
+              {{ selectedDevice.user || '-' }} / agent {{ selectedDevice.agentVersion || '-' }} /
+              {{ selectedDevice.online ? 'online' : 'offline' }}
+            </p>
+          </div>
+          <NSpace>
+            <NButton secondary :disabled="!selectedDevice" @click="lockScreen">
+              <template #icon><SvgIcon icon="mdi:lock" /></template>
+              Lock
             </NButton>
-          </NForm>
-        </NCard>
-      </NGi>
+            <NButton type="primary" :disabled="!selectedDevice" :loading="panelLoading" @click="refreshActivePanel">
+              <template #icon><SvgIcon icon="mdi:refresh" /></template>
+              Refresh Panel
+            </NButton>
+          </NSpace>
+        </div>
+      </NCard>
 
-      <NGi span="24 m:17">
-        <NSpace vertical :size="16">
-          <NCard :bordered="false" class="card-wrapper">
-            <template #header>
-              <div class="result-heading">
-                <div v-if="selectedTask" class="result-heading-icon">
-                  <SvgIcon :icon="taskIcon(selectedTask.kind)" />
-                </div>
+      <NCard :bordered="false" class="module-card">
+        <NTabs :value="activeTab" type="line" animated @update:value="handleTabChange">
+          <NTab name="files">File Manager</NTab>
+          <NTab name="processes">Process Manager</NTab>
+          <NTab name="apps">Applications</NTab>
+          <NTab name="startup">Startup</NTab>
+          <NTab name="shell">Command</NTab>
+          <NTab name="desktop">Desktop</NTab>
+          <NTab name="accounts">Accounts</NTab>
+        </NTabs>
+
+        <div class="module-body" :class="{ loading: panelLoading }">
+          <template v-if="activeTab === 'files'">
+            <div class="toolbar">
+              <NInputGroup>
+                <NButton secondary :disabled="!currentPath" @click="goUp">
+                  <template #icon><SvgIcon icon="mdi:arrow-up" /></template>
+                </NButton>
+                <NInput v-model:value="pathInput" placeholder="Select a drive or enter a remote path" @keyup.enter="goToPath" />
+                <NButton type="primary" :disabled="!pathInput" @click="goToPath">Open</NButton>
+              </NInputGroup>
+            </div>
+
+            <div v-if="!currentPath" class="drive-grid">
+              <button
+                v-for="drive in drives"
+                :key="drive.path"
+                class="drive-tile"
+                :disabled="!drive.isReady"
+                type="button"
+                @click="openPath(drive.path)"
+              >
+                <SvgIcon icon="mdi:harddisk" />
                 <div>
-                  <div class="text-16px font-700">Result Detail</div>
-                  <div v-if="selectedTask" class="text-12px text-gray-500">
-                    {{ taskLabel(selectedTask.kind) }} on {{ deviceName(selectedTask.deviceId) }}
-                  </div>
+                  <div class="drive-name">{{ drive.name }} {{ drive.volumeLabel }}</div>
+                  <div class="drive-sub">{{ drive.driveType }} / {{ drive.fileSystem || 'not ready' }}</div>
+                  <div class="drive-sub">{{ formatBytes(drive.freeSpace) }} free of {{ formatBytes(drive.totalSize) }}</div>
+                </div>
+              </button>
+              <NEmpty v-if="!drives.length && !panelLoading" description="No drives returned" />
+            </div>
+
+            <NDataTable
+              v-else
+              :columns="fileColumns"
+              :data="fileItems"
+              :loading="panelLoading"
+              :row-props="fileRowProps"
+              :scroll-x="1120"
+              :pagination="{ pageSize: 15 }"
+            />
+
+            <NDropdown
+              trigger="manual"
+              placement="bottom-start"
+              :show="fileContext.show"
+              :x="fileContext.x"
+              :y="fileContext.y"
+              :options="fileMenuOptions"
+              @select="handleFileMenuSelect"
+              @clickoutside="fileContext.show = false"
+            />
+          </template>
+
+          <template v-else-if="activeTab === 'processes'">
+            <div class="toolbar">
+              <NInput v-model:value="processSearch" clearable placeholder="Search process name, PID, path, or user" />
+              <NButton type="primary" :loading="panelLoading" @click="loadProcesses">
+                <template #icon><SvgIcon icon="mdi:refresh" /></template>
+                Refresh
+              </NButton>
+            </div>
+            <NDataTable
+              :columns="processColumns"
+              :data="filteredProcesses"
+              :loading="panelLoading"
+              :scroll-x="1280"
+              :pagination="{ pageSize: 15 }"
+            />
+          </template>
+
+          <template v-else-if="activeTab === 'apps'">
+            <div class="toolbar">
+              <div class="module-count">{{ apps.length }} installed applications</div>
+              <NButton type="primary" :loading="panelLoading" @click="loadApps">
+                <template #icon><SvgIcon icon="mdi:refresh" /></template>
+                Refresh
+              </NButton>
+            </div>
+            <div class="app-grid">
+              <div v-for="app in apps" :key="`${app.displayName}-${app.displayVersion}-${app.publisher}`" class="app-tile">
+                <NAvatar :src="app.iconBase64 ? `data:image/png;base64,${app.iconBase64}` : undefined" :size="42">
+                  <SvgIcon icon="mdi:application" />
+                </NAvatar>
+                <div class="min-w-0">
+                  <div class="truncate text-14px font-600">{{ app.displayName || 'Unnamed application' }}</div>
+                  <div class="truncate text-12px text-gray-500">{{ app.publisher || 'Unknown publisher' }}</div>
+                  <div class="truncate text-12px text-gray-400">{{ app.displayVersion || '-' }}</div>
                 </div>
               </div>
-            </template>
-            <template v-if="selectedTask" #header-extra>
-              <NSpace align="center">
-                <NTag :type="statusType(selectedTask)">{{ taskStatusLabel(selectedTask) }}</NTag>
-                <NTag>{{ taskLabel(selectedTask.kind) }}</NTag>
-              </NSpace>
-            </template>
+            </div>
+          </template>
 
-            <NEmpty v-if="!selectedTask" description="No remote task selected" />
-
-            <template v-else>
-              <NDescriptions :column="2" bordered label-placement="left" class="m-b-16px">
-                <NDescriptionsItem label="Device">{{ deviceName(selectedTask.deviceId) }}</NDescriptionsItem>
-                <NDescriptionsItem label="Actor">{{ selectedTask.actor || '-' }}</NDescriptionsItem>
-                <NDescriptionsItem label="Created">{{ formatTime(selectedTask.createdUtc) }}</NDescriptionsItem>
-                <NDescriptionsItem label="Completed">{{ formatTime(selectedTask.completedUtc) }}</NDescriptionsItem>
-                <NDescriptionsItem label="Summary">{{ resultSummary(selectedTask) }}</NDescriptionsItem>
-                <NDescriptionsItem label="Exit code">{{ selectedTask.exitCode }}</NDescriptionsItem>
-              </NDescriptions>
-
-              <template v-if="selectedTask.kind === 'inventory.installedApps'">
-                <NGrid v-if="installedApps.length" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-                  <NGi
-                    v-for="app in installedApps"
-                    :key="`${app.displayName}-${app.displayVersion}-${app.publisher}`"
-                    span="24 s:12 l:8"
-                  >
-                    <div class="app-tile">
-                      <NAvatar
-                        :src="app.iconBase64 ? `data:image/png;base64,${app.iconBase64}` : undefined"
-                        :size="44"
-                        class="app-avatar"
-                      >
-                        <SvgIcon icon="mdi:application" />
-                      </NAvatar>
-                      <div class="min-w-0">
-                        <div class="truncate text-14px font-600">{{ app.displayName || 'Unnamed application' }}</div>
-                        <div class="truncate text-12px text-gray-500">{{ app.publisher || 'Unknown publisher' }}</div>
-                        <div class="truncate text-12px text-gray-400">{{ app.displayVersion || '-' }}</div>
-                      </div>
-                    </div>
-                  </NGi>
-                </NGrid>
-                <NEmpty v-else description="No installed applications returned" />
-              </template>
-
-              <NDataTable
-                v-else-if="selectedTask.kind === 'inventory.startupItems'"
-                :columns="startupColumns"
-                :data="startupItems"
-                :scroll-x="980"
-                :pagination="{ pageSize: 8 }"
-              />
-
-              <NDataTable
-                v-else-if="selectedTask.kind === 'file.list'"
-                :columns="fileColumns"
-                :data="fileItems"
-                :scroll-x="980"
-                :pagination="{ pageSize: 10 }"
-              />
-
-              <div v-else-if="selectedTask.kind === 'desktop.screenshot'" class="screenshot-frame">
-                <img v-if="screenshotSrc" :src="screenshotSrc" alt="Remote screenshot" />
-                <NEmpty v-else description="No screenshot returned" />
-              </div>
-
-              <pre v-else-if="selectedTask.kind === 'cmd.run'" class="terminal-output">{{
-                selectedTask.output || selectedTask.error || 'No command output returned.'
-              }}</pre>
-
-              <NResult
-                v-else
-                :status="resultStatus(selectedTask)"
-                :title="resultTitle(selectedTask)"
-                :description="selectedTask.output || selectedTask.error || 'No output returned.'"
-              />
-
-              <div class="evidence-panel">
-                <div class="evidence-title">Task Evidence</div>
-                <NDescriptions :column="1" bordered label-placement="left">
-                  <NDescriptionsItem label="Task ID">{{ selectedTask.taskId }}</NDescriptionsItem>
-                  <NDescriptionsItem label="Arguments">
-                    <pre class="evidence-code">{{ formatJson(selectedTask.argumentsJson) }}</pre>
-                  </NDescriptionsItem>
-                  <NDescriptionsItem v-if="selectedTask.error" label="Error">
-                    <pre class="evidence-code evidence-code-error">{{ selectedTask.error }}</pre>
-                  </NDescriptionsItem>
-                </NDescriptions>
-              </div>
-            </template>
-          </NCard>
-
-          <NCard title="Task History" :bordered="false" class="card-wrapper">
+          <template v-else-if="activeTab === 'startup'">
+            <div class="toolbar">
+              <div class="module-count">{{ startupItems.length }} startup entries</div>
+              <NButton type="primary" :loading="panelLoading" @click="loadStartupItems">
+                <template #icon><SvgIcon icon="mdi:refresh" /></template>
+                Refresh
+              </NButton>
+            </div>
             <NDataTable
-              :columns="taskColumns"
-              :data="tasks"
-              :loading="loading"
-              :scroll-x="1060"
-              :pagination="{ pageSize: 8 }"
+              :columns="startupColumns"
+              :data="startupItems"
+              :loading="panelLoading"
+              :scroll-x="1120"
+              :pagination="{ pageSize: 12 }"
             />
-          </NCard>
-        </NSpace>
-      </NGi>
-    </NGrid>
-  </NSpace>
+          </template>
+
+          <template v-else-if="activeTab === 'shell'">
+            <div class="shell-grid">
+              <NInput
+                v-model:value="commandText"
+                type="textarea"
+                :autosize="{ minRows: 5, maxRows: 8 }"
+                placeholder="Command to run on the selected endpoint"
+              />
+              <NButton type="primary" :loading="panelLoading" @click="runCommand">
+                <template #icon><SvgIcon icon="mdi:console" /></template>
+                Run Command
+              </NButton>
+              <pre class="terminal-output">{{ commandOutput || 'Command output will appear here.' }}</pre>
+            </div>
+          </template>
+
+          <template v-else-if="activeTab === 'desktop'">
+            <div class="toolbar">
+              <div class="module-count">Remote desktop snapshot</div>
+              <NButton type="primary" :loading="panelLoading" @click="captureScreenshot">
+                <template #icon><SvgIcon icon="mdi:monitor-screenshot" /></template>
+                Capture
+              </NButton>
+            </div>
+            <div class="screenshot-frame">
+              <img v-if="screenshotSrc" :src="screenshotSrc" alt="Remote desktop screenshot" />
+              <NEmpty v-else description="No screenshot captured" />
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="account-panel">
+              <NForm label-placement="top">
+                <NFormItem label="Username">
+                  <NInput v-model:value="accountForm.username" />
+                </NFormItem>
+                <NFormItem label="New password">
+                  <NInput v-model:value="accountForm.newPassword" type="password" show-password-on="click" />
+                </NFormItem>
+                <NButton type="primary" :loading="panelLoading" @click="changePassword">
+                  <template #icon><SvgIcon icon="mdi:account-key" /></template>
+                  Change Password
+                </NButton>
+              </NForm>
+            </div>
+          </template>
+        </div>
+      </NCard>
+
+      <NCard title="Activity" :bordered="false" class="activity-card">
+        <div v-if="activity.length" class="activity-list">
+          <div v-for="item in activity" :key="item" class="activity-item">{{ item }}</div>
+        </div>
+        <NEmpty v-else description="No remote operations in this session" />
+      </NCard>
+    </main>
+
+    <NModal v-model:show="renameVisible" preset="card" title="Rename Remote Item" class="rename-modal">
+      <NForm label-placement="top">
+        <NFormItem label="Current path">
+          <NInput :value="renameTarget?.path || ''" readonly />
+        </NFormItem>
+        <NFormItem label="New name">
+          <NInput v-model:value="renameName" @keyup.enter="submitRename" />
+        </NFormItem>
+        <div class="modal-actions">
+          <NButton @click="renameVisible = false">Cancel</NButton>
+          <NButton type="primary" :loading="panelLoading" @click="submitRename">Rename</NButton>
+        </div>
+      </NForm>
+    </NModal>
+  </div>
 </template>
 
 <style scoped>
+.remote-workbench {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  min-height: calc(100vh - 128px);
+}
+
+.endpoint-pane,
+.operation-pane {
+  min-width: 0;
+}
+
+.endpoint-pane {
+  padding: 16px;
+  background: rgb(255 255 255);
+  border: 1px solid rgb(229 231 235);
+  border-radius: 8px;
+}
+
+.pane-header,
+.selected-device,
+.toolbar,
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pane-header h2,
+.selected-device h1 {
+  margin: 4px 0 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.selected-device p {
+  margin: 8px 0 0;
+  color: rgb(107 114 128);
+  font-size: 13px;
+}
+
 .eyebrow {
   color: rgb(37 99 235);
   font-size: 12px;
@@ -588,84 +941,176 @@ onMounted(refresh);
   text-transform: uppercase;
 }
 
-.metric-card :deep(.n-card__content) {
-  position: relative;
-  min-height: 116px;
-  padding-right: 72px;
-}
-
-.metric-icon {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  display: grid;
-  width: 44px;
-  height: 44px;
-  color: rgb(255 255 255);
-  place-items: center;
-  border-radius: 8px;
-}
-
-.metric-icon-blue {
-  background: rgb(37 99 235);
-}
-
-.metric-icon-green {
-  background: rgb(22 163 74);
-}
-
-.metric-icon-red {
-  background: rgb(220 38 38);
-}
-
-.metric-caption {
-  margin-top: 12px;
+.endpoint-summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 14px 0;
   color: rgb(107 114 128);
   font-size: 13px;
 }
 
-.device-alert {
-  line-height: 1.5;
+.endpoint-list {
+  display: grid;
+  gap: 8px;
 }
 
-.result-heading {
-  display: flex;
-  gap: 12px;
+.endpoint-item {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 10px;
+  gap: 10px;
   align-items: center;
+  width: 100%;
+  padding: 10px;
+  color: rgb(31 41 55);
+  text-align: left;
+  cursor: pointer;
+  background: rgb(249 250 251);
+  border: 1px solid rgb(229 231 235);
+  border-radius: 8px;
 }
 
-.result-heading-icon {
+.endpoint-item.active {
+  background: rgb(239 246 255);
+  border-color: rgb(37 99 235);
+}
+
+.endpoint-icon {
   display: grid;
   width: 36px;
   height: 36px;
   color: rgb(37 99 235);
-  background: rgb(239 246 255);
+  background: rgb(219 234 254);
   place-items: center;
   border-radius: 8px;
 }
 
-.task-kind-cell,
-.file-name-cell {
+.endpoint-name,
+.endpoint-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.endpoint-name {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.endpoint-sub {
+  margin-top: 2px;
+  color: rgb(107 114 128);
+  font-size: 12px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  background: rgb(156 163 175);
+  border-radius: 999px;
+}
+
+.status-dot.online {
+  background: rgb(22 163 74);
+}
+
+.operation-pane {
+  display: grid;
+  gap: 16px;
+}
+
+.module-card :deep(.n-card__content) {
+  padding-top: 4px;
+}
+
+.module-body {
+  position: relative;
+  min-height: 420px;
+  padding-top: 16px;
+}
+
+.module-body.loading {
+  cursor: progress;
+}
+
+.toolbar {
+  margin-bottom: 14px;
+}
+
+.module-count {
+  color: rgb(75 85 99);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.drive-grid,
+.app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+.drive-tile {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 92px;
+  padding: 14px;
+  color: rgb(31 41 55);
+  text-align: left;
+  cursor: pointer;
+  background: rgb(255 255 255);
+  border: 1px solid rgb(229 231 235);
+  border-radius: 8px;
+}
+
+.drive-tile:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.drive-tile svg {
+  color: rgb(37 99 235);
+  font-size: 30px;
+}
+
+.drive-name {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.drive-sub {
+  margin-top: 4px;
+  color: rgb(107 114 128);
+  font-size: 12px;
+}
+
+.manager-name-cell {
   display: flex;
   gap: 8px;
   align-items: center;
   min-width: 0;
 }
 
-.task-kind-icon {
-  flex: 0 0 auto;
-  color: rgb(37 99 235);
-  font-size: 18px;
-}
-
-.file-icon {
+.manager-icon {
   flex: 0 0 auto;
   color: rgb(75 85 99);
   font-size: 18px;
 }
 
-.file-icon-folder {
+.manager-icon-folder {
   color: rgb(217 119 6);
+}
+
+.manager-icon-process {
+  color: rgb(37 99 235);
+}
+
+.row-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
 }
 
 .app-tile {
@@ -679,16 +1124,29 @@ onMounted(refresh);
   border-radius: 8px;
 }
 
-.app-avatar {
-  flex: 0 0 auto;
-  background: rgb(243 244 246);
+.shell-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.terminal-output {
+  min-height: 300px;
+  max-height: 520px;
+  padding: 16px;
+  overflow: auto;
+  color: rgb(209 250 229);
+  font-family: Consolas, 'Courier New', monospace;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  background: rgb(17 24 39);
+  border-radius: 8px;
 }
 
 .screenshot-frame {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 360px;
+  min-height: 420px;
   padding: 12px;
   overflow: auto;
   background: rgb(17 24 39);
@@ -701,42 +1159,31 @@ onMounted(refresh);
   height: auto;
 }
 
-.terminal-output {
-  min-height: 280px;
-  max-height: 520px;
-  padding: 16px;
-  overflow: auto;
-  color: rgb(209 250 229);
-  font-family: Consolas, 'Courier New', monospace;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  background: rgb(17 24 39);
+.account-panel {
+  max-width: 480px;
+}
+
+.activity-list {
+  display: grid;
+  gap: 8px;
+}
+
+.activity-item {
+  padding: 8px 10px;
+  color: rgb(55 65 81);
+  font-size: 13px;
+  background: rgb(249 250 251);
+  border: 1px solid rgb(229 231 235);
   border-radius: 8px;
 }
 
-.evidence-panel {
-  margin-top: 16px;
+.rename-modal {
+  width: min(560px, calc(100vw - 32px));
 }
 
-.evidence-title {
-  margin-bottom: 8px;
-  color: rgb(55 65 81);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.evidence-code {
-  max-height: 220px;
-  margin: 0;
-  overflow: auto;
-  color: rgb(31 41 55);
-  font-family: Consolas, 'Courier New', monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
-.evidence-code-error {
-  color: rgb(185 28 28);
+@media (max-width: 960px) {
+  .remote-workbench {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

@@ -32,8 +32,23 @@ namespace DataProtectorWebBridge.Services
                     case "inventory.startupItems":
                         output = serializer.Serialize(QueryStartupItems());
                         break;
+                    case "process.list":
+                        output = serializer.Serialize(QueryProcesses());
+                        break;
+                    case "process.kill":
+                        output = KillProcess(ReadArgs(task.argumentsJson));
+                        break;
+                    case "file.drives":
+                        output = serializer.Serialize(ListDrives());
+                        break;
                     case "file.list":
                         output = serializer.Serialize(ListFiles(ReadArgs(task.argumentsJson)));
+                        break;
+                    case "file.delete":
+                        output = DeleteFileSystemEntry(ReadArgs(task.argumentsJson));
+                        break;
+                    case "file.rename":
+                        output = RenameFileSystemEntry(ReadArgs(task.argumentsJson));
                         break;
                     case "desktop.screenshot":
                         output = CaptureScreenshotBase64();
@@ -152,6 +167,92 @@ namespace DataProtectorWebBridge.Services
             return items.ToArray();
         }
 
+        private object[] QueryProcesses()
+        {
+            return Process.GetProcesses()
+                .Select(process =>
+                {
+                    string fileName = string.Empty;
+                    string userName = string.Empty;
+                    DateTime? startTime = null;
+                    long memoryBytes = 0;
+
+                    try
+                    {
+                        fileName = process.MainModule == null ? string.Empty : process.MainModule.FileName;
+                    }
+                    catch
+                    {
+                    }
+
+                    try
+                    {
+                        startTime = process.StartTime.ToUniversalTime();
+                    }
+                    catch
+                    {
+                    }
+
+                    try
+                    {
+                        memoryBytes = process.WorkingSet64;
+                    }
+                    catch
+                    {
+                    }
+
+                    return new
+                    {
+                        pid = process.Id,
+                        name = process.ProcessName,
+                        path = fileName,
+                        user = userName,
+                        memoryBytes = memoryBytes,
+                        startTimeUtc = startTime.HasValue ? startTime.Value.ToString("o") : string.Empty
+                    };
+                })
+                .OrderBy(process => process.name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(process => process.pid)
+                .ToArray();
+        }
+
+        private string KillProcess(Dictionary<string, object> args)
+        {
+            int pid = ParseInt(GetArg(args, "pid", "0"), 0);
+            if (pid <= 0)
+            {
+                throw new InvalidOperationException("A valid process id is required.");
+            }
+
+            Process process = Process.GetProcessById(pid);
+            string name = process.ProcessName;
+            process.Kill();
+            process.WaitForExit(5000);
+            return "Process terminated: " + name + " (" + pid + ")";
+        }
+
+        private object[] ListDrives()
+        {
+            return DriveInfo.GetDrives()
+                .Select(drive =>
+                {
+                    bool ready = drive.IsReady;
+                    return new
+                    {
+                        name = drive.Name,
+                        path = drive.RootDirectory.FullName,
+                        driveType = drive.DriveType.ToString(),
+                        volumeLabel = ready ? drive.VolumeLabel : string.Empty,
+                        fileSystem = ready ? drive.DriveFormat : string.Empty,
+                        isReady = ready,
+                        totalSize = ready ? drive.TotalSize : 0,
+                        freeSpace = ready ? drive.AvailableFreeSpace : 0
+                    };
+                })
+                .OrderBy(drive => drive.name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
         private static void ReadRunKey(RegistryKey root, string subKeyPath, string location, List<object> items)
         {
             using (RegistryKey key = root.OpenSubKey(subKeyPath))
@@ -203,7 +304,6 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Directory.GetFileSystemEntries(path)
-                .Take(limit)
                 .Select(entry =>
                 {
                     FileAttributes attributes = File.GetAttributes(entry);
@@ -223,7 +323,64 @@ namespace DataProtectorWebBridge.Services
                         lastWriteUtc = File.GetLastWriteTimeUtc(entry).ToString("o")
                     };
                 })
+                .OrderByDescending(entry => entry.isDirectory)
+                .ThenBy(entry => entry.name, StringComparer.OrdinalIgnoreCase)
+                .Take(limit)
                 .ToArray();
+        }
+
+        private string DeleteFileSystemEntry(Dictionary<string, object> args)
+        {
+            string path = GetRequiredPath(args, "path");
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, true);
+                return "Directory deleted: " + path;
+            }
+
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                return "File deleted: " + path;
+            }
+
+            throw new FileNotFoundException("Path not found.", path);
+        }
+
+        private string RenameFileSystemEntry(Dictionary<string, object> args)
+        {
+            string path = GetRequiredPath(args, "path");
+            string newName = GetArg(args, "newName", string.Empty);
+            if (string.IsNullOrWhiteSpace(newName))
+            {
+                throw new InvalidOperationException("New name is required.");
+            }
+
+            if (newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                throw new InvalidOperationException("New name contains invalid characters.");
+            }
+
+            string parent = Path.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(parent))
+            {
+                throw new InvalidOperationException("Root paths cannot be renamed.");
+            }
+
+            string target = Path.Combine(parent, newName);
+            if (Directory.Exists(path))
+            {
+                Directory.Move(path, target);
+                return "Directory renamed: " + path + " -> " + target;
+            }
+
+            if (File.Exists(path))
+            {
+                File.Move(path, target);
+                return "File renamed: " + path + " -> " + target;
+            }
+
+            throw new FileNotFoundException("Path not found.", path);
         }
 
         private string CaptureScreenshotBase64()
@@ -364,6 +521,17 @@ namespace DataProtectorWebBridge.Services
         {
             object value;
             return args != null && args.TryGetValue(key, out value) && value != null ? Convert.ToString(value) : fallback;
+        }
+
+        private static string GetRequiredPath(Dictionary<string, object> args, string key)
+        {
+            string path = GetArg(args, key, string.Empty);
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new InvalidOperationException("Path is required.");
+            }
+
+            return path;
         }
 
         private static int ParseInt(string value, int fallback)
