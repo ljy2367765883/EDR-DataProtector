@@ -42,10 +42,14 @@
   <ItemGroup>
     <Compile Include="Native\DataProtectorPolicyNative.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="Services\AgentSyncClient.cs" />
     <Compile Include="Services\AuditLog.cs" />
+    <Compile Include="Services\CentralHttpServer.cs" />
+    <Compile Include="Services\CentralPolicyStore.cs" />
     <Compile Include="Services\HttpBridgeServer.cs" />
     <Compile Include="Services\JsonResponse.cs" />
     <Compile Include="Services\PolicyBridgeService.cs" />
+    <Compile Include="Services\StaticWebContent.cs" />
   </ItemGroup>
   <PropertyGroup>
     <NativePolicyApiProjectPath>$(MSBuildThisFileDirectory)..\DataProtectorPolicyApi\x64\$(Configuration)\DataProtectorPolicyApi.dll</NativePolicyApiProjectPath>

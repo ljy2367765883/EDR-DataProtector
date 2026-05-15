@@ -51,6 +51,17 @@ export const generatedRoutes: GeneratedRoute[] = [
     }
   },
   {
+    name: 'devices',
+    path: '/devices',
+    component: 'layout.base$view.devices',
+    meta: {
+      title: 'devices',
+      i18nKey: 'route.devices',
+      icon: 'mdi:desktop-tower-monitor',
+      order: 10
+    }
+  },
+  {
     name: 'home',
     path: '/home',
     component: 'layout.base$view.home',

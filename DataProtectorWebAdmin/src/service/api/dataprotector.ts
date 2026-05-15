@@ -14,6 +14,13 @@ export function fetchPolicyRules() {
   });
 }
 
+export function fetchDevices() {
+  return request<Api.DataProtector.Device[]>({
+    url: '/devices',
+    method: 'get'
+  });
+}
+
 export function fetchAddPolicyRule(data: Api.DataProtector.PolicyRuleRequest) {
   return request<Api.DataProtector.OperationResult>({
     url: '/policy/rules',

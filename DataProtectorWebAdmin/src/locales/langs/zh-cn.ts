@@ -226,6 +226,7 @@ const local: App.I18n.Schema = {
     500: '服务器错误',
     'iframe-page': '外链页面',
     home: '运行态',
+    devices: '设备',
     policy: '策略',
     audit: '审计'
   },

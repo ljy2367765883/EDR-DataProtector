@@ -3,6 +3,7 @@ declare namespace Api {
     type RuleKind = 'processName' | 'processDirectory' | 'excludedDirectory';
 
     interface BridgeStatus {
+      mode?: string;
       connected: boolean;
       status: string;
       message: string;
@@ -10,6 +11,25 @@ declare namespace Api {
       machine: string;
       user: string;
       auditPath: string;
+      policyVersion?: number;
+      deviceCount?: number;
+      onlineDeviceCount?: number;
+    }
+
+    interface Device {
+      deviceId: string;
+      machine: string;
+      user: string;
+      agentVersion: string;
+      driverConnected: boolean;
+      driverStatus: string;
+      driverMessage: string;
+      policyVersion: number;
+      firstSeenUtc: string;
+      lastSeenUtc: string;
+      lastApplyStatus: string;
+      lastApplyMessage: string;
+      online: boolean;
     }
 
     interface PolicyRule {

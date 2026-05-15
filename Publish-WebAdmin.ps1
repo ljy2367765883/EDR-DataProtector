@@ -62,9 +62,10 @@ try {
         Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
     }
 
-    $bridgePublish = Join-Path $OutputDirectory "bridge"
-    $staticOutput = Join-Path $bridgePublish "web"
-    New-Item -ItemType Directory -Force -Path $staticOutput, $bridgePublish | Out-Null
+    $serverPublish = Join-Path $OutputDirectory "server"
+    $agentPublish = Join-Path $OutputDirectory "agent"
+    $staticOutput = Join-Path $serverPublish "web"
+    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish | Out-Null
 
     Copy-Item -Path (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
 
@@ -77,29 +78,35 @@ try {
     foreach ($file in $bridgeFiles) {
         $source = Join-Path $bridgeOutput $file
         if (Test-Path -LiteralPath $source) {
-            Copy-Item -LiteralPath $source -Destination $bridgePublish -Force
+            Copy-Item -LiteralPath $source -Destination $serverPublish -Force
+            Copy-Item -LiteralPath $source -Destination $agentPublish -Force
         }
     }
 
     $notes = @"
-DataProtector Web Admin
-=======================
+DataProtector Central Web Admin
+===============================
 
-Run bridge\DataProtectorWebBridge.exe on the protected server.
+Run the central server on the management machine:
+server\DataProtectorWebBridge.exe server
 
-Default remote web console:
+Open the web console:
 http://<server-ip>:17643/
 
-Default bridge API:
-http://<server-ip>:17643/api
+Run the endpoint agent on every protected client:
+agent\DataProtectorWebBridge.exe agent http://<server-ip>:17643/ 15
 
-Default audit log:
-C:\ProgramData\DataProtector\WebAudit.jsonl
+Central state:
+C:\ProgramData\DataProtector\CentralState.json
 
-The bridge listens on all server interfaces by default using the HTTP.sys
-wildcard prefix http://+:17643/, which is the Windows equivalent of binding to
-0.0.0.0. It serves the web UI from bridge\web. Allow inbound TCP 17643 through
-Windows Firewall.
+The central server listens on all server interfaces by default using the
+HTTP.sys wildcard prefix http://+:17643/, which is the Windows equivalent of
+binding to 0.0.0.0. It serves the web UI from server\web. Allow inbound TCP
+17643 through Windows Firewall on the central server. Clients only need
+outbound access to the server.
+
+Legacy single-machine debugging:
+server\DataProtectorWebBridge.exe standalone
 
 During development use:
 pnpm dev

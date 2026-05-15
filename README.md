@@ -1154,6 +1154,27 @@ DataProtectorPolicyApi.dll
 Wpf.Ui.dll
 ```
 
+### 15.4 Publish Central Web Package
+
+```powershell
+.\Publish-WebAdmin.ps1
+```
+
+Default output:
+
+```text
+publish\DataProtectorWebAdmin-x64-Release\
+```
+
+The package contains two runtime roles:
+
+```text
+server\DataProtectorWebBridge.exe   Central server and Web UI host
+server\web\                         Built SoybeanAdmin static assets
+agent\DataProtectorWebBridge.exe    Endpoint polling agent
+agent\DataProtectorPolicyApi.dll    Native driver policy API for the agent
+```
+
 ## 16. Installation and Runtime
 
 ### 16.1 Test Environment
@@ -1176,7 +1197,49 @@ Manual unload is currently enabled for development convenience. Production
 builds need a safe-stop design that flushes, synchronizes, and prevents
 plaintext cache exposure before unload.
 
-### 16.3 Basic Runtime Test
+### 16.3 Central Server and Agent Runtime
+
+On the management server:
+
+```cmd
+cd /d publish\DataProtectorWebAdmin-x64-Release\server
+netsh http add urlacl url=http://+:17643/ user=%USERNAME%
+netsh advfirewall firewall add rule name="DataProtector Central Server" dir=in action=allow protocol=TCP localport=17643
+DataProtectorWebBridge.exe server
+```
+
+Open the console from an administrator workstation:
+
+```text
+http://<server-ip>:17643/
+```
+
+On every protected endpoint, install and start the minifilter driver, then run
+the agent:
+
+```cmd
+cd /d publish\DataProtectorWebAdmin-x64-Release\agent
+DataProtectorWebBridge.exe agent http://<server-ip>:17643/ 15
+```
+
+The agent actively polls the central server through `/api/agent/sync`, registers
+the device, pulls the current policy version, clears local driver rules, applies
+the central rules, and reports the last apply result. Client machines do not
+need inbound firewall rules for management.
+
+Central server state is stored here:
+
+```text
+C:\ProgramData\DataProtector\CentralState.json
+```
+
+For single-machine debugging, the legacy local bridge remains available:
+
+```cmd
+DataProtectorWebBridge.exe standalone
+```
+
+### 16.4 Basic Runtime Test
 
 Example:
 

@@ -5,23 +5,21 @@ using System.Threading;
 
 namespace DataProtectorWebBridge.Services
 {
-    internal sealed class HttpBridgeServer : IDisposable
+    internal sealed class CentralHttpServer : IDisposable
     {
         private readonly HttpListener listener = new HttpListener();
-        private readonly PolicyBridgeService policyService;
-        private readonly AuditLog auditLog;
+        private readonly CentralPolicyStore store;
         private readonly StaticWebContent staticWebContent;
         private bool disposed;
 
-        public HttpBridgeServer(string prefix, PolicyBridgeService policyService, AuditLog auditLog, string webRoot)
+        public CentralHttpServer(string prefix, CentralPolicyStore store, string webRoot)
         {
             if (string.IsNullOrWhiteSpace(prefix))
             {
                 throw new ArgumentException("A listener prefix is required.", "prefix");
             }
 
-            this.policyService = policyService ?? throw new ArgumentNullException("policyService");
-            this.auditLog = auditLog ?? throw new ArgumentNullException("auditLog");
+            this.store = store ?? throw new ArgumentNullException("store");
             staticWebContent = new StaticWebContent(webRoot);
             listener.Prefixes.Add(prefix);
             Prefix = prefix;
@@ -32,7 +30,8 @@ namespace DataProtectorWebBridge.Services
         public void Start()
         {
             listener.Start();
-            Console.WriteLine("DataProtector Web Bridge listening on " + Prefix);
+            Console.WriteLine("DataProtector Central Server listening on " + Prefix);
+            Console.WriteLine("Central state: " + store.FilePath);
 
             while (listener.IsListening)
             {
@@ -58,13 +57,19 @@ namespace DataProtectorWebBridge.Services
 
                 if (method == "GET" && path == "/api/status")
                 {
-                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.GetStatus());
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.GetStatus());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/devices")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryDevices());
                     return;
                 }
 
                 if (method == "GET" && path == "/api/policy/rules")
                 {
-                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryRules());
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryRules());
                     return;
                 }
 
@@ -72,7 +77,7 @@ namespace DataProtectorWebBridge.Services
                 {
                     PolicyBridgeService.PolicyRuleRequest request =
                         JsonResponse.Read<PolicyBridgeService.PolicyRuleRequest>(context.Request.InputStream);
-                    PolicyBridgeService.OperationResult result = policyService.AddRule(request);
+                    PolicyBridgeService.OperationResult result = store.AddRule(request);
                     JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
                     return;
                 }
@@ -81,14 +86,14 @@ namespace DataProtectorWebBridge.Services
                 {
                     PolicyBridgeService.PolicyRuleRequest request =
                         JsonResponse.Read<PolicyBridgeService.PolicyRuleRequest>(context.Request.InputStream);
-                    PolicyBridgeService.OperationResult result = policyService.RemoveRule(request);
+                    PolicyBridgeService.OperationResult result = store.RemoveRule(request);
                     JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
                     return;
                 }
 
                 if (method == "POST" && path == "/api/policy/clear")
                 {
-                    PolicyBridgeService.OperationResult result = policyService.ClearRules(context.Request.UserHostAddress);
+                    PolicyBridgeService.OperationResult result = store.ClearRules(context.Request.UserHostAddress);
                     JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
                     return;
                 }
@@ -96,7 +101,15 @@ namespace DataProtectorWebBridge.Services
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     int limit = ParseLimit(context.Request.QueryString["limit"]);
-                    JsonResponse.Write(context.Response, "0000", "Success.", auditLog.ReadRecent(limit));
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.ReadRecentAudit(limit));
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/agent/sync")
+                {
+                    CentralPolicyStore.AgentSyncRequest request =
+                        JsonResponse.Read<CentralPolicyStore.AgentSyncRequest>(context.Request.InputStream);
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.SyncAgent(request));
                     return;
                 }
 

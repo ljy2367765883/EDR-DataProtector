@@ -109,7 +109,7 @@ async function addRule() {
   try {
     const { error, data } = await fetchAddPolicyRule({ ...form });
     if (!error && data.succeeded) {
-      window.$message?.success('Rule added to driver policy.');
+      window.$message?.success('Rule added to central policy.');
       form.value = '';
       await refresh();
     }
@@ -121,7 +121,7 @@ async function addRule() {
 async function removeRule(rule: Api.DataProtector.PolicyRule) {
   const { error, data } = await fetchRemovePolicyRule({ ...rule, actor: 'web-admin' });
   if (!error && data.succeeded) {
-    window.$message?.success('Rule removed from driver policy.');
+    window.$message?.success('Rule removed from central policy.');
     await refresh();
   }
 }
@@ -129,13 +129,13 @@ async function removeRule(rule: Api.DataProtector.PolicyRule) {
 async function clearRules() {
   window.$dialog?.warning({
     title: 'Clear all rules',
-    content: 'This removes all trusted process and excluded directory rules from the driver.',
+    content: 'This removes all trusted process and excluded directory rules from the central policy.',
     positiveText: 'Clear',
     negativeText: 'Cancel',
     onPositiveClick: async () => {
       const { error, data } = await fetchClearPolicyRules();
       if (!error && data.succeeded) {
-        window.$message?.success('Driver rules cleared.');
+        window.$message?.success('Central policy cleared.');
         await refresh();
       }
     }
@@ -152,11 +152,11 @@ onMounted(refresh);
         <div>
           <h1 class="m-0 text-24px font-700">Policy Management</h1>
           <p class="m-t-8px text-14px text-gray-500">
-            Extension-bound trusted process and excluded directory policy, coordinated through the local bridge.
+            Extension-bound central policy distributed to all registered DataProtector agents.
           </p>
         </div>
         <NSpace>
-          <NTag :type="connected ? 'success' : 'error'">{{ connected ? 'Driver connected' : 'Driver offline' }}</NTag>
+          <NTag :type="connected ? 'success' : 'error'">{{ connected ? 'Central server online' : 'Server offline' }}</NTag>
           <NButton :loading="loading" @click="refresh">
             <template #icon><SvgIcon icon="mdi:refresh" /></template>
             Refresh
@@ -183,14 +183,14 @@ onMounted(refresh);
             </NFormItem>
             <NButton block type="primary" :loading="submitting" @click="addRule">
               <template #icon><SvgIcon icon="mdi:plus" /></template>
-              Add to Driver
+              Add to Central Policy
             </NButton>
           </NForm>
         </NCard>
       </NGi>
 
       <NGi span="24 m:16">
-        <NCard title="Rule Inventory" :bordered="false" class="card-wrapper">
+        <NCard title="Central Rule Inventory" :bordered="false" class="card-wrapper">
           <template #header-extra>
             <NSpace>
               <NTag type="info">Process: {{ ruleGroups.processName }}</NTag>

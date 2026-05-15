@@ -230,6 +230,7 @@ const local: App.I18n.Schema = {
     500: 'Server Error',
     'iframe-page': 'Iframe',
     home: 'Operations',
+    devices: 'Devices',
     policy: 'Policy',
     audit: 'Audit'
   },

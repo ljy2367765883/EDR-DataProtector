@@ -28,9 +28,9 @@ namespace DataProtectorWebBridge.Services
             OperationResult result = Invoke(DataProtectorPolicyNative.DpPolicyCheckConnection);
             return new
             {
-                connected = result.Succeeded,
-                status = ToStatusText(result.Status),
-                message = result.Message,
+                connected = result.succeeded,
+                status = result.statusText,
+                message = result.message,
                 bridgePid = System.Diagnostics.Process.GetCurrentProcess().Id,
                 machine = Environment.MachineName,
                 user = Environment.UserName,
@@ -130,7 +130,7 @@ namespace DataProtectorWebBridge.Services
                 throw new BridgeException(1, "Unsupported rule kind.");
             });
 
-            auditLog.Append(normalized.Actor, "policy.rule.add." + normalized.Kind, normalized.Value, normalized.Extension, result.Succeeded, result.Status, result.Message);
+            auditLog.Append(normalized.Actor, "policy.rule.add." + normalized.Kind, normalized.Value, normalized.Extension, result.succeeded, result.status, result.message);
             return result;
         }
 
@@ -157,14 +157,14 @@ namespace DataProtectorWebBridge.Services
                 throw new BridgeException(1, "Unsupported rule kind.");
             });
 
-            auditLog.Append(normalized.Actor, "policy.rule.remove." + normalized.Kind, normalized.Value, normalized.Extension, result.Succeeded, result.Status, result.Message);
+            auditLog.Append(normalized.Actor, "policy.rule.remove." + normalized.Kind, normalized.Value, normalized.Extension, result.succeeded, result.status, result.message);
             return result;
         }
 
         public OperationResult ClearRules(string actor)
         {
             OperationResult result = Invoke(DataProtectorPolicyNative.DpPolicyClearProcessRules);
-            auditLog.Append(actor, "policy.rules.clear", "*", "*", result.Succeeded, result.Status, result.Message);
+            auditLog.Append(actor, "policy.rules.clear", "*", "*", result.succeeded, result.status, result.message);
             return result;
         }
 
@@ -227,9 +227,9 @@ namespace DataProtectorWebBridge.Services
 
             return new PolicyRuleDto
             {
-                Kind = kind,
-                Value = Marshal.PtrToStringUni(nativeRule.Value) ?? string.Empty,
-                Extension = Marshal.PtrToStringUni(nativeRule.Extension) ?? ".dpf"
+                kind = kind,
+                value = Marshal.PtrToStringUni(nativeRule.Value) ?? string.Empty,
+                extension = Marshal.PtrToStringUni(nativeRule.Extension) ?? ".dpf"
             };
         }
 
@@ -241,10 +241,10 @@ namespace DataProtectorWebBridge.Services
                 bool succeeded = status == SuccessStatus;
                 return new OperationResult
                 {
-                    Succeeded = succeeded,
-                    Status = status,
-                    StatusText = ToStatusText(status),
-                    Message = succeeded ? "Success." : ReadLastErrorMessage()
+                    succeeded = succeeded,
+                    status = status,
+                    statusText = ToStatusText(status),
+                    message = succeeded ? "Success." : ReadLastErrorMessage()
                 };
             }
             catch (BridgeException)
@@ -255,10 +255,10 @@ namespace DataProtectorWebBridge.Services
             {
                 return new OperationResult
                 {
-                    Succeeded = false,
-                    Status = 1,
-                    StatusText = ToStatusText(1),
-                    Message = ex.Message
+                    succeeded = false,
+                    status = 1,
+                    statusText = ToStatusText(1),
+                    message = ex.Message
                 };
             }
         }
@@ -298,17 +298,17 @@ namespace DataProtectorWebBridge.Services
 
         public sealed class PolicyRuleDto
         {
-            public string Kind { get; set; }
-            public string Value { get; set; }
-            public string Extension { get; set; }
+            public string kind { get; set; }
+            public string value { get; set; }
+            public string extension { get; set; }
         }
 
         public sealed class OperationResult
         {
-            public bool Succeeded { get; set; }
-            public uint Status { get; set; }
-            public string StatusText { get; set; }
-            public string Message { get; set; }
+            public bool succeeded { get; set; }
+            public uint status { get; set; }
+            public string statusText { get; set; }
+            public string message { get; set; }
         }
 
         public sealed class BridgeException : Exception

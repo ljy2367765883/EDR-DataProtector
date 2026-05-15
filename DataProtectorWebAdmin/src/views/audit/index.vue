@@ -62,7 +62,7 @@ onMounted(refresh);
         <div>
           <h1 class="m-0 text-24px font-700">Audit Trail</h1>
           <p class="m-t-8px text-14px text-gray-500">
-            Local JSONL audit records emitted by DataProtector Web Bridge for policy operations.
+            Central audit records for policy changes, agent synchronization, and client-side apply results.
           </p>
         </div>
         <NSpace align="center">
