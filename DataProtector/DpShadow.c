@@ -469,6 +469,13 @@ DpShadowSyncOriginalToShadow(
     originalSize.QuadPart = 0;
 
     if (!DpCryptoIsReady()) {
+        DP_TRACE_PPTX_NAME("ShadowOriginalToShadowCryptoNotReady",
+                           OriginalName,
+                           STATUS_ACCESS_DENIED,
+                           CreateDisposition,
+                           0,
+                           0,
+                           0);
         return STATUS_ACCESS_DENIED;
     }
 
@@ -527,6 +534,13 @@ DpShadowSyncOriginalToShadow(
                               &ioStatus);
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_NAME("ShadowOpenOriginalFailed",
+                           OriginalName,
+                           status,
+                           CreateDisposition,
+                           originalDisposition,
+                           0,
+                           0);
         goto Exit;
     }
 
@@ -571,6 +585,13 @@ CreateShadow:
                                   &ioStatus);
 
         if (!NT_SUCCESS(status)) {
+            DP_TRACE_PPTX_NAME("ShadowOpenShadowFailed",
+                               ShadowName,
+                               status,
+                               CreateDisposition,
+                               0,
+                               0,
+                               0);
             goto Exit;
         }
     }
@@ -581,6 +602,13 @@ CreateShadow:
                                        &originalSize);
 
         if (!NT_SUCCESS(status)) {
+            DP_TRACE_PPTX_NAME("ShadowQueryOriginalSizeFailed",
+                               OriginalName,
+                               status,
+                               CreateDisposition,
+                               0,
+                               0,
+                               0);
             goto Exit;
         }
     }
@@ -590,6 +618,13 @@ CreateShadow:
                                  originalSize);
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_NAME("ShadowSetSizeFailed",
+                           ShadowName,
+                           status,
+                           CreateDisposition,
+                           originalSize.QuadPart,
+                           copyOriginal,
+                           0);
         goto Exit;
     }
 
@@ -606,6 +641,13 @@ CreateShadow:
     }
 
 Exit:
+    DP_TRACE_PPTX_NAME("ShadowOriginalToShadowDone",
+                       OriginalName,
+                       status,
+                       CreateDisposition,
+                       copyOriginal,
+                       *ShadowDirty,
+                       originalSize.QuadPart);
     DpShadowCloseFile(shadowHandle, shadowFileObject);
     DpShadowCloseFile(originalHandle, originalFileObject);
     ExReleaseResourceAndLeaveCriticalRegion(&gDpShadowResource);
@@ -629,7 +671,16 @@ DpShadowSyncShadowToOriginal(
     LARGE_INTEGER shadowSize;
     NTSTATUS status;
 
+    shadowSize.QuadPart = 0;
+
     if (!DpCryptoIsReady()) {
+        DP_TRACE_PPTX_NAME("ShadowToOriginalCryptoNotReady",
+                           OriginalName,
+                           STATUS_ACCESS_DENIED,
+                           0,
+                           0,
+                           0,
+                           0);
         return STATUS_ACCESS_DENIED;
     }
 
@@ -648,6 +699,13 @@ DpShadowSyncShadowToOriginal(
                               &ioStatus);
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_NAME("ShadowToOriginalOpenShadowFailed",
+                           ShadowName,
+                           status,
+                           0,
+                           0,
+                           0,
+                           0);
         goto Exit;
     }
 
@@ -664,6 +722,13 @@ DpShadowSyncShadowToOriginal(
                               &ioStatus);
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_NAME("ShadowToOriginalOpenOriginalFailed",
+                           OriginalName,
+                           status,
+                           0,
+                           0,
+                           0,
+                           0);
         goto Exit;
     }
 
@@ -672,6 +737,13 @@ DpShadowSyncShadowToOriginal(
                                    &shadowSize);
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_NAME("ShadowToOriginalQuerySizeFailed",
+                           ShadowName,
+                           status,
+                           0,
+                           0,
+                           0,
+                           0);
         goto Exit;
     }
 
@@ -680,6 +752,13 @@ DpShadowSyncShadowToOriginal(
                                  shadowSize);
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_NAME("ShadowToOriginalSetSizeFailed",
+                           OriginalName,
+                           status,
+                           shadowSize.QuadPart,
+                           0,
+                           0,
+                           0);
         goto Exit;
     }
 
@@ -694,6 +773,13 @@ DpShadowSyncShadowToOriginal(
     }
 
 Exit:
+    DP_TRACE_PPTX_NAME("ShadowToOriginalDone",
+                       OriginalName,
+                       status,
+                       shadowSize.QuadPart,
+                       0,
+                       0,
+                       0);
     DpShadowCloseFile(originalHandle, originalFileObject);
     DpShadowCloseFile(shadowHandle, shadowFileObject);
     ExReleaseResourceAndLeaveCriticalRegion(&gDpShadowResource);
@@ -910,6 +996,13 @@ DpShadowPreCreate(
     }
 
     if (!DpPolicyNameIsProtected(&nameInfo->Name)) {
+        DP_TRACE_PPTX_NAME("ShadowPreCreateNotProtected",
+                           &nameInfo->Name,
+                           STATUS_SUCCESS,
+                           0,
+                           0,
+                           0,
+                           0);
         status = STATUS_SUCCESS;
         goto Exit;
     }
@@ -918,12 +1011,26 @@ DpShadowPreCreate(
                                              &nameInfo->Name,
                                              &markerPresent);
     if (!NT_SUCCESS(status) || !markerPresent) {
+        DP_TRACE_PPTX_NAME("ShadowPreCreateNoMarker",
+                           &nameInfo->Name,
+                           status,
+                           markerPresent,
+                           0,
+                           0,
+                           0);
         status = STATUS_SUCCESS;
         goto Exit;
     }
 
     trusted = DpProcessPolicyIsTrusted(Data, &nameInfo->Name);
     if (!trusted) {
+        DP_TRACE_PPTX_NAME("ShadowPreCreateUntrusted",
+                           &nameInfo->Name,
+                           STATUS_SUCCESS,
+                           trusted,
+                           markerPresent,
+                           0,
+                           0);
         status = STATUS_SUCCESS;
         goto Exit;
     }
@@ -967,6 +1074,13 @@ DpShadowPreCreate(
         DP_DBG_PRINT(DP_TRACE_SHADOW,
                      ("DataProtector!DpShadowPreCreate: sync original to shadow failed 0x%08X\n",
                       status));
+        DP_TRACE_PPTX_NAME("ShadowPreCreateSyncFailed",
+                           &nameInfo->Name,
+                           status,
+                           trusted,
+                           markerPresent,
+                           0,
+                           0);
         DpShadowFreeCreateContext(createContext);
         createContext = NULL;
         goto Exit;
@@ -994,6 +1108,13 @@ DpShadowPreCreate(
     Data->IoStatus.Information = IO_REPARSE;
     DP_DBG_PRINT(DP_TRACE_SHADOW,
                  ("DataProtector!DpShadowPreCreate: redirected trusted create to shadow stream\n"));
+    DP_TRACE_PPTX_NAME("ShadowPreCreateRedirect",
+                       &createContext->OriginalName,
+                       status,
+                       trusted,
+                       markerPresent,
+                       createContext->ShadowDirty,
+                       Data->Iopb->Parameters.Create.Options >> 24);
     status = STATUS_REPARSE;
 
 Exit:
@@ -1078,6 +1199,15 @@ DpShadowCleanupHandle(
     NTSTATUS status;
 
     if (HandleContext == NULL || !HandleContext->IsShadow || !HandleContext->ShadowDirty) {
+        if (HandleContext != NULL && HandleContext->OriginalName.Buffer != NULL) {
+            DP_TRACE_PPTX_NAME("ShadowCleanupSkip",
+                               &HandleContext->OriginalName,
+                               STATUS_SUCCESS,
+                               HandleContext->IsShadow,
+                               HandleContext->ShadowDirty,
+                               0,
+                               0);
+        }
         return STATUS_SUCCESS;
     }
 
@@ -1094,6 +1224,13 @@ DpShadowCleanupHandle(
     DP_DBG_PRINT(DP_TRACE_SHADOW,
                  ("DataProtector!DpShadowCleanupHandle: writeback status 0x%08X\n",
                   status));
+    DP_TRACE_PPTX_NAME("ShadowCleanupWriteback",
+                       &HandleContext->OriginalName,
+                       status,
+                       HandleContext->IsShadow,
+                       HandleContext->ShadowDirty,
+                       0,
+                       0);
 
     return status;
 }

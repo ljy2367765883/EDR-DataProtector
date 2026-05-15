@@ -44,6 +44,7 @@
     <ClCompile Include="DpPolicy.c" />
     <ClCompile Include="DpProcessPolicy.c" />
     <ClCompile Include="DpShadow.c" />
+    <ClCompile Include="DpTrace.c" />
     <ClInclude Include="DataProtector.h" />
     <Inf Include="DataProtector.inf" />
   </ItemGroup>

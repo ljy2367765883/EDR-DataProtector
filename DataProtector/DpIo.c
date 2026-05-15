@@ -236,9 +236,24 @@ DpFinalizeEncryptOnCleanup(
     }
 
     if (!DpPolicyNameIsProtected(finalName) || DpPolicyNameIsShadow(finalName)) {
+        DP_TRACE_PPTX_NAME("CleanupSkipEncrypt",
+                           finalName,
+                           STATUS_SUCCESS,
+                           HandleContext->IsProtected,
+                           HandleContext->IsTrusted,
+                           HandleContext->IsShadow,
+                           HandleContext->EncryptOnCleanup);
         status = STATUS_SUCCESS;
         goto Exit;
     }
+
+    DP_TRACE_PPTX_NAME("CleanupEncryptBegin",
+                       finalName,
+                       STATUS_SUCCESS,
+                       HandleContext->IsProtected,
+                       HandleContext->IsTrusted,
+                       HandleContext->IsShadow,
+                       HandleContext->EncryptOnCleanup);
 
     (VOID)FltFlushBuffers(FltObjects->Instance, FltObjects->FileObject);
 
@@ -246,6 +261,13 @@ DpFinalizeEncryptOnCleanup(
                                               FltObjects->FileObject);
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_NAME("CleanupEncryptFailed",
+                           finalName,
+                           status,
+                           HandleContext->IsProtected,
+                           HandleContext->IsTrusted,
+                           HandleContext->IsShadow,
+                           HandleContext->EncryptOnCleanup);
         goto Exit;
     }
 
@@ -253,12 +275,27 @@ DpFinalizeEncryptOnCleanup(
                                                  finalName);
     if (!NT_SUCCESS(markerStatus)) {
         status = markerStatus;
+        DP_TRACE_PPTX_NAME("CleanupMarkerFailed",
+                           finalName,
+                           status,
+                           HandleContext->IsProtected,
+                           HandleContext->IsTrusted,
+                           HandleContext->IsShadow,
+                           HandleContext->EncryptOnCleanup);
         goto Exit;
     }
 
     (VOID)DpPolicySetStreamProtection(FltObjects, TRUE);
     HandleContext->IsProtected = TRUE;
     HandleContext->EncryptOnCleanup = FALSE;
+
+    DP_TRACE_PPTX_NAME("CleanupEncryptDone",
+                       finalName,
+                       STATUS_SUCCESS,
+                       HandleContext->IsProtected,
+                       HandleContext->IsTrusted,
+                       HandleContext->IsShadow,
+                       HandleContext->EncryptOnCleanup);
 
 Exit:
     if (nameInfo != NULL) {
@@ -387,6 +424,13 @@ DpRenameTargetRemainsProtected(
         if (isProtected) {
             *EffectiveNameInfo = tunneledNameInfo;
         } else {
+            DP_TRACE_PPTX_NAME("RenameTunneledNotProtected",
+                               &tunneledNameInfo->Name,
+                               status,
+                               isProtected,
+                               0,
+                               0,
+                               0);
             FltReleaseFileNameInformation(tunneledNameInfo);
         }
 
@@ -399,6 +443,14 @@ DpRenameTargetRemainsProtected(
     if (isProtected) {
         FltReferenceFileNameInformation(RenameContext->TargetNameInfo);
         *EffectiveNameInfo = RenameContext->TargetNameInfo;
+    } else {
+        DP_TRACE_PPTX_NAME("RenameTargetNotProtected",
+                           &RenameContext->TargetNameInfo->Name,
+                           STATUS_SUCCESS,
+                           isProtected,
+                           0,
+                           0,
+                           0);
     }
 
     return isProtected;
@@ -429,6 +481,13 @@ DpPostSetInformationWhenSafe(
         FltObjects->FileObject != NULL) {
 
         trusted = DpProcessPolicyIsTrusted(Data, &effectiveNameInfo->Name);
+        DP_TRACE_PPTX_NAME("RenamePostTarget",
+                           &effectiveNameInfo->Name,
+                           Data->IoStatus.Status,
+                           trusted,
+                           renameContext->EncryptAfterRename,
+                           0,
+                           0);
         if (!trusted) {
             goto Exit;
         }
@@ -441,6 +500,21 @@ DpPostSetInformationWhenSafe(
             DP_DBG_PRINT(DP_TRACE_IO,
                          ("DataProtector!DpPostSetInformationWhenSafe: failed to arm deferred encryption 0x%08X\n",
                           status));
+            DP_TRACE_PPTX_NAME("RenameArmEncryptFailed",
+                               &effectiveNameInfo->Name,
+                               status,
+                               trusted,
+                               renameContext->EncryptAfterRename,
+                               0,
+                               0);
+        } else {
+            DP_TRACE_PPTX_NAME("RenameArmEncryptDone",
+                               &effectiveNameInfo->Name,
+                               status,
+                               trusted,
+                               renameContext->EncryptAfterRename,
+                               0,
+                               0);
         }
     }
 
@@ -468,11 +542,27 @@ DpPreCreate(
 
     status = DpShadowPreCreate(Data, FltObjects, &createContext);
     if (status == STATUS_REPARSE) {
+        DP_TRACE_PPTX_DATA("PreCreateShadowReparse",
+                           Data,
+                           FltObjects,
+                           status,
+                           0,
+                           0,
+                           0,
+                           0);
         DpShadowFreeCreateContext(createContext);
         return FLT_PREOP_COMPLETE;
     }
 
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_DATA("PreCreateDenied",
+                           Data,
+                           FltObjects,
+                           status,
+                           0,
+                           0,
+                           0,
+                           0);
         DpShadowFreeCreateContext(createContext);
         Data->IoStatus.Status = status;
         Data->IoStatus.Information = 0;
@@ -517,6 +607,13 @@ DpPostCreate(
                                         FltObjects,
                                         createContext,
                                         &handleContext);
+            DP_TRACE_PPTX_NAME("PostCreateShadowHandle",
+                               &createContext->OriginalName,
+                               status,
+                               createContext->IsTrusted,
+                               createContext->IsShadow,
+                               createContext->ShadowDirty,
+                               Data->IoStatus.Information);
 
             if (NT_SUCCESS(status) && handleContext != NULL) {
                 status = FltSetStreamHandleContext(FltObjects->Instance,
@@ -555,6 +652,14 @@ DpPostCreate(
 
                 isProtected = markerPresent;
             }
+
+            DP_TRACE_PPTX_NAME("PostCreatePolicy",
+                               &nameInfo->Name,
+                               Data->IoStatus.Status,
+                               pathProtected,
+                               markerPresent,
+                               isProtected,
+                               Data->IoStatus.Information);
         }
 
         if (pathProtected) {
@@ -587,6 +692,14 @@ DpPostCreate(
                         (VOID)DpDuplicateName(&nameInfo->Name,
                                               &handleContext->PendingName);
                     }
+
+                    DP_TRACE_PPTX_NAME("PostCreateHandle",
+                                       &nameInfo->Name,
+                                       status,
+                                       handleContext->IsProtected,
+                                       handleContext->IsTrusted,
+                                       handleContext->EncryptOnCleanup,
+                                       createdOrReplaced);
                 }
 
                 status = FltSetStreamHandleContext(FltObjects->Instance,
@@ -642,6 +755,14 @@ DpPreRead(
 
     status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
     if (!NT_SUCCESS(status) || !isProtected) {
+        DP_TRACE_PPTX_DATA("PreReadBypass",
+                           Data,
+                           FltObjects,
+                           status,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
@@ -655,6 +776,14 @@ DpPreRead(
 #endif
 
     if (!isTrusted && !plaintextCacheEnabled) {
+        DP_TRACE_PPTX_DATA("PreReadCiphertext",
+                           Data,
+                           FltObjects,
+                           STATUS_SUCCESS,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
@@ -663,10 +792,26 @@ DpPreRead(
     }
 
     if (DpIsPagingIo(Data) && !plaintextCacheEnabled) {
+        DP_TRACE_PPTX_DATA("PreReadPagingBypass",
+                           Data,
+                           FltObjects,
+                           STATUS_SUCCESS,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           plaintextCacheEnabled);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     if (!DpCryptoIsReady()) {
+        DP_TRACE_PPTX_DATA("PreReadCryptoNotReady",
+                           Data,
+                           FltObjects,
+                           STATUS_ACCESS_DENIED,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -686,6 +831,14 @@ DpPreRead(
         ioContext->Length = length;
         ioContext->TransformInPlace = TRUE;
         *CompletionContext = ioContext;
+        DP_TRACE_PPTX_DATA("PreReadTransformPaging",
+                           Data,
+                           FltObjects,
+                           STATUS_SUCCESS,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           ioContext->ByteOffset.QuadPart);
 
         return FLT_PREOP_SUCCESS_WITH_CALLBACK;
     }
@@ -720,6 +873,15 @@ DpPreRead(
 
     *CompletionContext = ioContext;
 
+    DP_TRACE_PPTX_DATA("PreReadTransform",
+                       Data,
+                       FltObjects,
+                       STATUS_SUCCESS,
+                       isProtected,
+                       isTrusted,
+                       length,
+                       ioContext->ByteOffset.QuadPart);
+
     return FLT_PREOP_SUCCESS_WITH_CALLBACK;
 }
 
@@ -748,6 +910,14 @@ DpPostRead(
 
     if (NT_SUCCESS(Data->IoStatus.Status) && Data->IoStatus.Information > 0) {
         bytesRead = (ULONG)min(Data->IoStatus.Information, ioContext->Length);
+        DP_TRACE_PPTX_DATA("PostReadTransform",
+                           Data,
+                           FltObjects,
+                           Data->IoStatus.Status,
+                           bytesRead,
+                           ioContext->Length,
+                           ioContext->TransformInPlace,
+                           ioContext->ByteOffset.QuadPart);
 
         if (ioContext->TransformInPlace) {
             destination = DpGetSystemBufferAddress(Data,
@@ -822,19 +992,43 @@ DpPreWrite(
 
     status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
     if (!NT_SUCCESS(status)) {
+        DP_TRACE_PPTX_DATA("PreWriteNoContext",
+                           Data,
+                           FltObjects,
+                           status,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     (VOID)DpShadowMarkHandleDirty(FltObjects);
 
     if (!isProtected && isTrusted) {
-        (VOID)DpMarkHandleEncryptOnCleanup(FltObjects,
-                                           NULL,
-                                           TRUE,
-                                           FALSE);
+        status = DpMarkHandleEncryptOnCleanup(FltObjects,
+                                              NULL,
+                                              TRUE,
+                                              FALSE);
+        DP_TRACE_PPTX_DATA("PreWriteArmExisting",
+                           Data,
+                           FltObjects,
+                           status,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
     }
 
     if (!isProtected) {
+        DP_TRACE_PPTX_DATA("PreWritePlainBypass",
+                           Data,
+                           FltObjects,
+                           STATUS_SUCCESS,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
@@ -848,6 +1042,14 @@ DpPreWrite(
 #endif
 
     if (!isTrusted) {
+        DP_TRACE_PPTX_DATA("PreWriteDeniedUntrusted",
+                           Data,
+                           FltObjects,
+                           STATUS_ACCESS_DENIED,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -858,10 +1060,26 @@ DpPreWrite(
     }
 
     if (DpIsPagingIo(Data) && !plaintextCacheEnabled) {
+        DP_TRACE_PPTX_DATA("PreWritePagingBypass",
+                           Data,
+                           FltObjects,
+                           STATUS_SUCCESS,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           plaintextCacheEnabled);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     if (!DpCryptoIsReady()) {
+        DP_TRACE_PPTX_DATA("PreWriteCryptoNotReady",
+                           Data,
+                           FltObjects,
+                           STATUS_ACCESS_DENIED,
+                           isProtected,
+                           isTrusted,
+                           length,
+                           DpIsPagingIo(Data));
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -914,6 +1132,15 @@ DpPreWrite(
 
     *CompletionContext = ioContext;
 
+    DP_TRACE_PPTX_DATA("PreWriteTransform",
+                       Data,
+                       FltObjects,
+                       STATUS_SUCCESS,
+                       isProtected,
+                       isTrusted,
+                       length,
+                       ioContext->ByteOffset.QuadPart);
+
     return FLT_PREOP_SUCCESS_WITH_CALLBACK;
 }
 
@@ -934,6 +1161,14 @@ DpPostWrite(
     }
 
     if (!FlagOn(Flags, FLTFL_POST_OPERATION_DRAINING)) {
+        DP_TRACE_PPTX_DATA("PostWriteRestore",
+                           Data,
+                           FltObjects,
+                           Data->IoStatus.Status,
+                           Data->IoStatus.Information,
+                           ioContext->Length,
+                           ioContext->ByteOffset.QuadPart,
+                           0);
         Data->Iopb->Parameters.Write.WriteBuffer = ioContext->OriginalBuffer;
         Data->Iopb->Parameters.Write.MdlAddress = ioContext->OriginalMdl;
         FLT_SET_CALLBACK_DATA_DIRTY(Data);
@@ -964,13 +1199,29 @@ DpPreCleanup(
 
     status = DpGetHandleContext(FltObjects, &handleContext);
     if (NT_SUCCESS(status) && handleContext != NULL) {
+        DP_TRACE_PPTX_DATA("PreCleanupHandle",
+                           Data,
+                           FltObjects,
+                           status,
+                           handleContext->IsProtected,
+                           handleContext->IsTrusted,
+                           handleContext->IsShadow,
+                           handleContext->EncryptOnCleanup);
         status = DpFinalizeEncryptOnCleanup(Data, FltObjects, handleContext);
         if (!NT_SUCCESS(status)) {
             DP_DBG_PRINT(DP_TRACE_IO,
                          ("DataProtector!DpPreCleanup: finalize encryption failed 0x%08X\n",
                           status));
         } else {
-            (VOID)DpShadowCleanupHandle(FltObjects, handleContext);
+            status = DpShadowCleanupHandle(FltObjects, handleContext);
+            DP_TRACE_PPTX_DATA("PreCleanupShadow",
+                               Data,
+                               FltObjects,
+                               status,
+                               handleContext->IsProtected,
+                               handleContext->IsTrusted,
+                               handleContext->IsShadow,
+                               handleContext->ShadowDirty);
         }
 
         DpReleaseHandleContext(handleContext);
@@ -1014,8 +1265,24 @@ DpPreSetInformation(
                                               &targetNameInfo);
 
         if (!NT_SUCCESS(status)) {
+            DP_TRACE_PPTX_DATA("PreRenameNoTarget",
+                               Data,
+                               FltObjects,
+                               status,
+                               isProtected,
+                               isTrusted,
+                               informationClass,
+                               0);
             return FLT_PREOP_SUCCESS_NO_CALLBACK;
         }
+
+        DP_TRACE_PPTX_NAME("PreRenameTarget",
+                           &targetNameInfo->Name,
+                           status,
+                           isProtected,
+                           isTrusted,
+                           informationClass,
+                           0);
 
         if (DpPolicyNameIsProtected(&targetNameInfo->Name) &&
             !DpPolicyNameIsShadow(&targetNameInfo->Name)) {
@@ -1032,6 +1299,14 @@ DpPreSetInformation(
                 *CompletionContext = renameContext;
             }
         }
+
+        DP_TRACE_PPTX_NAME("PreRenameDecision",
+                           &targetNameInfo->Name,
+                           STATUS_SUCCESS,
+                           renameContext != NULL,
+                           isProtected,
+                           isTrusted,
+                           informationClass);
 
         FltReleaseFileNameInformation(targetNameInfo);
 

@@ -253,9 +253,23 @@ DpPolicyFileHasProtectionMarker(
             status == STATUS_NO_SUCH_FILE ||
             status == STATUS_NOT_FOUND) {
 
+            DP_TRACE_PPTX_NAME("MarkerMissing",
+                               Name,
+                               status,
+                               0,
+                               0,
+                               0,
+                               0);
             return STATUS_SUCCESS;
         }
 
+        DP_TRACE_PPTX_NAME("MarkerOpenFailed",
+                           Name,
+                           status,
+                           0,
+                           0,
+                           0,
+                           0);
         return status;
     }
 
@@ -277,6 +291,14 @@ DpPolicyFileHasProtectionMarker(
     if (NT_SUCCESS(status) && bytesRead == sizeof(magic) && magic == DP_PROTECTION_MAGIC) {
         *IsProtected = TRUE;
     }
+
+    DP_TRACE_PPTX_NAME("MarkerRead",
+                       Name,
+                       status,
+                       *IsProtected,
+                       bytesRead,
+                       magic,
+                       0);
 
     DpPolicyCloseFile(markerHandle, markerFileObject);
     DpPolicyFreeMarkerName(&markerName);
@@ -322,6 +344,13 @@ DpPolicyWriteProtectionMarker(
 
     if (!NT_SUCCESS(status)) {
         DpPolicyFreeMarkerName(&markerName);
+        DP_TRACE_PPTX_NAME("MarkerWriteOpenFailed",
+                           Name,
+                           status,
+                           0,
+                           0,
+                           0,
+                           0);
         return status;
     }
 
@@ -343,6 +372,14 @@ DpPolicyWriteProtectionMarker(
     if (NT_SUCCESS(status) && bytesWritten != sizeof(magic)) {
         status = STATUS_DISK_FULL;
     }
+
+    DP_TRACE_PPTX_NAME("MarkerWrite",
+                       Name,
+                       status,
+                       bytesWritten,
+                       magic,
+                       0,
+                       0);
 
     if (NT_SUCCESS(status)) {
         (VOID)FltFlushBuffers(Instance, markerFileObject);
@@ -391,6 +428,14 @@ DpPolicyRefreshStreamContext(
             isProtected = markerPresent;
         }
     }
+
+    DP_TRACE_PPTX_NAME("RefreshStream",
+                       &nameInfo->Name,
+                       status,
+                       isProtected,
+                       markerPresent,
+                       0,
+                       0);
 
     FltReleaseFileNameInformation(nameInfo);
 

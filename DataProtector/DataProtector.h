@@ -39,6 +39,13 @@ Abstract:
 #define DP_TRACE_SHADOW        0x00000008
 
 //
+// Targeted WPS/Office investigation switch. Set to 0 for normal builds.
+// When enabled, the driver emits DbgPrintEx lines only for .pptx paths
+// and their DataProtector ADS streams.
+//
+#define DP_ENABLE_PPTX_OPERATION_TRACE 1
+
+//
 // Cached transparent encryption keeps plaintext in the system file cache.
 // Manual unload is therefore unsafe unless a separate safe-stop path flushes
 // and purges protected streams first.
@@ -523,5 +530,48 @@ DpHandleContextCleanup(
     _In_ PFLT_CONTEXT Context,
     _In_ FLT_CONTEXT_TYPE ContextType
     );
+
+#if DP_ENABLE_PPTX_OPERATION_TRACE
+
+BOOLEAN
+DpTraceNameIsPptx(
+    _In_opt_ PCUNICODE_STRING Name
+    );
+
+VOID
+DpTracePptxName(
+    _In_z_ PCSTR Operation,
+    _In_opt_ PCUNICODE_STRING Name,
+    _In_ NTSTATUS Status,
+    _In_ ULONG_PTR Detail1,
+    _In_ ULONG_PTR Detail2,
+    _In_ ULONG_PTR Detail3,
+    _In_ ULONG_PTR Detail4
+    );
+
+VOID
+DpTracePptxCallbackData(
+    _In_z_ PCSTR Operation,
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ NTSTATUS Status,
+    _In_ ULONG_PTR Detail1,
+    _In_ ULONG_PTR Detail2,
+    _In_ ULONG_PTR Detail3,
+    _In_ ULONG_PTR Detail4
+    );
+
+#define DP_TRACE_PPTX_NAME(_operation, _name, _status, _detail1, _detail2, _detail3, _detail4) \
+    DpTracePptxName((_operation), (_name), (_status), (ULONG_PTR)(_detail1), (ULONG_PTR)(_detail2), (ULONG_PTR)(_detail3), (ULONG_PTR)(_detail4))
+
+#define DP_TRACE_PPTX_DATA(_operation, _data, _fltObjects, _status, _detail1, _detail2, _detail3, _detail4) \
+    DpTracePptxCallbackData((_operation), (_data), (_fltObjects), (_status), (ULONG_PTR)(_detail1), (ULONG_PTR)(_detail2), (ULONG_PTR)(_detail3), (ULONG_PTR)(_detail4))
+
+#else
+
+#define DP_TRACE_PPTX_NAME(_operation, _name, _status, _detail1, _detail2, _detail3, _detail4) ((void)0)
+#define DP_TRACE_PPTX_DATA(_operation, _data, _fltObjects, _status, _detail1, _detail2, _detail3, _detail4) ((void)0)
+
+#endif
 
 EXTERN_C_END

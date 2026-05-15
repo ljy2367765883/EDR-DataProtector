@@ -48,6 +48,9 @@
     <ClCompile Include="DpShadow.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DpTrace.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DataProtector.h">
