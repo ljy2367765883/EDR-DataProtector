@@ -232,6 +232,7 @@ const local: App.I18n.Schema = {
     home: 'Operations',
     devices: 'Devices',
     policy: 'Policy',
+    remote: 'Remote',
     audit: 'Audit'
   },
   page: {

@@ -228,6 +228,7 @@ const local: App.I18n.Schema = {
     home: '运行态',
     devices: '设备',
     policy: '策略',
+    remote: '远程',
     audit: '审计'
   },
   page: {

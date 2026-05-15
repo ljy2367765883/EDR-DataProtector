@@ -46,7 +46,8 @@ namespace DataProtectorWebBridge.Services
                     auditPath = filePath,
                     policyVersion = state.PolicyVersion,
                     deviceCount = state.Devices.Count,
-                    onlineDeviceCount = state.Devices.Values.Count(IsOnline)
+                    onlineDeviceCount = state.Devices.Values.Count(IsOnline),
+                    pendingTaskCount = state.Tasks.Count(task => task.status == "queued" || task.status == "sent")
                 };
             }
         }
@@ -148,6 +149,71 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public RemoteTaskDto[] QueryTasks(string deviceId, int limit)
+        {
+            int take = limit <= 0 ? DefaultLimit : Math.Min(limit, 1000);
+            lock (syncRoot)
+            {
+                IEnumerable<RemoteTaskState> query = state.Tasks;
+                if (!string.IsNullOrWhiteSpace(deviceId))
+                {
+                    query = query.Where(task => string.Equals(task.deviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                }
+
+                return query
+                    .OrderByDescending(task => task.createdUtc, StringComparer.OrdinalIgnoreCase)
+                    .Take(take)
+                    .Select(CloneTask)
+                    .ToArray();
+            }
+        }
+
+        public RemoteTaskDto CreateTask(RemoteTaskRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Remote task request body is required.");
+            }
+
+            string deviceId = (request.deviceId ?? string.Empty).Trim();
+            string kind = (request.kind ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Target device id is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(kind))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Task kind is required.");
+            }
+
+            lock (syncRoot)
+            {
+                if (!state.Devices.ContainsKey(deviceId))
+                {
+                    throw new PolicyBridgeService.BridgeException(1, "Target device is not registered.");
+                }
+
+                RemoteTaskState task = new RemoteTaskState
+                {
+                    taskId = Guid.NewGuid().ToString("N"),
+                    deviceId = deviceId,
+                    kind = kind,
+                    argumentsJson = string.IsNullOrWhiteSpace(request.argumentsJson) ? "{}" : request.argumentsJson,
+                    actor = string.IsNullOrWhiteSpace(request.actor) ? Environment.UserName : request.actor,
+                    status = "queued",
+                    createdUtc = DateTime.UtcNow.ToString("o"),
+                    output = string.Empty,
+                    error = string.Empty
+                };
+
+                state.Tasks.Add(task);
+                AppendAudit(task.actor, "remote.task.create." + task.kind, task.deviceId, string.Empty, true, "0x00000000", "Remote task queued: " + task.taskId);
+                Save();
+                return CloneTask(task);
+            }
+        }
+
         public AgentSyncResponse SyncAgent(AgentSyncRequest request)
         {
             if (request == null)
@@ -179,6 +245,14 @@ namespace DataProtectorWebBridge.Services
                 device.LastApplyStatus = request.LastApplyStatus ?? string.Empty;
                 device.LastApplyMessage = request.LastApplyMessage ?? string.Empty;
 
+                if (request.TaskResults != null)
+                {
+                    foreach (RemoteTaskResult result in request.TaskResults)
+                    {
+                        ApplyTaskResult(deviceId, result);
+                    }
+                }
+
                 if (request.Audit != null)
                 {
                     foreach (AuditLog.AuditRecord record in request.Audit)
@@ -195,6 +269,7 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 AppendAudit(device.Machine, "agent.sync", device.DeviceId, string.Empty, true, "0x00000000", "Agent synchronized with central server.");
+                RemoteTaskDto[] assignedTasks = AssignTasks(deviceId);
                 TrimAudit();
                 Save();
 
@@ -204,7 +279,8 @@ namespace DataProtectorWebBridge.Services
                     deviceId = deviceId,
                     serverTimeUtc = DateTime.UtcNow.ToString("o"),
                     policyVersion = state.PolicyVersion,
-                    rules = QueryRules()
+                    rules = QueryRules(),
+                    tasks = assignedTasks
                 };
             }
         }
@@ -235,6 +311,7 @@ namespace DataProtectorWebBridge.Services
         {
             Directory.CreateDirectory(DirectoryPath);
             TrimAudit();
+            TrimTasks();
             string json = serializer.Serialize(state);
             File.WriteAllText(filePath, json, Encoding.UTF8);
         }
@@ -261,6 +338,90 @@ namespace DataProtectorWebBridge.Services
             {
                 state.Audit = state.Audit.Skip(state.Audit.Count - maxAuditRecords).ToList();
             }
+        }
+
+        private void TrimTasks()
+        {
+            const int maxTaskRecords = 5000;
+            if (state.Tasks.Count > maxTaskRecords)
+            {
+                state.Tasks = state.Tasks
+                    .OrderByDescending(task => task.createdUtc, StringComparer.OrdinalIgnoreCase)
+                    .Take(maxTaskRecords)
+                    .ToList();
+            }
+        }
+
+        private RemoteTaskDto[] AssignTasks(string deviceId)
+        {
+            DateTime now = DateTime.UtcNow;
+            List<RemoteTaskDto> tasks = new List<RemoteTaskDto>();
+
+            foreach (RemoteTaskState task in state.Tasks
+                .Where(task => string.Equals(task.deviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+                .Where(task => task.status == "queued" || IsStaleSentTask(task, now))
+                .OrderBy(task => task.createdUtc, StringComparer.OrdinalIgnoreCase)
+                .Take(5))
+            {
+                task.status = "sent";
+                task.sentUtc = now.ToString("o");
+                tasks.Add(CloneTask(task));
+            }
+
+            return tasks.ToArray();
+        }
+
+        private void ApplyTaskResult(string deviceId, RemoteTaskResult result)
+        {
+            if (result == null || string.IsNullOrWhiteSpace(result.taskId))
+            {
+                return;
+            }
+
+            RemoteTaskState task = state.Tasks.FirstOrDefault(item =>
+                string.Equals(item.taskId, result.taskId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(item.deviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+
+            if (task == null)
+            {
+                AppendAudit(deviceId, "remote.task.result.unknown", result.taskId, string.Empty, false, "0x00000001", "Agent returned an unknown task result.");
+                return;
+            }
+
+            task.status = result.succeeded ? "completed" : "failed";
+            task.completedUtc = DateTime.UtcNow.ToString("o");
+            task.succeeded = result.succeeded;
+            task.exitCode = result.exitCode;
+            task.output = Truncate(result.output, 262144);
+            task.error = Truncate(result.error, 65536);
+            RedactSensitiveTaskArgs(task);
+            AppendAudit(deviceId, "remote.task.result." + task.kind, task.taskId, string.Empty, result.succeeded, result.succeeded ? "0x00000000" : "0x00000001", result.succeeded ? "Remote task completed." : task.error);
+        }
+
+        private static bool IsStaleSentTask(RemoteTaskState task, DateTime now)
+        {
+            DateTime sent;
+            return task.status == "sent"
+                && DateTime.TryParse(task.sentUtc, out sent)
+                && now - sent.ToUniversalTime() > TimeSpan.FromMinutes(5);
+        }
+
+        private static void RedactSensitiveTaskArgs(RemoteTaskState task)
+        {
+            if (string.Equals(task.kind, "user.changePassword", StringComparison.OrdinalIgnoreCase))
+            {
+                task.argumentsJson = "{\"username\":\"redacted\",\"newPassword\":\"redacted\"}";
+            }
+        }
+
+        private static string Truncate(string value, int maxChars)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length <= maxChars)
+            {
+                return value ?? string.Empty;
+            }
+
+            return value.Substring(0, maxChars) + "\n[truncated]";
         }
 
         private static bool IsOnline(CentralDeviceState device)
@@ -347,6 +508,26 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static RemoteTaskDto CloneTask(RemoteTaskState task)
+        {
+            return new RemoteTaskDto
+            {
+                taskId = task.taskId,
+                deviceId = task.deviceId,
+                kind = task.kind,
+                argumentsJson = task.argumentsJson,
+                actor = task.actor,
+                status = task.status,
+                createdUtc = task.createdUtc,
+                sentUtc = task.sentUtc,
+                completedUtc = task.completedUtc,
+                succeeded = task.succeeded,
+                exitCode = task.exitCode,
+                output = task.output,
+                error = task.error
+            };
+        }
+
         private static AuditLog.AuditRecord CloneAudit(AuditLog.AuditRecord record)
         {
             if (record == null)
@@ -386,12 +567,14 @@ namespace DataProtectorWebBridge.Services
                 Rules = new List<PolicyBridgeService.PolicyRuleDto>();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 Audit = new List<AuditLog.AuditRecord>();
+                Tasks = new List<RemoteTaskState>();
             }
 
             public long PolicyVersion { get; set; }
             public List<PolicyBridgeService.PolicyRuleDto> Rules { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public List<AuditLog.AuditRecord> Audit { get; set; }
+            public List<RemoteTaskState> Tasks { get; set; }
         }
 
         private sealed class CentralDeviceState
@@ -440,6 +623,7 @@ namespace DataProtectorWebBridge.Services
             public string LastApplyStatus { get; set; }
             public string LastApplyMessage { get; set; }
             public AuditLog.AuditRecord[] Audit { get; set; }
+            public RemoteTaskResult[] TaskResults { get; set; }
         }
 
         public sealed class AgentSyncResponse
@@ -449,6 +633,58 @@ namespace DataProtectorWebBridge.Services
             public string serverTimeUtc { get; set; }
             public long policyVersion { get; set; }
             public PolicyBridgeService.PolicyRuleDto[] rules { get; set; }
+            public RemoteTaskDto[] tasks { get; set; }
+        }
+
+        private sealed class RemoteTaskState
+        {
+            public string taskId { get; set; }
+            public string deviceId { get; set; }
+            public string kind { get; set; }
+            public string argumentsJson { get; set; }
+            public string actor { get; set; }
+            public string status { get; set; }
+            public string createdUtc { get; set; }
+            public string sentUtc { get; set; }
+            public string completedUtc { get; set; }
+            public bool succeeded { get; set; }
+            public int exitCode { get; set; }
+            public string output { get; set; }
+            public string error { get; set; }
+        }
+
+        public sealed class RemoteTaskRequest
+        {
+            public string deviceId { get; set; }
+            public string kind { get; set; }
+            public string argumentsJson { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class RemoteTaskDto
+        {
+            public string taskId { get; set; }
+            public string deviceId { get; set; }
+            public string kind { get; set; }
+            public string argumentsJson { get; set; }
+            public string actor { get; set; }
+            public string status { get; set; }
+            public string createdUtc { get; set; }
+            public string sentUtc { get; set; }
+            public string completedUtc { get; set; }
+            public bool succeeded { get; set; }
+            public int exitCode { get; set; }
+            public string output { get; set; }
+            public string error { get; set; }
+        }
+
+        public sealed class RemoteTaskResult
+        {
+            public string taskId { get; set; }
+            public bool succeeded { get; set; }
+            public int exitCode { get; set; }
+            public string output { get; set; }
+            public string error { get; set; }
         }
     }
 }

@@ -1227,6 +1227,14 @@ the device, pulls the current policy version, clears local driver rules, applies
 the central rules, and reports the last apply result. Client machines do not
 need inbound firewall rules for management.
 
+The same polling channel now carries audited remote response tasks. The first
+task set includes installed application inventory with registry-derived icon
+metadata, startup item review, directory listing, desktop screenshot capture,
+screen lock, bounded command execution, and local account password change. Each
+task has a central `taskId`, target device, actor, timestamps, status, output,
+and audit record. Interactive command sessions and desktop video streaming are
+planned as stream/session transports layered above this task framework.
+
 Central server state is stored here:
 
 ```text

@@ -21,6 +21,22 @@ export function fetchDevices() {
   });
 }
 
+export function fetchRemoteTasks(params: { deviceId?: string; limit?: number } = {}) {
+  return request<Api.DataProtector.RemoteTask[]>({
+    url: '/tasks',
+    method: 'get',
+    params
+  });
+}
+
+export function fetchCreateRemoteTask(data: Api.DataProtector.RemoteTaskRequest) {
+  return request<Api.DataProtector.RemoteTask>({
+    url: '/tasks',
+    method: 'post',
+    data
+  });
+}
+
 export function fetchAddPolicyRule(data: Api.DataProtector.PolicyRuleRequest) {
   return request<Api.DataProtector.OperationResult>({
     url: '/policy/rules',

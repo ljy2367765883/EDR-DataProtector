@@ -107,5 +107,16 @@ export const generatedRoutes: GeneratedRoute[] = [
       icon: 'mdi:shield-key',
       order: 20
     }
+  },
+  {
+    name: 'remote',
+    path: '/remote',
+    component: 'layout.base$view.remote',
+    meta: {
+      title: 'remote',
+      i18nKey: 'route.remote',
+      icon: 'mdi:remote-desktop',
+      order: 25
+    }
   }
 ];

@@ -1,0 +1,398 @@
+using Microsoft.Win32;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Web.Script.Serialization;
+
+namespace DataProtectorWebBridge.Services
+{
+    internal sealed class RemoteTaskExecutor
+    {
+        private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+        public CentralPolicyStore.RemoteTaskResult Execute(CentralPolicyStore.RemoteTaskDto task)
+        {
+            try
+            {
+                string output;
+                int exitCode = 0;
+                string kind = (task.kind ?? string.Empty).Trim();
+
+                switch (kind)
+                {
+                    case "inventory.installedApps":
+                        output = serializer.Serialize(QueryInstalledApps());
+                        break;
+                    case "inventory.startupItems":
+                        output = serializer.Serialize(QueryStartupItems());
+                        break;
+                    case "file.list":
+                        output = serializer.Serialize(ListFiles(ReadArgs(task.argumentsJson)));
+                        break;
+                    case "desktop.screenshot":
+                        output = CaptureScreenshotBase64();
+                        break;
+                    case "session.lock":
+                        output = LockWorkStation() ? "Workstation lock requested." : "LockWorkStation returned false.";
+                        exitCode = output.StartsWith("Workstation", StringComparison.Ordinal) ? 0 : 1;
+                        break;
+                    case "cmd.run":
+                        CommandResult command = RunCommand(ReadArgs(task.argumentsJson));
+                        output = command.Output;
+                        exitCode = command.ExitCode;
+                        break;
+                    case "user.changePassword":
+                        CommandResult password = ChangePassword(ReadArgs(task.argumentsJson));
+                        output = password.Output;
+                        exitCode = password.ExitCode;
+                        break;
+                    default:
+                        throw new InvalidOperationException("Unsupported remote task kind: " + kind);
+                }
+
+                return new CentralPolicyStore.RemoteTaskResult
+                {
+                    taskId = task.taskId,
+                    succeeded = exitCode == 0,
+                    exitCode = exitCode,
+                    output = output,
+                    error = exitCode == 0 ? string.Empty : output
+                };
+            }
+            catch (Exception ex)
+            {
+                return new CentralPolicyStore.RemoteTaskResult
+                {
+                    taskId = task.taskId,
+                    succeeded = false,
+                    exitCode = 1,
+                    output = string.Empty,
+                    error = ex.Message
+                };
+            }
+        }
+
+        private Dictionary<string, object> ReadArgs(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            Dictionary<string, object> args = serializer.Deserialize<Dictionary<string, object>>(json);
+            return args ?? new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private object[] QueryInstalledApps()
+        {
+            List<InstalledAppInfo> apps = new List<InstalledAppInfo>();
+            ReadInstalledApps(Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", apps);
+            ReadInstalledApps(Registry.LocalMachine, @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall", apps);
+            ReadInstalledApps(Registry.CurrentUser, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", apps);
+            return apps
+                .OrderBy(app => app.displayName, StringComparer.OrdinalIgnoreCase)
+                .Take(1000)
+                .ToArray();
+        }
+
+        private static void ReadInstalledApps(RegistryKey root, string subKeyPath, List<InstalledAppInfo> apps)
+        {
+            using (RegistryKey uninstall = root.OpenSubKey(subKeyPath))
+            {
+                if (uninstall == null)
+                {
+                    return;
+                }
+
+                foreach (string name in uninstall.GetSubKeyNames())
+                {
+                    using (RegistryKey app = uninstall.OpenSubKey(name))
+                    {
+                        if (app == null)
+                        {
+                            continue;
+                        }
+
+                        string displayName = Convert.ToString(app.GetValue("DisplayName"));
+                        if (string.IsNullOrWhiteSpace(displayName))
+                        {
+                            continue;
+                        }
+
+                        string iconPath = Convert.ToString(app.GetValue("DisplayIcon"));
+                        apps.Add(new InstalledAppInfo
+                        {
+                            displayName = displayName,
+                            displayVersion = Convert.ToString(app.GetValue("DisplayVersion")),
+                            publisher = Convert.ToString(app.GetValue("Publisher")),
+                            installLocation = Convert.ToString(app.GetValue("InstallLocation")),
+                            uninstallString = Convert.ToString(app.GetValue("UninstallString")),
+                            displayIcon = iconPath,
+                            iconBase64 = TryReadIcon(iconPath)
+                        });
+                    }
+                }
+            }
+        }
+
+        private object[] QueryStartupItems()
+        {
+            List<object> items = new List<object>();
+            ReadRunKey(Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM Run", items);
+            ReadRunKey(Registry.CurrentUser, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKCU Run", items);
+            ReadRunKey(Registry.LocalMachine, @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "HKLM WOW6432 Run", items);
+            ReadStartupFolder(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "User Startup Folder", items);
+            ReadStartupFolder(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), "Common Startup Folder", items);
+            return items.ToArray();
+        }
+
+        private static void ReadRunKey(RegistryKey root, string subKeyPath, string location, List<object> items)
+        {
+            using (RegistryKey key = root.OpenSubKey(subKeyPath))
+            {
+                if (key == null)
+                {
+                    return;
+                }
+
+                foreach (string valueName in key.GetValueNames())
+                {
+                    items.Add(new
+                    {
+                        location = location,
+                        name = valueName,
+                        command = Convert.ToString(key.GetValue(valueName)),
+                        enabled = true
+                    });
+                }
+            }
+        }
+
+        private static void ReadStartupFolder(string folder, string location, List<object> items)
+        {
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            {
+                return;
+            }
+
+            foreach (string file in Directory.GetFiles(folder))
+            {
+                items.Add(new
+                {
+                    location = location,
+                    name = Path.GetFileName(file),
+                    command = file,
+                    enabled = true
+                });
+            }
+        }
+
+        private object[] ListFiles(Dictionary<string, object> args)
+        {
+            string path = GetArg(args, "path", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            int limit = Math.Max(1, Math.Min(ParseInt(GetArg(args, "limit", "200"), 200), 1000));
+            if (!Directory.Exists(path))
+            {
+                throw new DirectoryNotFoundException(path);
+            }
+
+            return Directory.GetFileSystemEntries(path)
+                .Take(limit)
+                .Select(entry =>
+                {
+                    FileAttributes attributes = File.GetAttributes(entry);
+                    bool isDirectory = (attributes & FileAttributes.Directory) == FileAttributes.Directory;
+                    long size = 0;
+                    if (!isDirectory)
+                    {
+                        size = new FileInfo(entry).Length;
+                    }
+
+                    return new
+                    {
+                        name = Path.GetFileName(entry),
+                        path = entry,
+                        isDirectory = isDirectory,
+                        size = size,
+                        lastWriteUtc = File.GetLastWriteTimeUtc(entry).ToString("o")
+                    };
+                })
+                .ToArray();
+        }
+
+        private string CaptureScreenshotBase64()
+        {
+            int width = GetSystemMetrics(0);
+            int height = GetSystemMetrics(1);
+            if (width <= 0 || height <= 0)
+            {
+                throw new InvalidOperationException("No interactive desktop is available for screenshot capture.");
+            }
+
+            using (Bitmap bitmap = new Bitmap(width, height))
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            using (MemoryStream stream = new MemoryStream())
+            {
+                graphics.CopyFromScreen(0, 0, 0, 0, bitmap.Size);
+                bitmap.Save(stream, ImageFormat.Png);
+                return Convert.ToBase64String(stream.ToArray());
+            }
+        }
+
+        private CommandResult RunCommand(Dictionary<string, object> args)
+        {
+            string command = GetArg(args, "command", string.Empty);
+            int timeoutSeconds = Math.Max(1, Math.Min(ParseInt(GetArg(args, "timeoutSeconds", "30"), 30), 300));
+            if (string.IsNullOrWhiteSpace(command))
+            {
+                throw new InvalidOperationException("Command is required.");
+            }
+
+            return RunProcess("cmd.exe", "/c " + command, timeoutSeconds);
+        }
+
+        private CommandResult ChangePassword(Dictionary<string, object> args)
+        {
+            string username = GetArg(args, "username", string.Empty);
+            string newPassword = GetArg(args, "newPassword", string.Empty);
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(newPassword))
+            {
+                throw new InvalidOperationException("Username and new password are required.");
+            }
+
+            return RunProcess("net.exe", "user \"" + username.Replace("\"", string.Empty) + "\" \"" + newPassword.Replace("\"", string.Empty) + "\"", 30);
+        }
+
+        private static CommandResult RunProcess(string fileName, string arguments, int timeoutSeconds)
+        {
+            using (Process process = new Process())
+            {
+                process.StartInfo.FileName = fileName;
+                process.StartInfo.Arguments = arguments;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.CreateNoWindow = true;
+
+                StringBuilder output = new StringBuilder();
+                process.OutputDataReceived += (sender, args) =>
+                {
+                    if (args.Data != null)
+                    {
+                        output.AppendLine(args.Data);
+                    }
+                };
+                process.ErrorDataReceived += (sender, args) =>
+                {
+                    if (args.Data != null)
+                    {
+                        output.AppendLine(args.Data);
+                    }
+                };
+
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                if (!process.WaitForExit(timeoutSeconds * 1000))
+                {
+                    try
+                    {
+                        process.Kill();
+                    }
+                    catch
+                    {
+                    }
+
+                    return new CommandResult { ExitCode = 124, Output = output + "\nCommand timed out." };
+                }
+
+                process.WaitForExit();
+                return new CommandResult { ExitCode = process.ExitCode, Output = output.ToString() };
+            }
+        }
+
+        private static string TryReadIcon(string displayIcon)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(displayIcon))
+                {
+                    return string.Empty;
+                }
+
+                string path = displayIcon.Trim().Trim('"');
+                int comma = path.LastIndexOf(',');
+                if (comma > 2 && File.Exists(path.Substring(0, comma)))
+                {
+                    path = path.Substring(0, comma);
+                }
+
+                if (!File.Exists(path))
+                {
+                    return string.Empty;
+                }
+
+                using (Icon icon = Icon.ExtractAssociatedIcon(path))
+                {
+                    if (icon == null)
+                    {
+                        return string.Empty;
+                    }
+
+                    using (Bitmap bitmap = icon.ToBitmap())
+                    using (MemoryStream stream = new MemoryStream())
+                    {
+                        bitmap.Save(stream, ImageFormat.Png);
+                        return Convert.ToBase64String(stream.ToArray());
+                    }
+                }
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string GetArg(Dictionary<string, object> args, string key, string fallback)
+        {
+            object value;
+            return args != null && args.TryGetValue(key, out value) && value != null ? Convert.ToString(value) : fallback;
+        }
+
+        private static int ParseInt(string value, int fallback)
+        {
+            int parsed;
+            return int.TryParse(value, out parsed) ? parsed : fallback;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool LockWorkStation();
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+
+        private sealed class CommandResult
+        {
+            public int ExitCode { get; set; }
+            public string Output { get; set; }
+        }
+
+        private sealed class InstalledAppInfo
+        {
+            public string displayName { get; set; }
+            public string displayVersion { get; set; }
+            public string publisher { get; set; }
+            public string installLocation { get; set; }
+            public string uninstallString { get; set; }
+            public string displayIcon { get; set; }
+            public string iconBase64 { get; set; }
+        }
+    }
+}

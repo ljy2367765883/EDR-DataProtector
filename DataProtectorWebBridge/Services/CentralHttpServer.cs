@@ -67,6 +67,22 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/tasks")
+                {
+                    int limit = ParseLimit(context.Request.QueryString["limit"]);
+                    string deviceId = context.Request.QueryString["deviceId"];
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryTasks(deviceId, limit));
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/tasks")
+                {
+                    CentralPolicyStore.RemoteTaskRequest request =
+                        JsonResponse.Read<CentralPolicyStore.RemoteTaskRequest>(context.Request.InputStream);
+                    JsonResponse.Write(context.Response, "0000", "Remote task queued.", store.CreateTask(request));
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/policy/rules")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", store.QueryRules());

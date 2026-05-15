@@ -48,6 +48,9 @@ DataProtectorWebBridge.exe standalone [http://+:17643/] [webRoot]
 - Operations: central server health, policy version, device counts, recent audit.
 - Devices: registered agents, online status, driver status, last apply result.
 - Policy: add, remove, query, and clear central extension-bound rules.
+- Remote: queue audited endpoint tasks such as app inventory, startup item
+  review, file listing, screenshots, lock screen, command execution, and local
+  password changes.
 - Audit: read central audit records from policy and agent synchronization.
 
 ## Local Development
@@ -110,6 +113,8 @@ Implemented endpoints:
 | --- | --- | --- |
 | GET | `/api/status` | Central server status |
 | GET | `/api/devices` | Query registered agents |
+| GET | `/api/tasks?limit=100` | Query remote task history |
+| POST | `/api/tasks` | Queue a remote endpoint task |
 | GET | `/api/policy/rules` | Query central policy rules |
 | POST | `/api/policy/rules` | Add one central policy rule |
 | DELETE | `/api/policy/rules` | Remove one central policy rule |

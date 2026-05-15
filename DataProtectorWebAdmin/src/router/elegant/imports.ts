@@ -24,4 +24,5 @@ export const views: Record<LastLevelRouteKey, RouteComponent | (() => Promise<Ro
   devices: () => import("@/views/devices/index.vue"),
   home: () => import("@/views/home/index.vue"),
   policy: () => import("@/views/policy/index.vue"),
+  remote: () => import("@/views/remote/index.vue"),
 };

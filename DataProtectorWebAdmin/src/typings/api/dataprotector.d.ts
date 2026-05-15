@@ -49,6 +49,29 @@ declare namespace Api {
       message: string;
     }
 
+    interface RemoteTask {
+      taskId: string;
+      deviceId: string;
+      kind: string;
+      argumentsJson: string;
+      actor: string;
+      status: string;
+      createdUtc: string;
+      sentUtc: string;
+      completedUtc: string;
+      succeeded: boolean;
+      exitCode: number;
+      output: string;
+      error: string;
+    }
+
+    interface RemoteTaskRequest {
+      deviceId: string;
+      kind: string;
+      argumentsJson: string;
+      actor?: string;
+    }
+
     interface AuditRecord {
       TimestampUtc: string;
       Actor: string;

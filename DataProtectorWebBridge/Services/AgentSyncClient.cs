@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -15,6 +16,8 @@ namespace DataProtectorWebBridge.Services
         private readonly PolicyBridgeService policyService;
         private readonly string statePath;
         private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+        private readonly RemoteTaskExecutor taskExecutor = new RemoteTaskExecutor();
+        private readonly List<CentralPolicyStore.RemoteTaskResult> pendingTaskResults = new List<CentralPolicyStore.RemoteTaskResult>();
         private string deviceId;
         private long appliedPolicyVersion;
         private string lastApplyStatus = "0x00000000";
@@ -75,7 +78,8 @@ namespace DataProtectorWebBridge.Services
                 PolicyVersion = appliedPolicyVersion,
                 LastApplyStatus = lastApplyStatus,
                 LastApplyMessage = lastApplyMessage,
-                Audit = new AuditLog.AuditRecord[0]
+                Audit = new AuditLog.AuditRecord[0],
+                TaskResults = pendingTaskResults.ToArray()
             };
 
             CentralPolicyStore.AgentSyncResponse response = Post<CentralPolicyStore.AgentSyncRequest, CentralPolicyStore.AgentSyncResponse>(serverSyncUri, request);
@@ -95,7 +99,19 @@ namespace DataProtectorWebBridge.Services
                 ApplyPolicy(response.rules ?? new PolicyBridgeService.PolicyRuleDto[0], response.policyVersion);
             }
 
+            pendingTaskResults.Clear();
+            ExecuteTasks(response.tasks ?? new CentralPolicyStore.RemoteTaskDto[0]);
             Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ".");
+        }
+
+        private void ExecuteTasks(CentralPolicyStore.RemoteTaskDto[] tasks)
+        {
+            foreach (CentralPolicyStore.RemoteTaskDto task in tasks)
+            {
+                CentralPolicyStore.RemoteTaskResult result = taskExecutor.Execute(task);
+                pendingTaskResults.Add(result);
+                Console.WriteLine(DateTime.Now.ToString("s") + " Task " + task.taskId + " " + task.kind + " completed: " + result.succeeded);
+            }
         }
 
         private void ApplyPolicy(PolicyBridgeService.PolicyRuleDto[] rules, long policyVersion)
