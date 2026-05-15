@@ -36,6 +36,15 @@ publish/
 packages/
 *.nupkg
 
+# Node/web outputs
+node_modules/
+DataProtectorWebAdmin/node_modules/
+DataProtectorWebAdmin/dist/
+DataProtectorWebAdmin/dist-ssr/
+DataProtectorWebAdmin/.vite/
+DataProtectorWebAdmin/coverage/
+DataProtectorWebAdmin/pnpm-debug.log*
+
 # Local diagnostics and captures
 Logfile.XML
 *.etl

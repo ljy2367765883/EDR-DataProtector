@@ -12,6 +12,11 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataProtectorAdmin", "DataP
 		{128D2525-C3AA-4E07-96CE-5F39EC669E72} = {128D2525-C3AA-4E07-96CE-5F39EC669E72}
 	EndProjectSection
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00A0C91BC942}") = "DataProtectorWebBridge", "DataProtectorWebBridge\DataProtectorWebBridge.csproj", "{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}"
+	ProjectSection(ProjectDependencies) = postProject
+		{128D2525-C3AA-4E07-96CE-5F39EC669E72} = {128D2525-C3AA-4E07-96CE-5F39EC669E72}
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|ARM = Debug|ARM
@@ -58,6 +63,16 @@ Global
 		{128D2525-C3AA-4E07-96CE-5F39EC669E72}.Release|x64.ActiveCfg = Release|x64
 		{128D2525-C3AA-4E07-96CE-5F39EC669E72}.Release|x64.Build.0 = Release|x64
 		{128D2525-C3AA-4E07-96CE-5F39EC669E72}.Release|x86.ActiveCfg = Release|Win32
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Debug|ARM.ActiveCfg = Debug|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Debug|ARM64.ActiveCfg = Debug|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Debug|x64.ActiveCfg = Debug|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Debug|x64.Build.0 = Debug|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Debug|x86.ActiveCfg = Debug|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Release|ARM.ActiveCfg = Release|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Release|ARM64.ActiveCfg = Release|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Release|x64.ActiveCfg = Release|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Release|x64.Build.0 = Release|x64
+		{7BE50A7E-B295-4C84-B4F0-42E4AFB7255E}.Release|x86.ActiveCfg = Release|x64
 		{E69ECEAA-0619-4B8F-B114-413C7D7790B9}.Debug|ARM.ActiveCfg = Debug|x64
 		{E69ECEAA-0619-4B8F-B114-413C7D7790B9}.Debug|ARM64.ActiveCfg = Debug|x64
 		{E69ECEAA-0619-4B8F-B114-413C7D7790B9}.Debug|x64.ActiveCfg = Debug|x64
