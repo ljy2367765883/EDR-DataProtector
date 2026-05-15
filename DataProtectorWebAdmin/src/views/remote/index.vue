@@ -78,6 +78,12 @@ const fileContext = reactive({
 
 const processes = ref<ProcessItem[]>([]);
 const processSearch = ref('');
+const processContext = reactive({
+  show: false,
+  x: 0,
+  y: 0,
+  row: null as ProcessItem | null
+});
 const apps = ref<InstalledApp[]>([]);
 const startupItems = ref<StartupItem[]>([]);
 const commandText = ref('whoami');
@@ -111,6 +117,14 @@ const fileMenuOptions = computed(() => [
   {
     label: 'Delete',
     key: 'delete'
+  }
+]);
+
+const processMenuOptions = computed(() => [
+  {
+    label: 'Terminate',
+    key: 'terminate',
+    disabled: !processContext.row
   }
 ]);
 
@@ -153,32 +167,6 @@ const fileColumns: DataTableColumns<FileItem> = [
     render(row) {
       return formatTime(row.lastWriteUtc);
     }
-  },
-  {
-    title: 'Actions',
-    key: 'actions',
-    width: 220,
-    render(row) {
-      return h('div', { class: 'row-actions' }, [
-        row.isDirectory
-          ? h(
-              NButton,
-              { size: 'small', text: true, type: 'primary', onClick: () => openPath(row.path) },
-              { default: () => 'Open' }
-            )
-          : null,
-        h(
-          NButton,
-          { size: 'small', text: true, onClick: () => showRename(row) },
-          { default: () => 'Rename' }
-        ),
-        h(
-          NButton,
-          { size: 'small', text: true, type: 'error', onClick: () => confirmDelete(row) },
-          { default: () => 'Delete' }
-        )
-      ]);
-    }
   }
 ];
 
@@ -214,18 +202,6 @@ const processColumns: DataTableColumns<ProcessItem> = [
     }
   },
   { title: 'Path', key: 'path', minWidth: 360, ellipsis: { tooltip: true } },
-  {
-    title: 'Action',
-    key: 'action',
-    width: 120,
-    render(row) {
-      return h(
-        NButton,
-        { size: 'small', type: 'error', secondary: true, onClick: () => confirmKillProcess(row) },
-        { default: () => 'Terminate' }
-      );
-    }
-  }
 ];
 
 const startupColumns: DataTableColumns<StartupItem> = [
@@ -265,7 +241,6 @@ async function selectDevice(deviceId: string) {
   if (selectedDeviceId.value === deviceId) return;
   selectedDeviceId.value = deviceId;
   resetPanelState();
-  await refreshActivePanel();
 }
 
 function resetPanelState() {
@@ -314,7 +289,6 @@ async function refreshActivePanel() {
 
 async function handleTabChange(value: string) {
   activeTab.value = value as WorkbenchTab;
-  await refreshActivePanel();
 }
 
 async function loadDrives() {
@@ -373,6 +347,18 @@ function fileRowProps(row: FileItem) {
   };
 }
 
+function processRowProps(row: ProcessItem) {
+  return {
+    onContextmenu: (event: MouseEvent) => {
+      event.preventDefault();
+      processContext.row = row;
+      processContext.x = event.clientX;
+      processContext.y = event.clientY;
+      processContext.show = true;
+    }
+  };
+}
+
 function handleFileMenuSelect(key: string) {
   const row = fileContext.row;
   fileContext.show = false;
@@ -384,6 +370,16 @@ function handleFileMenuSelect(key: string) {
     showRename(row);
   } else if (key === 'delete') {
     confirmDelete(row);
+  }
+}
+
+function handleProcessMenuSelect(key: string) {
+  const row = processContext.row;
+  processContext.show = false;
+  if (!row) return;
+
+  if (key === 'terminate') {
+    confirmKillProcess(row);
   }
 }
 
@@ -628,7 +624,6 @@ function sleep(ms: number) {
 
 onMounted(async () => {
   await refreshDevices();
-  await refreshActivePanel();
 });
 </script>
 
@@ -718,6 +713,7 @@ onMounted(async () => {
                 <NButton type="primary" :disabled="!pathInput" @click="goToPath">Open</NButton>
               </NInputGroup>
             </div>
+            <div class="interaction-hint">Double-click folders or drives to enter. Right-click items for actions.</div>
 
             <div v-if="!currentPath" class="drive-grid">
               <button
@@ -726,7 +722,7 @@ onMounted(async () => {
                 class="drive-tile"
                 :disabled="!drive.isReady"
                 type="button"
-                @click="openPath(drive.path)"
+                @dblclick="openPath(drive.path)"
               >
                 <SvgIcon icon="mdi:harddisk" />
                 <div>
@@ -744,7 +740,7 @@ onMounted(async () => {
               :data="fileItems"
               :loading="panelLoading"
               :row-props="fileRowProps"
-              :scroll-x="1120"
+              :scroll-x="900"
               :pagination="{ pageSize: 15 }"
             />
 
@@ -768,12 +764,24 @@ onMounted(async () => {
                 Refresh
               </NButton>
             </div>
+            <div class="interaction-hint">Right-click a process to terminate it.</div>
             <NDataTable
               :columns="processColumns"
               :data="filteredProcesses"
               :loading="panelLoading"
-              :scroll-x="1280"
+              :row-props="processRowProps"
+              :scroll-x="1120"
               :pagination="{ pageSize: 15 }"
+            />
+            <NDropdown
+              trigger="manual"
+              placement="bottom-start"
+              :show="processContext.show"
+              :x="processContext.x"
+              :y="processContext.y"
+              :options="processMenuOptions"
+              @select="handleProcessMenuSelect"
+              @clickoutside="processContext.show = false"
             />
           </template>
 
@@ -1037,6 +1045,12 @@ onMounted(async () => {
   margin-bottom: 14px;
 }
 
+.interaction-hint {
+  margin: -4px 0 12px;
+  color: rgb(107 114 128);
+  font-size: 12px;
+}
+
 .module-count {
   color: rgb(75 85 99);
   font-size: 13px;
@@ -1068,6 +1082,11 @@ onMounted(async () => {
 .drive-tile:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.drive-tile:not(:disabled):hover {
+  background: rgb(239 246 255);
+  border-color: rgb(37 99 235);
 }
 
 .drive-tile svg {
@@ -1105,12 +1124,6 @@ onMounted(async () => {
 
 .manager-icon-process {
   color: rgb(37 99 235);
-}
-
-.row-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
 }
 
 .app-tile {
