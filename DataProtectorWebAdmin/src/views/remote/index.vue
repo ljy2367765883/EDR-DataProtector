@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue';
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { Icon } from '@iconify/vue';
 import { NButton, NTag, type DataTableColumns } from 'naive-ui';
 import { fetchCreateRemoteTask, fetchDevices, fetchRemoteTasks } from '@/service/api';
@@ -55,6 +55,12 @@ type ProcessItem = {
   startTimeUtc: string;
 };
 
+type TerminalSnapshot = {
+  running: boolean;
+  sequence: number;
+  output: string;
+};
+
 const devices = ref<Api.DataProtector.Device[]>([]);
 const selectedDeviceId = ref('');
 const activeTab = ref<WorkbenchTab>('files');
@@ -86,8 +92,13 @@ const processContext = reactive({
 });
 const apps = ref<InstalledApp[]>([]);
 const startupItems = ref<StartupItem[]>([]);
-const commandText = ref('whoami');
-const commandOutput = ref('');
+const terminalInput = ref('');
+const terminalOutput = ref('');
+const terminalRunning = ref(false);
+const terminalPolling = ref<number | null>(null);
+const terminalReadPending = ref(false);
+const terminalRef = ref<HTMLElement | null>(null);
+const terminalAutoFollow = ref(true);
 const screenshotSrc = ref('');
 const accountForm = reactive({
   username: '',
@@ -251,7 +262,11 @@ function resetPanelState() {
   processes.value = [];
   apps.value = [];
   startupItems.value = [];
-  commandOutput.value = '';
+  terminalInput.value = '';
+  terminalOutput.value = '';
+  terminalRunning.value = false;
+  terminalAutoFollow.value = true;
+  stopTerminalPolling();
   screenshotSrc.value = '';
 }
 
@@ -474,17 +489,99 @@ async function loadStartupItems() {
   }
 }
 
-async function runCommand() {
-  if (!commandText.value.trim()) return;
-
+async function startTerminal() {
   panelLoading.value = true;
-  commandOutput.value = '';
   try {
-    const task = await runRemoteTask('cmd.run', { command: commandText.value, timeoutSeconds: 60 });
-    commandOutput.value = task.output || task.error || '';
+    terminalAutoFollow.value = true;
+    const task = await runRemoteTask('terminal.start', {});
+    applyTerminalSnapshot(task.output);
+    startTerminalPolling();
   } finally {
     panelLoading.value = false;
   }
+}
+
+async function sendTerminalInput() {
+  const input = terminalInput.value;
+  if (!input.trim()) return;
+
+  terminalInput.value = '';
+  try {
+    terminalAutoFollow.value = true;
+    const task = await runRemoteTask('terminal.input', { input });
+    applyTerminalSnapshot(task.output);
+    startTerminalPolling();
+  } finally {
+    if (terminalAutoFollow.value) {
+      await scrollTerminalToBottom();
+    }
+  }
+}
+
+async function readTerminal() {
+  if (!selectedDevice.value || !terminalRunning.value || terminalReadPending.value) return;
+
+  terminalReadPending.value = true;
+  try {
+    terminalAutoFollow.value = terminalAutoFollow.value && isTerminalNearBottom();
+    const task = await runRemoteTask('terminal.read', {}, false);
+    applyTerminalSnapshot(task.output);
+  } catch {
+    stopTerminalPolling();
+  } finally {
+    terminalReadPending.value = false;
+  }
+}
+
+async function stopTerminal() {
+  panelLoading.value = true;
+  try {
+    const task = await runRemoteTask('terminal.stop', {});
+    applyTerminalSnapshot(task.output);
+    stopTerminalPolling();
+  } finally {
+    panelLoading.value = false;
+  }
+}
+
+function applyTerminalSnapshot(value: string) {
+  const snapshot = parseJson<TerminalSnapshot>(value, { running: false, sequence: 0, output: value || '' });
+  terminalRunning.value = snapshot.running;
+  terminalOutput.value = snapshot.output || terminalOutput.value;
+  if (terminalAutoFollow.value) {
+    scrollTerminalToBottom();
+  }
+}
+
+function startTerminalPolling() {
+  if (terminalPolling.value !== null) return;
+  terminalPolling.value = window.setInterval(() => {
+    readTerminal();
+  }, 1200);
+}
+
+function stopTerminalPolling() {
+  if (terminalPolling.value === null) return;
+  window.clearInterval(terminalPolling.value);
+  terminalPolling.value = null;
+}
+
+async function scrollTerminalToBottom() {
+  await nextTick();
+  if (terminalRef.value) {
+    terminalRef.value.scrollTop = terminalRef.value.scrollHeight;
+  }
+}
+
+function isTerminalNearBottom() {
+  const element = terminalRef.value;
+  if (!element) return true;
+  const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+  return distance < 48;
+}
+
+function handleTerminalScroll() {
+  terminalAutoFollow.value = isTerminalNearBottom();
 }
 
 async function captureScreenshot() {
@@ -521,7 +618,7 @@ async function lockScreen() {
   }
 }
 
-async function runRemoteTask(kind: string, args: Record<string, unknown>) {
+async function runRemoteTask(kind: string, args: Record<string, unknown>, logActivity = true) {
   if (!selectedDevice.value) {
     throw new Error('Select an endpoint first.');
   }
@@ -538,7 +635,9 @@ async function runRemoteTask(kind: string, args: Record<string, unknown>) {
   }
 
   const taskId = createResult.data.taskId;
-  pushActivity(`Queued ${operationLabel(kind)}`);
+  if (logActivity) {
+    pushActivity(`Queued ${operationLabel(kind)}`);
+  }
 
   for (let attempt = 0; attempt < 40; attempt += 1) {
     await sleep(1000);
@@ -550,7 +649,9 @@ async function runRemoteTask(kind: string, args: Record<string, unknown>) {
 
     if (task.status === 'completed' || task.status === 'failed') {
       if (task.status === 'completed' && task.succeeded) {
-        pushActivity(`Completed ${operationLabel(kind)}`);
+        if (logActivity) {
+          pushActivity(`Completed ${operationLabel(kind)}`);
+        }
         return task;
       }
 
@@ -585,6 +686,10 @@ function operationLabel(kind: string) {
     'inventory.installedApps': 'application inventory',
     'inventory.startupItems': 'startup inventory',
     'cmd.run': 'remote command',
+    'terminal.start': 'terminal start',
+    'terminal.input': 'terminal input',
+    'terminal.read': 'terminal output read',
+    'terminal.stop': 'terminal stop',
     'desktop.screenshot': 'desktop screenshot',
     'session.lock': 'screen lock',
     'user.changePassword': 'password change'
@@ -624,6 +729,10 @@ function sleep(ms: number) {
 
 onMounted(async () => {
   await refreshDevices();
+});
+
+onBeforeUnmount(() => {
+  stopTerminalPolling();
 });
 </script>
 
@@ -712,6 +821,10 @@ onMounted(async () => {
                 <NInput v-model:value="pathInput" placeholder="Select a drive or enter a remote path" @keyup.enter="goToPath" />
                 <NButton type="primary" :disabled="!pathInput" @click="goToPath">Open</NButton>
               </NInputGroup>
+              <NButton type="primary" :loading="panelLoading" @click="refreshActivePanel">
+                <template #icon><SvgIcon icon="mdi:refresh" /></template>
+                Refresh
+              </NButton>
             </div>
             <div class="interaction-hint">Double-click folders or drives to enter. Right-click items for actions.</div>
 
@@ -825,18 +938,40 @@ onMounted(async () => {
           </template>
 
           <template v-else-if="activeTab === 'shell'">
-            <div class="shell-grid">
-              <NInput
-                v-model:value="commandText"
-                type="textarea"
-                :autosize="{ minRows: 5, maxRows: 8 }"
-                placeholder="Command to run on the selected endpoint"
-              />
-              <NButton type="primary" :loading="panelLoading" @click="runCommand">
-                <template #icon><SvgIcon icon="mdi:console" /></template>
-                Run Command
-              </NButton>
-              <pre class="terminal-output">{{ commandOutput || 'Command output will appear here.' }}</pre>
+            <div class="terminal-panel">
+              <div class="terminal-toolbar">
+                <NTag :type="terminalRunning ? 'success' : 'default'" :bordered="false">
+                  {{ terminalRunning ? 'Connected' : 'Stopped' }}
+                </NTag>
+                <NSpace>
+                  <NButton type="primary" :loading="panelLoading" :disabled="terminalRunning" @click="startTerminal">
+                    <template #icon><SvgIcon icon="mdi:play" /></template>
+                    Start
+                  </NButton>
+                  <NButton secondary :disabled="!terminalRunning" @click="readTerminal">
+                    <template #icon><SvgIcon icon="mdi:refresh" /></template>
+                    Read
+                  </NButton>
+                  <NButton secondary type="error" :loading="panelLoading" :disabled="!terminalRunning" @click="stopTerminal">
+                    <template #icon><SvgIcon icon="mdi:stop" /></template>
+                    Stop
+                  </NButton>
+                </NSpace>
+              </div>
+              <pre ref="terminalRef" class="terminal-output" @scroll="handleTerminalScroll">{{
+                terminalOutput || 'Start a session, then type commands below. Press Enter to send.'
+              }}</pre>
+              <NInputGroup>
+                <NInput
+                  v-model:value="terminalInput"
+                  :disabled="!terminalRunning"
+                  placeholder="Type a command and press Enter"
+                  @keyup.enter="sendTerminalInput"
+                />
+                <NButton type="primary" :disabled="!terminalRunning || !terminalInput.trim()" @click="sendTerminalInput">
+                  Send
+                </NButton>
+              </NInputGroup>
             </div>
           </template>
 
@@ -1137,9 +1272,16 @@ onMounted(async () => {
   border-radius: 8px;
 }
 
-.shell-grid {
+.terminal-panel {
   display: grid;
   gap: 12px;
+}
+
+.terminal-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .terminal-output {

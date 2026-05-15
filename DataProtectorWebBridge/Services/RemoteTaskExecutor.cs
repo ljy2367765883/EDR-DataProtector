@@ -15,6 +15,10 @@ namespace DataProtectorWebBridge.Services
     internal sealed class RemoteTaskExecutor
     {
         private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+        private readonly object terminalSync = new object();
+        private Process terminalProcess;
+        private StringBuilder terminalBuffer = new StringBuilder();
+        private int terminalSequence;
 
         public CentralPolicyStore.RemoteTaskResult Execute(CentralPolicyStore.RemoteTaskDto task)
         {
@@ -61,6 +65,18 @@ namespace DataProtectorWebBridge.Services
                         CommandResult command = RunCommand(ReadArgs(task.argumentsJson));
                         output = command.Output;
                         exitCode = command.ExitCode;
+                        break;
+                    case "terminal.start":
+                        output = StartTerminal();
+                        break;
+                    case "terminal.input":
+                        output = WriteTerminalInput(ReadArgs(task.argumentsJson));
+                        break;
+                    case "terminal.read":
+                        output = ReadTerminal();
+                        break;
+                    case "terminal.stop":
+                        output = StopTerminal();
                         break;
                     case "user.changePassword":
                         CommandResult password = ChangePassword(ReadArgs(task.argumentsJson));
@@ -412,6 +428,178 @@ namespace DataProtectorWebBridge.Services
             }
 
             return RunProcess("cmd.exe", "/c " + command, timeoutSeconds);
+        }
+
+        private string StartTerminal()
+        {
+            lock (terminalSync)
+            {
+                EnsureTerminalStarted();
+                return SerializeTerminalSnapshot(true);
+            }
+        }
+
+        private string WriteTerminalInput(Dictionary<string, object> args)
+        {
+            string input = GetArg(args, "input", string.Empty);
+            if (string.IsNullOrEmpty(input))
+            {
+                return ReadTerminal();
+            }
+
+            lock (terminalSync)
+            {
+                EnsureTerminalStarted();
+                terminalProcess.StandardInput.WriteLine(input);
+                AppendTerminalText(input + Environment.NewLine);
+                return SerializeTerminalSnapshot(true);
+            }
+        }
+
+        private string ReadTerminal()
+        {
+            lock (terminalSync)
+            {
+                bool running = terminalProcess != null && !terminalProcess.HasExited;
+                return SerializeTerminalSnapshot(running);
+            }
+        }
+
+        private string StopTerminal()
+        {
+            lock (terminalSync)
+            {
+                if (terminalProcess == null)
+                {
+                    return SerializeTerminalSnapshot(false);
+                }
+
+                try
+                {
+                    if (!terminalProcess.HasExited)
+                    {
+                        terminalProcess.StandardInput.WriteLine("exit");
+                        if (!terminalProcess.WaitForExit(1500))
+                        {
+                            terminalProcess.Kill();
+                        }
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    terminalProcess.Dispose();
+                    terminalProcess = null;
+                    AppendTerminalLine("[terminal stopped]");
+                }
+
+                return SerializeTerminalSnapshot(false);
+            }
+        }
+
+        private void EnsureTerminalStarted()
+        {
+            if (terminalProcess == null || terminalProcess.HasExited)
+            {
+                terminalBuffer = new StringBuilder();
+                terminalSequence = 0;
+                terminalProcess = new Process();
+                terminalProcess.StartInfo.FileName = "cmd.exe";
+                terminalProcess.StartInfo.Arguments = "/Q /K prompt $P$G";
+                terminalProcess.StartInfo.UseShellExecute = false;
+                terminalProcess.StartInfo.RedirectStandardInput = true;
+                terminalProcess.StartInfo.RedirectStandardOutput = true;
+                terminalProcess.StartInfo.RedirectStandardError = true;
+                terminalProcess.StartInfo.CreateNoWindow = true;
+                terminalProcess.StartInfo.WorkingDirectory = GetTerminalWorkingDirectory();
+                terminalProcess.StartInfo.StandardOutputEncoding = Encoding.Default;
+                terminalProcess.StartInfo.StandardErrorEncoding = Encoding.Default;
+                terminalProcess.Start();
+                terminalProcess.StandardInput.AutoFlush = true;
+                StartTerminalReader(terminalProcess, terminalProcess.StandardOutput.BaseStream);
+                StartTerminalReader(terminalProcess, terminalProcess.StandardError.BaseStream);
+            }
+        }
+
+        private static string GetTerminalWorkingDirectory()
+        {
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrWhiteSpace(userProfile) && Directory.Exists(userProfile))
+            {
+                return userProfile;
+            }
+
+            return Environment.SystemDirectory;
+        }
+
+        private void StartTerminalReader(Process process, Stream stream)
+        {
+            System.Threading.ThreadPool.QueueUserWorkItem(state => ReadTerminalStream(process, stream));
+        }
+
+        private void ReadTerminalStream(Process process, Stream stream)
+        {
+            byte[] buffer = new byte[4096];
+            while (process != null)
+            {
+                int read;
+                try
+                {
+                    read = stream.Read(buffer, 0, buffer.Length);
+                }
+                catch
+                {
+                    return;
+                }
+
+                if (read <= 0)
+                {
+                    return;
+                }
+
+                AppendTerminalText(Encoding.Default.GetString(buffer, 0, read));
+            }
+        }
+
+        private void AppendTerminalLine(string line)
+        {
+            if (line == null)
+            {
+                return;
+            }
+
+            AppendTerminalText(line + Environment.NewLine);
+        }
+
+        private void AppendTerminalText(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return;
+            }
+
+            lock (terminalSync)
+            {
+                terminalBuffer.Append(text);
+                if (terminalBuffer.Length > 65536)
+                {
+                    terminalBuffer.Remove(0, terminalBuffer.Length - 65536);
+                }
+
+                terminalSequence++;
+            }
+        }
+
+        private string SerializeTerminalSnapshot(bool running)
+        {
+            return serializer.Serialize(new
+            {
+                running = running,
+                sequence = terminalSequence,
+                output = terminalBuffer.ToString()
+            });
         }
 
         private CommandResult ChangePassword(Dictionary<string, object> args)

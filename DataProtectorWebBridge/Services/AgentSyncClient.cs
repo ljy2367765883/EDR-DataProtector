@@ -79,7 +79,8 @@ namespace DataProtectorWebBridge.Services
                 LastApplyStatus = lastApplyStatus,
                 LastApplyMessage = lastApplyMessage,
                 Audit = new AuditLog.AuditRecord[0],
-                TaskResults = pendingTaskResults.ToArray()
+                TaskResults = pendingTaskResults.ToArray(),
+                ResultOnly = false
             };
 
             CentralPolicyStore.AgentSyncResponse response = Post<CentralPolicyStore.AgentSyncRequest, CentralPolicyStore.AgentSyncResponse>(serverSyncUri, request);
@@ -101,6 +102,10 @@ namespace DataProtectorWebBridge.Services
 
             pendingTaskResults.Clear();
             ExecuteTasks(response.tasks ?? new CentralPolicyStore.RemoteTaskDto[0]);
+            if (pendingTaskResults.Count > 0)
+            {
+                FlushTaskResults();
+            }
             Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ".");
         }
 
@@ -112,6 +117,30 @@ namespace DataProtectorWebBridge.Services
                 pendingTaskResults.Add(result);
                 Console.WriteLine(DateTime.Now.ToString("s") + " Task " + task.taskId + " " + task.kind + " completed: " + result.succeeded);
             }
+        }
+
+        private void FlushTaskResults()
+        {
+            object rawStatus = policyService.GetStatus();
+            CentralPolicyStore.AgentSyncRequest request = new CentralPolicyStore.AgentSyncRequest
+            {
+                DeviceId = deviceId,
+                Machine = Environment.MachineName,
+                User = Environment.UserName,
+                AgentVersion = AgentVersion,
+                DriverConnected = GetBool(rawStatus, "connected"),
+                DriverStatus = GetString(rawStatus, "status"),
+                DriverMessage = GetString(rawStatus, "message"),
+                PolicyVersion = appliedPolicyVersion,
+                LastApplyStatus = lastApplyStatus,
+                LastApplyMessage = lastApplyMessage,
+                Audit = new AuditLog.AuditRecord[0],
+                TaskResults = pendingTaskResults.ToArray(),
+                ResultOnly = true
+            };
+
+            Post<CentralPolicyStore.AgentSyncRequest, CentralPolicyStore.AgentSyncResponse>(serverSyncUri, request);
+            pendingTaskResults.Clear();
         }
 
         private void ApplyPolicy(PolicyBridgeService.PolicyRuleDto[] rules, long policyVersion)

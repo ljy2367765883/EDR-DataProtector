@@ -269,7 +269,7 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 AppendAudit(device.Machine, "agent.sync", device.DeviceId, string.Empty, true, "0x00000000", "Agent synchronized with central server.");
-                RemoteTaskDto[] assignedTasks = AssignTasks(deviceId);
+                RemoteTaskDto[] assignedTasks = request.ResultOnly ? new RemoteTaskDto[0] : AssignTasks(deviceId);
                 TrimAudit();
                 Save();
 
@@ -624,6 +624,7 @@ namespace DataProtectorWebBridge.Services
             public string LastApplyMessage { get; set; }
             public AuditLog.AuditRecord[] Audit { get; set; }
             public RemoteTaskResult[] TaskResults { get; set; }
+            public bool ResultOnly { get; set; }
         }
 
         public sealed class AgentSyncResponse

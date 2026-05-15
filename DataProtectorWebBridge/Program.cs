@@ -78,7 +78,7 @@ namespace DataProtectorWebBridge
 
             AuditLog auditLog = new AuditLog();
             PolicyBridgeService policyService = new PolicyBridgeService(auditLog);
-            AgentSyncClient agent = new AgentSyncClient(serverUrl, TimeSpan.FromSeconds(Math.Max(5, seconds)), policyService);
+            AgentSyncClient agent = new AgentSyncClient(serverUrl, TimeSpan.FromSeconds(Math.Max(1, seconds)), policyService);
             agent.Run();
             return 0;
         }
