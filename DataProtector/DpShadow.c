@@ -567,6 +567,26 @@ DpShadowSyncOriginalToShadow(
                               &ioStatus);
 
     if (!NT_SUCCESS(status)) {
+        if (status == STATUS_SHARING_VIOLATION && copyOriginal) {
+            copyOriginal = FALSE;
+            status = STATUS_SUCCESS;
+            DP_TRACE_PPTX_NAME("ShadowReuseActive",
+                               OriginalName,
+                               status,
+                               CreateDisposition,
+                               originalDisposition,
+                               0,
+                               0);
+            goto Exit;
+        }
+
+        DP_TRACE_PPTX_NAME("ShadowOpenShadowFailed",
+                           ShadowName,
+                           status,
+                           CreateDisposition,
+                           originalDisposition,
+                           0,
+                           0);
         goto Exit;
     }
 
