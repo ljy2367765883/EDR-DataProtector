@@ -360,6 +360,11 @@ DpNetFilterAleClassify(
         return;
     }
 
+    if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP) {
+        ClassifyOut->actionType = FWP_ACTION_CONTINUE;
+        return;
+    }
+
     action = DpNetFilterFindAction(direction,
                                    (DP_NETWORK_PROTOCOL)protocol,
                                    localAddress,
@@ -681,6 +686,20 @@ DpNetFilterAddManagementFilter(
     return FwpmFilterAdd0(gDpWfpEngineHandle, &filter, NULL, NULL);
 }
 
+static
+VOID
+DpNetFilterInitializeProtocolCondition(
+    _Out_ FWPM_FILTER_CONDITION0 *Condition,
+    _In_ UCHAR Protocol
+    )
+{
+    RtlZeroMemory(Condition, sizeof(FWPM_FILTER_CONDITION0));
+    Condition->fieldKey = FWPM_CONDITION_IP_PROTOCOL;
+    Condition->matchType = FWP_MATCH_EQUAL;
+    Condition->conditionValue.type = FWP_UINT8;
+    Condition->conditionValue.uint8 = Protocol;
+}
+
 NTSTATUS
 DpNetFilterInitialize(
     _In_ PDRIVER_OBJECT DriverObject
@@ -689,6 +708,8 @@ DpNetFilterInitialize(
     NTSTATUS status;
     FWPM_SESSION0 session;
     FWPM_SUBLAYER0 subLayer;
+    FWPM_FILTER_CONDITION0 tcpCondition;
+    FWPM_FILTER_CONDITION0 aleUdpCondition;
     FWPM_FILTER_CONDITION0 udpConditions[2];
 
     InitializeListHead(&gDpNetworkRules);
@@ -771,20 +792,42 @@ DpNetFilterInitialize(
         goto Abort;
     }
 
+    DpNetFilterInitializeProtocolCondition(&tcpCondition, IPPROTO_TCP);
     status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_CONNECT_V4,
                                             &DP_WFP_ALE_CONNECT_V4_CALLOUT_GUID,
-                                            L"DataProtector outbound IPv4 defense",
-                                            NULL,
-                                            0);
+                                            L"DataProtector outbound TCP defense",
+                                            &tcpCondition,
+                                            1);
     if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
         goto Abort;
     }
 
+    DpNetFilterInitializeProtocolCondition(&aleUdpCondition, IPPROTO_UDP);
+    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                                            &DP_WFP_ALE_CONNECT_V4_CALLOUT_GUID,
+                                            L"DataProtector outbound UDP connect defense",
+                                            &aleUdpCondition,
+                                            1);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        goto Abort;
+    }
+
+    DpNetFilterInitializeProtocolCondition(&tcpCondition, IPPROTO_TCP);
     status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
                                             &DP_WFP_ALE_RECV_ACCEPT_V4_CALLOUT_GUID,
-                                            L"DataProtector inbound IPv4 defense",
-                                            NULL,
-                                            0);
+                                            L"DataProtector inbound TCP defense",
+                                            &tcpCondition,
+                                            1);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        goto Abort;
+    }
+
+    DpNetFilterInitializeProtocolCondition(&aleUdpCondition, IPPROTO_UDP);
+    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                                            &DP_WFP_ALE_RECV_ACCEPT_V4_CALLOUT_GUID,
+                                            L"DataProtector inbound UDP defense",
+                                            &aleUdpCondition,
+                                            1);
     if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
         goto Abort;
     }
