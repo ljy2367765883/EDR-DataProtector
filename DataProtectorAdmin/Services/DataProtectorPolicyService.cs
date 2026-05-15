@@ -18,6 +18,7 @@ namespace DataProtectorAdmin.Services
         private const uint RuleTypeExcludedDirectory = 3;
         private const int MessageBufferChars = 512;
         private const int PathBufferChars = 1024;
+        private const int MaxRuleQueryAttempts = 4;
 
         private readonly IPolicySettingsStore settingsStore;
 
@@ -42,107 +43,74 @@ namespace DataProtectorAdmin.Services
                 List<PolicyRule> processNameRules = new List<PolicyRule>();
                 List<PolicyRule> processDirectoryRules = new List<PolicyRule>();
                 List<PolicyRule> excludedDirectoryRules = new List<PolicyRule>();
-                uint ruleCount;
-                uint stringCharsRequired;
-                uint status = DataProtectorPolicyNative.DpPolicyQueryProcessRules(
-                    new DataProtectorPolicyNative.NativePolicyRule[0],
-                    0,
-                    out ruleCount,
-                    IntPtr.Zero,
-                    0,
-                    out stringCharsRequired);
+                NativeRuleSnapshot snapshot = QueryNativeRulesWithRetry();
 
-                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                if (!snapshot.Result.Succeeded)
                 {
-                    return new PolicyOperationResult(false, status, ReadLastErrorMessage());
+                    return snapshot.Result;
                 }
-
-                DataProtectorPolicyNative.NativePolicyRule[] nativeRules =
-                    new DataProtectorPolicyNative.NativePolicyRule[ruleCount];
-                IntPtr stringBuffer = IntPtr.Zero;
 
                 try
                 {
-                    int stringBufferBytes = checked((int)Math.Max(1, stringCharsRequired) * 2);
-                    stringBuffer = Marshal.AllocHGlobal(stringBufferBytes);
-                    ZeroMemory(stringBuffer, stringBufferBytes);
-
-                    status = DataProtectorPolicyNative.DpPolicyQueryProcessRules(
-                        nativeRules,
-                        ruleCount,
-                        out ruleCount,
-                        stringBuffer,
-                        stringCharsRequired,
-                        out stringCharsRequired);
-
-                    if (status != SuccessStatus)
+                    foreach (DataProtectorPolicyNative.NativePolicyRule nativeRule in snapshot.Rules)
                     {
-                        AdminDiagnostics.Log("Query process rules from driver failed with status 0x" + status.ToString("X8") + ".");
-                        return new PolicyOperationResult(false, status, ReadLastErrorMessage());
-                    }
-
-                    for (int index = 0; index < nativeRules.Length; index++)
-                    {
-                        string value = Marshal.PtrToStringUni(nativeRules[index].Value);
-                        string extension = NormalizeExtension(Marshal.PtrToStringUni(nativeRules[index].Extension));
+                        string value = Marshal.PtrToStringUni(nativeRule.Value);
+                        string extension = NormalizeExtension(Marshal.PtrToStringUni(nativeRule.Extension));
 
                         if (string.IsNullOrWhiteSpace(value))
                         {
                             continue;
                         }
 
-                        if (nativeRules[index].RuleType == RuleTypeProcessName)
+                        if (nativeRule.RuleType == RuleTypeProcessName)
                         {
                             AddRuleToList(processNameRules,
                                           new PolicyRule(PolicyRuleKind.ProcessName, value, value, extension));
                         }
-                        else if (nativeRules[index].RuleType == RuleTypeProcessDirectory)
+                        else if (nativeRule.RuleType == RuleTypeProcessDirectory)
                         {
                             AddRuleToList(processDirectoryRules,
                                           new PolicyRule(PolicyRuleKind.ProcessDirectory, value, value, extension));
                         }
-                        else if (nativeRules[index].RuleType == RuleTypeExcludedDirectory)
+                        else if (nativeRule.RuleType == RuleTypeExcludedDirectory)
                         {
                             AddRuleToList(excludedDirectoryRules,
                                           new PolicyRule(PolicyRuleKind.ExcludedDirectory, value, value, extension));
                         }
                     }
-
-                    PolicyOperationResult result = CommitLocalChange(
-                        "已从驱动读取当前规则。",
-                        "已读取驱动规则，但本地配置保存失败：",
-                        () =>
-                        {
-                            Settings.ProcessNameRules.Clear();
-                            Settings.ProcessDirectoryRules.Clear();
-                            Settings.ExcludedDirectoryRules.Clear();
-
-                            foreach (PolicyRule rule in processNameRules)
-                            {
-                                Settings.ProcessNameRules.Add(rule);
-                            }
-
-                            foreach (PolicyRule rule in processDirectoryRules)
-                            {
-                                Settings.ProcessDirectoryRules.Add(rule);
-                            }
-
-                            foreach (PolicyRule rule in excludedDirectoryRules)
-                            {
-                                Settings.ExcludedDirectoryRules.Add(rule);
-                            }
-                        });
-
-                    AdminDiagnostics.Log("Query process rules from driver: " + (result.Succeeded ? "success." : "failed."));
-                    return result;
                 }
                 finally
                 {
-                    if (stringBuffer != IntPtr.Zero)
-                    {
-                        Marshal.FreeHGlobal(stringBuffer);
-                    }
+                    snapshot.Dispose();
                 }
+
+                PolicyOperationResult result = CommitLocalChange(
+                    "已从驱动读取当前规则。",
+                    "已读取驱动规则，但本地配置保存失败：",
+                    () =>
+                    {
+                        Settings.ProcessNameRules.Clear();
+                        Settings.ProcessDirectoryRules.Clear();
+                        Settings.ExcludedDirectoryRules.Clear();
+
+                        foreach (PolicyRule rule in processNameRules)
+                        {
+                            Settings.ProcessNameRules.Add(rule);
+                        }
+
+                        foreach (PolicyRule rule in processDirectoryRules)
+                        {
+                            Settings.ProcessDirectoryRules.Add(rule);
+                        }
+
+                        foreach (PolicyRule rule in excludedDirectoryRules)
+                        {
+                            Settings.ExcludedDirectoryRules.Add(rule);
+                        }
+                    });
+
+                AdminDiagnostics.Log("Query process rules from driver: " + (result.Succeeded ? "success." : "failed."));
+                return result;
             }
             catch (Exception ex)
             {
@@ -154,6 +122,82 @@ namespace DataProtectorAdmin.Services
                 AdminDiagnostics.Log(ex);
                 return new PolicyOperationResult(false, 1, "读取驱动规则失败：" + ex.Message);
             }
+        }
+
+        private static NativeRuleSnapshot QueryNativeRulesWithRetry()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 1; attempt <= MaxRuleQueryAttempts; attempt++)
+            {
+                uint ruleCount;
+                uint stringCharsRequired;
+
+                status = DataProtectorPolicyNative.DpPolicyQueryProcessRules(
+                    new DataProtectorPolicyNative.NativePolicyRule[0],
+                    0,
+                    out ruleCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    AdminDiagnostics.Log("Query process rules sizing failed with status 0x" + status.ToString("X8") + ".");
+                    return NativeRuleSnapshot.Failed(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativePolicyRule[] nativeRules =
+                    new DataProtectorPolicyNative.NativePolicyRule[checked((int)ruleCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int stringBufferBytes = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(stringBufferBytes);
+                    ZeroMemory(stringBuffer, stringBufferBytes);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryProcessRules(
+                        nativeRules,
+                        (uint)nativeRules.Length,
+                        out ruleCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returnedRuleCount = checked((int)ruleCount);
+                        if (returnedRuleCount < nativeRules.Length)
+                        {
+                            Array.Resize(ref nativeRules, returnedRuleCount);
+                        }
+
+                        return NativeRuleSnapshot.Success(nativeRules, stringBuffer);
+                    }
+
+                    if (status == BufferTooSmallStatus)
+                    {
+                        AdminDiagnostics.Log("Query process rules buffer grew during attempt " + attempt + "; retrying.");
+                        continue;
+                    }
+
+                    AdminDiagnostics.Log("Query process rules failed with status 0x" + status.ToString("X8") + ".");
+                    return NativeRuleSnapshot.Failed(status, ReadLastErrorMessage());
+                }
+                finally
+                {
+                    if (status != SuccessStatus && stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            return NativeRuleSnapshot.Failed(
+                BufferTooSmallStatus,
+                "驱动规则在查询期间持续变化，请稍后重试。");
         }
 
         public PolicyOperationResult AddProcessNameRule(string processName, string extension)
@@ -626,6 +670,52 @@ namespace DataProtectorAdmin.Services
             public string DriverValue { get; private set; }
 
             public string Message { get; private set; }
+        }
+
+        private sealed class NativeRuleSnapshot : IDisposable
+        {
+            private IntPtr stringBuffer;
+
+            private NativeRuleSnapshot(
+                PolicyOperationResult result,
+                DataProtectorPolicyNative.NativePolicyRule[] rules,
+                IntPtr stringBuffer)
+            {
+                Result = result;
+                Rules = rules;
+                this.stringBuffer = stringBuffer;
+            }
+
+            public PolicyOperationResult Result { get; private set; }
+
+            public DataProtectorPolicyNative.NativePolicyRule[] Rules { get; private set; }
+
+            public static NativeRuleSnapshot Success(
+                DataProtectorPolicyNative.NativePolicyRule[] rules,
+                IntPtr stringBuffer)
+            {
+                return new NativeRuleSnapshot(
+                    PolicyOperationResult.Success("已读取驱动规则。"),
+                    rules ?? new DataProtectorPolicyNative.NativePolicyRule[0],
+                    stringBuffer);
+            }
+
+            public static NativeRuleSnapshot Failed(uint status, string message)
+            {
+                return new NativeRuleSnapshot(
+                    new PolicyOperationResult(false, status, message),
+                    new DataProtectorPolicyNative.NativePolicyRule[0],
+                    IntPtr.Zero);
+            }
+
+            public void Dispose()
+            {
+                if (stringBuffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(stringBuffer);
+                    stringBuffer = IntPtr.Zero;
+                }
+            }
         }
     }
 }

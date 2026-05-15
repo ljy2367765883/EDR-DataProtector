@@ -697,6 +697,7 @@ DpPolicyQueryProcessRules(
     DWORD index;
     DWORD requiredStringChars = 0;
     DWORD copiedStringChars = 0;
+    BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
 
     if (RuleCount != NULL) {
         *RuleCount = 0;
@@ -836,6 +837,11 @@ DpPolicyQueryProcessRules(
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
     if (RuleCapacity < header->RuleCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
