@@ -20,5 +20,6 @@ EXPORTS
     DpPolicyRemoveNetworkRule
     DpPolicyClearNetworkRules
     DpPolicyQueryNetworkRules
+    DpPolicyQuerySmtpEvents
     DpPolicyConvertDosPathToNtPath
     DpPolicyGetLastErrorMessage

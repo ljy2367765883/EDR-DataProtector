@@ -20,6 +20,7 @@ namespace DataProtectorWebBridge.Services
         private const uint NetworkActionAllow = 0;
         private const uint NetworkActionBlock = 1;
         private const uint NetworkProtocolAny = 0;
+        private const uint NetworkProtocolIcmp = 1;
         private const uint NetworkProtocolTcp = 6;
         private const uint NetworkProtocolUdp = 17;
         private const uint NetworkDirectionInbound = 0;
@@ -288,6 +289,110 @@ namespace DataProtectorWebBridge.Services
             return result;
         }
 
+        public SmtpEventDto[] QuerySmtpEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQuerySmtpEvents(
+                    new DataProtectorPolicyNative.NativeSmtpEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeSmtpEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeSmtpEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQuerySmtpEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<SmtpEventDto> events = new List<SmtpEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertSmtpEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver SMTP event queue changed while querying. Please retry.");
+        }
+
+        public AuditLog.AuditRecord[] DrainSmtpAuditRecords()
+        {
+            SmtpEventDto[] events = QuerySmtpEvents();
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+
+            foreach (SmtpEventDto item in events)
+            {
+                string endpoint = item.remoteEndpoint;
+                string target = item.from + " -> " + item.to;
+                string message = "SMTP envelope observed on " + endpoint + " by PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+
+                auditLog.Append("network-sensor",
+                                "network.smtp.send",
+                                target,
+                                endpoint,
+                                true,
+                                SuccessStatus,
+                                message);
+
+                records.Add(new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Actor = "network-sensor",
+                    Action = "network.smtp.send",
+                    Target = target,
+                    Extension = endpoint,
+                    Succeeded = true,
+                    Status = "0x00000000",
+                    Message = message
+                });
+            }
+
+            return records.ToArray();
+        }
+
         private static PolicyRuleRequest NormalizeRequest(PolicyRuleRequest request)
         {
             if (request == null)
@@ -359,9 +464,9 @@ namespace DataProtectorWebBridge.Services
                 throw new BridgeException(1, "Network rule action must be allow or block.");
             }
 
-            if (protocol != "any" && protocol != "tcp" && protocol != "udp")
+            if (protocol != "any" && protocol != "icmp" && protocol != "tcp" && protocol != "udp")
             {
-                throw new BridgeException(1, "Network protocol must be any, tcp, or udp.");
+                throw new BridgeException(1, "Network protocol must be any, icmp, tcp, or udp.");
             }
 
             if (direction != "inbound" && direction != "outbound" && direction != "both")
@@ -374,9 +479,14 @@ namespace DataProtectorWebBridge.Services
                 throw new BridgeException(1, "Domain rule requires a domain.");
             }
 
+            if (kind == "domain" && protocol == "icmp")
+            {
+                throw new BridgeException(1, "Domain rules do not support ICMP.");
+            }
+
             if (kind == "ip" && string.IsNullOrWhiteSpace(remoteAddress))
             {
-                throw new BridgeException(1, "IP rule requires a remote address or CIDR.");
+                remoteAddress = "*";
             }
 
             NetworkRuleDto normalized = new NetworkRuleDto
@@ -447,6 +557,26 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static SmtpEventDto ConvertSmtpEvent(DataProtectorPolicyNative.NativeSmtpEvent nativeEvent)
+        {
+            string localEndpoint = FormatEndpoint(nativeEvent.LocalAddress, nativeEvent.LocalPort);
+            string remoteEndpoint = FormatEndpoint(nativeEvent.RemoteAddress, nativeEvent.RemotePort);
+
+            return new SmtpEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                processId = nativeEvent.ProcessId,
+                localAddress = FormatAddress(nativeEvent.LocalAddress, 0xFFFFFFFFu),
+                remoteAddress = FormatAddress(nativeEvent.RemoteAddress, 0xFFFFFFFFu),
+                localPort = nativeEvent.LocalPort,
+                remotePort = nativeEvent.RemotePort,
+                localEndpoint = localEndpoint,
+                remoteEndpoint = remoteEndpoint,
+                from = Marshal.PtrToStringUni(nativeEvent.From) ?? string.Empty,
+                to = Marshal.PtrToStringUni(nativeEvent.To) ?? string.Empty
+            };
+        }
+
         private static DataProtectorPolicyNative.NativeNetworkRule ToNativeNetworkRule(NetworkRuleDto rule)
         {
             uint localAddress;
@@ -483,6 +613,7 @@ namespace DataProtectorWebBridge.Services
 
         private static uint ToProtocol(string protocol)
         {
+            if (string.Equals(protocol, "icmp", StringComparison.OrdinalIgnoreCase)) return NetworkProtocolIcmp;
             if (string.Equals(protocol, "tcp", StringComparison.OrdinalIgnoreCase)) return NetworkProtocolTcp;
             if (string.Equals(protocol, "udp", StringComparison.OrdinalIgnoreCase)) return NetworkProtocolUdp;
             return NetworkProtocolAny;
@@ -490,6 +621,7 @@ namespace DataProtectorWebBridge.Services
 
         private static string FromProtocol(uint protocol)
         {
+            if (protocol == NetworkProtocolIcmp) return "icmp";
             if (protocol == NetworkProtocolTcp) return "tcp";
             if (protocol == NetworkProtocolUdp) return "udp";
             return "any";
@@ -566,6 +698,12 @@ namespace DataProtectorWebBridge.Services
             }
 
             return ip + "/" + CountPrefix(mask).ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string FormatEndpoint(uint address, ushort port)
+        {
+            string ip = FormatAddress(address, 0xFFFFFFFFu);
+            return port == 0 ? ip : ip + ":" + port.ToString(CultureInfo.InvariantCulture);
         }
 
         private static int CountPrefix(uint mask)
@@ -672,6 +810,20 @@ namespace DataProtectorWebBridge.Services
         public sealed class NetworkRuleDto : NetworkRuleRequest
         {
             public string displayTarget { get; set; }
+        }
+
+        public sealed class SmtpEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong processId { get; set; }
+            public string localAddress { get; set; }
+            public string remoteAddress { get; set; }
+            public ushort localPort { get; set; }
+            public ushort remotePort { get; set; }
+            public string localEndpoint { get; set; }
+            public string remoteEndpoint { get; set; }
+            public string from { get; set; }
+            public string to { get; set; }
         }
 
         public sealed class OperationResult

@@ -126,6 +126,14 @@ namespace DataProtectorWebBridge.Services
 
                 if (method == "GET" && path == "/api/audit/events")
                 {
+                    try
+                    {
+                        policyService.DrainSmtpAuditRecords();
+                    }
+                    catch
+                    {
+                    }
+
                     int limit = ParseLimit(context.Request.QueryString["limit"]);
                     JsonResponse.Write(context.Response, "0000", "Success.", auditLog.ReadRecent(limit));
                     return;

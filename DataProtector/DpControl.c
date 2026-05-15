@@ -97,6 +97,12 @@ DpControlMessageNotify(
                                      ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQuerySmtpEvents) {
+        return DpNetFilterQuerySmtpEvents(OutputBuffer,
+                                          OutputBufferLength,
+                                          ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandAddNetworkRule) {
         PDP_NETWORK_RULE_MESSAGE rule;
 

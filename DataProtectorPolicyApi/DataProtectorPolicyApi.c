@@ -11,6 +11,7 @@
 #define DP_POLICY_MAX_RULE_BYTES (1024u * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64u * sizeof(WCHAR))
 #define DP_POLICY_MAX_DOMAIN_BYTES (260u * sizeof(WCHAR))
+#define DP_SMTP_MAX_ADDRESS_CHARS 256u
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 
 typedef enum _DP_POLICY_COMMAND {
@@ -25,7 +26,8 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandAddNetworkRule = 20,
     DpPolicyCommandRemoveNetworkRule = 21,
     DpPolicyCommandClearNetworkRules = 22,
-    DpPolicyCommandQueryNetworkRules = 23
+    DpPolicyCommandQueryNetworkRules = 23,
+    DpPolicyCommandQuerySmtpEvents = 24
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -90,11 +92,34 @@ typedef struct _DP_NETWORK_RULE_QUERY_ENTRY {
     ULONG DomainLengthBytes;
     WCHAR Domain[1];
 } DP_NETWORK_RULE_QUERY_ENTRY, *PDP_NETWORK_RULE_QUERY_ENTRY;
+
+typedef struct _DP_SMTP_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_SMTP_EVENT_QUERY_HEADER, *PDP_SMTP_EVENT_QUERY_HEADER;
+
+typedef struct _DP_SMTP_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG LocalAddress;
+    ULONG RemoteAddress;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG FromLengthBytes;
+    ULONG ToLengthBytes;
+    ULONG Reserved;
+    WCHAR From[DP_SMTP_MAX_ADDRESS_CHARS];
+    WCHAR To[DP_SMTP_MAX_ADDRESS_CHARS];
+} DP_SMTP_EVENT_QUERY_ENTRY, *PDP_SMTP_EVENT_QUERY_ENTRY;
 #pragma pack(pop)
 
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
+#define DP_SMTP_EVENT_QUERY_VERSION 1u
 
 static WCHAR gLastErrorMessage[512];
 
@@ -994,6 +1019,7 @@ DpPolicyAddNetworkRule(
         (Rule->Kind != DP_POLICY_API_NETWORK_RULE_IP && Rule->Kind != DP_POLICY_API_NETWORK_RULE_DOMAIN) ||
         (Rule->Action != DP_POLICY_API_NETWORK_ACTION_ALLOW && Rule->Action != DP_POLICY_API_NETWORK_ACTION_BLOCK) ||
         (Rule->Protocol != DP_POLICY_API_NETWORK_PROTOCOL_ANY &&
+         Rule->Protocol != DP_POLICY_API_NETWORK_PROTOCOL_ICMP &&
          Rule->Protocol != DP_POLICY_API_NETWORK_PROTOCOL_TCP &&
          Rule->Protocol != DP_POLICY_API_NETWORK_PROTOCOL_UDP) ||
         (Rule->Direction != DP_POLICY_API_NETWORK_DIRECTION_INBOUND &&
@@ -1024,6 +1050,13 @@ DpPolicyAddNetworkRule(
 
     if (Rule->Kind == DP_POLICY_API_NETWORK_RULE_DOMAIN && domainLength == 0) {
         DpPolicySetLastErrorMessage(L"Domain network rules require a domain name.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (Rule->Kind == DP_POLICY_API_NETWORK_RULE_DOMAIN &&
+        Rule->Protocol == DP_POLICY_API_NETWORK_PROTOCOL_ICMP) {
+
+        DpPolicySetLastErrorMessage(L"Domain network rules do not support ICMP.");
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1221,6 +1254,168 @@ DpPolicyQueryNetworkRules(
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
     if (RuleCapacity < header->RuleCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQuerySmtpEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_SMTP_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_SMTP_EVENT_QUERY_HEADER header;
+    DP_SMTP_EVENT_QUERY_HEADER sizingHeader;
+    PDP_SMTP_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQuerySmtpEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_SMTP_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_SMTP_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_SMTP_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid SMTP event snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQuerySmtpEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_SMTP_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid SMTP event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_SMTP_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_SMTP_EVENT_QUERY_VERSION ||
+        (header->EventCount > (MAXDWORD - sizeof(DP_SMTP_EVENT_QUERY_HEADER)) / sizeof(DP_SMTP_EVENT_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_SMTP_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_SMTP_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported SMTP event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = header->EventCount;
+    }
+
+    entry = (PDP_SMTP_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_SMTP_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < header->EventCount; index++) {
+        DWORD fromChars;
+        DWORD toChars;
+
+        if (entry[index].FromLengthBytes > sizeof(entry[index].From) ||
+            entry[index].ToLengthBytes > sizeof(entry[index].To) ||
+            entry[index].FromLengthBytes % sizeof(WCHAR) != 0 ||
+            entry[index].ToLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid SMTP event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        fromChars = entry[index].FromLengthBytes / sizeof(WCHAR);
+        toChars = entry[index].ToLengthBytes / sizeof(WCHAR);
+        requiredStringChars += fromChars + 1 + toChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + fromChars + 1 + toChars + 1 <= StringBufferChars) {
+
+            Events[index].Sequence = entry[index].Sequence;
+            Events[index].ProcessId = entry[index].ProcessId;
+            Events[index].LocalAddress = entry[index].LocalAddress;
+            Events[index].RemoteAddress = entry[index].RemoteAddress;
+            Events[index].LocalPort = entry[index].LocalPort;
+            Events[index].RemotePort = entry[index].RemotePort;
+
+            Events[index].From = StringBuffer + copiedStringChars;
+            if (fromChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].From, entry[index].FromLengthBytes);
+                copiedStringChars += fromChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].To = StringBuffer + copiedStringChars;
+            if (toChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].To, entry[index].ToLengthBytes);
+                copiedStringChars += toChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < header->EventCount || StringBufferChars < requiredStringChars) {
         if (sizingOnly) {
             DpPolicySetLastErrorMessage(L"Success.");
             return DP_POLICY_API_SUCCESS;

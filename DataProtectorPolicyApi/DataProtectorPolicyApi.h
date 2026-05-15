@@ -30,6 +30,7 @@ extern "C" {
 #define DP_POLICY_API_NETWORK_ACTION_BLOCK      1u
 
 #define DP_POLICY_API_NETWORK_PROTOCOL_ANY      0u
+#define DP_POLICY_API_NETWORK_PROTOCOL_ICMP     1u
 #define DP_POLICY_API_NETWORK_PROTOCOL_TCP      6u
 #define DP_POLICY_API_NETWORK_PROTOCOL_UDP      17u
 
@@ -57,6 +58,17 @@ typedef struct _DP_POLICY_API_NETWORK_RULE {
     WORD RemotePort;
     LPCWSTR Domain;
 } DP_POLICY_API_NETWORK_RULE, *PDP_POLICY_API_NETWORK_RULE;
+
+typedef struct _DP_POLICY_API_SMTP_EVENT {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    DWORD LocalAddress;
+    DWORD RemoteAddress;
+    WORD LocalPort;
+    WORD RemotePort;
+    LPCWSTR From;
+    LPCWSTR To;
+} DP_POLICY_API_SMTP_EVENT, *PDP_POLICY_API_SMTP_EVENT;
 
 DP_POLICY_API
 DWORD
@@ -177,6 +189,17 @@ DpPolicyQueryNetworkRules(
     _Out_writes_opt_(ruleCapacity) DP_POLICY_API_NETWORK_RULE *rules,
     _In_ DWORD ruleCapacity,
     _Out_opt_ DWORD *ruleCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQuerySmtpEvents(
+    _Out_writes_opt_(eventCapacity) DP_POLICY_API_SMTP_EVENT *events,
+    _In_ DWORD eventCapacity,
+    _Out_opt_ DWORD *eventCount,
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
     _In_ DWORD stringBufferChars,
     _Out_opt_ DWORD *stringBufferCharsRequired

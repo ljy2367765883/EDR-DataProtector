@@ -69,6 +69,7 @@ const networkFormRules: FormRules = {
     trigger: 'input',
     validator() {
       if (networkForm.kind !== 'ip') return true;
+      if (networkForm.protocol === 'icmp') return true;
       return networkForm.remoteAddress.trim().length > 0 ? true : new Error('Remote address is required');
     }
   }
@@ -98,6 +99,7 @@ const networkActionOptions = [
 
 const networkProtocolOptions = [
   { label: 'Any', value: 'any' },
+  { label: 'ICMP', value: 'icmp' },
   { label: 'TCP', value: 'tcp' },
   { label: 'UDP', value: 'udp' }
 ];
@@ -117,6 +119,7 @@ const ruleGroups = computed(() => ({
 const networkGroups = computed(() => ({
   domain: networkRules.value.filter(rule => rule.kind === 'domain').length,
   ip: networkRules.value.filter(rule => rule.kind === 'ip').length,
+  icmp: networkRules.value.filter(rule => rule.protocol === 'icmp').length,
   blocked: networkRules.value.filter(rule => rule.action === 'block').length
 }));
 
@@ -274,7 +277,10 @@ async function addNetworkRule() {
     const payload: Api.DataProtector.NetworkRuleRequest = {
       ...networkForm,
       domain: networkForm.kind === 'domain' ? networkForm.domain.trim() : '',
-      remoteAddress: networkForm.kind === 'ip' ? networkForm.remoteAddress.trim() : networkForm.remoteAddress.trim(),
+      remoteAddress:
+        networkForm.kind === 'ip' && networkForm.protocol === 'icmp'
+          ? networkForm.remoteAddress.trim() || '*'
+          : networkForm.remoteAddress.trim(),
       actor: 'web-admin'
     };
     const { error, data } = await fetchAddNetworkRule(payload);
@@ -282,6 +288,32 @@ async function addNetworkRule() {
       window.$message?.success('Network rule added to central policy.');
       networkForm.domain = '';
       networkForm.remoteAddress = '';
+      await refresh();
+    }
+  } finally {
+    networkSubmitting.value = false;
+  }
+}
+
+async function addBlockPingRule() {
+  networkSubmitting.value = true;
+  try {
+    const payload: Api.DataProtector.NetworkRuleRequest = {
+      ruleId: Date.now() >>> 0,
+      kind: 'ip',
+      action: 'block',
+      protocol: 'icmp',
+      direction: 'outbound',
+      localAddress: '',
+      localPort: 0,
+      remoteAddress: '*',
+      remotePort: 0,
+      domain: '',
+      actor: 'web-admin'
+    };
+    const { error, data } = await fetchAddNetworkRule(payload);
+    if (!error && data.succeeded) {
+      window.$message?.success('Ping blocking rule added to central policy.');
       await refresh();
     }
   } finally {
@@ -417,7 +449,10 @@ onMounted(refresh);
                   <NInput v-model:value="networkForm.domain" placeholder="*.example.com" />
                 </NFormItem>
                 <NFormItem v-else label="Remote IPv4 / CIDR" path="remoteAddress">
-                  <NInput v-model:value="networkForm.remoteAddress" placeholder="203.0.113.10 or 203.0.113.0/24" />
+                  <NInput
+                    v-model:value="networkForm.remoteAddress"
+                    :placeholder="networkForm.protocol === 'icmp' ? '* for all ping targets' : '203.0.113.10 or 203.0.113.0/24'"
+                  />
                 </NFormItem>
                 <NGrid :x-gap="12" :y-gap="0" cols="2">
                   <NGi>
@@ -457,7 +492,11 @@ onMounted(refresh);
                 <NSpace>
                   <NTag type="info">Domains: {{ networkGroups.domain }}</NTag>
                   <NTag type="warning">IP: {{ networkGroups.ip }}</NTag>
+                  <NTag type="error">ICMP: {{ networkGroups.icmp }}</NTag>
                   <NTag type="error">Blocked: {{ networkGroups.blocked }}</NTag>
+                  <NButton size="small" type="warning" secondary :loading="networkSubmitting" @click="addBlockPingRule">
+                    Block Ping
+                  </NButton>
                   <NButton size="small" type="error" secondary @click="clearNetworkRules">Clear</NButton>
                 </NSpace>
               </template>

@@ -30,11 +30,15 @@ Abstract:
 #define DP_TAG_FOOTER_BUFFER   'fPpD'
 #define DP_TAG_NET_RULE        'rNpD'
 #define DP_TAG_NET_BUFFER      'bNpD'
+#define DP_TAG_SMTP_EVENT      'eSpD'
+#define DP_TAG_SMTP_FLOW       'fSpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
 #define DP_POLICY_MAX_NETWORK_RULES 1024
 #define DP_POLICY_MAX_DOMAIN_BYTES (260 * sizeof(WCHAR))
+#define DP_POLICY_MAX_SMTP_EVENTS 128
+#define DP_SMTP_MAX_ADDRESS_CHARS 256
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
 #define DP_PROTECTION_MAGIC 0x32465044u
@@ -179,7 +183,8 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandAddNetworkRule = 20,
     DpPolicyCommandRemoveNetworkRule = 21,
     DpPolicyCommandClearNetworkRules = 22,
-    DpPolicyCommandQueryNetworkRules = 23
+    DpPolicyCommandQueryNetworkRules = 23,
+    DpPolicyCommandQuerySmtpEvents = 24
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -222,6 +227,7 @@ typedef enum _DP_NETWORK_ACTION {
 
 typedef enum _DP_NETWORK_PROTOCOL {
     DpNetworkProtocolAny = 0,
+    DpNetworkProtocolIcmp = 1,
     DpNetworkProtocolTcp = 6,
     DpNetworkProtocolUdp = 17
 } DP_NETWORK_PROTOCOL;
@@ -275,6 +281,30 @@ typedef struct _DP_NETWORK_RULE_QUERY_ENTRY {
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1
 #define DP_NETWORK_RULE_QUERY_VERSION 1
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
+
+typedef struct _DP_SMTP_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_SMTP_EVENT_QUERY_HEADER, *PDP_SMTP_EVENT_QUERY_HEADER;
+
+typedef struct _DP_SMTP_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG LocalAddress;
+    ULONG RemoteAddress;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG FromLengthBytes;
+    ULONG ToLengthBytes;
+    ULONG Reserved;
+    WCHAR From[DP_SMTP_MAX_ADDRESS_CHARS];
+    WCHAR To[DP_SMTP_MAX_ADDRESS_CHARS];
+} DP_SMTP_EVENT_QUERY_ENTRY, *PDP_SMTP_EVENT_QUERY_ENTRY;
+
+#define DP_SMTP_EVENT_QUERY_VERSION 1
 
 EXTERN_C_START
 
@@ -511,6 +541,13 @@ DpNetFilterClearRules(
 
 NTSTATUS
 DpNetFilterQueryRules(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpNetFilterQuerySmtpEvents(
     _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
     _In_ ULONG OutputBufferLength,
     _Out_ PULONG ReturnOutputBufferLength

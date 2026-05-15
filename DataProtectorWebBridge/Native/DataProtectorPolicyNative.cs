@@ -60,6 +60,15 @@ namespace DataProtectorWebBridge.Native
             out uint stringBufferCharsRequired);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQuerySmtpEvents(
+            [Out] NativeSmtpEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyGetLastErrorMessage(StringBuilder buffer, uint bufferChars);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -85,6 +94,19 @@ namespace DataProtectorWebBridge.Native
             public ushort LocalPort;
             public ushort RemotePort;
             public IntPtr Domain;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeSmtpEvent
+        {
+            public ulong Sequence;
+            public ulong ProcessId;
+            public uint LocalAddress;
+            public uint RemoteAddress;
+            public ushort LocalPort;
+            public ushort RemotePort;
+            public IntPtr From;
+            public IntPtr To;
         }
     }
 }

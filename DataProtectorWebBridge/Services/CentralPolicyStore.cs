@@ -601,9 +601,9 @@ namespace DataProtectorWebBridge.Services
                 throw new PolicyBridgeService.BridgeException(1, "Network rule action must be allow or block.");
             }
 
-            if (protocol != "any" && protocol != "tcp" && protocol != "udp")
+            if (protocol != "any" && protocol != "icmp" && protocol != "tcp" && protocol != "udp")
             {
-                throw new PolicyBridgeService.BridgeException(1, "Network protocol must be any, tcp, or udp.");
+                throw new PolicyBridgeService.BridgeException(1, "Network protocol must be any, icmp, tcp, or udp.");
             }
 
             if (direction != "inbound" && direction != "outbound" && direction != "both")
@@ -616,9 +616,14 @@ namespace DataProtectorWebBridge.Services
                 throw new PolicyBridgeService.BridgeException(1, "Domain rule requires a domain.");
             }
 
+            if (kind == "domain" && protocol == "icmp")
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Domain rules do not support ICMP.");
+            }
+
             if (kind == "ip" && string.IsNullOrWhiteSpace(remoteAddress))
             {
-                throw new PolicyBridgeService.BridgeException(1, "IP rule requires a remote address or CIDR.");
+                remoteAddress = "*";
             }
 
             uint ruleId = request.ruleId;

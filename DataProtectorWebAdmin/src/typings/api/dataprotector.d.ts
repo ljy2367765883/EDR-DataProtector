@@ -3,7 +3,7 @@ declare namespace Api {
     type RuleKind = 'processName' | 'processDirectory' | 'excludedDirectory';
     type NetworkRuleKind = 'ip' | 'domain';
     type NetworkAction = 'allow' | 'block';
-    type NetworkProtocol = 'any' | 'tcp' | 'udp';
+    type NetworkProtocol = 'any' | 'icmp' | 'tcp' | 'udp';
     type NetworkDirection = 'inbound' | 'outbound' | 'both';
 
     interface BridgeStatus {

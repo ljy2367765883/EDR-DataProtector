@@ -21,11 +21,14 @@ Abstract:
 
 #include "DataProtector.h"
 #include <ndis.h>
+#include <ntstrsafe.h>
 #include <fwpsk.h>
 #include <fwpmk.h>
 #include <initguid.h>
 
 #define DP_UDP_HEADER_SIZE 8
+#define DP_SMTP_CAPTURE_BYTES 4096
+#define DP_SMTP_MAX_LINE_BYTES 1024
 
 DEFINE_GUID(
     DP_WFP_SUBLAYER_GUID,
@@ -43,6 +46,10 @@ DEFINE_GUID(
     DP_WFP_DNS_DATAGRAM_V4_CALLOUT_GUID,
     0x499d0624, 0x7b6f, 0x46c9, 0xa9, 0xc2, 0x3d, 0xb7, 0x76, 0x92, 0x21, 0xe4);
 
+DEFINE_GUID(
+    DP_WFP_SMTP_STREAM_V4_CALLOUT_GUID,
+    0x28778b42, 0x1d77, 0x49e5, 0xb5, 0xa7, 0x48, 0x6c, 0x4c, 0xfa, 0x95, 0x32);
+
 typedef struct _DP_NETWORK_RULE_ENTRY {
     LIST_ENTRY Link;
     ULONG RuleId;
@@ -59,15 +66,39 @@ typedef struct _DP_NETWORK_RULE_ENTRY {
     UNICODE_STRING Domain;
 } DP_NETWORK_RULE_ENTRY, *PDP_NETWORK_RULE_ENTRY;
 
+typedef struct _DP_SMTP_EVENT_ENTRY {
+    LIST_ENTRY Link;
+    DP_SMTP_EVENT_QUERY_ENTRY Event;
+} DP_SMTP_EVENT_ENTRY, *PDP_SMTP_EVENT_ENTRY;
+
+typedef struct _DP_SMTP_FLOW_CONTEXT {
+    ULONG LocalAddress;
+    ULONG RemoteAddress;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONGLONG ProcessId;
+    BOOLEAN HasFrom;
+    WCHAR From[DP_SMTP_MAX_ADDRESS_CHARS];
+    CHAR PendingLine[DP_SMTP_MAX_LINE_BYTES];
+    ULONG PendingLength;
+} DP_SMTP_FLOW_CONTEXT, *PDP_SMTP_FLOW_CONTEXT;
+
 static LIST_ENTRY gDpNetworkRules;
+static LIST_ENTRY gDpSmtpEvents;
 static KSPIN_LOCK gDpNetworkRuleLock;
+static KSPIN_LOCK gDpSmtpEventLock;
 static PDEVICE_OBJECT gDpNetDeviceObject = NULL;
 static HANDLE gDpWfpEngineHandle = NULL;
 static UINT32 gDpAleConnectV4CalloutId = 0;
 static UINT32 gDpAleRecvAcceptV4CalloutId = 0;
 static UINT32 gDpDnsDatagramV4CalloutId = 0;
+static UINT32 gDpSmtpStreamV4CalloutId = 0;
 static BOOLEAN gDpNetFilterInitialized = FALSE;
 static BOOLEAN gDpNetworkRuleLockInitialized = FALSE;
+static BOOLEAN gDpSmtpEventLockInitialized = FALSE;
+static ULONG gDpSmtpEventCount = 0;
+static ULONGLONG gDpSmtpEventSequence = 0;
+static ULONGLONG gDpSmtpDroppedEvents = 0;
 
 static
 VOID
@@ -93,6 +124,429 @@ DpNetFilterFreeRule(
     if (Rule != NULL) {
         DpNetFilterFreeUnicodeString(&Rule->Domain);
         ExFreePoolWithTag(Rule, DP_TAG_NET_RULE);
+    }
+}
+
+static
+VOID
+DpNetFilterFreeSmtpEvent(
+    _In_ PDP_SMTP_EVENT_ENTRY Event
+    )
+{
+    if (Event != NULL) {
+        ExFreePoolWithTag(Event, DP_TAG_SMTP_EVENT);
+    }
+}
+
+static
+VOID
+DpNetFilterClearSmtpEvents(
+    VOID
+    )
+{
+    LIST_ENTRY localList;
+    KIRQL oldIrql;
+
+    if (!gDpSmtpEventLockInitialized) {
+        return;
+    }
+
+    InitializeListHead(&localList);
+
+    KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
+
+    while (!IsListEmpty(&gDpSmtpEvents)) {
+        PLIST_ENTRY link = RemoveHeadList(&gDpSmtpEvents);
+        InsertTailList(&localList, link);
+    }
+
+    gDpSmtpEventCount = 0;
+
+    KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);
+
+    while (!IsListEmpty(&localList)) {
+        PLIST_ENTRY link = RemoveHeadList(&localList);
+        PDP_SMTP_EVENT_ENTRY event = CONTAINING_RECORD(link, DP_SMTP_EVENT_ENTRY, Link);
+        DpNetFilterFreeSmtpEvent(event);
+    }
+}
+
+static
+CHAR
+DpNetFilterLowerAscii(
+    _In_ CHAR Character
+    )
+{
+    if (Character >= 'A' && Character <= 'Z') {
+        return (CHAR)(Character + ('a' - 'A'));
+    }
+
+    return Character;
+}
+
+static
+BOOLEAN
+DpNetFilterAsciiStartsWithInsensitive(
+    _In_reads_bytes_(Length) const CHAR *Buffer,
+    _In_ SIZE_T Length,
+    _In_z_ const CHAR *Prefix
+    )
+{
+    SIZE_T index;
+
+    if (Buffer == NULL || Prefix == NULL) {
+        return FALSE;
+    }
+
+    for (index = 0; Prefix[index] != '\0'; index++) {
+        if (index >= Length ||
+            DpNetFilterLowerAscii(Buffer[index]) != DpNetFilterLowerAscii(Prefix[index])) {
+
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static
+SIZE_T
+DpNetFilterAsciiStringLength(
+    _In_z_ const CHAR *Value
+    )
+{
+    SIZE_T length = 0;
+
+    if (Value == NULL) {
+        return 0;
+    }
+
+    while (Value[length] != '\0') {
+        length++;
+    }
+
+    return length;
+}
+
+static
+VOID
+DpNetFilterCopyAsciiAddressToWide(
+    _In_reads_bytes_(Length) const CHAR *Source,
+    _In_ SIZE_T Length,
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ SIZE_T DestinationChars
+    )
+{
+    SIZE_T index;
+    SIZE_T start = 0;
+    SIZE_T end = Length;
+    SIZE_T outputIndex = 0;
+
+    if (Destination == NULL || DestinationChars == 0) {
+        return;
+    }
+
+    Destination[0] = L'\0';
+
+    if (Source == NULL || Length == 0) {
+        return;
+    }
+
+    while (start < end &&
+           (Source[start] == ' ' || Source[start] == '\t' ||
+            Source[start] == '<' || Source[start] == '"')) {
+
+        start++;
+    }
+
+    while (end > start &&
+           (Source[end - 1] == ' ' || Source[end - 1] == '\t' ||
+            Source[end - 1] == '\r' || Source[end - 1] == '\n' ||
+            Source[end - 1] == '>' || Source[end - 1] == '"')) {
+
+        end--;
+    }
+
+    for (index = start; index < end && outputIndex < DestinationChars - 1; index++) {
+        UCHAR character = (UCHAR)Source[index];
+
+        if (character < 0x20 || character > 0x7E) {
+            break;
+        }
+
+        Destination[outputIndex++] = (WCHAR)character;
+    }
+
+    Destination[outputIndex] = L'\0';
+}
+
+static
+BOOLEAN
+DpNetFilterExtractSmtpAddress(
+    _In_reads_bytes_(LineLength) const CHAR *Line,
+    _In_ SIZE_T LineLength,
+    _In_z_ const CHAR *CommandPrefix,
+    _Out_writes_(AddressChars) PWCHAR Address,
+    _In_ SIZE_T AddressChars
+    )
+{
+    SIZE_T prefixLength;
+    SIZE_T index;
+    SIZE_T valueStart;
+    SIZE_T valueEnd;
+
+    if (Address == NULL || AddressChars == 0) {
+        return FALSE;
+    }
+
+    Address[0] = L'\0';
+
+    if (!DpNetFilterAsciiStartsWithInsensitive(Line, LineLength, CommandPrefix)) {
+        return FALSE;
+    }
+
+    prefixLength = DpNetFilterAsciiStringLength(CommandPrefix);
+    index = prefixLength;
+
+    if (index < LineLength &&
+        Line[index] != ':' &&
+        Line[index] != ' ' &&
+        Line[index] != '\t') {
+
+        return FALSE;
+    }
+
+    while (index < LineLength && (Line[index] == ' ' || Line[index] == '\t')) {
+        index++;
+    }
+
+    if (index < LineLength && Line[index] == ':') {
+        index++;
+    }
+
+    while (index < LineLength && (Line[index] == ' ' || Line[index] == '\t')) {
+        index++;
+    }
+
+    valueStart = index;
+    valueEnd = LineLength;
+
+    while (valueEnd > valueStart &&
+           (Line[valueEnd - 1] == '\r' || Line[valueEnd - 1] == '\n' ||
+            Line[valueEnd - 1] == ' ' || Line[valueEnd - 1] == '\t')) {
+
+        valueEnd--;
+    }
+
+    if (valueEnd <= valueStart) {
+        return FALSE;
+    }
+
+    for (index = valueStart; index < valueEnd; index++) {
+        if (Line[index] == '>') {
+            valueEnd = index + 1;
+            break;
+        }
+    }
+
+    DpNetFilterCopyAsciiAddressToWide(Line + valueStart,
+                                      valueEnd - valueStart,
+                                      Address,
+                                      AddressChars);
+
+    return Address[0] != L'\0';
+}
+
+static
+ULONG
+DpNetFilterWideStringLengthBytes(
+    _In_reads_(MaxChars) const WCHAR *Value,
+    _In_ SIZE_T MaxChars
+    )
+{
+    SIZE_T chars = 0;
+
+    if (Value == NULL) {
+        return 0;
+    }
+
+    while (chars < MaxChars && Value[chars] != L'\0') {
+        chars++;
+    }
+
+    return (ULONG)(chars * sizeof(WCHAR));
+}
+
+static
+VOID
+DpNetFilterQueueSmtpEvent(
+    _In_ PDP_SMTP_FLOW_CONTEXT FlowContext,
+    _In_reads_(DP_SMTP_MAX_ADDRESS_CHARS) const WCHAR *Recipient
+    )
+{
+    PDP_SMTP_EVENT_ENTRY entry;
+    KIRQL oldIrql;
+
+    if (FlowContext == NULL || !FlowContext->HasFrom ||
+        Recipient == NULL || Recipient[0] == L'\0') {
+
+        return;
+    }
+
+    entry = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                  sizeof(DP_SMTP_EVENT_ENTRY),
+                                  DP_TAG_SMTP_EVENT);
+    if (entry == NULL) {
+        if (gDpSmtpEventLockInitialized) {
+            KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
+            gDpSmtpDroppedEvents++;
+            KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);
+        }
+        return;
+    }
+
+    RtlZeroMemory(entry, sizeof(DP_SMTP_EVENT_ENTRY));
+    InitializeListHead(&entry->Link);
+    entry->Event.ProcessId = FlowContext->ProcessId;
+    entry->Event.LocalAddress = FlowContext->LocalAddress;
+    entry->Event.RemoteAddress = FlowContext->RemoteAddress;
+    entry->Event.LocalPort = FlowContext->LocalPort;
+    entry->Event.RemotePort = FlowContext->RemotePort;
+    RtlStringCchCopyW(entry->Event.From,
+                      RTL_NUMBER_OF(entry->Event.From),
+                      FlowContext->From);
+    RtlStringCchCopyW(entry->Event.To,
+                      RTL_NUMBER_OF(entry->Event.To),
+                      Recipient);
+    entry->Event.FromLengthBytes =
+        DpNetFilterWideStringLengthBytes(entry->Event.From, RTL_NUMBER_OF(entry->Event.From));
+    entry->Event.ToLengthBytes =
+        DpNetFilterWideStringLengthBytes(entry->Event.To, RTL_NUMBER_OF(entry->Event.To));
+
+    KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
+
+    entry->Event.Sequence = ++gDpSmtpEventSequence;
+    InsertTailList(&gDpSmtpEvents, &entry->Link);
+    gDpSmtpEventCount++;
+
+    while (gDpSmtpEventCount > DP_POLICY_MAX_SMTP_EVENTS && !IsListEmpty(&gDpSmtpEvents)) {
+        PLIST_ENTRY oldLink = RemoveHeadList(&gDpSmtpEvents);
+        PDP_SMTP_EVENT_ENTRY oldEvent = CONTAINING_RECORD(oldLink, DP_SMTP_EVENT_ENTRY, Link);
+        gDpSmtpEventCount--;
+        gDpSmtpDroppedEvents++;
+        KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);
+        DpNetFilterFreeSmtpEvent(oldEvent);
+        KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
+    }
+
+    KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);
+}
+
+static
+VOID
+DpNetFilterInspectSmtpLine(
+    _Inout_ PDP_SMTP_FLOW_CONTEXT FlowContext,
+    _In_reads_bytes_(LineLength) const CHAR *Line,
+    _In_ SIZE_T LineLength
+    )
+{
+    WCHAR address[DP_SMTP_MAX_ADDRESS_CHARS];
+
+    if (FlowContext == NULL || Line == NULL || LineLength == 0) {
+        return;
+    }
+
+    RtlZeroMemory(address, sizeof(address));
+
+    if (DpNetFilterExtractSmtpAddress(Line,
+                                      LineLength,
+                                      "MAIL FROM",
+                                      address,
+                                      RTL_NUMBER_OF(address))) {
+
+        RtlStringCchCopyW(FlowContext->From,
+                          RTL_NUMBER_OF(FlowContext->From),
+                          address);
+        FlowContext->HasFrom = TRUE;
+        return;
+    }
+
+    if (DpNetFilterExtractSmtpAddress(Line,
+                                      LineLength,
+                                      "RCPT TO",
+                                      address,
+                                      RTL_NUMBER_OF(address))) {
+
+        DpNetFilterQueueSmtpEvent(FlowContext, address);
+    }
+}
+
+static
+VOID
+DpNetFilterInspectSmtpBuffer(
+    _Inout_ PDP_SMTP_FLOW_CONTEXT FlowContext,
+    _In_reads_bytes_(Length) const CHAR *Buffer,
+    _In_ SIZE_T Length
+    )
+{
+    SIZE_T offset = 0;
+
+    if (FlowContext == NULL || Buffer == NULL || Length == 0) {
+        return;
+    }
+
+    while (offset < Length) {
+        SIZE_T lineStart = offset;
+        SIZE_T lineEnd = offset;
+
+        while (lineEnd < Length && Buffer[lineEnd] != '\n') {
+            lineEnd++;
+        }
+
+        if (FlowContext->PendingLength != 0) {
+            SIZE_T lineBytes = lineEnd - lineStart;
+            SIZE_T copyBytes = lineBytes;
+
+            if (copyBytes > RTL_NUMBER_OF(FlowContext->PendingLine) - FlowContext->PendingLength) {
+                copyBytes = RTL_NUMBER_OF(FlowContext->PendingLine) - FlowContext->PendingLength;
+            }
+
+            if (copyBytes != 0) {
+                RtlCopyMemory(FlowContext->PendingLine + FlowContext->PendingLength,
+                              Buffer + lineStart,
+                              copyBytes);
+                FlowContext->PendingLength += (ULONG)copyBytes;
+            }
+
+            if (lineEnd < Length) {
+                DpNetFilterInspectSmtpLine(FlowContext,
+                                           FlowContext->PendingLine,
+                                           FlowContext->PendingLength);
+                FlowContext->PendingLength = 0;
+                RtlZeroMemory(FlowContext->PendingLine, sizeof(FlowContext->PendingLine));
+            } else if (FlowContext->PendingLength >= RTL_NUMBER_OF(FlowContext->PendingLine)) {
+                FlowContext->PendingLength = 0;
+                RtlZeroMemory(FlowContext->PendingLine, sizeof(FlowContext->PendingLine));
+            }
+        } else if (lineEnd < Length) {
+            DpNetFilterInspectSmtpLine(FlowContext,
+                                       Buffer + lineStart,
+                                       lineEnd - lineStart);
+        } else {
+            SIZE_T lineBytes = lineEnd - lineStart;
+
+            if (lineBytes >= RTL_NUMBER_OF(FlowContext->PendingLine)) {
+                FlowContext->PendingLength = 0;
+                RtlZeroMemory(FlowContext->PendingLine, sizeof(FlowContext->PendingLine));
+            } else if (lineBytes != 0) {
+                RtlCopyMemory(FlowContext->PendingLine,
+                              Buffer + lineStart,
+                              lineBytes);
+                FlowContext->PendingLength = (ULONG)lineBytes;
+            }
+        }
+
+        offset = lineEnd < Length ? lineEnd + 1 : Length;
     }
 }
 
@@ -257,6 +711,10 @@ DpNetFilterRuleMatches(
     }
 
     if (Rule->Kind == DpNetworkRuleDomain) {
+        if (Protocol == DpNetworkProtocolIcmp) {
+            return FALSE;
+        }
+
         return DpNetFilterEqualDomain(&Rule->Domain, Domain);
     }
 
@@ -381,7 +839,10 @@ DpNetFilterAleClassify(
         return;
     }
 
-    if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP) {
+    if (protocol != IPPROTO_TCP &&
+        protocol != IPPROTO_UDP &&
+        protocol != IPPROTO_ICMP) {
+
         ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
@@ -611,6 +1072,114 @@ DpNetFilterDnsClassify(
 }
 
 static
+VOID
+NTAPI
+DpNetFilterSmtpClassify(
+    _In_ const FWPS_INCOMING_VALUES0 *InFixedValues,
+    _In_ const FWPS_INCOMING_METADATA_VALUES0 *InMetaValues,
+    _Inout_opt_ VOID *LayerData,
+    _In_opt_ const VOID *ClassifyContext,
+    _In_ const FWPS_FILTER1 *Filter,
+    _In_ UINT64 FlowContext,
+    _Inout_ FWPS_CLASSIFY_OUT0 *ClassifyOut
+    )
+{
+    FWPS_STREAM_CALLOUT_IO_PACKET0 *ioPacket;
+    FWPS_STREAM_DATA0 *streamData;
+    PDP_SMTP_FLOW_CONTEXT flowContext = (PDP_SMTP_FLOW_CONTEXT)(ULONG_PTR)FlowContext;
+    PCHAR captureBuffer = NULL;
+    SIZE_T bytesToCopy;
+    SIZE_T bytesCopied = 0;
+    NTSTATUS status;
+
+    UNREFERENCED_PARAMETER(ClassifyContext);
+    UNREFERENCED_PARAMETER(Filter);
+
+    if (ClassifyOut != NULL && (ClassifyOut->rights & FWPS_RIGHT_ACTION_WRITE) != 0) {
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
+    }
+
+    ioPacket = (FWPS_STREAM_CALLOUT_IO_PACKET0 *)LayerData;
+    if (InFixedValues == NULL ||
+        InMetaValues == NULL ||
+        ioPacket == NULL ||
+        ioPacket->streamData == NULL) {
+
+        return;
+    }
+
+    ioPacket->streamAction = FWPS_STREAM_ACTION_NONE;
+    ioPacket->countBytesRequired = 0;
+    ioPacket->countBytesEnforced = 0;
+
+    streamData = ioPacket->streamData;
+    if ((streamData->flags & FWPS_STREAM_FLAG_SEND) == 0 ||
+        streamData->dataLength == 0) {
+
+        return;
+    }
+
+    if (flowContext == NULL) {
+        if (!FWPS_IS_METADATA_FIELD_PRESENT(InMetaValues, FWPS_METADATA_FIELD_FLOW_HANDLE) ||
+            InMetaValues->flowHandle == 0 ||
+            gDpSmtpStreamV4CalloutId == 0) {
+
+            return;
+        }
+
+        flowContext = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                            sizeof(DP_SMTP_FLOW_CONTEXT),
+                                            DP_TAG_SMTP_FLOW);
+        if (flowContext == NULL) {
+            return;
+        }
+
+        RtlZeroMemory(flowContext, sizeof(DP_SMTP_FLOW_CONTEXT));
+        flowContext->LocalAddress = InFixedValues->incomingValue[FWPS_FIELD_STREAM_V4_IP_LOCAL_ADDRESS].value.uint32;
+        flowContext->RemoteAddress = InFixedValues->incomingValue[FWPS_FIELD_STREAM_V4_IP_REMOTE_ADDRESS].value.uint32;
+        flowContext->LocalPort = InFixedValues->incomingValue[FWPS_FIELD_STREAM_V4_IP_LOCAL_PORT].value.uint16;
+        flowContext->RemotePort = InFixedValues->incomingValue[FWPS_FIELD_STREAM_V4_IP_REMOTE_PORT].value.uint16;
+
+        if (FWPS_IS_METADATA_FIELD_PRESENT(InMetaValues, FWPS_METADATA_FIELD_PROCESS_ID)) {
+            flowContext->ProcessId = InMetaValues->processId;
+        }
+
+        status = FwpsFlowAssociateContext0(InMetaValues->flowHandle,
+                                           FWPS_LAYER_STREAM_V4,
+                                           gDpSmtpStreamV4CalloutId,
+                                           (UINT64)(ULONG_PTR)flowContext);
+        if (!NT_SUCCESS(status)) {
+            ExFreePoolWithTag(flowContext, DP_TAG_SMTP_FLOW);
+            return;
+        }
+    }
+
+    bytesToCopy = streamData->dataLength;
+    if (bytesToCopy > DP_SMTP_CAPTURE_BYTES) {
+        bytesToCopy = DP_SMTP_CAPTURE_BYTES;
+    }
+
+    captureBuffer = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                          DP_SMTP_CAPTURE_BYTES,
+                                          DP_TAG_NET_BUFFER);
+    if (captureBuffer == NULL) {
+        return;
+    }
+
+    RtlZeroMemory(captureBuffer, DP_SMTP_CAPTURE_BYTES);
+    FwpsCopyStreamDataToBuffer0(streamData,
+                                captureBuffer,
+                                bytesToCopy,
+                                &bytesCopied);
+
+    if (bytesCopied != 0) {
+        DpNetFilterInspectSmtpBuffer(flowContext, captureBuffer, bytesCopied);
+    }
+
+    ExFreePoolWithTag(captureBuffer, DP_TAG_NET_BUFFER);
+}
+
+static
 NTSTATUS
 NTAPI
 DpNetFilterNotify(
@@ -636,8 +1205,11 @@ DpNetFilterFlowDelete(
     )
 {
     UNREFERENCED_PARAMETER(LayerId);
-    UNREFERENCED_PARAMETER(CalloutId);
-    UNREFERENCED_PARAMETER(FlowContext);
+
+    if (CalloutId == gDpSmtpStreamV4CalloutId && FlowContext != 0) {
+        PDP_SMTP_FLOW_CONTEXT flowContext = (PDP_SMTP_FLOW_CONTEXT)(ULONG_PTR)FlowContext;
+        ExFreePoolWithTag(flowContext, DP_TAG_SMTP_FLOW);
+    }
 }
 
 static
@@ -722,6 +1294,66 @@ DpNetFilterInitializeProtocolCondition(
     Condition->conditionValue.uint8 = Protocol;
 }
 
+static
+VOID
+DpNetFilterInitializePortCondition(
+    _Out_ FWPM_FILTER_CONDITION0 *Condition,
+    _In_ USHORT Port
+    )
+{
+    RtlZeroMemory(Condition, sizeof(FWPM_FILTER_CONDITION0));
+    Condition->fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+    Condition->matchType = FWP_MATCH_EQUAL;
+    Condition->conditionValue.type = FWP_UINT16;
+    Condition->conditionValue.uint16 = Port;
+}
+
+static
+NTSTATUS
+DpNetFilterAddAleProtocolFilters(
+    _In_ const GUID *LayerGuid,
+    _In_ const GUID *CalloutGuid,
+    _In_z_ PWSTR TcpName,
+    _In_z_ PWSTR UdpName,
+    _In_z_ PWSTR IcmpName
+    )
+{
+    NTSTATUS status;
+    FWPM_FILTER_CONDITION0 condition;
+
+    DpNetFilterInitializeProtocolCondition(&condition, IPPROTO_TCP);
+    status = DpNetFilterAddManagementFilter(LayerGuid,
+                                            CalloutGuid,
+                                            TcpName,
+                                            &condition,
+                                            1);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        return status;
+    }
+
+    DpNetFilterInitializeProtocolCondition(&condition, IPPROTO_UDP);
+    status = DpNetFilterAddManagementFilter(LayerGuid,
+                                            CalloutGuid,
+                                            UdpName,
+                                            &condition,
+                                            1);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        return status;
+    }
+
+    DpNetFilterInitializeProtocolCondition(&condition, IPPROTO_ICMP);
+    status = DpNetFilterAddManagementFilter(LayerGuid,
+                                            CalloutGuid,
+                                            IcmpName,
+                                            &condition,
+                                            1);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        return status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 DpNetFilterInitialize(
     _In_ PDRIVER_OBJECT DriverObject
@@ -730,13 +1362,18 @@ DpNetFilterInitialize(
     NTSTATUS status;
     FWPM_SESSION0 session;
     FWPM_SUBLAYER0 subLayer;
-    FWPM_FILTER_CONDITION0 tcpCondition;
-    FWPM_FILTER_CONDITION0 aleUdpCondition;
     FWPM_FILTER_CONDITION0 udpConditions[2];
+    FWPM_FILTER_CONDITION0 smtpPortCondition;
 
     InitializeListHead(&gDpNetworkRules);
+    InitializeListHead(&gDpSmtpEvents);
     KeInitializeSpinLock(&gDpNetworkRuleLock);
+    KeInitializeSpinLock(&gDpSmtpEventLock);
     gDpNetworkRuleLockInitialized = TRUE;
+    gDpSmtpEventLockInitialized = TRUE;
+    gDpSmtpEventCount = 0;
+    gDpSmtpEventSequence = 0;
+    gDpSmtpDroppedEvents = 0;
 
     status = IoCreateDevice(DriverObject,
                             0,
@@ -814,43 +1451,31 @@ DpNetFilterInitialize(
         goto Abort;
     }
 
-    DpNetFilterInitializeProtocolCondition(&tcpCondition, IPPROTO_TCP);
-    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-                                            &DP_WFP_ALE_CONNECT_V4_CALLOUT_GUID,
-                                            L"DataProtector outbound TCP defense",
-                                            &tcpCondition,
-                                            1);
-    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+    status = DpNetFilterRegisterCallout(gDpNetDeviceObject,
+                                        &DP_WFP_SMTP_STREAM_V4_CALLOUT_GUID,
+                                        &FWPM_LAYER_STREAM_V4,
+                                        DpNetFilterSmtpClassify,
+                                        L"DataProtector SMTP Stream V4",
+                                        &gDpSmtpStreamV4CalloutId);
+    if (!NT_SUCCESS(status)) {
         goto Abort;
     }
 
-    DpNetFilterInitializeProtocolCondition(&aleUdpCondition, IPPROTO_UDP);
-    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-                                            &DP_WFP_ALE_CONNECT_V4_CALLOUT_GUID,
-                                            L"DataProtector outbound UDP connect defense",
-                                            &aleUdpCondition,
-                                            1);
-    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+    status = DpNetFilterAddAleProtocolFilters(&FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+                                              &DP_WFP_ALE_CONNECT_V4_CALLOUT_GUID,
+                                              L"DataProtector outbound TCP defense",
+                                              L"DataProtector outbound UDP connect defense",
+                                              L"DataProtector outbound ICMP defense");
+    if (!NT_SUCCESS(status)) {
         goto Abort;
     }
 
-    DpNetFilterInitializeProtocolCondition(&tcpCondition, IPPROTO_TCP);
-    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-                                            &DP_WFP_ALE_RECV_ACCEPT_V4_CALLOUT_GUID,
-                                            L"DataProtector inbound TCP defense",
-                                            &tcpCondition,
-                                            1);
-    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
-        goto Abort;
-    }
-
-    DpNetFilterInitializeProtocolCondition(&aleUdpCondition, IPPROTO_UDP);
-    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-                                            &DP_WFP_ALE_RECV_ACCEPT_V4_CALLOUT_GUID,
-                                            L"DataProtector inbound UDP defense",
-                                            &aleUdpCondition,
-                                            1);
-    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+    status = DpNetFilterAddAleProtocolFilters(&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+                                              &DP_WFP_ALE_RECV_ACCEPT_V4_CALLOUT_GUID,
+                                              L"DataProtector inbound TCP defense",
+                                              L"DataProtector inbound UDP defense",
+                                              L"DataProtector inbound ICMP defense");
+    if (!NT_SUCCESS(status)) {
         goto Abort;
     }
 
@@ -869,6 +1494,36 @@ DpNetFilterInitialize(
                                             L"DataProtector outbound UDP defense",
                                             udpConditions,
                                             RTL_NUMBER_OF(udpConditions));
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        goto Abort;
+    }
+
+    DpNetFilterInitializePortCondition(&smtpPortCondition, 25);
+    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_STREAM_V4,
+                                            &DP_WFP_SMTP_STREAM_V4_CALLOUT_GUID,
+                                            L"DataProtector SMTP stream audit 25",
+                                            &smtpPortCondition,
+                                            1);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        goto Abort;
+    }
+
+    DpNetFilterInitializePortCondition(&smtpPortCondition, 465);
+    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_STREAM_V4,
+                                            &DP_WFP_SMTP_STREAM_V4_CALLOUT_GUID,
+                                            L"DataProtector SMTP stream audit 465",
+                                            &smtpPortCondition,
+                                            1);
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        goto Abort;
+    }
+
+    DpNetFilterInitializePortCondition(&smtpPortCondition, 587);
+    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_STREAM_V4,
+                                            &DP_WFP_SMTP_STREAM_V4_CALLOUT_GUID,
+                                            L"DataProtector SMTP stream audit 587",
+                                            &smtpPortCondition,
+                                            1);
     if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
         goto Abort;
     }
@@ -901,6 +1556,11 @@ DpNetFilterUninitialize(
         gDpDnsDatagramV4CalloutId = 0;
     }
 
+    if (gDpSmtpStreamV4CalloutId != 0) {
+        FwpsCalloutUnregisterById0(gDpSmtpStreamV4CalloutId);
+        gDpSmtpStreamV4CalloutId = 0;
+    }
+
     if (gDpAleRecvAcceptV4CalloutId != 0) {
         FwpsCalloutUnregisterById0(gDpAleRecvAcceptV4CalloutId);
         gDpAleRecvAcceptV4CalloutId = 0;
@@ -925,6 +1585,11 @@ DpNetFilterUninitialize(
         DpNetFilterClearRules();
         gDpNetworkRuleLockInitialized = FALSE;
     }
+
+    if (gDpSmtpEventLockInitialized) {
+        DpNetFilterClearSmtpEvents();
+        gDpSmtpEventLockInitialized = FALSE;
+    }
 }
 
 NTSTATUS
@@ -941,6 +1606,13 @@ DpNetFilterAddRule(
         Rule->RuleId == 0 ||
         (Rule->Kind != DpNetworkRuleIp && Rule->Kind != DpNetworkRuleDomain) ||
         (Rule->Action != DpNetworkActionAllow && Rule->Action != DpNetworkActionBlock) ||
+        (Rule->Protocol != DpNetworkProtocolAny &&
+         Rule->Protocol != DpNetworkProtocolIcmp &&
+         Rule->Protocol != DpNetworkProtocolTcp &&
+         Rule->Protocol != DpNetworkProtocolUdp) ||
+        (Rule->Direction != DpNetworkDirectionInbound &&
+         Rule->Direction != DpNetworkDirectionOutbound &&
+         Rule->Direction != DpNetworkDirectionBoth) ||
         (Rule->DomainLengthBytes > DP_POLICY_MAX_DOMAIN_BYTES) ||
         (Rule->DomainLengthBytes % sizeof(WCHAR)) != 0) {
 
@@ -948,6 +1620,12 @@ DpNetFilterAddRule(
     }
 
     if (Rule->Kind == DpNetworkRuleDomain && Rule->DomainLengthBytes == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Rule->Kind == DpNetworkRuleDomain &&
+        Rule->Protocol == DpNetworkProtocolIcmp) {
+
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1142,6 +1820,97 @@ DpNetFilterQueryRules(
     }
 
     if (returnedRuleCount != ruleCount) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+DpNetFilterQuerySmtpEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    )
+{
+    PDP_SMTP_EVENT_QUERY_HEADER header;
+    PUCHAR cursor;
+    ULONG bytesRequired = sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+    ULONG bytesReturned = sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+    ULONG eventCount = 0;
+    ULONG returnedEventCount = 0;
+    PLIST_ENTRY link;
+    KIRQL oldIrql;
+    BOOLEAN sizingOnly;
+
+    if (ReturnOutputBufferLength == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ReturnOutputBufferLength = 0;
+
+    if (OutputBuffer == NULL || OutputBufferLength < sizeof(DP_SMTP_EVENT_QUERY_HEADER)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    header = (PDP_SMTP_EVENT_QUERY_HEADER)OutputBuffer;
+    sizingOnly = OutputBufferLength == sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+
+    RtlZeroMemory(header, sizeof(DP_SMTP_EVENT_QUERY_HEADER));
+    cursor = (PUCHAR)OutputBuffer + sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+
+    if (!gDpSmtpEventLockInitialized) {
+        header->Version = DP_SMTP_EVENT_QUERY_VERSION;
+        header->BytesRequired = sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+        header->BytesReturned = sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+        *ReturnOutputBufferLength = sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+        return STATUS_SUCCESS;
+    }
+
+    KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
+
+    header->Version = DP_SMTP_EVENT_QUERY_VERSION;
+    header->BytesReturned = sizeof(DP_SMTP_EVENT_QUERY_HEADER);
+    header->DroppedEvents = gDpSmtpDroppedEvents;
+
+    for (link = gDpSmtpEvents.Flink; link != &gDpSmtpEvents; link = link->Flink) {
+        bytesRequired += sizeof(DP_SMTP_EVENT_QUERY_ENTRY);
+        eventCount++;
+
+        if (bytesReturned <= OutputBufferLength &&
+            sizeof(DP_SMTP_EVENT_QUERY_ENTRY) <= OutputBufferLength - bytesReturned) {
+
+            PDP_SMTP_EVENT_ENTRY event = CONTAINING_RECORD(link, DP_SMTP_EVENT_ENTRY, Link);
+            RtlCopyMemory(cursor, &event->Event, sizeof(DP_SMTP_EVENT_QUERY_ENTRY));
+            cursor += sizeof(DP_SMTP_EVENT_QUERY_ENTRY);
+            bytesReturned += sizeof(DP_SMTP_EVENT_QUERY_ENTRY);
+            returnedEventCount++;
+        }
+    }
+
+    header->EventCount = eventCount;
+    header->BytesRequired = bytesRequired;
+    header->BytesReturned = bytesReturned;
+    *ReturnOutputBufferLength = bytesReturned;
+
+    if (!sizingOnly && returnedEventCount == eventCount) {
+        while (!IsListEmpty(&gDpSmtpEvents)) {
+            PLIST_ENTRY eventLink = RemoveHeadList(&gDpSmtpEvents);
+            PDP_SMTP_EVENT_ENTRY event = CONTAINING_RECORD(eventLink, DP_SMTP_EVENT_ENTRY, Link);
+            gDpSmtpEventCount--;
+            KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);
+            DpNetFilterFreeSmtpEvent(event);
+            KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
+        }
+    }
+
+    KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);
+
+    if (sizingOnly) {
+        return STATUS_SUCCESS;
+    }
+
+    if (returnedEventCount != eventCount) {
         return STATUS_BUFFER_TOO_SMALL;
     }
 

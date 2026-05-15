@@ -66,6 +66,7 @@ namespace DataProtectorWebBridge.Services
         private void SyncOnce()
         {
             object rawStatus = policyService.GetStatus();
+            AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
             CentralPolicyStore.AgentSyncRequest request = new CentralPolicyStore.AgentSyncRequest
             {
                 DeviceId = deviceId,
@@ -78,7 +79,7 @@ namespace DataProtectorWebBridge.Services
                 PolicyVersion = appliedPolicyVersion,
                 LastApplyStatus = lastApplyStatus,
                 LastApplyMessage = lastApplyMessage,
-                Audit = new AuditLog.AuditRecord[0],
+                Audit = auditRecords,
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = false
             };
@@ -125,6 +126,7 @@ namespace DataProtectorWebBridge.Services
         private void FlushTaskResults()
         {
             object rawStatus = policyService.GetStatus();
+            AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
             CentralPolicyStore.AgentSyncRequest request = new CentralPolicyStore.AgentSyncRequest
             {
                 DeviceId = deviceId,
@@ -137,13 +139,26 @@ namespace DataProtectorWebBridge.Services
                 PolicyVersion = appliedPolicyVersion,
                 LastApplyStatus = lastApplyStatus,
                 LastApplyMessage = lastApplyMessage,
-                Audit = new AuditLog.AuditRecord[0],
+                Audit = auditRecords,
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = true
             };
 
             Post<CentralPolicyStore.AgentSyncRequest, CentralPolicyStore.AgentSyncResponse>(serverSyncUri, request);
             pendingTaskResults.Clear();
+        }
+
+        private AuditLog.AuditRecord[] DrainLocalAuditRecords()
+        {
+            try
+            {
+                return policyService.DrainSmtpAuditRecords();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " SMTP audit drain failed: " + ex.Message);
+                return new AuditLog.AuditRecord[0];
+            }
         }
 
         private void ApplyPolicy(
