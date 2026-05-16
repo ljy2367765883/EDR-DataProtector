@@ -403,9 +403,18 @@ namespace DataProtectorWebBridge.Services
                             : normalized.Target;
                         state.Audit.Add(normalized);
                     }
+
+                    if (request.Audit.Length > 0)
+                    {
+                        Console.WriteLine(DateTime.Now.ToString("s") + " Central received " + request.Audit.Length + " audit event(s) from " + device.Machine + " (" + device.DeviceId + ").");
+                    }
                 }
 
-                AppendAudit(device.Machine, "agent.sync", device.DeviceId, string.Empty, true, "0x00000000", "Agent synchronized with central server.");
+                if (!request.ResultOnly && request.PolicyVersion != state.PolicyVersion)
+                {
+                    AppendAudit(device.Machine, "agent.policy.pending", device.DeviceId, string.Empty, true, "0x00000000", "Agent will apply central policy version " + state.PolicyVersion + ".");
+                }
+
                 RemoteTaskDto[] assignedTasks = request.ResultOnly ? new RemoteTaskDto[0] : AssignTasks(deviceId);
                 TrimAudit();
                 Save();

@@ -536,16 +536,7 @@ namespace DataProtectorWebBridge.Services
                 string endpoint = item.remoteEndpoint;
                 string target = item.from + " -> " + item.to;
                 string message = "SMTP envelope observed on " + endpoint + " by PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
-
-                auditLog.Append("network-sensor",
-                                "network.smtp.send",
-                                target,
-                                endpoint,
-                                true,
-                                SuccessStatus,
-                                message);
-
-                records.Add(new AuditLog.AuditRecord
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
                 {
                     TimestampUtc = DateTime.UtcNow.ToString("o"),
                     Actor = "network-sensor",
@@ -555,7 +546,10 @@ namespace DataProtectorWebBridge.Services
                     Succeeded = true,
                     Status = "0x00000000",
                     Message = message
-                });
+                };
+
+                records.Add(record);
+                TryAppendAudit(record);
             }
 
             return records.ToArray();
@@ -564,8 +558,8 @@ namespace DataProtectorWebBridge.Services
         public AuditLog.AuditRecord[] DrainSecurityAuditRecords()
         {
             List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
-            records.AddRange(DrainSmtpAuditRecords());
-            records.AddRange(DrainWebShellAuditRecords());
+            records.AddRange(TryDrainSecurityAuditSource("smtp", DrainSmtpAuditRecords));
+            records.AddRange(TryDrainSecurityAuditSource("webshell", DrainWebShellAuditRecords));
             return records.ToArray();
         }
 
@@ -580,16 +574,7 @@ namespace DataProtectorWebBridge.Services
                 string message = "WebShell " + item.severity + " on " + item.operation + " by PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
                 bool allowed = !string.Equals(item.severity, "danger", StringComparison.OrdinalIgnoreCase);
                 uint status = allowed ? SuccessStatus : 0xC0000022u;
-
-                auditLog.Append("webshell-sensor",
-                                action,
-                                item.path,
-                                item.extension,
-                                allowed,
-                                status,
-                                message + " Sample: " + item.sample);
-
-                records.Add(new AuditLog.AuditRecord
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
                 {
                     TimestampUtc = DateTime.UtcNow.ToString("o"),
                     Actor = "webshell-sensor",
@@ -599,10 +584,55 @@ namespace DataProtectorWebBridge.Services
                     Succeeded = allowed,
                     Status = "0x" + status.ToString("X8"),
                     Message = message + " Sample: " + item.sample
-                });
+                };
+
+                records.Add(record);
+                TryAppendAudit(record);
             }
 
             return records.ToArray();
+        }
+
+        private AuditLog.AuditRecord[] TryDrainSecurityAuditSource(string source, Func<AuditLog.AuditRecord[]> drain)
+        {
+            try
+            {
+                return drain();
+            }
+            catch (Exception ex)
+            {
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Actor = "security-audit",
+                    Action = "security.audit.drain.failed." + source,
+                    Target = source,
+                    Extension = string.Empty,
+                    Succeeded = false,
+                    Status = "0x00000001",
+                    Message = ex.Message
+                };
+
+                TryAppendAudit(record);
+                return new[] { record };
+            }
+        }
+
+        private void TryAppendAudit(AuditLog.AuditRecord record)
+        {
+            if (record == null)
+            {
+                return;
+            }
+
+            try
+            {
+                auditLog.AppendRecord(record);
+            }
+            catch
+            {
+                // Central upload must not depend on local JSONL availability.
+            }
         }
 
         private static PolicyRuleRequest NormalizeRequest(PolicyRuleRequest request)

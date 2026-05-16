@@ -38,6 +38,32 @@ namespace DataProtectorWebBridge.Services
                 Message = message ?? string.Empty
             };
 
+            AppendRecord(record);
+        }
+
+        public void AppendRecord(AuditRecord record)
+        {
+            if (record == null)
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(record.TimestampUtc))
+            {
+                record.TimestampUtc = DateTime.UtcNow.ToString("o");
+            }
+
+            if (string.IsNullOrWhiteSpace(record.Actor))
+            {
+                record.Actor = Environment.UserName;
+            }
+
+            record.Action = record.Action ?? string.Empty;
+            record.Target = record.Target ?? string.Empty;
+            record.Extension = record.Extension ?? string.Empty;
+            record.Status = record.Status ?? "0x00000000";
+            record.Message = record.Message ?? string.Empty;
+
             string line = serializer.Serialize(record);
 
             lock (syncRoot)

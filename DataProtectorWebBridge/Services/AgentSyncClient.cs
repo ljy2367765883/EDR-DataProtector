@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -45,6 +47,8 @@ namespace DataProtectorWebBridge.Services
         {
             Console.WriteLine("DataProtector Agent connecting to " + serverSyncUri);
             Console.WriteLine("Agent state: " + statePath);
+            Console.WriteLine("Agent executable: " + Assembly.GetExecutingAssembly().Location);
+            Console.WriteLine("Policy API DLL: " + GetPolicyApiPath());
 
             while (true)
             {
@@ -67,6 +71,11 @@ namespace DataProtectorWebBridge.Services
         {
             object rawStatus = policyService.GetStatus();
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
+            if (auditRecords.Length > 0)
+            {
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s).");
+            }
+
             CentralPolicyStore.AgentSyncRequest request = new CentralPolicyStore.AgentSyncRequest
             {
                 DeviceId = deviceId,
@@ -111,7 +120,7 @@ namespace DataProtectorWebBridge.Services
             {
                 FlushTaskResults();
             }
-            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ".");
+            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ".");
         }
 
         private void ExecuteTasks(CentralPolicyStore.RemoteTaskDto[] tasks)
@@ -128,6 +137,11 @@ namespace DataProtectorWebBridge.Services
         {
             object rawStatus = policyService.GetStatus();
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
+            if (auditRecords.Length > 0)
+            {
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s) during task result flush.");
+            }
+
             CentralPolicyStore.AgentSyncRequest request = new CentralPolicyStore.AgentSyncRequest
             {
                 DeviceId = deviceId,
@@ -160,6 +174,30 @@ namespace DataProtectorWebBridge.Services
                 Console.Error.WriteLine(DateTime.Now.ToString("s") + " security audit drain failed: " + ex.Message);
                 return new AuditLog.AuditRecord[0];
             }
+        }
+
+        private static string GetPolicyApiPath()
+        {
+            IntPtr handle;
+            if (!GetModuleHandleEx(0, "DataProtectorPolicyApi.dll", out handle) || handle == IntPtr.Zero)
+            {
+                try
+                {
+                    DataProtectorWebBridge.Native.DataProtectorPolicyNative.DpPolicyGetLastErrorMessage(new StringBuilder(2), 2);
+                    if (!GetModuleHandleEx(0, "DataProtectorPolicyApi.dll", out handle) || handle == IntPtr.Zero)
+                    {
+                        return "DataProtectorPolicyApi.dll is not loaded.";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    return "DataProtectorPolicyApi.dll load probe failed: " + ex.Message;
+                }
+            }
+
+            StringBuilder path = new StringBuilder(1024);
+            uint length = GetModuleFileName(handle, path, path.Capacity);
+            return length == 0 ? "DataProtectorPolicyApi.dll loaded, path unavailable." : path.ToString();
         }
 
         private void ApplyPolicy(
@@ -385,5 +423,11 @@ namespace DataProtectorWebBridge.Services
             public string LastApplyStatus { get; set; }
             public string LastApplyMessage { get; set; }
         }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool GetModuleHandleEx(uint flags, string moduleName, out IntPtr moduleHandle);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetModuleFileName(IntPtr moduleHandle, StringBuilder fileName, int size);
     }
 }
