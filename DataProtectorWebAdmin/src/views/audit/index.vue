@@ -26,6 +26,14 @@ interface AuditSummary {
   critical: number;
 }
 
+interface HostSummary {
+  host: string;
+  total: number;
+  critical: number;
+  warning: number;
+  blocked: number;
+}
+
 const loading = ref(false);
 const events = ref<Api.DataProtector.AuditRecord[]>([]);
 const activeCategory = ref<AuditCategory>('all');
@@ -109,21 +117,22 @@ const hostOptions = computed(() => {
 });
 
 const hostSummaries = computed(() => {
-  const groups = new Map<string, { host: string; count: number; critical: number; warning: number }>();
+  const groups = new Map<string, HostSummary>();
 
   for (const record of visibleEvents.value) {
     const host = resolveHost(record) || 'Unknown';
-    const current = groups.get(host) || { host, count: 0, critical: 0, warning: 0 };
-    current.count += 1;
+    const current = groups.get(host) || { host, total: 0, critical: 0, warning: 0, blocked: 0 };
+    current.total += 1;
     if (resolveSeverity(record) === 'critical') current.critical += 1;
     if (resolveSeverity(record) === 'warning') current.warning += 1;
+    if (resolveDisposition(record) === 'blocked') current.blocked += 1;
     groups.set(host, current);
   }
 
   return Array.from(groups.values())
     .sort(
       (left, right) =>
-        right.critical - left.critical || right.warning - left.warning || right.count - left.count || left.host.localeCompare(right.host)
+        right.critical - left.critical || right.warning - left.warning || right.blocked - left.blocked || right.total - left.total || left.host.localeCompare(right.host)
     )
     .slice(0, 8);
 });
@@ -144,7 +153,8 @@ const hostRiskChartData = computed(() =>
     name: item.host,
     critical: item.critical,
     warning: item.warning,
-    total: item.count
+    blocked: item.blocked,
+    total: item.total
   }))
 );
 
@@ -179,17 +189,50 @@ const { domRef: categoryChartRef, updateOptions: updateCategoryChart } = useEcha
 }));
 
 const { domRef: hostRiskChartRef, updateOptions: updateHostRiskChart } = useEcharts(() => ({
-  color: ['#d03050', '#f0a020'],
+  color: ['#d03050', '#f0a020', '#7c3aed'],
   tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-  legend: { top: 0, data: ['Critical', 'Warning'] },
+  legend: { top: 0, data: ['Critical', 'Warning', 'Blocked'] },
   grid: { left: 90, right: 18, top: 44, bottom: 28 },
   xAxis: { type: 'value', minInterval: 1 },
   yAxis: { type: 'category', data: [] as string[] },
   series: [
     { name: 'Critical', type: 'bar', stack: 'risk', data: [] as number[] },
-    { name: 'Warning', type: 'bar', stack: 'risk', data: [] as number[] }
+    { name: 'Warning', type: 'bar', stack: 'risk', data: [] as number[] },
+    { name: 'Blocked', type: 'bar', stack: 'risk', data: [] as number[] }
   ]
 }));
+
+const hostColumns: DataTableColumns<HostSummary> = [
+  { title: 'Host', key: 'host', minWidth: 180, ellipsis: { tooltip: true } },
+  { title: 'Events', key: 'total', width: 90, sorter: (a, b) => a.total - b.total },
+  {
+    title: 'Critical',
+    key: 'critical',
+    width: 100,
+    sorter: (a, b) => a.critical - b.critical,
+    render(row) {
+      return h(NTag, { type: row.critical ? 'error' : 'default', bordered: false }, { default: () => row.critical });
+    }
+  },
+  {
+    title: 'Warning',
+    key: 'warning',
+    width: 100,
+    sorter: (a, b) => a.warning - b.warning,
+    render(row) {
+      return h(NTag, { type: row.warning ? 'warning' : 'default', bordered: false }, { default: () => row.warning });
+    }
+  },
+  {
+    title: 'Blocked',
+    key: 'blocked',
+    width: 100,
+    sorter: (a, b) => a.blocked - b.blocked,
+    render(row) {
+      return h(NTag, { type: row.blocked ? 'error' : 'default', bordered: false }, { default: () => row.blocked });
+    }
+  }
+];
 
 const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
   {
@@ -388,6 +431,7 @@ function updateCharts() {
     opts.yAxis.data = items.map(item => item.name);
     opts.series[0].data = items.map(item => item.critical);
     opts.series[1].data = items.map(item => item.warning);
+    opts.series[2].data = items.map(item => item.blocked);
     return opts;
   });
 }
@@ -527,54 +571,40 @@ onMounted(refresh);
       </NGi>
     </NGrid>
 
-    <NCard title="Host Risk Ranking" :bordered="false" class="card-wrapper">
-      <div ref="hostRiskChartRef" class="h-280px overflow-hidden"></div>
+    <NCard title="Host Analytics" :bordered="false" class="card-wrapper">
+      <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+        <NGi span="24 l:13">
+          <div ref="hostRiskChartRef" class="h-300px overflow-hidden"></div>
+        </NGi>
+        <NGi span="24 l:11">
+          <NDataTable
+            :columns="hostColumns"
+            :data="hostSummaries"
+            :pagination="false"
+            :bordered="false"
+            :max-height="300"
+          />
+        </NGi>
+      </NGrid>
     </NCard>
 
-    <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGi span="24 l:14">
-        <NCard title="Event Classification" :bordered="false" class="card-wrapper">
-          <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-            <NGi v-for="item in categorySummaries" :key="item.category" span="24 s:12 m:8">
-              <div
-                class="cursor-pointer rounded-8px border border-gray-200 px-14px py-12px transition hover:border-primary"
-                :class="{ 'border-primary bg-primary/8': activeCategory === item.category }"
-                @click="activeCategory = item.category"
-              >
-                <div class="flex items-center justify-between">
-                  <span class="font-600">{{ item.label }}</span>
-                  <NTag v-if="item.critical" type="error" size="small" :bordered="false">{{ item.critical }} critical</NTag>
-                </div>
-                <div class="m-t-8px text-24px font-700">{{ item.count }}</div>
-              </div>
-            </NGi>
-          </NGrid>
-        </NCard>
-      </NGi>
-      <NGi span="24 l:10">
-        <NCard title="Host Distribution" :bordered="false" class="card-wrapper">
-          <NSpace vertical :size="10">
-            <div v-for="item in hostSummaries" :key="item.host" class="flex items-center justify-between gap-12px">
-              <div class="min-w-0 flex-1">
-                <div class="truncate font-600">{{ item.host }}</div>
-                <NProgress
-                  type="line"
-                  :percentage="events.length ? Math.round((item.count / events.length) * 100) : 0"
-                  :show-indicator="false"
-                  :height="6"
-                />
-              </div>
-              <NSpace align="center" :size="6">
-                <NTag v-if="item.critical" type="error" size="small" :bordered="false">{{ item.critical }}</NTag>
-                <NTag v-if="item.warning" type="warning" size="small" :bordered="false">{{ item.warning }}</NTag>
-                <span class="w-42px text-right font-600">{{ item.count }}</span>
-              </NSpace>
+    <NCard title="Event Classification" :bordered="false" class="card-wrapper">
+      <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+        <NGi v-for="item in categorySummaries" :key="item.category" span="24 s:12 m:8 l:6">
+          <div
+            class="cursor-pointer rounded-8px border border-gray-200 px-14px py-12px transition hover:border-primary"
+            :class="{ 'border-primary bg-primary/8': activeCategory === item.category }"
+            @click="activeCategory = item.category"
+          >
+            <div class="flex items-center justify-between">
+              <span class="font-600">{{ item.label }}</span>
+              <NTag v-if="item.critical" type="error" size="small" :bordered="false">{{ item.critical }} critical</NTag>
             </div>
-            <NEmpty v-if="!hostSummaries.length" description="No host data" />
-          </NSpace>
-        </NCard>
-      </NGi>
-    </NGrid>
+            <div class="m-t-8px text-24px font-700">{{ item.count }}</div>
+          </div>
+        </NGi>
+      </NGrid>
+    </NCard>
 
     <NCard title="Audit Events" :bordered="false" class="card-wrapper">
       <NSpace vertical :size="12">
