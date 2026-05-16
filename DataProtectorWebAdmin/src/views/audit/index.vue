@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue';
+import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NTag, type DataTableColumns } from 'naive-ui';
+import { useEcharts } from '@/hooks/common/echarts';
 import { fetchAuditEvents } from '@/service/api';
 
 defineOptions({
@@ -8,7 +9,8 @@ defineOptions({
 });
 
 type AuditCategory = Api.DataProtector.AuditCategory;
-type AuditResult = Api.DataProtector.AuditResult;
+type AuditSeverity = Api.DataProtector.AuditSeverity;
+type AuditDisposition = Api.DataProtector.AuditDisposition;
 
 interface CategoryOption {
   label: string;
@@ -21,7 +23,7 @@ interface AuditSummary {
   category: AuditCategory;
   label: string;
   count: number;
-  failed: number;
+  critical: number;
 }
 
 const loading = ref(false);
@@ -32,7 +34,8 @@ const timeRange = ref<[number, number] | null>(null);
 const filters = reactive({
   limit: 500,
   host: 'all',
-  result: 'all' as AuditResult,
+  severity: 'all' as AuditSeverity,
+  disposition: 'all' as AuditDisposition,
   search: ''
 });
 
@@ -47,10 +50,20 @@ const categoryOptions: CategoryOption[] = [
   { label: 'System', value: 'system', icon: 'mdi:cog-outline', tagType: 'default' }
 ];
 
-const resultOptions = [
-  { label: 'All results', value: 'all' },
-  { label: 'Success only', value: 'success' },
-  { label: 'Failed only', value: 'failed' }
+const severityOptions = [
+  { label: 'All severity', value: 'all' },
+  { label: 'Critical', value: 'critical' },
+  { label: 'Warning', value: 'warning' },
+  { label: 'Info', value: 'info' },
+  { label: 'Operational', value: 'operational' }
+];
+
+const dispositionOptions = [
+  { label: 'All disposition', value: 'all' },
+  { label: 'Blocked', value: 'blocked' },
+  { label: 'Observed', value: 'observed' },
+  { label: 'Completed', value: 'completed' },
+  { label: 'Failed', value: 'failed' }
 ];
 
 const limitOptions = [
@@ -62,8 +75,9 @@ const limitOptions = [
 const categoryMap = computed(() => new Map(categoryOptions.map(item => [item.value, item])));
 const categorySelectOptions = computed(() => categoryOptions.map(item => ({ label: item.label, value: item.value })));
 
-const successCount = computed(() => events.value.filter(item => item.Succeeded).length);
-const failureCount = computed(() => events.value.length - successCount.value);
+const criticalCount = computed(() => events.value.filter(item => resolveSeverity(item) === 'critical').length);
+const warningCount = computed(() => events.value.filter(item => resolveSeverity(item) === 'warning').length);
+const blockedCount = computed(() => events.value.filter(item => resolveDisposition(item) === 'blocked').length);
 
 const categorySummaries = computed<AuditSummary[]>(() =>
   categoryOptions
@@ -75,7 +89,7 @@ const categorySummaries = computed<AuditSummary[]>(() =>
         category: item.value,
         label: item.label,
         count: items.length,
-        failed: items.filter(record => !record.Succeeded).length
+        critical: items.filter(record => resolveSeverity(record) === 'critical').length
       };
     })
 );
@@ -95,20 +109,87 @@ const hostOptions = computed(() => {
 });
 
 const hostSummaries = computed(() => {
-  const groups = new Map<string, { host: string; count: number; failed: number }>();
+  const groups = new Map<string, { host: string; count: number; critical: number; warning: number }>();
 
   for (const record of visibleEvents.value) {
     const host = resolveHost(record) || 'Unknown';
-    const current = groups.get(host) || { host, count: 0, failed: 0 };
+    const current = groups.get(host) || { host, count: 0, critical: 0, warning: 0 };
     current.count += 1;
-    if (!record.Succeeded) current.failed += 1;
+    if (resolveSeverity(record) === 'critical') current.critical += 1;
+    if (resolveSeverity(record) === 'warning') current.warning += 1;
     groups.set(host, current);
   }
 
   return Array.from(groups.values())
-    .sort((left, right) => right.count - left.count || left.host.localeCompare(right.host))
+    .sort(
+      (left, right) =>
+        right.critical - left.critical || right.warning - left.warning || right.count - left.count || left.host.localeCompare(right.host)
+    )
     .slice(0, 8);
 });
+
+const trendBuckets = computed(() => buildTrendBuckets(events.value));
+
+const categoryChartData = computed(() =>
+  categorySummaries.value
+    .filter(item => item.count > 0)
+    .map(item => ({
+      name: item.label,
+      value: item.count
+    }))
+);
+
+const hostRiskChartData = computed(() =>
+  hostSummaries.value.map(item => ({
+    name: item.host,
+    critical: item.critical,
+    warning: item.warning,
+    total: item.count
+  }))
+);
+
+const { domRef: trendChartRef, updateOptions: updateTrendChart } = useEcharts(() => ({
+  color: ['#d03050', '#f0a020', '#2080f0'],
+  tooltip: { trigger: 'axis' },
+  legend: { top: 0, data: ['Critical', 'Warning', 'Total'] },
+  grid: { left: 36, right: 18, top: 44, bottom: 28 },
+  xAxis: { type: 'category', boundaryGap: false, data: [] as string[] },
+  yAxis: { type: 'value', minInterval: 1 },
+  series: [
+    { name: 'Critical', type: 'line', smooth: true, data: [] as number[] },
+    { name: 'Warning', type: 'line', smooth: true, data: [] as number[] },
+    { name: 'Total', type: 'line', smooth: true, data: [] as number[] }
+  ]
+}));
+
+const { domRef: categoryChartRef, updateOptions: updateCategoryChart } = useEcharts(() => ({
+  color: ['#2080f0', '#18a058', '#f0a020', '#d03050', '#8a63d2', '#00a2ae', '#909399'],
+  tooltip: { trigger: 'item' },
+  legend: { bottom: 0, left: 'center' },
+  series: [
+    {
+      name: 'Event type',
+      type: 'pie',
+      radius: ['46%', '72%'],
+      avoidLabelOverlap: true,
+      label: { formatter: '{b}: {c}' },
+      data: [] as { name: string; value: number }[]
+    }
+  ]
+}));
+
+const { domRef: hostRiskChartRef, updateOptions: updateHostRiskChart } = useEcharts(() => ({
+  color: ['#d03050', '#f0a020'],
+  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+  legend: { top: 0, data: ['Critical', 'Warning'] },
+  grid: { left: 90, right: 18, top: 44, bottom: 28 },
+  xAxis: { type: 'value', minInterval: 1 },
+  yAxis: { type: 'category', data: [] as string[] },
+  series: [
+    { name: 'Critical', type: 'bar', stack: 'risk', data: [] as number[] },
+    { name: 'Warning', type: 'bar', stack: 'risk', data: [] as number[] }
+  ]
+}));
 
 const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
   {
@@ -147,14 +228,28 @@ const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
     }
   },
   {
-    title: 'Result',
-    key: 'Succeeded',
-    width: 110,
+    title: 'Severity',
+    key: 'severity',
+    width: 120,
     render(row) {
+      const severity = resolveSeverity(row);
       return h(
         NTag,
-        { type: row.Succeeded ? 'success' : 'error', bordered: false },
-        { default: () => (row.Succeeded ? 'Success' : 'Failed') }
+        { type: severityTagType(severity), bordered: false },
+        { default: () => severityLabel(severity) }
+      );
+    }
+  },
+  {
+    title: 'Disposition',
+    key: 'disposition',
+    width: 130,
+    render(row) {
+      const disposition = resolveDisposition(row);
+      return h(
+        NTag,
+        { type: dispositionTagType(disposition), bordered: false },
+        { default: () => dispositionLabel(disposition) }
       );
     }
   },
@@ -187,11 +282,122 @@ function resolveHost(record: Api.DataProtector.AuditRecord) {
   return record.Host || record.Actor || '';
 }
 
+function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSeverity, 'all'> {
+  const action = record.Action || '';
+  const message = record.Message || '';
+  const status = record.Status || '';
+
+  if (action.startsWith('webshell.danger') || action.includes('.blocked') || status.toUpperCase() === '0XC0000022') {
+    return 'critical';
+  }
+
+  if (action.startsWith('webshell.warning') || action.startsWith('security.audit.drain.failed') || action.includes('.failed') || /failed/i.test(message)) {
+    return 'warning';
+  }
+
+  if (action.startsWith('webshell.notice') || action.startsWith('network.smtp')) {
+    return 'info';
+  }
+
+  return 'operational';
+}
+
+function resolveDisposition(record: Api.DataProtector.AuditRecord): Exclude<AuditDisposition, 'all'> {
+  const action = record.Action || '';
+  const message = record.Message || '';
+  const status = record.Status || '';
+
+  if (status.toUpperCase() === '0XC0000022' || /blocked|denied/i.test(message)) return 'blocked';
+  if (!record.Succeeded) return 'failed';
+  if (action.startsWith('webshell.') || action.startsWith('network.smtp')) return 'observed';
+
+  return 'completed';
+}
+
+function severityLabel(severity: Exclude<AuditSeverity, 'all'>) {
+  const labels = {
+    critical: 'Critical',
+    warning: 'Warning',
+    info: 'Info',
+    operational: 'Operational'
+  };
+
+  return labels[severity];
+}
+
+function dispositionLabel(disposition: Exclude<AuditDisposition, 'all'>) {
+  const labels = {
+    blocked: 'Blocked',
+    observed: 'Observed',
+    completed: 'Completed',
+    failed: 'Failed'
+  };
+
+  return labels[disposition];
+}
+
+function severityTagType(severity: Exclude<AuditSeverity, 'all'>) {
+  if (severity === 'critical') return 'error';
+  if (severity === 'warning') return 'warning';
+  if (severity === 'info') return 'info';
+  return 'default';
+}
+
+function dispositionTagType(disposition: Exclude<AuditDisposition, 'all'>) {
+  if (disposition === 'blocked') return 'error';
+  if (disposition === 'failed') return 'warning';
+  if (disposition === 'observed') return 'info';
+  return 'success';
+}
+
+function buildTrendBuckets(records: Api.DataProtector.AuditRecord[]) {
+  const sorted = [...records].sort((a, b) => new Date(a.TimestampUtc).getTime() - new Date(b.TimestampUtc).getTime());
+  const buckets = new Map<string, { label: string; critical: number; warning: number; total: number }>();
+
+  for (const record of sorted) {
+    const date = new Date(record.TimestampUtc);
+    if (Number.isNaN(date.getTime())) continue;
+
+    const key = `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:00`;
+    const bucket = buckets.get(key) || { label: key, critical: 0, warning: 0, total: 0 };
+    bucket.total += 1;
+    if (resolveSeverity(record) === 'critical') bucket.critical += 1;
+    if (resolveSeverity(record) === 'warning') bucket.warning += 1;
+    buckets.set(key, bucket);
+  }
+
+  return Array.from(buckets.values()).slice(-24);
+}
+
+function updateCharts() {
+  updateTrendChart(opts => {
+    opts.xAxis.data = trendBuckets.value.map(item => item.label);
+    opts.series[0].data = trendBuckets.value.map(item => item.critical);
+    opts.series[1].data = trendBuckets.value.map(item => item.warning);
+    opts.series[2].data = trendBuckets.value.map(item => item.total);
+    return opts;
+  });
+
+  updateCategoryChart(opts => {
+    opts.series[0].data = categoryChartData.value.length ? categoryChartData.value : [{ name: 'No events', value: 0 }];
+    return opts;
+  });
+
+  updateHostRiskChart(opts => {
+    const items = [...hostRiskChartData.value].reverse();
+    opts.yAxis.data = items.map(item => item.name);
+    opts.series[0].data = items.map(item => item.critical);
+    opts.series[1].data = items.map(item => item.warning);
+    return opts;
+  });
+}
+
 function buildQuery(): Api.DataProtector.AuditQuery {
   const query: Api.DataProtector.AuditQuery = {
     limit: filters.limit,
     host: filters.host,
-    result: filters.result,
+    severity: filters.severity,
+    disposition: filters.disposition,
     search: filters.search.trim()
   };
 
@@ -216,11 +422,14 @@ async function refresh() {
 function resetFilters() {
   activeCategory.value = 'all';
   filters.host = 'all';
-  filters.result = 'all';
+  filters.severity = 'all';
+  filters.disposition = 'all';
   filters.search = '';
   timeRange.value = null;
   refresh();
 }
+
+watch([events, activeCategory], updateCharts, { deep: true });
 
 onMounted(refresh);
 </script>
@@ -256,11 +465,16 @@ onMounted(refresh);
           </NFormItem>
         </NGi>
         <NGi span="24 m:5">
-          <NFormItem label="Result" :show-feedback="false">
-            <NSelect v-model:value="filters.result" :options="resultOptions" />
+          <NFormItem label="Severity" :show-feedback="false">
+            <NSelect v-model:value="filters.severity" :options="severityOptions" />
           </NFormItem>
         </NGi>
         <NGi span="24 m:7">
+          <NFormItem label="Disposition" :show-feedback="false">
+            <NSelect v-model:value="filters.disposition" :options="dispositionOptions" />
+          </NFormItem>
+        </NGi>
+        <NGi span="24 m:12">
           <NFormItem label="Time range" :show-feedback="false">
             <NDatePicker v-model:value="timeRange" type="datetimerange" clearable class="w-full" />
           </NFormItem>
@@ -278,22 +492,44 @@ onMounted(refresh);
     </NCard>
 
     <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-      <NGi span="24 s:8">
+      <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
           <NStatistic label="Loaded events" :value="events.length" />
         </NCard>
       </NGi>
-      <NGi span="24 s:8">
+      <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
-          <NStatistic label="Successful" :value="successCount" />
+          <NStatistic label="Critical events" :value="criticalCount" />
         </NCard>
       </NGi>
-      <NGi span="24 s:8">
+      <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
-          <NStatistic label="Failed" :value="failureCount" />
+          <NStatistic label="Warning events" :value="warningCount" />
+        </NCard>
+      </NGi>
+      <NGi span="24 s:12 l:6">
+        <NCard :bordered="false" class="card-wrapper">
+          <NStatistic label="Blocked actions" :value="blockedCount" />
         </NCard>
       </NGi>
     </NGrid>
+
+    <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+      <NGi span="24 l:12">
+        <NCard title="Security Trend" :bordered="false" class="card-wrapper">
+          <div ref="trendChartRef" class="h-320px overflow-hidden"></div>
+        </NCard>
+      </NGi>
+      <NGi span="24 l:12">
+        <NCard title="Event Type Distribution" :bordered="false" class="card-wrapper">
+          <div ref="categoryChartRef" class="h-320px overflow-hidden"></div>
+        </NCard>
+      </NGi>
+    </NGrid>
+
+    <NCard title="Host Risk Ranking" :bordered="false" class="card-wrapper">
+      <div ref="hostRiskChartRef" class="h-280px overflow-hidden"></div>
+    </NCard>
 
     <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGi span="24 l:14">
@@ -307,7 +543,7 @@ onMounted(refresh);
               >
                 <div class="flex items-center justify-between">
                   <span class="font-600">{{ item.label }}</span>
-                  <NTag v-if="item.failed" type="error" size="small" :bordered="false">{{ item.failed }} failed</NTag>
+                  <NTag v-if="item.critical" type="error" size="small" :bordered="false">{{ item.critical }} critical</NTag>
                 </div>
                 <div class="m-t-8px text-24px font-700">{{ item.count }}</div>
               </div>
@@ -329,7 +565,8 @@ onMounted(refresh);
                 />
               </div>
               <NSpace align="center" :size="6">
-                <NTag v-if="item.failed" type="error" size="small" :bordered="false">{{ item.failed }}</NTag>
+                <NTag v-if="item.critical" type="error" size="small" :bordered="false">{{ item.critical }}</NTag>
+                <NTag v-if="item.warning" type="warning" size="small" :bordered="false">{{ item.warning }}</NTag>
                 <span class="w-42px text-right font-600">{{ item.count }}</span>
               </NSpace>
             </div>
@@ -356,7 +593,7 @@ onMounted(refresh);
           :data="visibleEvents"
           :loading="loading"
           :pagination="{ pageSize: 15 }"
-          :scroll-x="1600"
+          :scroll-x="1720"
           remote
         />
       </NSpace>

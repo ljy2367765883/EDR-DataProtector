@@ -116,12 +116,16 @@ declare namespace Api {
 
     type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'remote' | 'agent' | 'system';
     type AuditResult = 'all' | 'success' | 'failed';
+    type AuditSeverity = 'all' | 'critical' | 'warning' | 'info' | 'operational';
+    type AuditDisposition = 'all' | 'blocked' | 'observed' | 'completed' | 'failed';
 
     interface AuditQuery {
       limit?: number;
       category?: AuditCategory;
       host?: string;
       result?: AuditResult;
+      severity?: AuditSeverity;
+      disposition?: AuditDisposition;
       fromUtc?: string;
       toUtc?: string;
       search?: string;

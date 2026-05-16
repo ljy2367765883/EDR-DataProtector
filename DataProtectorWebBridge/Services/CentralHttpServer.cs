@@ -235,6 +235,8 @@ namespace DataProtectorWebBridge.Services
                 Category = request.QueryString["category"],
                 Host = request.QueryString["host"],
                 Result = request.QueryString["result"],
+                Severity = request.QueryString["severity"],
+                Disposition = request.QueryString["disposition"],
                 FromUtc = request.QueryString["fromUtc"],
                 ToUtc = request.QueryString["toUtc"],
                 Search = request.QueryString["search"]

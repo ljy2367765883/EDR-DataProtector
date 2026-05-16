@@ -93,6 +93,63 @@ namespace DataProtectorWebBridge.Services
             return string.Empty;
         }
 
+        public static string ResolveSeverity(AuditRecord record)
+        {
+            string action = record == null || record.Action == null ? string.Empty : record.Action;
+            string message = record == null || record.Message == null ? string.Empty : record.Message;
+            string status = record == null || record.Status == null ? string.Empty : record.Status;
+
+            if (action.StartsWith("webshell.danger", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                status.Equals("0xC0000022", StringComparison.OrdinalIgnoreCase))
+            {
+                return "critical";
+            }
+
+            if (action.StartsWith("webshell.warning", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("security.audit.drain.failed", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".failed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "warning";
+            }
+
+            if (action.StartsWith("webshell.notice", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
+            {
+                return "info";
+            }
+
+            return "operational";
+        }
+
+        public static string ResolveDisposition(AuditRecord record)
+        {
+            string action = record == null || record.Action == null ? string.Empty : record.Action;
+            string status = record == null || record.Status == null ? string.Empty : record.Status;
+            string message = record == null || record.Message == null ? string.Empty : record.Message;
+
+            if (status.Equals("0xC0000022", StringComparison.OrdinalIgnoreCase) ||
+                message.IndexOf("blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("denied", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "blocked";
+            }
+
+            if (record != null && !record.Succeeded)
+            {
+                return "failed";
+            }
+
+            if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
+            {
+                return "observed";
+            }
+
+            return "completed";
+        }
+
         public static bool Matches(AuditRecord record, AuditQueryOptions options)
         {
             if (record == null)
@@ -132,6 +189,20 @@ namespace DataProtectorWebBridge.Services
                 }
             }
 
+            if (!string.IsNullOrWhiteSpace(options.Severity) &&
+                !string.Equals(options.Severity, "all", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(ResolveSeverity(record), options.Severity, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Disposition) &&
+                !string.Equals(options.Disposition, "all", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(ResolveDisposition(record), options.Disposition, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
             DateTime timestampUtc;
             if (!DateTime.TryParse(record.TimestampUtc, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out timestampUtc))
             {
@@ -156,6 +227,8 @@ namespace DataProtectorWebBridge.Services
                 {
                     record.Actor ?? string.Empty,
                     ResolveHost(record),
+                    ResolveSeverity(record),
+                    ResolveDisposition(record),
                     record.Action ?? string.Empty,
                     record.Target ?? string.Empty,
                     record.Extension ?? string.Empty,
@@ -294,6 +367,8 @@ namespace DataProtectorWebBridge.Services
             public string Category { get; set; }
             public string Host { get; set; }
             public string Result { get; set; }
+            public string Severity { get; set; }
+            public string Disposition { get; set; }
             public string FromUtc { get; set; }
             public string ToUtc { get; set; }
             public string Search { get; set; }
