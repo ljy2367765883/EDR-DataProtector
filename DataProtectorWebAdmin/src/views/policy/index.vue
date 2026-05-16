@@ -436,6 +436,21 @@ onMounted(refresh);
 
       <NTabPane name="network" tab="Network Defense">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24">
+            <NCard title="Quick Network Actions" :bordered="false" class="card-wrapper">
+              <div class="flex flex-wrap items-center justify-between gap-16px">
+                <NSpace :size="12" align="center">
+                  <NTag type="error" :bordered="false">Inbound ICMP</NTag>
+                  <NTag type="warning" :bordered="false">Endpoint hardening</NTag>
+                </NSpace>
+                <NButton type="warning" :loading="networkSubmitting" @click="addBlockPingRule">
+                  <template #icon><SvgIcon icon="mdi:lan-disconnect" /></template>
+                  Disable Inbound Ping
+                </NButton>
+              </div>
+            </NCard>
+          </NGi>
+
           <NGi span="24 m:8">
             <NCard title="Add Network Rule" :bordered="false" class="card-wrapper">
               <NForm ref="networkFormRef" :model="networkForm" :rules="networkFormRules" label-placement="top">
@@ -494,9 +509,6 @@ onMounted(refresh);
                   <NTag type="warning">IP: {{ networkGroups.ip }}</NTag>
                   <NTag type="error">ICMP: {{ networkGroups.icmp }}</NTag>
                   <NTag type="error">Blocked: {{ networkGroups.blocked }}</NTag>
-                  <NButton size="small" type="warning" secondary :loading="networkSubmitting" @click="addBlockPingRule">
-                    Block Inbound Ping
-                  </NButton>
                   <NButton size="small" type="error" secondary @click="clearNetworkRules">Clear</NButton>
                 </NSpace>
               </template>
