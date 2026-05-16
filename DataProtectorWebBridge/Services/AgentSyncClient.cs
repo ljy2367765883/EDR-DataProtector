@@ -17,7 +17,7 @@ namespace DataProtectorWebBridge.Services
         private readonly TimeSpan interval;
         private readonly PolicyBridgeService policyService;
         private readonly string statePath;
-        private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+        private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly RemoteTaskExecutor taskExecutor = new RemoteTaskExecutor();
         private readonly List<CentralPolicyStore.RemoteTaskResult> pendingTaskResults = new List<CentralPolicyStore.RemoteTaskResult>();
         private string deviceId;

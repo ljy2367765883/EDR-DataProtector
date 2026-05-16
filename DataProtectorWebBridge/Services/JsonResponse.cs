@@ -9,7 +9,16 @@ namespace DataProtectorWebBridge.Services
 {
     internal static class JsonResponse
     {
-        private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer();
+        private static readonly JavaScriptSerializer Serializer = CreateSerializer();
+
+        public static JavaScriptSerializer CreateSerializer()
+        {
+            return new JavaScriptSerializer
+            {
+                MaxJsonLength = int.MaxValue,
+                RecursionLimit = 256
+            };
+        }
 
         public static T Read<T>(Stream stream)
         {

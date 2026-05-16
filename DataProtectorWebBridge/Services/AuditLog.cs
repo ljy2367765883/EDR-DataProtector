@@ -12,7 +12,7 @@ namespace DataProtectorWebBridge.Services
     {
         private const int DefaultLimit = 200;
         private readonly object syncRoot = new object();
-        private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+        private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
 
         public AuditLog()
         {

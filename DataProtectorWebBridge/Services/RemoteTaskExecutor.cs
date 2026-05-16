@@ -14,7 +14,7 @@ namespace DataProtectorWebBridge.Services
 {
     internal sealed class RemoteTaskExecutor
     {
-        private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+        private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly object terminalSync = new object();
         private Process terminalProcess;
         private StringBuilder terminalBuffer = new StringBuilder();
