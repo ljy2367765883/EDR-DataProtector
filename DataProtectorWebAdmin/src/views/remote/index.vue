@@ -100,6 +100,7 @@ const terminalReadPending = ref(false);
 const terminalRef = ref<HTMLElement | null>(null);
 const terminalAutoFollow = ref(true);
 const screenshotSrc = ref('');
+const screenshotError = ref('');
 const accountForm = reactive({
   username: '',
   newPassword: ''
@@ -588,7 +589,12 @@ async function captureScreenshot() {
   panelLoading.value = true;
   try {
     const task = await runRemoteTask('desktop.screenshot', {});
-    screenshotSrc.value = task.output ? `data:image/png;base64,${task.output}` : '';
+    screenshotError.value = '';
+    screenshotSrc.value = normalizePngDataUrl(task.output);
+    if (!screenshotSrc.value) {
+      screenshotError.value = 'The endpoint returned an invalid or truncated screenshot payload.';
+      window.$message?.error(screenshotError.value);
+    }
   } finally {
     panelLoading.value = false;
   }
@@ -669,6 +675,20 @@ function parseJson<T>(value: string | undefined, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function normalizePngDataUrl(value: string | undefined) {
+  if (!value) return '';
+
+  const trimmed = value.trim().replace(/^"|"$/g, '');
+  const base64 = trimmed.startsWith('data:image/png;base64,') ? trimmed.slice('data:image/png;base64,'.length) : trimmed;
+  const compact = base64.replace(/\s+/g, '');
+
+  if (!compact || compact.includes('[truncated]')) return '';
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(compact)) return '';
+  if (compact.length % 4 !== 0) return '';
+
+  return `data:image/png;base64,${compact}`;
 }
 
 function pushActivity(message: string) {
@@ -985,7 +1005,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="screenshot-frame">
               <img v-if="screenshotSrc" :src="screenshotSrc" alt="Remote desktop screenshot" />
-              <NEmpty v-else description="No screenshot captured" />
+              <NEmpty v-else :description="screenshotError || 'No screenshot captured'" />
             </div>
           </template>
 

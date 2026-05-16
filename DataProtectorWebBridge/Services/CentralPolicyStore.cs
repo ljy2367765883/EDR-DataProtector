@@ -560,7 +560,7 @@ namespace DataProtectorWebBridge.Services
             task.completedUtc = DateTime.UtcNow.ToString("o");
             task.succeeded = result.succeeded;
             task.exitCode = result.exitCode;
-            task.output = Truncate(result.output, 262144);
+            task.output = Truncate(result.output, GetTaskOutputLimit(task.kind));
             task.error = Truncate(result.error, 65536);
             RedactSensitiveTaskArgs(task);
             AppendAudit(deviceId, "remote.task.result." + task.kind, task.taskId, string.Empty, result.succeeded, result.succeeded ? "0x00000000" : "0x00000001", result.succeeded ? "Remote task completed." : task.error);
@@ -590,6 +590,16 @@ namespace DataProtectorWebBridge.Services
             }
 
             return value.Substring(0, maxChars) + "\n[truncated]";
+        }
+
+        private static int GetTaskOutputLimit(string kind)
+        {
+            if (string.Equals(kind, "desktop.screenshot", StringComparison.OrdinalIgnoreCase))
+            {
+                return 16 * 1024 * 1024;
+            }
+
+            return 262144;
         }
 
         private static bool IsOnline(CentralDeviceState device)
