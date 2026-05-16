@@ -35,6 +35,12 @@ static ULONG gDpWebShellEventCount = 0;
 static ULONGLONG gDpWebShellEventSequence = 0;
 static ULONGLONG gDpWebShellDroppedEvents = 0;
 
+extern
+UCHAR *
+PsGetProcessImageFileName(
+    _In_ PEPROCESS Process
+    );
+
 #if DP_ENABLE_WEBSHELL_OPERATION_TRACE
 #define DP_WEBSHELL_TRACE(_format, ...) \
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "DataProtector77[WebShell] " _format, __VA_ARGS__)
@@ -1393,6 +1399,8 @@ DpWebShellQueryEvents(
     PLIST_ENTRY link;
     KIRQL oldIrql;
     BOOLEAN sizingOnly;
+    HANDLE queryProcessId;
+    const CHAR *queryImageName;
 
     if (ReturnOutputBufferLength == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -1406,6 +1414,8 @@ DpWebShellQueryEvents(
 
     header = (PDP_WEBSHELL_EVENT_QUERY_HEADER)OutputBuffer;
     sizingOnly = OutputBufferLength == sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER);
+    queryProcessId = PsGetCurrentProcessId();
+    queryImageName = (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess());
 
     RtlZeroMemory(header, sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER));
     cursor = (PUCHAR)OutputBuffer + sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER);
@@ -1444,7 +1454,9 @@ DpWebShellQueryEvents(
     header->BytesReturned = bytesReturned;
     *ReturnOutputBufferLength = bytesReturned;
 
-    DP_WEBSHELL_TRACE("77 query events sizing=%u events=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u\n",
+    DP_WEBSHELL_TRACE("77 query events pid=%p image=%s sizing=%u events=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u\n",
+                      queryProcessId,
+                      queryImageName != NULL ? queryImageName : "<unknown>",
                       sizingOnly,
                       eventCount,
                       returnedEventCount,
@@ -1457,7 +1469,9 @@ DpWebShellQueryEvents(
             PLIST_ENTRY eventLink = RemoveHeadList(&gDpWebShellEvents);
             PDP_WEBSHELL_EVENT_ENTRY event = CONTAINING_RECORD(eventLink, DP_WEBSHELL_EVENT_ENTRY, Link);
             gDpWebShellEventCount--;
-            DP_WEBSHELL_TRACE("77 query drain seq=%I64u remaining=%lu\n",
+            DP_WEBSHELL_TRACE("77 query drain pid=%p image=%s seq=%I64u remaining=%lu\n",
+                              queryProcessId,
+                              queryImageName != NULL ? queryImageName : "<unknown>",
                               event->Event.Sequence,
                               gDpWebShellEventCount);
             KeReleaseSpinLock(&gDpWebShellEventLock, oldIrql);

@@ -48,6 +48,7 @@ namespace DataProtectorWebBridge.Services
             Console.WriteLine("DataProtector Agent connecting to " + serverSyncUri);
             Console.WriteLine("Agent state: " + statePath);
             Console.WriteLine("Agent executable: " + Assembly.GetExecutingAssembly().Location);
+            Console.WriteLine("Agent PID: " + System.Diagnostics.Process.GetCurrentProcess().Id);
             Console.WriteLine("Policy API DLL: " + GetPolicyApiPath());
 
             while (true)
@@ -165,13 +166,28 @@ namespace DataProtectorWebBridge.Services
 
         private AuditLog.AuditRecord[] DrainLocalAuditRecords()
         {
+            AuditLog.AuditRecord[] smtpRecords = DrainAuditSource("smtp", policyService.DrainSmtpAuditRecords);
+            AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
+            if (smtpRecords.Length > 0 || webShellRecords.Length > 0)
+            {
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ".");
+            }
+
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length);
+            records.AddRange(smtpRecords);
+            records.AddRange(webShellRecords);
+            return records.ToArray();
+        }
+
+        private AuditLog.AuditRecord[] DrainAuditSource(string source, Func<AuditLog.AuditRecord[]> drain)
+        {
             try
             {
-                return policyService.DrainSecurityAuditRecords();
+                return drain();
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine(DateTime.Now.ToString("s") + " security audit drain failed: " + ex.Message);
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " security audit drain failed for " + source + ": " + ex.Message);
                 return new AuditLog.AuditRecord[0];
             }
         }
