@@ -70,10 +70,10 @@ Abstract:
 #define DP_ENABLE_PPTX_OPERATION_TRACE 1
 
 //
-// Targeted WebShell investigation switch. Keep enabled while hardening the
-// WebShell minifilter path; set to 0 for quiet production packages.
+// Targeted WebShell investigation switch. Emits DataProtector77 lines through
+// DbgPrintEx while diagnosing policy, event queue, and reporting paths.
 //
-#define DP_ENABLE_WEBSHELL_OPERATION_TRACE 0
+#define DP_ENABLE_WEBSHELL_OPERATION_TRACE 1
 
 //
 // Cached transparent encryption keeps plaintext in the system file cache.

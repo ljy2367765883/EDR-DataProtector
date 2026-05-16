@@ -37,7 +37,7 @@ static ULONGLONG gDpWebShellDroppedEvents = 0;
 
 #if DP_ENABLE_WEBSHELL_OPERATION_TRACE
 #define DP_WEBSHELL_TRACE(_format, ...) \
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "DataProtector[WebShell] " _format, __VA_ARGS__)
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "DataProtector77[WebShell] " _format, __VA_ARGS__)
 #else
 #define DP_WEBSHELL_TRACE(_format, ...) ((void)0)
 #endif
@@ -588,6 +588,11 @@ DpWebShellQueueEvent(
                                   DP_TAG_WEBSHELL_EVENT);
 
     if (entry == NULL) {
+        DP_WEBSHELL_TRACE("77 queue alloc failed pid=%p severity=%lu op=%lu path=%wZ\n",
+                          ProcessId,
+                          (ULONG)Severity,
+                          (ULONG)Operation,
+                          Path);
         KeAcquireSpinLock(&gDpWebShellEventLock, &oldIrql);
         gDpWebShellDroppedEvents++;
         KeReleaseSpinLock(&gDpWebShellEventLock, oldIrql);
@@ -618,12 +623,24 @@ DpWebShellQueueEvent(
     entry->Event.Sequence = ++gDpWebShellEventSequence;
     InsertTailList(&gDpWebShellEvents, &entry->Link);
     gDpWebShellEventCount++;
+    DP_WEBSHELL_TRACE("77 queued seq=%I64u count=%lu pid=%p severity=%lu op=%lu size=%lu sample=%lu path=%wZ\n",
+                      entry->Event.Sequence,
+                      gDpWebShellEventCount,
+                      ProcessId,
+                      (ULONG)Severity,
+                      (ULONG)Operation,
+                      FileSize,
+                      entry->Event.SampleLength,
+                      Path);
 
     while (gDpWebShellEventCount > DP_WEBSHELL_MAX_EVENTS && !IsListEmpty(&gDpWebShellEvents)) {
         PLIST_ENTRY oldLink = RemoveHeadList(&gDpWebShellEvents);
         PDP_WEBSHELL_EVENT_ENTRY oldEvent = CONTAINING_RECORD(oldLink, DP_WEBSHELL_EVENT_ENTRY, Link);
         gDpWebShellEventCount--;
         gDpWebShellDroppedEvents++;
+        DP_WEBSHELL_TRACE("77 queue trim dropped=%I64u remaining=%lu\n",
+                          gDpWebShellDroppedEvents,
+                          gDpWebShellEventCount);
         KeReleaseSpinLock(&gDpWebShellEventLock, oldIrql);
         DpWebShellFreeEvent(oldEvent);
         KeAcquireSpinLock(&gDpWebShellEventLock, &oldIrql);
@@ -650,7 +667,7 @@ DpWebShellClassifyAndReport(
     if (!DpWebShellIsProtectedPath(Path) ||
         !DpWebShellIsScriptPath(Path, &extension)) {
 
-        DP_WEBSHELL_TRACE("classify bypass pid=%p op=%lu size=%lu sample=%lu path=%wZ\n",
+        DP_WEBSHELL_TRACE("77 classify bypass pid=%p op=%lu size=%lu sample=%lu path=%wZ\n",
                           ProcessId,
                           (ULONG)Operation,
                           FileSize,
@@ -671,6 +688,15 @@ DpWebShellClassifyAndReport(
         severity = DpWebShellSeverityNotify;
     }
 
+    DP_WEBSHELL_TRACE("77 classify hit pid=%p op=%lu severity=%lu oneLiner=%u size=%lu sample=%lu path=%wZ\n",
+                      ProcessId,
+                      (ULONG)Operation,
+                      (ULONG)severity,
+                      oneLiner,
+                      FileSize,
+                      SampleLength,
+                      Path);
+
     DpWebShellQueueEvent(ProcessId,
                          Path,
                          &extension,
@@ -680,12 +706,11 @@ DpWebShellClassifyAndReport(
                          severity,
                          Operation);
 
-    DP_WEBSHELL_TRACE("event queued pid=%p op=%lu severity=%lu size=%lu sample=%lu path=%wZ\n",
+    DP_WEBSHELL_TRACE("77 classify return pid=%p op=%lu severity=%lu status=0x%08X path=%wZ\n",
                       ProcessId,
                       (ULONG)Operation,
                       (ULONG)severity,
-                      FileSize,
-                      SampleLength,
+                      severity == DpWebShellSeverityDanger ? STATUS_ACCESS_DENIED : STATUS_SUCCESS,
                       Path);
 
     if (severity == DpWebShellSeverityDanger) {
@@ -767,7 +792,7 @@ DpWebShellIsProtectedPath(
         if (DpWebShellDirectoryMatches(&rule->Directory, Name) ||
             DpWebShellTailDirectoryMatches(&rule->TailDirectory, Name)) {
 
-            DP_WEBSHELL_TRACE("protected path matched pid=%p path=%wZ rule=%wZ tail=%wZ\n",
+            DP_WEBSHELL_TRACE("77 protected path matched pid=%p path=%wZ rule=%wZ tail=%wZ\n",
                               PsGetCurrentProcessId(),
                               Name,
                               &rule->Directory,
@@ -836,6 +861,9 @@ DpWebShellInspectWrite(
                                        FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
                                        &nameInfo);
     if (!NT_SUCCESS(status)) {
+        DP_WEBSHELL_TRACE("77 inspect write name failed status=0x%08X length=%lu\n",
+                          status,
+                          Length);
         return STATUS_SUCCESS;
     }
 
@@ -887,6 +915,11 @@ DpWebShellInspectFileObject(
                                      FileStandardInformation,
                                      NULL);
     if (!NT_SUCCESS(status)) {
+        DP_WEBSHELL_TRACE("77 inspect fileobject query failed status=0x%08X pid=%p op=%lu report=%wZ\n",
+                          status,
+                          ProcessId,
+                          (ULONG)Operation,
+                          ReportName);
         return STATUS_SUCCESS;
     }
 
@@ -908,12 +941,22 @@ DpWebShellInspectFileObject(
                           NULL);
     }
 
-    return DpWebShellClassifyAndReport(ProcessId,
-                                       ReportName,
-                                       fileSize,
-                                       sample,
-                                       bytesRead,
-                                       Operation);
+    status = DpWebShellClassifyAndReport(ProcessId,
+                                         ReportName,
+                                         fileSize,
+                                         sample,
+                                         bytesRead,
+                                         Operation);
+
+    DP_WEBSHELL_TRACE("77 inspect fileobject status=0x%08X pid=%p op=%lu size=%lu read=%lu report=%wZ\n",
+                      status,
+                      ProcessId,
+                      (ULONG)Operation,
+                      fileSize,
+                      bytesRead,
+                      ReportName);
+
+    return status;
 }
 
 NTSTATUS
@@ -993,6 +1036,10 @@ DpWebShellInspectFileBySourceName(
                               NULL);
 
     if (!NT_SUCCESS(status)) {
+        DP_WEBSHELL_TRACE("77 source open failed status=0x%08X source=%wZ report=%wZ\n",
+                          status,
+                          SourceName,
+                          ReportName);
         return STATUS_SUCCESS;
     }
 
@@ -1005,6 +1052,10 @@ DpWebShellInspectFileBySourceName(
                                      NULL);
 
     if (!NT_SUCCESS(status)) {
+        DP_WEBSHELL_TRACE("77 source query failed status=0x%08X source=%wZ report=%wZ\n",
+                          status,
+                          SourceName,
+                          ReportName);
         goto Exit;
     }
 
@@ -1025,6 +1076,10 @@ DpWebShellInspectFileBySourceName(
                              NULL,
                              NULL);
         if (!NT_SUCCESS(status)) {
+            DP_WEBSHELL_TRACE("77 source read failed status=0x%08X source=%wZ report=%wZ\n",
+                              status,
+                              SourceName,
+                              ReportName);
             goto Exit;
         }
     }
@@ -1039,6 +1094,15 @@ DpWebShellInspectFileBySourceName(
     if (Inspected != NULL) {
         *Inspected = TRUE;
     }
+
+    DP_WEBSHELL_TRACE("77 inspect source status=0x%08X pid=%p op=%lu size=%lu read=%lu source=%wZ report=%wZ\n",
+                      status,
+                      ProcessId,
+                      (ULONG)Operation,
+                      fileSize,
+                      bytesRead,
+                      SourceName,
+                      ReportName);
 
 Exit:
     if (fileObject != NULL) {
@@ -1140,7 +1204,7 @@ DpWebShellAddRule(
     } else {
         InsertTailList(&gDpWebShellRules, &entry->Link);
         gDpWebShellRuleCount++;
-        DP_WEBSHELL_TRACE("rule added directory=%wZ tail=%wZ count=%lu\n",
+        DP_WEBSHELL_TRACE("77 rule added directory=%wZ tail=%wZ count=%lu\n",
                           &entry->Directory,
                           &entry->TailDirectory,
                           gDpWebShellRuleCount);
@@ -1380,11 +1444,22 @@ DpWebShellQueryEvents(
     header->BytesReturned = bytesReturned;
     *ReturnOutputBufferLength = bytesReturned;
 
+    DP_WEBSHELL_TRACE("77 query events sizing=%u events=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u\n",
+                      sizingOnly,
+                      eventCount,
+                      returnedEventCount,
+                      bytesRequired,
+                      bytesReturned,
+                      gDpWebShellDroppedEvents);
+
     if (!sizingOnly && returnedEventCount == eventCount) {
         while (!IsListEmpty(&gDpWebShellEvents)) {
             PLIST_ENTRY eventLink = RemoveHeadList(&gDpWebShellEvents);
             PDP_WEBSHELL_EVENT_ENTRY event = CONTAINING_RECORD(eventLink, DP_WEBSHELL_EVENT_ENTRY, Link);
             gDpWebShellEventCount--;
+            DP_WEBSHELL_TRACE("77 query drain seq=%I64u remaining=%lu\n",
+                              event->Event.Sequence,
+                              gDpWebShellEventCount);
             KeReleaseSpinLock(&gDpWebShellEventLock, oldIrql);
             DpWebShellFreeEvent(event);
             KeAcquireSpinLock(&gDpWebShellEventLock, &oldIrql);
