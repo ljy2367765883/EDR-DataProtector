@@ -29,6 +29,8 @@ export function initThemeSettings() {
     localStg.set('overrideThemeFlag', BUILD_TIME);
   }
 
+  settings.sider.width = Math.max(settings.sider.width, 280);
+
   return settings;
 }
 
