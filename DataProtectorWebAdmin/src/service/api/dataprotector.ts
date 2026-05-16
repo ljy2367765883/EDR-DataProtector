@@ -120,10 +120,12 @@ export function fetchClearWebShellRules() {
   });
 }
 
-export function fetchAuditEvents(limit = 200) {
+export function fetchAuditEvents(params: number | Api.DataProtector.AuditQuery = 200) {
+  const query = typeof params === 'number' ? { limit: params } : params;
+
   return request<Api.DataProtector.AuditRecord[]>({
     url: '/audit/events',
     method: 'get',
-    params: { limit }
+    params: query
   });
 }

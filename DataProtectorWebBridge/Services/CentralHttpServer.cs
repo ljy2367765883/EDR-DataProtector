@@ -178,8 +178,7 @@ namespace DataProtectorWebBridge.Services
 
                 if (method == "GET" && path == "/api/audit/events")
                 {
-                    int limit = ParseLimit(context.Request.QueryString["limit"]);
-                    JsonResponse.Write(context.Response, "0000", "Success.", store.ReadRecentAudit(limit));
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryAudit(ParseAuditQuery(context.Request)));
                     return;
                 }
 
@@ -226,6 +225,20 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Math.Max(1, Math.Min(limit, 1000));
+        }
+
+        private static AuditLog.AuditQueryOptions ParseAuditQuery(HttpListenerRequest request)
+        {
+            return new AuditLog.AuditQueryOptions
+            {
+                Limit = ParseLimit(request.QueryString["limit"]),
+                Category = request.QueryString["category"],
+                Host = request.QueryString["host"],
+                Result = request.QueryString["result"],
+                FromUtc = request.QueryString["fromUtc"],
+                ToUtc = request.QueryString["toUtc"],
+                Search = request.QueryString["search"]
+            };
         }
 
         private static void AddCorsHeaders(HttpListenerResponse response)

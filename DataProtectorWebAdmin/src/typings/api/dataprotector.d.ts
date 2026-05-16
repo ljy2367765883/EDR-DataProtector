@@ -104,6 +104,7 @@ declare namespace Api {
 
     interface AuditRecord {
       TimestampUtc: string;
+      Host?: string;
       Actor: string;
       Action: string;
       Target: string;
@@ -111,6 +112,19 @@ declare namespace Api {
       Succeeded: boolean;
       Status: string;
       Message: string;
+    }
+
+    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'remote' | 'agent' | 'system';
+    type AuditResult = 'all' | 'success' | 'failed';
+
+    interface AuditQuery {
+      limit?: number;
+      category?: AuditCategory;
+      host?: string;
+      result?: AuditResult;
+      fromUtc?: string;
+      toUtc?: string;
+      search?: string;
     }
   }
 }

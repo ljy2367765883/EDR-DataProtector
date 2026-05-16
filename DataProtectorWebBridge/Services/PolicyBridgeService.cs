@@ -539,6 +539,7 @@ namespace DataProtectorWebBridge.Services
                 AuditLog.AuditRecord record = new AuditLog.AuditRecord
                 {
                     TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
                     Actor = "network-sensor",
                     Action = "network.smtp.send",
                     Target = target,
@@ -577,6 +578,7 @@ namespace DataProtectorWebBridge.Services
                 AuditLog.AuditRecord record = new AuditLog.AuditRecord
                 {
                     TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
                     Actor = "webshell-sensor",
                     Action = action,
                     Target = item.path,
@@ -604,6 +606,7 @@ namespace DataProtectorWebBridge.Services
                 AuditLog.AuditRecord record = new AuditLog.AuditRecord
                 {
                     TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
                     Actor = "security-audit",
                     Action = "security.audit.drain.failed." + source,
                     Target = source,

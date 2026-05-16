@@ -193,6 +193,7 @@ namespace DataProtectorWebBridge.Services
                     new AuditLog.AuditRecord
                     {
                         TimestampUtc = DateTime.UtcNow.ToString("o"),
+                        Host = Environment.MachineName,
                         Actor = "security-audit",
                         Action = "security.audit.drain.failed." + source,
                         Target = source,

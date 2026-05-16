@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -24,11 +25,159 @@ namespace DataProtectorWebBridge.Services
 
         public string FilePath { get; private set; }
 
+        public static int NormalizeLimit(int limit)
+        {
+            return limit <= 0 ? DefaultLimit : Math.Min(limit, 1000);
+        }
+
+        public static string ClassifyCategory(AuditRecord record)
+        {
+            string action = record == null || record.Action == null ? string.Empty : record.Action;
+
+            if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".webshell.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.EndsWith(".webshell", StringComparison.OrdinalIgnoreCase))
+            {
+                return "webshell";
+            }
+
+            if (action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase) ||
+                action.EndsWith(".smtp", StringComparison.OrdinalIgnoreCase))
+            {
+                return "smtp";
+            }
+
+            if (action.IndexOf(".network.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.StartsWith("policy.network", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("central.policy.network", StringComparison.OrdinalIgnoreCase))
+            {
+                return "network";
+            }
+
+            if (action.StartsWith("remote.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "remote";
+            }
+
+            if (action.StartsWith("agent.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "agent";
+            }
+
+            if (action.StartsWith("policy.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("central.policy.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "policy";
+            }
+
+            return "system";
+        }
+
+        public static string ResolveHost(AuditRecord record)
+        {
+            if (record == null)
+            {
+                return string.Empty;
+            }
+
+            if (!string.IsNullOrWhiteSpace(record.Host))
+            {
+                return record.Host;
+            }
+
+            if (!string.IsNullOrWhiteSpace(record.Actor))
+            {
+                return record.Actor;
+            }
+
+            return string.Empty;
+        }
+
+        public static bool Matches(AuditRecord record, AuditQueryOptions options)
+        {
+            if (record == null)
+            {
+                return false;
+            }
+
+            if (options == null)
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Category) &&
+                !string.Equals(options.Category, "all", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(ClassifyCategory(record), options.Category, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Host) &&
+                !string.Equals(options.Host, "all", StringComparison.OrdinalIgnoreCase) &&
+                ResolveHost(record).IndexOf(options.Host, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Result))
+            {
+                if (string.Equals(options.Result, "success", StringComparison.OrdinalIgnoreCase) && !record.Succeeded)
+                {
+                    return false;
+                }
+
+                if (string.Equals(options.Result, "failed", StringComparison.OrdinalIgnoreCase) && record.Succeeded)
+                {
+                    return false;
+                }
+            }
+
+            DateTime timestampUtc;
+            if (!DateTime.TryParse(record.TimestampUtc, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out timestampUtc))
+            {
+                timestampUtc = DateTime.MinValue;
+            }
+
+            DateTime fromUtc;
+            if (TryParseUtc(options.FromUtc, out fromUtc) && timestampUtc < fromUtc)
+            {
+                return false;
+            }
+
+            DateTime toUtc;
+            if (TryParseUtc(options.ToUtc, out toUtc) && timestampUtc > toUtc)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Search))
+            {
+                string haystack = string.Join("\n", new[]
+                {
+                    record.Actor ?? string.Empty,
+                    ResolveHost(record),
+                    record.Action ?? string.Empty,
+                    record.Target ?? string.Empty,
+                    record.Extension ?? string.Empty,
+                    record.Status ?? string.Empty,
+                    record.Message ?? string.Empty
+                });
+
+                if (haystack.IndexOf(options.Search, StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         public void Append(string actor, string action, string target, string extension, bool succeeded, uint status, string message)
         {
             AuditRecord record = new AuditRecord
             {
                 TimestampUtc = DateTime.UtcNow.ToString("o"),
+                Host = Environment.MachineName,
                 Actor = string.IsNullOrWhiteSpace(actor) ? Environment.UserName : actor,
                 Action = action ?? string.Empty,
                 Target = target ?? string.Empty,
@@ -58,6 +207,11 @@ namespace DataProtectorWebBridge.Services
                 record.Actor = Environment.UserName;
             }
 
+            if (string.IsNullOrWhiteSpace(record.Host))
+            {
+                record.Host = Environment.MachineName;
+            }
+
             record.Action = record.Action ?? string.Empty;
             record.Target = record.Target ?? string.Empty;
             record.Extension = record.Extension ?? string.Empty;
@@ -75,7 +229,13 @@ namespace DataProtectorWebBridge.Services
 
         public AuditRecord[] ReadRecent(int limit)
         {
-            int take = limit <= 0 ? DefaultLimit : Math.Min(limit, 1000);
+            return Read(new AuditQueryOptions { Limit = limit });
+        }
+
+        public AuditRecord[] Read(AuditQueryOptions options)
+        {
+            AuditQueryOptions query = options ?? new AuditQueryOptions();
+            int take = NormalizeLimit(query.Limit);
 
             lock (syncRoot)
             {
@@ -87,7 +247,6 @@ namespace DataProtectorWebBridge.Services
                 List<string> lines = File.ReadAllLines(FilePath, Encoding.UTF8)
                     .Where(line => !string.IsNullOrWhiteSpace(line))
                     .Reverse()
-                    .Take(take)
                     .ToList();
 
                 List<AuditRecord> records = new List<AuditRecord>();
@@ -111,13 +270,39 @@ namespace DataProtectorWebBridge.Services
                     }
                 }
 
-                return records.ToArray();
+                return records
+                    .Where(record => Matches(record, query))
+                    .Take(take)
+                    .ToArray();
             }
+        }
+
+        private static bool TryParseUtc(string value, out DateTime timestampUtc)
+        {
+            if (DateTime.TryParse(value, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out timestampUtc))
+            {
+                timestampUtc = timestampUtc.ToUniversalTime();
+                return true;
+            }
+
+            return false;
+        }
+
+        public sealed class AuditQueryOptions
+        {
+            public int Limit { get; set; }
+            public string Category { get; set; }
+            public string Host { get; set; }
+            public string Result { get; set; }
+            public string FromUtc { get; set; }
+            public string ToUtc { get; set; }
+            public string Search { get; set; }
         }
 
         public sealed class AuditRecord
         {
             public string TimestampUtc { get; set; }
+            public string Host { get; set; }
             public string Actor { get; set; }
             public string Action { get; set; }
             public string Target { get; set; }

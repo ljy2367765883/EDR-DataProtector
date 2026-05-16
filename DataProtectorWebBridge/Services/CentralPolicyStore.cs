@@ -262,12 +262,20 @@ namespace DataProtectorWebBridge.Services
 
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
         {
-            int take = limit <= 0 ? DefaultLimit : Math.Min(limit, 1000);
+            return QueryAudit(new AuditLog.AuditQueryOptions { Limit = limit });
+        }
+
+        public AuditLog.AuditRecord[] QueryAudit(AuditLog.AuditQueryOptions options)
+        {
+            AuditLog.AuditQueryOptions query = options ?? new AuditLog.AuditQueryOptions();
+            int take = AuditLog.NormalizeLimit(query.Limit);
+
             lock (syncRoot)
             {
                 return state.Audit
                     .AsEnumerable()
                     .Reverse()
+                    .Where(record => AuditLog.Matches(record, query))
                     .Take(take)
                     .Select(CloneAudit)
                     .ToArray();
@@ -394,10 +402,13 @@ namespace DataProtectorWebBridge.Services
                 {
                     foreach (AuditLog.AuditRecord record in request.Audit)
                     {
-                        AuditLog.AuditRecord normalized = CloneAudit(record);
-                        normalized.Actor = string.IsNullOrWhiteSpace(normalized.Actor)
-                            ? device.Machine
-                            : normalized.Actor;
+                AuditLog.AuditRecord normalized = CloneAudit(record);
+                normalized.Host = string.IsNullOrWhiteSpace(normalized.Host)
+                    ? device.Machine
+                    : normalized.Host;
+                normalized.Actor = string.IsNullOrWhiteSpace(normalized.Actor)
+                    ? device.Machine
+                    : normalized.Actor;
                         normalized.Target = string.IsNullOrWhiteSpace(normalized.Target)
                             ? device.DeviceId
                             : normalized.Target;
@@ -477,6 +488,7 @@ namespace DataProtectorWebBridge.Services
             state.Audit.Add(new AuditLog.AuditRecord
             {
                 TimestampUtc = DateTime.UtcNow.ToString("o"),
+                Host = Environment.MachineName,
                 Actor = string.IsNullOrWhiteSpace(actor) ? Environment.UserName : actor,
                 Action = action ?? string.Empty,
                 Target = target ?? string.Empty,
@@ -861,6 +873,7 @@ namespace DataProtectorWebBridge.Services
             return new AuditLog.AuditRecord
             {
                 TimestampUtc = string.IsNullOrWhiteSpace(record.TimestampUtc) ? DateTime.UtcNow.ToString("o") : record.TimestampUtc,
+                Host = record.Host ?? string.Empty,
                 Actor = record.Actor ?? string.Empty,
                 Action = record.Action ?? string.Empty,
                 Target = record.Target ?? string.Empty,
