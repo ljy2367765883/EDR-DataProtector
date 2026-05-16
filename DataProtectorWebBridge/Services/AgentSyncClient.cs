@@ -188,7 +188,20 @@ namespace DataProtectorWebBridge.Services
             catch (Exception ex)
             {
                 Console.Error.WriteLine(DateTime.Now.ToString("s") + " security audit drain failed for " + source + ": " + ex.Message);
-                return new AuditLog.AuditRecord[0];
+                return new[]
+                {
+                    new AuditLog.AuditRecord
+                    {
+                        TimestampUtc = DateTime.UtcNow.ToString("o"),
+                        Actor = "security-audit",
+                        Action = "security.audit.drain.failed." + source,
+                        Target = source,
+                        Extension = string.Empty,
+                        Succeeded = false,
+                        Status = "0x00000001",
+                        Message = ex.Message
+                    }
+                };
             }
         }
 

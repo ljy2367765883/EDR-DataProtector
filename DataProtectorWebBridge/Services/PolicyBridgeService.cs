@@ -829,12 +829,7 @@ namespace DataProtectorWebBridge.Services
 
         private static WebShellEventDto ConvertWebShellEvent(DataProtectorPolicyNative.NativeWebShellEvent nativeEvent)
         {
-            uint sampleLength = Math.Min(nativeEvent.SampleLength, nativeEvent.Sample == null ? 0u : (uint)nativeEvent.Sample.Length);
-            string sample = string.Empty;
-            if (nativeEvent.Sample != null && sampleLength != 0)
-            {
-                sample = DecodeWebShellSample(nativeEvent.Sample, checked((int)sampleLength));
-            }
+            string sample = DecodeWebShellSample(nativeEvent.Sample, checked((int)Math.Min(nativeEvent.SampleLength, 100u)));
 
             return new WebShellEventDto
             {
@@ -849,18 +844,18 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
-        private static string DecodeWebShellSample(byte[] sample, int length)
+        private static unsafe string DecodeWebShellSample(DataProtectorPolicyNative.SampleBuffer sample, int length)
         {
-            if (sample == null || length <= 0)
+            if (length <= 0)
             {
                 return string.Empty;
             }
 
             StringBuilder builder = new StringBuilder(length);
-            int take = Math.Min(length, sample.Length);
+            int take = Math.Min(length, 100);
             for (int index = 0; index < take; index++)
             {
-                byte value = sample[index];
+                byte value = sample.Bytes[index];
                 if (value == 0)
                 {
                     continue;

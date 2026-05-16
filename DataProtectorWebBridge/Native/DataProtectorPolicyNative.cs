@@ -154,8 +154,13 @@ namespace DataProtectorWebBridge.Native
             public IntPtr Path;
             public IntPtr Extension;
 
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 100)]
-            public byte[] Sample;
+            public SampleBuffer Sample;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Size = 100)]
+        internal unsafe struct SampleBuffer
+        {
+            public fixed byte Bytes[100];
         }
     }
 }
