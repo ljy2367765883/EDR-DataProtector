@@ -989,6 +989,7 @@ DpPolicyQueryProcessRules(
     DWORD index;
     DWORD requiredStringChars = 0;
     DWORD copiedStringChars = 0;
+    DWORD returnedRuleCount = 0;
     BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
 
     if (RuleCount != NULL) {
@@ -1059,13 +1060,15 @@ DpPolicyQueryProcessRules(
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
+    returnedRuleCount = header->RuleCount;
+
     if (RuleCount != NULL) {
-        *RuleCount = header->RuleCount;
+        *RuleCount = returnedRuleCount;
     }
 
     cursor = queryBuffer + sizeof(DP_POLICY_QUERY_HEADER);
 
-    for (index = 0; index < header->RuleCount; index++) {
+    for (index = 0; index < returnedRuleCount; index++) {
         PDP_POLICY_QUERY_ENTRY entry;
         DWORD valueChars;
         DWORD extensionChars;
@@ -1128,7 +1131,7 @@ DpPolicyQueryProcessRules(
 
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
-    if (RuleCapacity < header->RuleCount || StringBufferChars < requiredStringChars) {
+    if (RuleCapacity < returnedRuleCount || StringBufferChars < requiredStringChars) {
         if (sizingOnly) {
             DpPolicySetLastErrorMessage(L"Success.");
             return DP_POLICY_API_SUCCESS;
@@ -1263,6 +1266,7 @@ DpPolicyQueryNetworkRules(
     DWORD index;
     DWORD requiredStringChars = 0;
     DWORD copiedStringChars = 0;
+    DWORD returnedRuleCount = 0;
     BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
 
     if (RuleCount != NULL) {
@@ -1330,13 +1334,15 @@ DpPolicyQueryNetworkRules(
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
+    returnedRuleCount = header->RuleCount;
+
     if (RuleCount != NULL) {
-        *RuleCount = header->RuleCount;
+        *RuleCount = returnedRuleCount;
     }
 
     cursor = queryBuffer + sizeof(DP_NETWORK_RULE_QUERY_HEADER);
 
-    for (index = 0; index < header->RuleCount; index++) {
+    for (index = 0; index < returnedRuleCount; index++) {
         PDP_NETWORK_RULE_QUERY_ENTRY entry;
         DWORD domainChars;
         DWORD entryBytes;
@@ -1389,7 +1395,7 @@ DpPolicyQueryNetworkRules(
 
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
-    if (RuleCapacity < header->RuleCount || StringBufferChars < requiredStringChars) {
+    if (RuleCapacity < returnedRuleCount || StringBufferChars < requiredStringChars) {
         if (sizingOnly) {
             DpPolicySetLastErrorMessage(L"Success.");
             return DP_POLICY_API_SUCCESS;
@@ -1423,6 +1429,7 @@ DpPolicyQuerySmtpEvents(
     DWORD index;
     DWORD requiredStringChars = 0;
     DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
     BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
 
     if (EventCount != NULL) {
@@ -1543,13 +1550,15 @@ DpPolicyQuerySmtpEvents(
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
+    returnedEventCount = header->EventCount;
+
     if (EventCount != NULL) {
-        *EventCount = header->EventCount;
+        *EventCount = returnedEventCount;
     }
 
     entry = (PDP_SMTP_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_SMTP_EVENT_QUERY_HEADER));
 
-    for (index = 0; index < header->EventCount; index++) {
+    for (index = 0; index < returnedEventCount; index++) {
         DWORD fromChars;
         DWORD toChars;
 
@@ -1600,7 +1609,7 @@ DpPolicyQuerySmtpEvents(
 
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
-    if (EventCapacity < header->EventCount || StringBufferChars < requiredStringChars) {
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
         if (sizingOnly) {
             DpPolicySetLastErrorMessage(L"Success.");
             return DP_POLICY_API_SUCCESS;
@@ -1728,6 +1737,7 @@ DpPolicyQueryWebShellRules(
     DWORD index;
     DWORD requiredStringChars = 0;
     DWORD copiedStringChars = 0;
+    DWORD returnedRuleCount = 0;
     BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
 
     if (RuleCount != NULL) {
@@ -1795,13 +1805,15 @@ DpPolicyQueryWebShellRules(
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
+    returnedRuleCount = header->RuleCount;
+
     if (RuleCount != NULL) {
-        *RuleCount = header->RuleCount;
+        *RuleCount = returnedRuleCount;
     }
 
     cursor = queryBuffer + sizeof(DP_WEBSHELL_RULE_QUERY_HEADER);
 
-    for (index = 0; index < header->RuleCount; index++) {
+    for (index = 0; index < returnedRuleCount; index++) {
         PDP_WEBSHELL_RULE_QUERY_ENTRY entry;
         DWORD directoryChars;
         DWORD entryBytes;
@@ -1846,7 +1858,7 @@ DpPolicyQueryWebShellRules(
 
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
-    if (RuleCapacity < header->RuleCount || StringBufferChars < requiredStringChars) {
+    if (RuleCapacity < returnedRuleCount || StringBufferChars < requiredStringChars) {
         if (sizingOnly) {
             DpPolicySetLastErrorMessage(L"Success.");
             return DP_POLICY_API_SUCCESS;
@@ -1880,6 +1892,7 @@ DpPolicyQueryWebShellEvents(
     DWORD index;
     DWORD requiredStringChars = 0;
     DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
     BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
 
     DpPolicyTrace(L"WebShellEvents enter events=%p capacity=%lu stringBuffer=%p stringChars=%lu sizingOnly=%lu",
@@ -2058,13 +2071,15 @@ DpPolicyQueryWebShellEvents(
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
+    returnedEventCount = header->EventCount;
+
     if (EventCount != NULL) {
-        *EventCount = header->EventCount;
+        *EventCount = returnedEventCount;
     }
 
     entry = (PDP_WEBSHELL_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER));
 
-    for (index = 0; index < header->EventCount; index++) {
+    for (index = 0; index < returnedEventCount; index++) {
         DWORD pathChars;
         DWORD extensionChars;
 
@@ -2133,7 +2148,7 @@ DpPolicyQueryWebShellEvents(
     }
 
     DpPolicyTrace(L"WebShellEvents post-copy headerEvents=%lu requiredStringChars=%lu copiedStringChars=%lu eventCapacity=%lu stringChars=%lu",
-                  header->EventCount,
+                  returnedEventCount,
                   requiredStringChars,
                   copiedStringChars,
                   EventCapacity,
@@ -2141,7 +2156,7 @@ DpPolicyQueryWebShellEvents(
 
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
-    if (EventCapacity < header->EventCount || StringBufferChars < requiredStringChars) {
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
         if (sizingOnly) {
             DpPolicySetLastErrorMessage(L"Success.");
             DpPolicyTrace(L"WebShellEvents sizing-only post-copy success");
@@ -2151,7 +2166,7 @@ DpPolicyQueryWebShellEvents(
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
         DpPolicyTrace(L"WebShellEvents buffer too small after copy capacity=%lu eventCount=%lu stringChars=%lu required=%lu",
                       EventCapacity,
-                      header->EventCount,
+                      returnedEventCount,
                       StringBufferChars,
                       requiredStringChars);
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
