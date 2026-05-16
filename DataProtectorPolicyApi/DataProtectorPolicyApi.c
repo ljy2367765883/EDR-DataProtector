@@ -16,6 +16,8 @@
 #define DP_WEBSHELL_EVENT_PATH_CHARS 512u
 #define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32u
 #define DP_WEBSHELL_MAX_SAMPLE_BYTES 100u
+#define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
+#define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 
 typedef enum _DP_POLICY_COMMAND {
@@ -1378,6 +1380,55 @@ DpPolicyQuerySmtpEvents(
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount >
+                MAXDWORD / DP_SMTP_EVENT_STRING_CHARS) {
+
+                DpPolicySetLastErrorMessage(L"SMTP event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+
+            *StringBufferCharsRequired = sizingHeader.EventCount * DP_SMTP_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = sizingHeader.EventCount;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        if (sizingHeader.EventCount >
+            MAXDWORD / DP_SMTP_EVENT_STRING_CHARS) {
+
+            DpPolicySetLastErrorMessage(L"SMTP event snapshot is too large.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        *StringBufferCharsRequired = sizingHeader.EventCount * DP_SMTP_EVENT_STRING_CHARS;
+    }
+
+    if (sizingHeader.EventCount >
+        MAXDWORD / DP_SMTP_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"SMTP event snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        StringBufferChars < sizingHeader.EventCount * DP_SMTP_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
     bytesRequired = sizingHeader.BytesRequired;
     queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
     if (queryBuffer == NULL) {
@@ -1784,6 +1835,55 @@ DpPolicyQueryWebShellEvents(
 
         DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell event snapshot header.");
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount >
+                MAXDWORD / DP_WEBSHELL_EVENT_STRING_CHARS) {
+
+                DpPolicySetLastErrorMessage(L"WebShell event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+
+            *StringBufferCharsRequired = sizingHeader.EventCount * DP_WEBSHELL_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = sizingHeader.EventCount;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        if (sizingHeader.EventCount >
+            MAXDWORD / DP_WEBSHELL_EVENT_STRING_CHARS) {
+
+            DpPolicySetLastErrorMessage(L"WebShell event snapshot is too large.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        *StringBufferCharsRequired = sizingHeader.EventCount * DP_WEBSHELL_EVENT_STRING_CHARS;
+    }
+
+    if (sizingHeader.EventCount >
+        MAXDWORD / DP_WEBSHELL_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"WebShell event snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        StringBufferChars < sizingHeader.EventCount * DP_WEBSHELL_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
 
     bytesRequired = sizingHeader.BytesRequired;
