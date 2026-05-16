@@ -21,6 +21,7 @@ EXPORTS
     DpPolicyClearNetworkRules
     DpPolicyQueryNetworkRules
     DpPolicyQuerySmtpEvents
+    DpPolicyQueryNetworkConnectionEvents
     DpPolicyAddWebShellRule
     DpPolicyRemoveWebShellRule
     DpPolicyClearWebShellRules

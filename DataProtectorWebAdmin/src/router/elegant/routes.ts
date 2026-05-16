@@ -98,6 +98,17 @@ export const generatedRoutes: GeneratedRoute[] = [
     }
   },
   {
+    name: 'network-awareness',
+    path: '/network-awareness',
+    component: 'layout.base$view.network-awareness',
+    meta: {
+      title: 'network-awareness',
+      i18nKey: 'route.network-awareness',
+      icon: 'mdi:access-point-network',
+      order: 22
+    }
+  },
+  {
     name: 'policy',
     path: '/policy',
     component: 'layout.base$view.policy',

@@ -30,6 +30,7 @@ Abstract:
 #define DP_TAG_FOOTER_BUFFER   'fPpD'
 #define DP_TAG_NET_RULE        'rNpD'
 #define DP_TAG_NET_BUFFER      'bNpD'
+#define DP_TAG_NET_EVENT       'eNpD'
 #define DP_TAG_SMTP_EVENT      'eSpD'
 #define DP_TAG_SMTP_FLOW       'fSpD'
 #define DP_TAG_WEBSHELL_RULE   'rWpD'
@@ -40,6 +41,9 @@ Abstract:
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
 #define DP_POLICY_MAX_NETWORK_RULES 1024
 #define DP_POLICY_MAX_DOMAIN_BYTES (260 * sizeof(WCHAR))
+#define DP_NETWORK_MAX_CONNECTION_EVENTS 1024
+#define DP_NETWORK_EVENT_PROCESS_PATH_CHARS 512
+#define DP_NETWORK_EVENT_DOMAIN_CHARS 260
 #define DP_POLICY_MAX_SMTP_EVENTS 128
 #define DP_SMTP_MAX_ADDRESS_CHARS 256
 #define DP_WEBSHELL_MAX_RULES 256
@@ -202,6 +206,7 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandClearNetworkRules = 22,
     DpPolicyCommandQueryNetworkRules = 23,
     DpPolicyCommandQuerySmtpEvents = 24,
+    DpPolicyCommandQueryNetworkConnectionEvents = 25,
     DpPolicyCommandAddWebShellRule = 40,
     DpPolicyCommandRemoveWebShellRule = 41,
     DpPolicyCommandClearWebShellRules = 42,
@@ -303,6 +308,39 @@ typedef struct _DP_NETWORK_RULE_QUERY_ENTRY {
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1
 #define DP_NETWORK_RULE_QUERY_VERSION 1
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
+
+#define DP_NETWORK_EVENT_FLAG_DNS       0x00000001u
+#define DP_NETWORK_EVENT_FLAG_QUIC      0x00000002u
+#define DP_NETWORK_EVENT_FLAG_HTTP3     0x00000004u
+#define DP_NETWORK_EVENT_FLAG_BLOCKED   0x00000008u
+
+typedef struct _DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER, *PDP_NETWORK_CONNECTION_EVENT_QUERY_HEADER;
+
+typedef struct _DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG Direction;
+    ULONG Protocol;
+    ULONG LocalAddress;
+    ULONG RemoteAddress;
+    ULONG Flags;
+    ULONG ProcessPathLengthBytes;
+    ULONG DomainLengthBytes;
+    ULONG Reserved;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG Reserved2;
+    WCHAR ProcessPath[DP_NETWORK_EVENT_PROCESS_PATH_CHARS];
+    WCHAR Domain[DP_NETWORK_EVENT_DOMAIN_CHARS];
+} DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY, *PDP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY;
+
+#define DP_NETWORK_CONNECTION_EVENT_QUERY_VERSION 1
 
 typedef struct _DP_SMTP_EVENT_QUERY_HEADER {
     ULONG Version;
@@ -723,6 +761,13 @@ DpNetFilterQueryRules(
 
 NTSTATUS
 DpNetFilterQuerySmtpEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpNetFilterQueryConnectionEvents(
     _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
     _In_ ULONG OutputBufferLength,
     _Out_ PULONG ReturnOutputBufferLength

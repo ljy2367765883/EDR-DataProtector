@@ -75,6 +75,11 @@ typedef struct _DP_SMTP_EVENT_ENTRY {
     DP_SMTP_EVENT_QUERY_ENTRY Event;
 } DP_SMTP_EVENT_ENTRY, *PDP_SMTP_EVENT_ENTRY;
 
+typedef struct _DP_NETWORK_CONNECTION_EVENT_ENTRY {
+    LIST_ENTRY Link;
+    DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY Event;
+} DP_NETWORK_CONNECTION_EVENT_ENTRY, *PDP_NETWORK_CONNECTION_EVENT_ENTRY;
+
 typedef struct _DP_SMTP_FLOW_CONTEXT {
     ULONG LocalAddress;
     ULONG RemoteAddress;
@@ -88,8 +93,10 @@ typedef struct _DP_SMTP_FLOW_CONTEXT {
 } DP_SMTP_FLOW_CONTEXT, *PDP_SMTP_FLOW_CONTEXT;
 
 static LIST_ENTRY gDpNetworkRules;
+static LIST_ENTRY gDpNetworkConnectionEvents;
 static LIST_ENTRY gDpSmtpEvents;
 static KSPIN_LOCK gDpNetworkRuleLock;
+static KSPIN_LOCK gDpNetworkConnectionEventLock;
 static KSPIN_LOCK gDpSmtpEventLock;
 static PDEVICE_OBJECT gDpNetDeviceObject = NULL;
 static HANDLE gDpWfpEngineHandle = NULL;
@@ -100,7 +107,11 @@ static UINT32 gDpInboundTransportV4CalloutId = 0;
 static UINT32 gDpSmtpStreamV4CalloutId = 0;
 static BOOLEAN gDpNetFilterInitialized = FALSE;
 static BOOLEAN gDpNetworkRuleLockInitialized = FALSE;
+static BOOLEAN gDpNetworkConnectionEventLockInitialized = FALSE;
 static BOOLEAN gDpSmtpEventLockInitialized = FALSE;
+static ULONG gDpNetworkConnectionEventCount = 0;
+static ULONGLONG gDpNetworkConnectionEventSequence = 0;
+static ULONGLONG gDpNetworkConnectionDroppedEvents = 0;
 static ULONG gDpSmtpEventCount = 0;
 static ULONGLONG gDpSmtpEventSequence = 0;
 static ULONGLONG gDpSmtpDroppedEvents = 0;
@@ -140,6 +151,51 @@ DpNetFilterFreeSmtpEvent(
 {
     if (Event != NULL) {
         ExFreePoolWithTag(Event, DP_TAG_SMTP_EVENT);
+    }
+}
+
+static
+VOID
+DpNetFilterFreeConnectionEvent(
+    _In_ PDP_NETWORK_CONNECTION_EVENT_ENTRY Event
+    )
+{
+    if (Event != NULL) {
+        ExFreePoolWithTag(Event, DP_TAG_NET_EVENT);
+    }
+}
+
+static
+VOID
+DpNetFilterClearConnectionEvents(
+    VOID
+    )
+{
+    LIST_ENTRY localList;
+    KIRQL oldIrql;
+
+    if (!gDpNetworkConnectionEventLockInitialized) {
+        return;
+    }
+
+    InitializeListHead(&localList);
+
+    KeAcquireSpinLock(&gDpNetworkConnectionEventLock, &oldIrql);
+
+    while (!IsListEmpty(&gDpNetworkConnectionEvents)) {
+        PLIST_ENTRY link = RemoveHeadList(&gDpNetworkConnectionEvents);
+        InsertTailList(&localList, link);
+    }
+
+    gDpNetworkConnectionEventCount = 0;
+
+    KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
+
+    while (!IsListEmpty(&localList)) {
+        PLIST_ENTRY link = RemoveHeadList(&localList);
+        PDP_NETWORK_CONNECTION_EVENT_ENTRY event =
+            CONTAINING_RECORD(link, DP_NETWORK_CONNECTION_EVENT_ENTRY, Link);
+        DpNetFilterFreeConnectionEvent(event);
     }
 }
 
@@ -380,6 +436,286 @@ DpNetFilterWideStringLengthBytes(
     }
 
     return (ULONG)(chars * sizeof(WCHAR));
+}
+
+static
+VOID
+DpNetFilterCopyProcessPath(
+    _In_opt_ const FWPS_INCOMING_METADATA_VALUES0 *InMetaValues,
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ SIZE_T DestinationChars,
+    _Out_ PULONG LengthBytes
+    )
+{
+    SIZE_T copyBytes;
+
+    if (LengthBytes != NULL) {
+        *LengthBytes = 0;
+    }
+
+    if (Destination == NULL || DestinationChars == 0) {
+        return;
+    }
+
+    Destination[0] = L'\0';
+
+    if (InMetaValues == NULL ||
+        !FWPS_IS_METADATA_FIELD_PRESENT(InMetaValues, FWPS_METADATA_FIELD_PROCESS_PATH) ||
+        InMetaValues->processPath == NULL ||
+        InMetaValues->processPath->data == NULL ||
+        InMetaValues->processPath->size == 0) {
+
+        return;
+    }
+
+    copyBytes = InMetaValues->processPath->size;
+    if (copyBytes > (DestinationChars - 1) * sizeof(WCHAR)) {
+        copyBytes = (DestinationChars - 1) * sizeof(WCHAR);
+    }
+
+    copyBytes -= copyBytes % sizeof(WCHAR);
+    if (copyBytes == 0) {
+        return;
+    }
+
+    RtlCopyMemory(Destination, InMetaValues->processPath->data, copyBytes);
+    Destination[copyBytes / sizeof(WCHAR)] = L'\0';
+
+    if (LengthBytes != NULL) {
+        *LengthBytes = DpNetFilterWideStringLengthBytes(Destination, DestinationChars);
+    }
+}
+
+static
+VOID
+DpNetFilterCopyDomain(
+    _In_opt_z_ PCWSTR Domain,
+    _Out_writes_(DestinationChars) PWCHAR Destination,
+    _In_ SIZE_T DestinationChars,
+    _Out_ PULONG LengthBytes
+    )
+{
+    SIZE_T index = 0;
+
+    if (LengthBytes != NULL) {
+        *LengthBytes = 0;
+    }
+
+    if (Destination == NULL || DestinationChars == 0) {
+        return;
+    }
+
+    Destination[0] = L'\0';
+
+    if (Domain == NULL || Domain[0] == L'\0') {
+        return;
+    }
+
+    while (index < DestinationChars - 1 && Domain[index] != L'\0') {
+        Destination[index] = Domain[index];
+        index++;
+    }
+
+    Destination[index] = L'\0';
+
+    if (LengthBytes != NULL) {
+        *LengthBytes = (ULONG)(index * sizeof(WCHAR));
+    }
+}
+
+static
+WCHAR
+DpNetFilterLowerWide(
+    _In_ WCHAR Character
+    );
+
+static
+BOOLEAN
+DpNetFilterPathEndsWithInsensitive(
+    _In_reads_(ValueChars) PCWSTR Value,
+    _In_ SIZE_T ValueChars,
+    _In_z_ PCWSTR Suffix
+    )
+{
+    SIZE_T suffixChars = 0;
+    SIZE_T index;
+
+    if (Value == NULL || Suffix == NULL) {
+        return FALSE;
+    }
+
+    while (Suffix[suffixChars] != L'\0') {
+        suffixChars++;
+    }
+
+    if (suffixChars == 0 || suffixChars > ValueChars) {
+        return FALSE;
+    }
+
+    for (index = 0; index < suffixChars; index++) {
+        WCHAR left = Value[ValueChars - suffixChars + index];
+        WCHAR right = Suffix[index];
+
+        if (DpNetFilterLowerWide(left) != DpNetFilterLowerWide(right)) {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static
+BOOLEAN
+DpNetFilterProcessPathIsIgnored(
+    _In_reads_(PathChars) PCWSTR Path,
+    _In_ SIZE_T PathChars
+    )
+{
+    static PCWSTR ignoredNames[] = {
+        L"\\chrome.exe", L"\\msedge.exe", L"\\firefox.exe", L"\\iexplore.exe",
+        L"\\msedgewebview2.exe", L"\\chromium.exe", L"\\opera.exe", L"\\opera_gx.exe",
+        L"\\brave.exe", L"\\vivaldi.exe", L"\\safari.exe", L"\\ucbrowser.exe",
+        L"\\browser.exe", L"\\qqbrowser.exe", L"\\sogouexplorer.exe",
+        L"\\360se.exe", L"\\360chrome.exe", L"\\liebao.exe", L"\\maxthon.exe",
+        L"\\2345explorer.exe", L"\\baidubrowser.exe", L"\\theworld.exe",
+        L"\\wechat.exe", L"\\weixin.exe", L"\\wechatappex.exe", L"\\wxwork.exe",
+        L"\\enterprisewechat.exe", L"\\wecom.exe", L"\\qq.exe", L"\\tim.exe",
+        L"\\dingtalk.exe", L"\\feishu.exe", L"\\lark.exe", L"\\teams.exe",
+        L"\\slack.exe", L"\\telegram.exe", L"\\discord.exe", L"\\skype.exe",
+        L"\\zoom.exe", L"\\tencentmeeting.exe", L"\\wemeetapp.exe",
+        L"\\outlook.exe", L"\\thunderbird.exe", L"\\foxmail.exe",
+        L"\\whatsapp.exe", L"\\signal.exe", L"\\line.exe", L"\\viber.exe",
+        L"\\mattermost.exe"
+    };
+    ULONG index;
+
+    if (Path == NULL || PathChars == 0) {
+        return FALSE;
+    }
+
+    for (index = 0; index < RTL_NUMBER_OF(ignoredNames); index++) {
+        if (DpNetFilterPathEndsWithInsensitive(Path, PathChars, ignoredNames[index])) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static
+ULONG
+DpNetFilterDetectProtocolFlags(
+    _In_opt_z_ PCWSTR Domain,
+    _In_ ULONG BaseFlags
+    )
+{
+    ULONG flags = BaseFlags;
+
+    if (Domain != NULL) {
+        SIZE_T index = 0;
+        while (Domain[index] != L'\0') {
+            if ((Domain[index] == L'h' || Domain[index] == L'H') &&
+                (Domain[index + 1] == L'3') &&
+                (Domain[index + 2] == L'\0' || Domain[index + 2] == L'.' || Domain[index + 2] == L'-')) {
+
+                flags |= DP_NETWORK_EVENT_FLAG_QUIC | DP_NETWORK_EVENT_FLAG_HTTP3;
+                break;
+            }
+
+            index++;
+        }
+    }
+
+    return flags;
+}
+
+static
+VOID
+DpNetFilterQueueConnectionEvent(
+    _In_opt_ const FWPS_INCOMING_METADATA_VALUES0 *InMetaValues,
+    _In_ DP_NETWORK_DIRECTION Direction,
+    _In_ UCHAR Protocol,
+    _In_ ULONG LocalAddress,
+    _In_ USHORT LocalPort,
+    _In_ ULONG RemoteAddress,
+    _In_ USHORT RemotePort,
+    _In_opt_z_ PCWSTR Domain,
+    _In_ ULONG Flags
+    )
+{
+    PDP_NETWORK_CONNECTION_EVENT_ENTRY entry;
+    KIRQL oldIrql;
+    ULONGLONG processId = 0;
+
+    if (!gDpNetworkConnectionEventLockInitialized) {
+        return;
+    }
+
+    if (InMetaValues != NULL &&
+        FWPS_IS_METADATA_FIELD_PRESENT(InMetaValues, FWPS_METADATA_FIELD_PROCESS_ID)) {
+
+        processId = InMetaValues->processId;
+    }
+
+    entry = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                  sizeof(DP_NETWORK_CONNECTION_EVENT_ENTRY),
+                                  DP_TAG_NET_EVENT);
+    if (entry == NULL) {
+        KeAcquireSpinLock(&gDpNetworkConnectionEventLock, &oldIrql);
+        gDpNetworkConnectionDroppedEvents++;
+        KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
+        return;
+    }
+
+    RtlZeroMemory(entry, sizeof(DP_NETWORK_CONNECTION_EVENT_ENTRY));
+    InitializeListHead(&entry->Link);
+
+    entry->Event.ProcessId = processId;
+    entry->Event.Direction = Direction;
+    entry->Event.Protocol = Protocol;
+    entry->Event.LocalAddress = LocalAddress;
+    entry->Event.RemoteAddress = RemoteAddress;
+    entry->Event.LocalPort = LocalPort;
+    entry->Event.RemotePort = RemotePort;
+    entry->Event.Flags = DpNetFilterDetectProtocolFlags(Domain, Flags);
+
+    DpNetFilterCopyProcessPath(InMetaValues,
+                               entry->Event.ProcessPath,
+                               RTL_NUMBER_OF(entry->Event.ProcessPath),
+                               &entry->Event.ProcessPathLengthBytes);
+
+    if (DpNetFilterProcessPathIsIgnored(entry->Event.ProcessPath,
+                                        entry->Event.ProcessPathLengthBytes / sizeof(WCHAR))) {
+
+        ExFreePoolWithTag(entry, DP_TAG_NET_EVENT);
+        return;
+    }
+
+    DpNetFilterCopyDomain(Domain,
+                          entry->Event.Domain,
+                          RTL_NUMBER_OF(entry->Event.Domain),
+                          &entry->Event.DomainLengthBytes);
+
+    KeAcquireSpinLock(&gDpNetworkConnectionEventLock, &oldIrql);
+
+    entry->Event.Sequence = ++gDpNetworkConnectionEventSequence;
+    InsertTailList(&gDpNetworkConnectionEvents, &entry->Link);
+    gDpNetworkConnectionEventCount++;
+
+    while (gDpNetworkConnectionEventCount > DP_NETWORK_MAX_CONNECTION_EVENTS &&
+           !IsListEmpty(&gDpNetworkConnectionEvents)) {
+
+        PLIST_ENTRY oldLink = RemoveHeadList(&gDpNetworkConnectionEvents);
+        PDP_NETWORK_CONNECTION_EVENT_ENTRY oldEvent =
+            CONTAINING_RECORD(oldLink, DP_NETWORK_CONNECTION_EVENT_ENTRY, Link);
+        gDpNetworkConnectionEventCount--;
+        gDpNetworkConnectionDroppedEvents++;
+        KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
+        DpNetFilterFreeConnectionEvent(oldEvent);
+        KeAcquireSpinLock(&gDpNetworkConnectionEventLock, &oldIrql);
+    }
+
+    KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
 }
 
 static
@@ -807,7 +1143,6 @@ DpNetFilterAleClassify(
     DP_NETWORK_DIRECTION direction;
     DP_NETWORK_ACTION action;
 
-    UNREFERENCED_PARAMETER(InMetaValues);
     UNREFERENCED_PARAMETER(LayerData);
     UNREFERENCED_PARAMETER(ClassifyContext);
     UNREFERENCED_PARAMETER(Filter);
@@ -860,12 +1195,95 @@ DpNetFilterAleClassify(
                                    remotePort,
                                    NULL);
 
+    if (protocol != IPPROTO_UDP ||
+        direction == DpNetworkDirectionInbound ||
+        action == DpNetworkActionBlock) {
+
+        DpNetFilterQueueConnectionEvent(InMetaValues,
+                                        direction,
+                                        protocol,
+                                        localAddress,
+                                        localPort,
+                                        remoteAddress,
+                                        remotePort,
+                                        NULL,
+                                        action == DpNetworkActionBlock ? DP_NETWORK_EVENT_FLAG_BLOCKED : 0);
+    }
+
     if (action == DpNetworkActionBlock) {
         ClassifyOut->actionType = FWP_ACTION_BLOCK;
         ClassifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
     } else {
         ClassifyOut->actionType = FWP_ACTION_PERMIT;
     }
+}
+
+static
+BOOLEAN
+DpNetFilterLooksLikeQuicDatagram(
+    _In_opt_ const VOID *LayerData,
+    _In_ ULONG TransportHeaderSize,
+    _In_ USHORT RemotePort
+    )
+{
+    PNET_BUFFER_LIST netBufferList;
+    PNET_BUFFER netBuffer;
+    ULONG dataLength;
+    PUCHAR copyBuffer = NULL;
+    PVOID dataBuffer;
+    PUCHAR payload;
+    UCHAR firstByte;
+    ULONG version;
+    BOOLEAN result = FALSE;
+
+    if (RemotePort != 443 ||
+        LayerData == NULL ||
+        TransportHeaderSize == 0) {
+
+        return FALSE;
+    }
+
+    netBufferList = (PNET_BUFFER_LIST)LayerData;
+    netBuffer = NET_BUFFER_LIST_FIRST_NB(netBufferList);
+    if (netBuffer == NULL) {
+        return FALSE;
+    }
+
+    dataLength = NET_BUFFER_DATA_LENGTH(netBuffer);
+    if (dataLength <= TransportHeaderSize) {
+        return FALSE;
+    }
+
+    copyBuffer = ExAllocatePoolWithTag(NonPagedPoolNx, dataLength, DP_TAG_NET_BUFFER);
+    if (copyBuffer == NULL) {
+        return FALSE;
+    }
+
+    dataBuffer = NdisGetDataBuffer(netBuffer, dataLength, copyBuffer, 1, 0);
+    if (dataBuffer == NULL) {
+        ExFreePoolWithTag(copyBuffer, DP_TAG_NET_BUFFER);
+        return FALSE;
+    }
+
+    payload = (PUCHAR)dataBuffer + TransportHeaderSize;
+    firstByte = payload[0];
+
+    if ((firstByte & 0x80) != 0) {
+        if (dataLength >= TransportHeaderSize + 7 &&
+            (firstByte & 0x40) != 0) {
+
+            version = ((ULONG)payload[1] << 24) |
+                      ((ULONG)payload[2] << 16) |
+                      ((ULONG)payload[3] << 8) |
+                      (ULONG)payload[4];
+            result = version != 0;
+        }
+    } else {
+        result = (firstByte & 0x40) != 0;
+    }
+
+    ExFreePoolWithTag(copyBuffer, DP_TAG_NET_BUFFER);
+    return result;
 }
 
 static
@@ -1034,12 +1452,36 @@ DpNetFilterDnsClassify(
                                    NULL);
 
     if (action == DpNetworkActionBlock) {
+        DpNetFilterQueueConnectionEvent(InMetaValues,
+                                        DpNetworkDirectionOutbound,
+                                        protocol,
+                                        localAddress,
+                                        localPort,
+                                        remoteAddress,
+                                        remotePort,
+                                        NULL,
+                                        DP_NETWORK_EVENT_FLAG_BLOCKED);
         ClassifyOut->actionType = FWP_ACTION_BLOCK;
         ClassifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
         return;
     }
 
     if (remotePort != 53) {
+        ULONG eventFlags = DpNetFilterLooksLikeQuicDatagram(LayerData,
+                                                            transportHeaderSize,
+                                                            remotePort)
+            ? DP_NETWORK_EVENT_FLAG_QUIC
+            : 0;
+
+        DpNetFilterQueueConnectionEvent(InMetaValues,
+                                        DpNetworkDirectionOutbound,
+                                        protocol,
+                                        localAddress,
+                                        localPort,
+                                        remoteAddress,
+                                        remotePort,
+                                        NULL,
+                                        eventFlags);
         ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
@@ -1056,6 +1498,15 @@ DpNetFilterDnsClassify(
                                   domain,
                                   RTL_NUMBER_OF(domain))) {
 
+        DpNetFilterQueueConnectionEvent(InMetaValues,
+                                        DpNetworkDirectionOutbound,
+                                        protocol,
+                                        localAddress,
+                                        localPort,
+                                        remoteAddress,
+                                        remotePort,
+                                        NULL,
+                                        remotePort == 53 ? DP_NETWORK_EVENT_FLAG_DNS : 0);
         ClassifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
@@ -1067,6 +1518,17 @@ DpNetFilterDnsClassify(
                                    remoteAddress,
                                    remotePort,
                                    domain);
+
+    DpNetFilterQueueConnectionEvent(InMetaValues,
+                                    DpNetworkDirectionOutbound,
+                                    protocol,
+                                    localAddress,
+                                    localPort,
+                                    remoteAddress,
+                                    remotePort,
+                                    domain,
+                                    DP_NETWORK_EVENT_FLAG_DNS |
+                                        (action == DpNetworkActionBlock ? DP_NETWORK_EVENT_FLAG_BLOCKED : 0));
 
     if (action == DpNetworkActionBlock) {
         ClassifyOut->actionType = FWP_ACTION_BLOCK;
@@ -1096,7 +1558,6 @@ DpNetFilterInboundTransportClassify(
     UCHAR protocol;
     DP_NETWORK_ACTION action;
 
-    UNREFERENCED_PARAMETER(InMetaValues);
     UNREFERENCED_PARAMETER(LayerData);
     UNREFERENCED_PARAMETER(ClassifyContext);
     UNREFERENCED_PARAMETER(Filter);
@@ -1134,6 +1595,16 @@ DpNetFilterInboundTransportClassify(
                                    remoteAddress,
                                    remotePort,
                                    NULL);
+
+    DpNetFilterQueueConnectionEvent(InMetaValues,
+                                    DpNetworkDirectionInbound,
+                                    protocol,
+                                    localAddress,
+                                    localPort,
+                                    remoteAddress,
+                                    remotePort,
+                                    NULL,
+                                    action == DpNetworkActionBlock ? DP_NETWORK_EVENT_FLAG_BLOCKED : 0);
 
     if (action == DpNetworkActionBlock) {
         ClassifyOut->actionType = FWP_ACTION_BLOCK;
@@ -1453,11 +1924,17 @@ DpNetFilterInitialize(
     FWPM_FILTER_CONDITION0 inboundIcmpConditions[2];
 
     InitializeListHead(&gDpNetworkRules);
+    InitializeListHead(&gDpNetworkConnectionEvents);
     InitializeListHead(&gDpSmtpEvents);
     KeInitializeSpinLock(&gDpNetworkRuleLock);
+    KeInitializeSpinLock(&gDpNetworkConnectionEventLock);
     KeInitializeSpinLock(&gDpSmtpEventLock);
     gDpNetworkRuleLockInitialized = TRUE;
+    gDpNetworkConnectionEventLockInitialized = TRUE;
     gDpSmtpEventLockInitialized = TRUE;
+    gDpNetworkConnectionEventCount = 0;
+    gDpNetworkConnectionEventSequence = 0;
+    gDpNetworkConnectionDroppedEvents = 0;
     gDpSmtpEventCount = 0;
     gDpSmtpEventSequence = 0;
     gDpSmtpDroppedEvents = 0;
@@ -1700,6 +2177,11 @@ DpNetFilterUninitialize(
         gDpNetworkRuleLockInitialized = FALSE;
     }
 
+    if (gDpNetworkConnectionEventLockInitialized) {
+        DpNetFilterClearConnectionEvents();
+        gDpNetworkConnectionEventLockInitialized = FALSE;
+    }
+
     if (gDpSmtpEventLockInitialized) {
         DpNetFilterClearSmtpEvents();
         gDpSmtpEventLockInitialized = FALSE;
@@ -1934,6 +2416,117 @@ DpNetFilterQueryRules(
     }
 
     if (returnedRuleCount != ruleCount) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+DpNetFilterQueryConnectionEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    )
+{
+    PDP_NETWORK_CONNECTION_EVENT_QUERY_HEADER header;
+    PUCHAR cursor;
+    ULONG bytesRequired = sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+    ULONG bytesReturned = sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+    ULONG eventCount = 0;
+    ULONG returnedEventCount = 0;
+    PLIST_ENTRY link;
+    KIRQL oldIrql;
+    BOOLEAN sizingOnly;
+
+    if (ReturnOutputBufferLength == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ReturnOutputBufferLength = 0;
+
+    if (OutputBuffer == NULL ||
+        OutputBufferLength < sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER)) {
+
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    header = (PDP_NETWORK_CONNECTION_EVENT_QUERY_HEADER)OutputBuffer;
+    sizingOnly = OutputBufferLength == sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+
+    RtlZeroMemory(header, sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER));
+    cursor = (PUCHAR)OutputBuffer + sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+
+    if (!gDpNetworkConnectionEventLockInitialized) {
+        header->Version = DP_NETWORK_CONNECTION_EVENT_QUERY_VERSION;
+        header->BytesRequired = sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+        header->BytesReturned = sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+        *ReturnOutputBufferLength = sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+        return STATUS_SUCCESS;
+    }
+
+    KeAcquireSpinLock(&gDpNetworkConnectionEventLock, &oldIrql);
+
+    header->Version = DP_NETWORK_CONNECTION_EVENT_QUERY_VERSION;
+    header->BytesReturned = sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER);
+    header->DroppedEvents = gDpNetworkConnectionDroppedEvents;
+
+    for (link = gDpNetworkConnectionEvents.Flink;
+         link != &gDpNetworkConnectionEvents;
+         link = link->Flink) {
+
+        bytesRequired += sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY);
+        eventCount++;
+
+        if (bytesReturned <= OutputBufferLength &&
+            sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY) <= OutputBufferLength - bytesReturned) {
+
+            PDP_NETWORK_CONNECTION_EVENT_ENTRY event =
+                CONTAINING_RECORD(link, DP_NETWORK_CONNECTION_EVENT_ENTRY, Link);
+            RtlCopyMemory(cursor,
+                          &event->Event,
+                          sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY));
+            cursor += sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY);
+            bytesReturned += sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY);
+            returnedEventCount++;
+        }
+    }
+
+    header->EventCount = eventCount;
+    header->BytesRequired = bytesRequired;
+    header->BytesReturned = bytesReturned;
+    *ReturnOutputBufferLength = bytesReturned;
+
+    if (!sizingOnly && returnedEventCount == eventCount) {
+        LIST_ENTRY localList;
+
+        InitializeListHead(&localList);
+
+        while (!IsListEmpty(&gDpNetworkConnectionEvents)) {
+            PLIST_ENTRY eventLink = RemoveHeadList(&gDpNetworkConnectionEvents);
+            InsertTailList(&localList, eventLink);
+            gDpNetworkConnectionEventCount--;
+        }
+
+        KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
+
+        while (!IsListEmpty(&localList)) {
+            PLIST_ENTRY eventLink = RemoveHeadList(&localList);
+            PDP_NETWORK_CONNECTION_EVENT_ENTRY event =
+                CONTAINING_RECORD(eventLink, DP_NETWORK_CONNECTION_EVENT_ENTRY, Link);
+            DpNetFilterFreeConnectionEvent(event);
+        }
+
+        return STATUS_SUCCESS;
+    }
+
+    KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
+
+    if (sizingOnly) {
+        return STATUS_SUCCESS;
+    }
+
+    if (returnedEventCount != eventCount) {
         return STATUS_BUFFER_TOO_SMALL;
     }
 

@@ -25,6 +25,7 @@ declare module "@elegant-router/types" {
     "home": "/home";
     "iframe-page": "/iframe-page/:url";
     "login": "/login/:module(pwd-login|code-login|register|reset-pwd|bind-wechat)?";
+    "network-awareness": "/network-awareness";
     "policy": "/policy";
     "remote": "/remote";
   };
@@ -66,6 +67,7 @@ declare module "@elegant-router/types" {
     | "home"
     | "iframe-page"
     | "login"
+    | "network-awareness"
     | "policy"
     | "remote"
   >;
@@ -92,6 +94,7 @@ declare module "@elegant-router/types" {
     | "audit"
     | "devices"
     | "home"
+    | "network-awareness"
     | "policy"
     | "remote"
   >;

@@ -90,6 +90,14 @@ export function fetchClearNetworkRules() {
   });
 }
 
+export function fetchNetworkInsights(params: Api.DataProtector.NetworkInsightQuery = {}) {
+  return request<Api.DataProtector.NetworkInsightResponse>({
+    url: '/network/insights',
+    method: 'get',
+    params
+  });
+}
+
 export function fetchWebShellRules() {
   return request<Api.DataProtector.WebShellRule[]>({
     url: '/webshell/rules',

@@ -12,12 +12,15 @@
 #define DP_POLICY_MAX_RULE_BYTES (1024u * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64u * sizeof(WCHAR))
 #define DP_POLICY_MAX_DOMAIN_BYTES (260u * sizeof(WCHAR))
+#define DP_NETWORK_EVENT_PROCESS_PATH_CHARS 512u
+#define DP_NETWORK_EVENT_DOMAIN_CHARS 260u
 #define DP_SMTP_MAX_ADDRESS_CHARS 256u
 #define DP_WEBSHELL_MAX_PATH_BYTES (1024u * sizeof(WCHAR))
 #define DP_WEBSHELL_EVENT_PATH_CHARS 512u
 #define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32u
 #define DP_WEBSHELL_MAX_SAMPLE_BYTES 100u
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
+#define DP_NETWORK_CONNECTION_EVENT_STRING_CHARS (DP_NETWORK_EVENT_PROCESS_PATH_CHARS + DP_NETWORK_EVENT_DOMAIN_CHARS + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_API_ENABLE_FILE_TRACE 1
@@ -37,6 +40,7 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandClearNetworkRules = 22,
     DpPolicyCommandQueryNetworkRules = 23,
     DpPolicyCommandQuerySmtpEvents = 24,
+    DpPolicyCommandQueryNetworkConnectionEvents = 25,
     DpPolicyCommandAddWebShellRule = 40,
     DpPolicyCommandRemoveWebShellRule = 41,
     DpPolicyCommandClearWebShellRules = 42,
@@ -128,6 +132,32 @@ typedef struct _DP_SMTP_EVENT_QUERY_ENTRY {
     WCHAR From[DP_SMTP_MAX_ADDRESS_CHARS];
     WCHAR To[DP_SMTP_MAX_ADDRESS_CHARS];
 } DP_SMTP_EVENT_QUERY_ENTRY, *PDP_SMTP_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER, *PDP_NETWORK_CONNECTION_EVENT_QUERY_HEADER;
+
+typedef struct _DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG Direction;
+    ULONG Protocol;
+    ULONG LocalAddress;
+    ULONG RemoteAddress;
+    ULONG Flags;
+    ULONG ProcessPathLengthBytes;
+    ULONG DomainLengthBytes;
+    ULONG Reserved;
+    USHORT LocalPort;
+    USHORT RemotePort;
+    ULONG Reserved2;
+    WCHAR ProcessPath[DP_NETWORK_EVENT_PROCESS_PATH_CHARS];
+    WCHAR Domain[DP_NETWORK_EVENT_DOMAIN_CHARS];
+} DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY, *PDP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY;
 #pragma pack(pop)
 
 typedef struct _DP_WEBSHELL_RULE_MESSAGE {
@@ -174,6 +204,7 @@ typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
 #define DP_SMTP_EVENT_QUERY_VERSION 1u
+#define DP_NETWORK_CONNECTION_EVENT_QUERY_VERSION 1u
 #define DP_WEBSHELL_RULE_MESSAGE_VERSION 1u
 #define DP_WEBSHELL_RULE_QUERY_VERSION 1u
 #define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
@@ -1598,6 +1629,233 @@ DpPolicyQuerySmtpEvents(
             if (toChars != 0) {
                 CopyMemory(StringBuffer + copiedStringChars, entry[index].To, entry[index].ToLengthBytes);
                 copiedStringChars += toChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryNetworkConnectionEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_NETWORK_CONNECTION_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_NETWORK_CONNECTION_EVENT_QUERY_HEADER header;
+    DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER sizingHeader;
+    PDP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryNetworkConnectionEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_NETWORK_CONNECTION_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid network connection event snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount >
+                MAXDWORD / DP_NETWORK_CONNECTION_EVENT_STRING_CHARS) {
+
+                DpPolicySetLastErrorMessage(L"Network connection event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+
+            *StringBufferCharsRequired =
+                sizingHeader.EventCount * DP_NETWORK_CONNECTION_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = sizingHeader.EventCount;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        if (sizingHeader.EventCount >
+            MAXDWORD / DP_NETWORK_CONNECTION_EVENT_STRING_CHARS) {
+
+            DpPolicySetLastErrorMessage(L"Network connection event snapshot is too large.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        *StringBufferCharsRequired =
+            sizingHeader.EventCount * DP_NETWORK_CONNECTION_EVENT_STRING_CHARS;
+    }
+
+    if (sizingHeader.EventCount >
+        MAXDWORD / DP_NETWORK_CONNECTION_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Network connection event snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        StringBufferChars <
+            sizingHeader.EventCount * DP_NETWORK_CONNECTION_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryNetworkConnectionEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid network connection event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_NETWORK_CONNECTION_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_NETWORK_CONNECTION_EVENT_QUERY_VERSION ||
+        (header->EventCount >
+            (MAXDWORD - sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER)) /
+                sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported network connection event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedEventCount = header->EventCount;
+
+    if (EventCount != NULL) {
+        *EventCount = returnedEventCount;
+    }
+
+    entry = (PDP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY)
+        (queryBuffer + sizeof(DP_NETWORK_CONNECTION_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < returnedEventCount; index++) {
+        DWORD processPathChars;
+        DWORD domainChars;
+
+        if (entry[index].ProcessPathLengthBytes > sizeof(entry[index].ProcessPath) ||
+            entry[index].DomainLengthBytes > sizeof(entry[index].Domain) ||
+            entry[index].ProcessPathLengthBytes % sizeof(WCHAR) != 0 ||
+            entry[index].DomainLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid network connection event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        processPathChars = entry[index].ProcessPathLengthBytes / sizeof(WCHAR);
+        domainChars = entry[index].DomainLengthBytes / sizeof(WCHAR);
+        requiredStringChars += processPathChars + 1 + domainChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + processPathChars + 1 + domainChars + 1 <= StringBufferChars) {
+
+            Events[index].Sequence = entry[index].Sequence;
+            Events[index].ProcessId = entry[index].ProcessId;
+            Events[index].Direction = entry[index].Direction;
+            Events[index].Protocol = entry[index].Protocol;
+            Events[index].LocalAddress = entry[index].LocalAddress;
+            Events[index].RemoteAddress = entry[index].RemoteAddress;
+            Events[index].Flags = entry[index].Flags;
+            Events[index].LocalPort = entry[index].LocalPort;
+            Events[index].RemotePort = entry[index].RemotePort;
+
+            Events[index].ProcessPath = StringBuffer + copiedStringChars;
+            if (processPathChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars,
+                           entry[index].ProcessPath,
+                           entry[index].ProcessPathLengthBytes);
+                copiedStringChars += processPathChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].Domain = StringBuffer + copiedStringChars;
+            if (domainChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars,
+                           entry[index].Domain,
+                           entry[index].DomainLengthBytes);
+                copiedStringChars += domainChars;
             }
             StringBuffer[copiedStringChars++] = L'\0';
         }

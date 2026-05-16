@@ -232,6 +232,7 @@ const local: App.I18n.Schema = {
     home: 'Operations',
     devices: 'Devices',
     policy: 'Policy',
+    'network-awareness': 'Network Awareness',
     remote: 'Remote',
     audit: 'Audit'
   },

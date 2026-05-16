@@ -103,6 +103,12 @@ DpControlMessageNotify(
                                           ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryNetworkConnectionEvents) {
+        return DpNetFilterQueryConnectionEvents(OutputBuffer,
+                                                OutputBufferLength,
+                                                ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandQueryWebShellRules) {
         return DpWebShellQueryRules(OutputBuffer,
                                     OutputBufferLength,

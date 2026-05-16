@@ -69,6 +69,15 @@ namespace DataProtectorWebBridge.Native
             out uint stringBufferCharsRequired);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryNetworkConnectionEvents(
+            [Out] NativeNetworkConnectionEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyAddWebShellRule(string directoryPath);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -134,6 +143,22 @@ namespace DataProtectorWebBridge.Native
             public ushort RemotePort;
             public IntPtr From;
             public IntPtr To;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeNetworkConnectionEvent
+        {
+            public ulong Sequence;
+            public ulong ProcessId;
+            public uint Direction;
+            public uint Protocol;
+            public uint LocalAddress;
+            public uint RemoteAddress;
+            public uint Flags;
+            public ushort LocalPort;
+            public ushort RemotePort;
+            public IntPtr ProcessPath;
+            public IntPtr Domain;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

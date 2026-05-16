@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using DataProtectorWebBridge.Native;
 
@@ -26,6 +29,10 @@ namespace DataProtectorWebBridge.Services
         private const uint NetworkDirectionInbound = 0;
         private const uint NetworkDirectionOutbound = 1;
         private const uint NetworkDirectionBoth = 2;
+        private const uint NetworkEventFlagDns = 0x00000001;
+        private const uint NetworkEventFlagQuic = 0x00000002;
+        private const uint NetworkEventFlagHttp3 = 0x00000004;
+        private const uint NetworkEventFlagBlocked = 0x00000008;
         private const uint WebShellSeverityNotify = 1;
         private const uint WebShellSeverityWarning = 2;
         private const uint WebShellSeverityDanger = 3;
@@ -526,6 +533,80 @@ namespace DataProtectorWebBridge.Services
             throw new BridgeException(BufferTooSmallStatus, "The driver WebShell event queue changed while querying. Please retry.");
         }
 
+        public NetworkConnectionEventDto[] QueryNetworkConnectionEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryNetworkConnectionEvents(
+                    new DataProtectorPolicyNative.NativeNetworkConnectionEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeNetworkConnectionEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeNetworkConnectionEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryNetworkConnectionEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<NetworkConnectionEventDto> events = new List<NetworkConnectionEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            NetworkConnectionEventDto item = ConvertNetworkConnectionEvent(nativeEvents[index]);
+                            if (!IsNoiseNetworkProcess(item.processPath))
+                            {
+                                EnrichNetworkConnectionEvent(item);
+                                events.Add(item);
+                            }
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver network connection event queue changed while querying. Please retry.");
+        }
+
         public AuditLog.AuditRecord[] DrainSmtpAuditRecords()
         {
             SmtpEventDto[] events = QuerySmtpEvents();
@@ -559,8 +640,37 @@ namespace DataProtectorWebBridge.Services
         public AuditLog.AuditRecord[] DrainSecurityAuditRecords()
         {
             List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+            records.AddRange(TryDrainSecurityAuditSource("network-connection", DrainNetworkConnectionAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("smtp", DrainSmtpAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("webshell", DrainWebShellAuditRecords));
+            return records.ToArray();
+        }
+
+        public AuditLog.AuditRecord[] DrainNetworkConnectionAuditRecords()
+        {
+            NetworkConnectionEventDto[] events = QueryNetworkConnectionEvents();
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+
+            foreach (NetworkConnectionEventDto item in events)
+            {
+                string message = "Network connection observed: " + item.direction + " " + item.protocolName + " " + item.remoteEndpoint + " by " + item.processPath + ".";
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
+                    Actor = "network-sensor",
+                    Action = item.isHttp3 ? "network.connection.http3" : "network.connection.observed",
+                    Target = item.remoteIdentity,
+                    Extension = item.processPath,
+                    Succeeded = !item.blocked,
+                    Status = item.blocked ? "0xC0000022" : "0x00000000",
+                    Message = JsonResponse.CreateSerializer().Serialize(item)
+                };
+
+                records.Add(record);
+                TryAppendAudit(record);
+            }
+
             return records.ToArray();
         }
 
@@ -822,6 +932,39 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static NetworkConnectionEventDto ConvertNetworkConnectionEvent(DataProtectorPolicyNative.NativeNetworkConnectionEvent nativeEvent)
+        {
+            string domain = Marshal.PtrToStringUni(nativeEvent.Domain) ?? string.Empty;
+            string remoteAddress = FormatAddress(nativeEvent.RemoteAddress, 0xFFFFFFFFu);
+            string remoteEndpoint = FormatEndpoint(nativeEvent.RemoteAddress, nativeEvent.RemotePort);
+            string protocolName = FromProtocol(nativeEvent.Protocol);
+            bool isHttp3 = (nativeEvent.Flags & NetworkEventFlagHttp3) != 0;
+            bool isQuic = (nativeEvent.Flags & NetworkEventFlagQuic) != 0;
+
+            return new NetworkConnectionEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                processId = nativeEvent.ProcessId,
+                direction = FromDirection(nativeEvent.Direction),
+                protocol = nativeEvent.Protocol,
+                protocolName = protocolName,
+                localAddress = FormatAddress(nativeEvent.LocalAddress, 0xFFFFFFFFu),
+                remoteAddress = remoteAddress,
+                localPort = nativeEvent.LocalPort,
+                remotePort = nativeEvent.RemotePort,
+                localEndpoint = FormatEndpoint(nativeEvent.LocalAddress, nativeEvent.LocalPort),
+                remoteEndpoint = remoteEndpoint,
+                domain = domain,
+                remoteIdentity = string.IsNullOrWhiteSpace(domain) ? remoteEndpoint : domain,
+                processPath = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.ProcessPath) ?? string.Empty),
+                flags = nativeEvent.Flags,
+                isDns = (nativeEvent.Flags & NetworkEventFlagDns) != 0,
+                isQuic = isQuic,
+                isHttp3 = isHttp3,
+                blocked = (nativeEvent.Flags & NetworkEventFlagBlocked) != 0
+            };
+        }
+
         private static WebShellRuleDto ConvertWebShellRule(DataProtectorPolicyNative.NativeWebShellRule nativeRule)
         {
             return new WebShellRuleDto
@@ -1037,6 +1180,151 @@ namespace DataProtectorWebBridge.Services
             return port == 0 ? ip : ip + ":" + port.ToString(CultureInfo.InvariantCulture);
         }
 
+        private static string NormalizeDevicePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return string.Empty;
+            }
+
+            string value = path.Trim();
+            string systemRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            if (value.StartsWith("\\Device\\HarddiskVolume", StringComparison.OrdinalIgnoreCase))
+            {
+                string suffix = value;
+                int usersIndex = value.IndexOf("\\Users\\", StringComparison.OrdinalIgnoreCase);
+                if (usersIndex >= 0)
+                {
+                    string systemDrive = Path.GetPathRoot(systemRoot);
+                    return (systemDrive ?? string.Empty).TrimEnd('\\') + suffix.Substring(usersIndex);
+                }
+
+                int programFilesIndex = value.IndexOf("\\Program Files", StringComparison.OrdinalIgnoreCase);
+                if (programFilesIndex >= 0)
+                {
+                    string systemDrive = Path.GetPathRoot(systemRoot);
+                    return (systemDrive ?? string.Empty).TrimEnd('\\') + suffix.Substring(programFilesIndex);
+                }
+
+                int windowsIndex = value.IndexOf("\\Windows\\", StringComparison.OrdinalIgnoreCase);
+                if (windowsIndex >= 0)
+                {
+                    string systemDrive = Path.GetPathRoot(systemRoot);
+                    return (systemDrive ?? string.Empty).TrimEnd('\\') + suffix.Substring(windowsIndex);
+                }
+            }
+
+            return value;
+        }
+
+        private static bool IsNoiseNetworkProcess(string processPath)
+        {
+            string fileName = string.IsNullOrWhiteSpace(processPath)
+                ? string.Empty
+                : Path.GetFileName(processPath).ToLowerInvariant();
+
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                return false;
+            }
+
+            string[] ignored =
+            {
+                "chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe", "opera.exe", "opera_gx.exe",
+                "msedgewebview2.exe", "chromium.exe", "brave.exe", "vivaldi.exe", "safari.exe",
+                "ucbrowser.exe", "browser.exe", "qqbrowser.exe", "sogouexplorer.exe", "360se.exe",
+                "360chrome.exe", "liebao.exe", "maxthon.exe", "2345explorer.exe", "baidubrowser.exe",
+                "theworld.exe", "wechat.exe", "weixin.exe", "wechatappex.exe", "wxwork.exe",
+                "enterprisewechat.exe", "wecom.exe", "qq.exe", "tim.exe", "dingtalk.exe",
+                "feishu.exe", "lark.exe", "teams.exe", "slack.exe", "telegram.exe",
+                "discord.exe", "skype.exe", "zoom.exe", "tencentmeeting.exe", "wemeetapp.exe",
+                "outlook.exe", "thunderbird.exe", "foxmail.exe", "whatsapp.exe", "signal.exe",
+                "line.exe", "viber.exe", "mattermost.exe"
+            };
+
+            for (int index = 0; index < ignored.Length; index++)
+            {
+                if (string.Equals(fileName, ignored[index], StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void EnrichNetworkConnectionEvent(NetworkConnectionEventDto item)
+        {
+            if (item == null)
+            {
+                return;
+            }
+
+            string path = item.processPath;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                item.fileExists = false;
+                item.signatureStatus = "unknown";
+                return;
+            }
+
+            item.fileExists = true;
+
+            try
+            {
+                FileInfo file = new FileInfo(path);
+                item.fileSize = file.Length;
+                item.fileModifiedUtc = file.LastWriteTimeUtc.ToString("o");
+            }
+            catch
+            {
+                item.fileSize = 0;
+                item.fileModifiedUtc = string.Empty;
+            }
+
+            try
+            {
+                System.Diagnostics.FileVersionInfo version = System.Diagnostics.FileVersionInfo.GetVersionInfo(path);
+                item.productName = version.ProductName ?? string.Empty;
+                item.companyName = version.CompanyName ?? string.Empty;
+                item.fileDescription = version.FileDescription ?? string.Empty;
+                item.fileVersion = version.FileVersion ?? string.Empty;
+            }
+            catch
+            {
+                item.productName = string.Empty;
+                item.companyName = string.Empty;
+                item.fileDescription = string.Empty;
+                item.fileVersion = string.Empty;
+            }
+
+            try
+            {
+                using (SHA256 sha256 = SHA256.Create())
+                using (FileStream stream = File.OpenRead(path))
+                {
+                    item.sha256 = BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+                }
+            }
+            catch
+            {
+                item.sha256 = string.Empty;
+            }
+
+            try
+            {
+                X509Certificate certificate = X509Certificate.CreateFromSignedFile(path);
+                X509Certificate2 certificate2 = new X509Certificate2(certificate);
+                item.signatureStatus = "signed";
+                item.signer = certificate2.Subject ?? string.Empty;
+            }
+            catch
+            {
+                item.signatureStatus = "unsigned";
+                item.signer = string.Empty;
+            }
+        }
+
         private static int CountPrefix(uint mask)
         {
             int prefix = 0;
@@ -1155,6 +1443,39 @@ namespace DataProtectorWebBridge.Services
             public string remoteEndpoint { get; set; }
             public string from { get; set; }
             public string to { get; set; }
+        }
+
+        public sealed class NetworkConnectionEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong processId { get; set; }
+            public string direction { get; set; }
+            public uint protocol { get; set; }
+            public string protocolName { get; set; }
+            public string localAddress { get; set; }
+            public string remoteAddress { get; set; }
+            public ushort localPort { get; set; }
+            public ushort remotePort { get; set; }
+            public string localEndpoint { get; set; }
+            public string remoteEndpoint { get; set; }
+            public string domain { get; set; }
+            public string remoteIdentity { get; set; }
+            public string processPath { get; set; }
+            public uint flags { get; set; }
+            public bool isDns { get; set; }
+            public bool isQuic { get; set; }
+            public bool isHttp3 { get; set; }
+            public bool blocked { get; set; }
+            public bool fileExists { get; set; }
+            public long fileSize { get; set; }
+            public string fileModifiedUtc { get; set; }
+            public string productName { get; set; }
+            public string companyName { get; set; }
+            public string fileDescription { get; set; }
+            public string fileVersion { get; set; }
+            public string sha256 { get; set; }
+            public string signatureStatus { get; set; }
+            public string signer { get; set; }
         }
 
         public class WebShellRuleRequest

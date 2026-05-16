@@ -24,6 +24,7 @@ namespace DataProtectorWebBridge.Services
         private long appliedPolicyVersion;
         private string lastApplyStatus = "0x00000000";
         private string lastApplyMessage = "Agent started.";
+        private long heartbeatIndex;
 
         public AgentSyncClient(string serverBaseUrl, TimeSpan interval, PolicyBridgeService policyService)
         {
@@ -166,14 +167,20 @@ namespace DataProtectorWebBridge.Services
 
         private AuditLog.AuditRecord[] DrainLocalAuditRecords()
         {
+            heartbeatIndex++;
+            bool drainNetworkConnections = heartbeatIndex % 2 == 0;
+            AuditLog.AuditRecord[] networkConnectionRecords = drainNetworkConnections
+                ? DrainAuditSource("network-connection", policyService.DrainNetworkConnectionAuditRecords)
+                : new AuditLog.AuditRecord[0];
             AuditLog.AuditRecord[] smtpRecords = DrainAuditSource("smtp", policyService.DrainSmtpAuditRecords);
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
-            if (smtpRecords.Length > 0 || webShellRecords.Length > 0)
+            if (networkConnectionRecords.Length > 0 || smtpRecords.Length > 0 || webShellRecords.Length > 0)
             {
-                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ".");
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: network=" + networkConnectionRecords.Length + ", smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(networkConnectionRecords.Length + smtpRecords.Length + webShellRecords.Length);
+            records.AddRange(networkConnectionRecords);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
             return records.ToArray();

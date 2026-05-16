@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -282,6 +283,44 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public NetworkInsightResponse QueryNetworkInsights(NetworkInsightQuery query)
+        {
+            NetworkInsightQuery normalized = NormalizeNetworkInsightQuery(query);
+            DateTime sinceUtc = DateTime.UtcNow - normalized.window;
+            DateTime baselineUtc = DateTime.UtcNow - normalized.baseline;
+
+            lock (syncRoot)
+            {
+                List<NetworkConnectionObservation> current = state.NetworkConnections
+                    .Where(item => IsNetworkInsightMatch(item, normalized) && ParseUtcOrMin(item.lastSeenUtc) >= sinceUtc)
+                    .Select(CloneNetworkObservation)
+                    .ToList();
+
+                HashSet<string> baselineKeys = new HashSet<string>(
+                    state.NetworkConnections
+                        .Where(item => IsNetworkInsightMatch(item, normalized) && ParseUtcOrMin(item.firstSeenUtc) < baselineUtc)
+                        .Select(NetworkObservationKey),
+                    StringComparer.OrdinalIgnoreCase);
+
+                NetworkInsightItem[] items = current
+                    .GroupBy(NetworkObservationKey, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => ToNetworkInsightItem(group.ToList(), baselineKeys))
+                    .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
+                    .Take(normalized.limit)
+                    .ToArray();
+
+                return new NetworkInsightResponse
+                {
+                    baselineHours = normalized.baseline.TotalHours,
+                    windowHours = normalized.window.TotalHours,
+                    generatedUtc = DateTime.UtcNow.ToString("o"),
+                    total = items.Length,
+                    newTotal = items.Count(item => item.isNew),
+                    items = items
+                };
+            }
+        }
+
         public CentralDeviceDto[] QueryDevices()
         {
             lock (syncRoot)
@@ -413,6 +452,7 @@ namespace DataProtectorWebBridge.Services
                             ? device.DeviceId
                             : normalized.Target;
                         state.Audit.Add(normalized);
+                        TryIngestNetworkObservation(deviceId, device, normalized);
                     }
 
                     if (request.Audit.Length > 0)
@@ -465,6 +505,10 @@ namespace DataProtectorWebBridge.Services
                     {
                         loaded.WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
                     }
+                    if (loaded != null && loaded.NetworkConnections == null)
+                    {
+                        loaded.NetworkConnections = new List<NetworkConnectionObservation>();
+                    }
                     return loaded ?? new CentralState();
                 }
                 catch
@@ -479,6 +523,7 @@ namespace DataProtectorWebBridge.Services
             Directory.CreateDirectory(DirectoryPath);
             TrimAudit();
             TrimTasks();
+            TrimNetworkConnections();
             string json = serializer.Serialize(state);
             File.WriteAllText(filePath, json, Encoding.UTF8);
         }
@@ -506,6 +551,280 @@ namespace DataProtectorWebBridge.Services
             {
                 state.Audit = state.Audit.Skip(state.Audit.Count - maxAuditRecords).ToList();
             }
+        }
+
+        private void TrimNetworkConnections()
+        {
+            const int maxNetworkObservations = 50000;
+            if (state.NetworkConnections.Count > maxNetworkObservations)
+            {
+                state.NetworkConnections = state.NetworkConnections
+                    .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
+                    .Take(maxNetworkObservations)
+                    .ToList();
+            }
+        }
+
+        private void TryIngestNetworkObservation(string deviceId, CentralDeviceState device, AuditLog.AuditRecord record)
+        {
+            if (record == null ||
+                string.IsNullOrWhiteSpace(record.Action) ||
+                !record.Action.StartsWith("network.connection.", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            PolicyBridgeService.NetworkConnectionEventDto details = TryDeserializeNetworkConnectionDetails(record.Message);
+            NetworkConnectionObservation observation = new NetworkConnectionObservation
+            {
+                deviceId = deviceId,
+                host = device == null ? record.Host : device.Machine,
+                user = device == null ? string.Empty : device.User,
+                remoteIdentity = string.IsNullOrWhiteSpace(details.remoteIdentity) ? record.Target : details.remoteIdentity,
+                remoteAddress = details.remoteAddress ?? string.Empty,
+                remoteEndpoint = details.remoteEndpoint ?? string.Empty,
+                domain = details.domain ?? string.Empty,
+                processPath = string.IsNullOrWhiteSpace(details.processPath) ? record.Extension : details.processPath,
+                processId = details.processId,
+                direction = details.direction ?? string.Empty,
+                protocolName = details.protocolName ?? string.Empty,
+                localEndpoint = details.localEndpoint ?? string.Empty,
+                remotePort = details.remotePort,
+                isDns = details.isDns,
+                isQuic = details.isQuic,
+                isHttp3 = details.isHttp3,
+                blocked = details.blocked,
+                fileExists = details.fileExists,
+                fileSize = details.fileSize,
+                fileModifiedUtc = details.fileModifiedUtc ?? string.Empty,
+                productName = details.productName ?? string.Empty,
+                companyName = details.companyName ?? string.Empty,
+                fileDescription = details.fileDescription ?? string.Empty,
+                fileVersion = details.fileVersion ?? string.Empty,
+                sha256 = details.sha256 ?? string.Empty,
+                signatureStatus = details.signatureStatus ?? string.Empty,
+                signer = details.signer ?? string.Empty,
+                firstSeenUtc = record.TimestampUtc,
+                lastSeenUtc = record.TimestampUtc,
+                count = 1
+            };
+
+            string key = NetworkObservationKey(observation);
+            NetworkConnectionObservation existing = state.NetworkConnections.FirstOrDefault(item =>
+                string.Equals(NetworkObservationKey(item), key, StringComparison.OrdinalIgnoreCase));
+
+            if (existing == null)
+            {
+                state.NetworkConnections.Add(observation);
+            }
+            else
+            {
+                existing.lastSeenUtc = observation.lastSeenUtc;
+                existing.count++;
+                existing.processId = observation.processId;
+                existing.localEndpoint = observation.localEndpoint;
+                existing.fileExists = observation.fileExists;
+                existing.fileSize = observation.fileSize;
+                existing.fileModifiedUtc = observation.fileModifiedUtc;
+                existing.productName = observation.productName;
+                existing.companyName = observation.companyName;
+                existing.fileDescription = observation.fileDescription;
+                existing.fileVersion = observation.fileVersion;
+                existing.sha256 = observation.sha256;
+                existing.signatureStatus = observation.signatureStatus;
+                existing.signer = observation.signer;
+            }
+
+            TrimNetworkConnections();
+        }
+
+        private PolicyBridgeService.NetworkConnectionEventDto TryDeserializeNetworkConnectionDetails(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return new PolicyBridgeService.NetworkConnectionEventDto();
+            }
+
+            try
+            {
+                if (message.StartsWith("{", StringComparison.Ordinal))
+                {
+                    return serializer.Deserialize<PolicyBridgeService.NetworkConnectionEventDto>(message) ??
+                        new PolicyBridgeService.NetworkConnectionEventDto();
+                }
+            }
+            catch
+            {
+            }
+
+            return new PolicyBridgeService.NetworkConnectionEventDto();
+        }
+
+        private static NetworkInsightQuery NormalizeNetworkInsightQuery(NetworkInsightQuery query)
+        {
+            NetworkInsightQuery normalized = query ?? new NetworkInsightQuery();
+            normalized.limit = normalized.limit <= 0 ? DefaultLimit : Math.Min(normalized.limit, 1000);
+            normalized.baselineHours = ClampHours(normalized.baselineHours <= 0 ? 24 : normalized.baselineHours, 1, 24 * 31);
+            normalized.windowHours = ClampHours(normalized.windowHours <= 0 ? normalized.baselineHours : normalized.windowHours, 1, 24 * 31);
+            normalized.host = normalized.host ?? string.Empty;
+            normalized.eventType = normalized.eventType ?? "all";
+            normalized.search = normalized.search ?? string.Empty;
+            normalized.baseline = TimeSpan.FromHours(normalized.baselineHours);
+            normalized.window = TimeSpan.FromHours(normalized.windowHours);
+            return normalized;
+        }
+
+        private static int ClampHours(int value, int min, int max)
+        {
+            return Math.Max(min, Math.Min(max, value));
+        }
+
+        private static bool IsNetworkInsightMatch(NetworkConnectionObservation item, NetworkInsightQuery query)
+        {
+            if (item == null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(query.host) &&
+                !string.Equals(query.host, "all", StringComparison.OrdinalIgnoreCase) &&
+                (item.host ?? string.Empty).IndexOf(query.host, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(query.eventType) &&
+                !string.Equals(query.eventType, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.Equals(query.eventType, "http3", StringComparison.OrdinalIgnoreCase) && !item.isHttp3) return false;
+                if (string.Equals(query.eventType, "quic", StringComparison.OrdinalIgnoreCase) && !item.isQuic) return false;
+                if (string.Equals(query.eventType, "dns", StringComparison.OrdinalIgnoreCase) && !item.isDns) return false;
+                if (string.Equals(query.eventType, "blocked", StringComparison.OrdinalIgnoreCase) && !item.blocked) return false;
+                if (string.Equals(query.eventType, "connection", StringComparison.OrdinalIgnoreCase) &&
+                    (item.isDns || item.isHttp3 || item.isQuic || item.blocked)) return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(query.search))
+            {
+                string haystack = string.Join("\n", new[]
+                {
+                    item.host ?? string.Empty,
+                    item.remoteIdentity ?? string.Empty,
+                    item.remoteAddress ?? string.Empty,
+                    item.remoteEndpoint ?? string.Empty,
+                    item.domain ?? string.Empty,
+                    item.processPath ?? string.Empty,
+                    item.companyName ?? string.Empty,
+                    item.productName ?? string.Empty,
+                    item.fileDescription ?? string.Empty,
+                    item.signer ?? string.Empty,
+                    item.sha256 ?? string.Empty
+                });
+
+                if (haystack.IndexOf(query.search, StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static NetworkInsightItem ToNetworkInsightItem(List<NetworkConnectionObservation> items, HashSet<string> baselineKeys)
+        {
+            NetworkConnectionObservation latest = items
+                .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
+                .First();
+
+            return new NetworkInsightItem
+            {
+                key = NetworkObservationKey(latest),
+                isNew = !baselineKeys.Contains(NetworkObservationKey(latest)),
+                firstSeenUtc = items.Min(item => item.firstSeenUtc),
+                lastSeenUtc = latest.lastSeenUtc,
+                count = items.Sum(item => item.count),
+                hosts = items.Select(item => item.host).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value).ToArray(),
+                remoteIdentity = latest.remoteIdentity,
+                remoteAddress = latest.remoteAddress,
+                remoteEndpoint = latest.remoteEndpoint,
+                domain = latest.domain,
+                processPath = latest.processPath,
+                direction = latest.direction,
+                protocolName = latest.protocolName,
+                isDns = latest.isDns,
+                isQuic = latest.isQuic,
+                isHttp3 = latest.isHttp3,
+                blocked = latest.blocked,
+                fileExists = latest.fileExists,
+                fileSize = latest.fileSize,
+                fileModifiedUtc = latest.fileModifiedUtc,
+                productName = latest.productName,
+                companyName = latest.companyName,
+                fileDescription = latest.fileDescription,
+                fileVersion = latest.fileVersion,
+                sha256 = latest.sha256,
+                signatureStatus = latest.signatureStatus,
+                signer = latest.signer
+            };
+        }
+
+        private static string NetworkObservationKey(NetworkConnectionObservation item)
+        {
+            if (item == null)
+            {
+                return string.Empty;
+            }
+
+            return (item.host ?? string.Empty).ToLowerInvariant() + "|" +
+                   (item.processPath ?? string.Empty).ToLowerInvariant() + "|" +
+                   (item.remoteIdentity ?? string.Empty).ToLowerInvariant() + "|" +
+                   (item.protocolName ?? string.Empty).ToLowerInvariant() + "|" +
+                   item.remotePort.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static NetworkConnectionObservation CloneNetworkObservation(NetworkConnectionObservation item)
+        {
+            return new NetworkConnectionObservation
+            {
+                deviceId = item.deviceId,
+                host = item.host,
+                user = item.user,
+                remoteIdentity = item.remoteIdentity,
+                remoteAddress = item.remoteAddress,
+                remoteEndpoint = item.remoteEndpoint,
+                domain = item.domain,
+                processPath = item.processPath,
+                processId = item.processId,
+                direction = item.direction,
+                protocolName = item.protocolName,
+                localEndpoint = item.localEndpoint,
+                remotePort = item.remotePort,
+                isDns = item.isDns,
+                isQuic = item.isQuic,
+                isHttp3 = item.isHttp3,
+                blocked = item.blocked,
+                fileExists = item.fileExists,
+                fileSize = item.fileSize,
+                fileModifiedUtc = item.fileModifiedUtc,
+                productName = item.productName,
+                companyName = item.companyName,
+                fileDescription = item.fileDescription,
+                fileVersion = item.fileVersion,
+                sha256 = item.sha256,
+                signatureStatus = item.signatureStatus,
+                signer = item.signer,
+                firstSeenUtc = item.firstSeenUtc,
+                lastSeenUtc = item.lastSeenUtc,
+                count = item.count
+            };
+        }
+
+        private static DateTime ParseUtcOrMin(string value)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out parsed)
+                ? parsed.ToUniversalTime()
+                : DateTime.MinValue;
         }
 
         private void TrimTasks()
@@ -916,6 +1235,7 @@ namespace DataProtectorWebBridge.Services
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 Audit = new List<AuditLog.AuditRecord>();
                 Tasks = new List<RemoteTaskState>();
+                NetworkConnections = new List<NetworkConnectionObservation>();
             }
 
             public long PolicyVersion { get; set; }
@@ -925,6 +1245,94 @@ namespace DataProtectorWebBridge.Services
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public List<AuditLog.AuditRecord> Audit { get; set; }
             public List<RemoteTaskState> Tasks { get; set; }
+            public List<NetworkConnectionObservation> NetworkConnections { get; set; }
+        }
+
+        public sealed class NetworkInsightQuery
+        {
+            internal TimeSpan baseline;
+            internal TimeSpan window;
+            public int baselineHours { get; set; }
+            public int windowHours { get; set; }
+            public int limit { get; set; }
+            public string host { get; set; }
+            public string eventType { get; set; }
+            public string search { get; set; }
+        }
+
+        public sealed class NetworkInsightResponse
+        {
+            public double baselineHours { get; set; }
+            public double windowHours { get; set; }
+            public string generatedUtc { get; set; }
+            public int total { get; set; }
+            public int newTotal { get; set; }
+            public NetworkInsightItem[] items { get; set; }
+        }
+
+        public sealed class NetworkInsightItem
+        {
+            public string key { get; set; }
+            public bool isNew { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public int count { get; set; }
+            public string[] hosts { get; set; }
+            public string remoteIdentity { get; set; }
+            public string remoteAddress { get; set; }
+            public string remoteEndpoint { get; set; }
+            public string domain { get; set; }
+            public string processPath { get; set; }
+            public string direction { get; set; }
+            public string protocolName { get; set; }
+            public bool isDns { get; set; }
+            public bool isQuic { get; set; }
+            public bool isHttp3 { get; set; }
+            public bool blocked { get; set; }
+            public bool fileExists { get; set; }
+            public long fileSize { get; set; }
+            public string fileModifiedUtc { get; set; }
+            public string productName { get; set; }
+            public string companyName { get; set; }
+            public string fileDescription { get; set; }
+            public string fileVersion { get; set; }
+            public string sha256 { get; set; }
+            public string signatureStatus { get; set; }
+            public string signer { get; set; }
+        }
+
+        private sealed class NetworkConnectionObservation
+        {
+            public string deviceId { get; set; }
+            public string host { get; set; }
+            public string user { get; set; }
+            public string remoteIdentity { get; set; }
+            public string remoteAddress { get; set; }
+            public string remoteEndpoint { get; set; }
+            public string domain { get; set; }
+            public string processPath { get; set; }
+            public ulong processId { get; set; }
+            public string direction { get; set; }
+            public string protocolName { get; set; }
+            public string localEndpoint { get; set; }
+            public ushort remotePort { get; set; }
+            public bool isDns { get; set; }
+            public bool isQuic { get; set; }
+            public bool isHttp3 { get; set; }
+            public bool blocked { get; set; }
+            public bool fileExists { get; set; }
+            public long fileSize { get; set; }
+            public string fileModifiedUtc { get; set; }
+            public string productName { get; set; }
+            public string companyName { get; set; }
+            public string fileDescription { get; set; }
+            public string fileVersion { get; set; }
+            public string sha256 { get; set; }
+            public string signatureStatus { get; set; }
+            public string signer { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public int count { get; set; }
         }
 
         private sealed class CentralDeviceState

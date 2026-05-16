@@ -65,6 +65,56 @@ declare namespace Api {
       displayTarget?: string;
     }
 
+    type NetworkInsightEventType = 'all' | 'connection' | 'dns' | 'quic' | 'http3' | 'blocked';
+
+    interface NetworkInsightQuery {
+      baselineHours?: number;
+      windowHours?: number;
+      limit?: number;
+      host?: string;
+      eventType?: NetworkInsightEventType;
+      search?: string;
+    }
+
+    interface NetworkInsightItem {
+      key: string;
+      isNew: boolean;
+      firstSeenUtc: string;
+      lastSeenUtc: string;
+      count: number;
+      hosts: string[];
+      remoteIdentity: string;
+      remoteAddress: string;
+      remoteEndpoint: string;
+      domain: string;
+      processPath: string;
+      direction: string;
+      protocolName: string;
+      isDns: boolean;
+      isQuic: boolean;
+      isHttp3: boolean;
+      blocked: boolean;
+      fileExists: boolean;
+      fileSize: number;
+      fileModifiedUtc: string;
+      productName: string;
+      companyName: string;
+      fileDescription: string;
+      fileVersion: string;
+      sha256: string;
+      signatureStatus: string;
+      signer: string;
+    }
+
+    interface NetworkInsightResponse {
+      baselineHours: number;
+      windowHours: number;
+      generatedUtc: string;
+      total: number;
+      newTotal: number;
+      items: NetworkInsightItem[];
+    }
+
     interface WebShellRule {
       directory: string;
       actor?: string;

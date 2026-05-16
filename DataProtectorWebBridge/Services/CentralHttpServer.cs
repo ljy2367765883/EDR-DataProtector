@@ -120,6 +120,12 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/network/insights")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryNetworkInsights(ParseNetworkInsightQuery(context.Request)));
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/network/rules")
                 {
                     PolicyBridgeService.NetworkRuleRequest request =
@@ -241,6 +247,30 @@ namespace DataProtectorWebBridge.Services
                 ToUtc = request.QueryString["toUtc"],
                 Search = request.QueryString["search"]
             };
+        }
+
+        private static CentralPolicyStore.NetworkInsightQuery ParseNetworkInsightQuery(HttpListenerRequest request)
+        {
+            return new CentralPolicyStore.NetworkInsightQuery
+            {
+                limit = ParseLimit(request.QueryString["limit"]),
+                baselineHours = ParseHours(request.QueryString["baselineHours"], 24),
+                windowHours = ParseHours(request.QueryString["windowHours"], 24 * 31),
+                host = request.QueryString["host"],
+                eventType = request.QueryString["eventType"],
+                search = request.QueryString["search"]
+            };
+        }
+
+        private static int ParseHours(string value, int fallback)
+        {
+            int hours;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out hours))
+            {
+                return fallback;
+            }
+
+            return Math.Max(1, Math.Min(hours, 24 * 31));
         }
 
         private static void AddCorsHeaders(HttpListenerResponse response)

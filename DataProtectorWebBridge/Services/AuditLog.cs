@@ -42,9 +42,11 @@ namespace DataProtectorWebBridge.Services
             }
 
             if (action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("network.connection", StringComparison.OrdinalIgnoreCase) ||
                 action.EndsWith(".smtp", StringComparison.OrdinalIgnoreCase))
             {
-                return "smtp";
+                return action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase) ||
+                    action.EndsWith(".smtp", StringComparison.OrdinalIgnoreCase) ? "smtp" : "network";
             }
 
             if (action.IndexOf(".network.", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -115,7 +117,8 @@ namespace DataProtectorWebBridge.Services
             }
 
             if (action.StartsWith("webshell.notice", StringComparison.OrdinalIgnoreCase) ||
-                action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
+                action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("network.connection", StringComparison.OrdinalIgnoreCase))
             {
                 return "info";
             }
@@ -142,7 +145,8 @@ namespace DataProtectorWebBridge.Services
             }
 
             if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
-                action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
+                action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("network.connection", StringComparison.OrdinalIgnoreCase))
             {
                 return "observed";
             }

@@ -48,6 +48,11 @@ extern "C" {
 
 #define DP_POLICY_API_WEBSHELL_SAMPLE_BYTES      100u
 
+#define DP_POLICY_API_NETWORK_EVENT_FLAG_DNS       0x00000001u
+#define DP_POLICY_API_NETWORK_EVENT_FLAG_QUIC      0x00000002u
+#define DP_POLICY_API_NETWORK_EVENT_FLAG_HTTP3     0x00000004u
+#define DP_POLICY_API_NETWORK_EVENT_FLAG_BLOCKED   0x00000008u
+
 typedef struct _DP_POLICY_API_RULE {
     DWORD RuleType;
     LPCWSTR Value;
@@ -79,6 +84,20 @@ typedef struct _DP_POLICY_API_SMTP_EVENT {
     LPCWSTR From;
     LPCWSTR To;
 } DP_POLICY_API_SMTP_EVENT, *PDP_POLICY_API_SMTP_EVENT;
+
+typedef struct _DP_POLICY_API_NETWORK_CONNECTION_EVENT {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    DWORD Direction;
+    DWORD Protocol;
+    DWORD LocalAddress;
+    DWORD RemoteAddress;
+    DWORD Flags;
+    WORD LocalPort;
+    WORD RemotePort;
+    LPCWSTR ProcessPath;
+    LPCWSTR Domain;
+} DP_POLICY_API_NETWORK_CONNECTION_EVENT, *PDP_POLICY_API_NETWORK_CONNECTION_EVENT;
 
 typedef struct _DP_POLICY_API_WEBSHELL_RULE {
     LPCWSTR Directory;
@@ -224,6 +243,17 @@ DP_POLICY_API
 DWORD
 DpPolicyQuerySmtpEvents(
     _Out_writes_opt_(eventCapacity) DP_POLICY_API_SMTP_EVENT *events,
+    _In_ DWORD eventCapacity,
+    _Out_opt_ DWORD *eventCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryNetworkConnectionEvents(
+    _Out_writes_opt_(eventCapacity) DP_POLICY_API_NETWORK_CONNECTION_EVENT *events,
     _In_ DWORD eventCapacity,
     _Out_opt_ DWORD *eventCount,
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,

@@ -23,6 +23,7 @@ export const views: Record<LastLevelRouteKey, RouteComponent | (() => Promise<Ro
   audit: () => import("@/views/audit/index.vue"),
   devices: () => import("@/views/devices/index.vue"),
   home: () => import("@/views/home/index.vue"),
+  "network-awareness": () => import("@/views/network-awareness/index.vue"),
   policy: () => import("@/views/policy/index.vue"),
   remote: () => import("@/views/remote/index.vue"),
 };
