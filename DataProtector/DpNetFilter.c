@@ -47,6 +47,10 @@ DEFINE_GUID(
     0x499d0624, 0x7b6f, 0x46c9, 0xa9, 0xc2, 0x3d, 0xb7, 0x76, 0x92, 0x21, 0xe4);
 
 DEFINE_GUID(
+    DP_WFP_INBOUND_TRANSPORT_V4_CALLOUT_GUID,
+    0x7f115b67, 0x2a1f, 0x4dd0, 0x8b, 0x9c, 0x39, 0x48, 0xc6, 0x6c, 0x95, 0x90);
+
+DEFINE_GUID(
     DP_WFP_SMTP_STREAM_V4_CALLOUT_GUID,
     0x28778b42, 0x1d77, 0x49e5, 0xb5, 0xa7, 0x48, 0x6c, 0x4c, 0xfa, 0x95, 0x32);
 
@@ -92,6 +96,7 @@ static HANDLE gDpWfpEngineHandle = NULL;
 static UINT32 gDpAleConnectV4CalloutId = 0;
 static UINT32 gDpAleRecvAcceptV4CalloutId = 0;
 static UINT32 gDpDnsDatagramV4CalloutId = 0;
+static UINT32 gDpInboundTransportV4CalloutId = 0;
 static UINT32 gDpSmtpStreamV4CalloutId = 0;
 static BOOLEAN gDpNetFilterInitialized = FALSE;
 static BOOLEAN gDpNetworkRuleLockInitialized = FALSE;
@@ -1074,6 +1079,73 @@ DpNetFilterDnsClassify(
 static
 VOID
 NTAPI
+DpNetFilterInboundTransportClassify(
+    _In_ const FWPS_INCOMING_VALUES0 *InFixedValues,
+    _In_ const FWPS_INCOMING_METADATA_VALUES0 *InMetaValues,
+    _Inout_opt_ VOID *LayerData,
+    _In_opt_ const VOID *ClassifyContext,
+    _In_ const FWPS_FILTER1 *Filter,
+    _In_ UINT64 FlowContext,
+    _Inout_ FWPS_CLASSIFY_OUT0 *ClassifyOut
+    )
+{
+    ULONG localAddress;
+    ULONG remoteAddress;
+    USHORT localPort;
+    USHORT remotePort;
+    UCHAR protocol;
+    DP_NETWORK_ACTION action;
+
+    UNREFERENCED_PARAMETER(InMetaValues);
+    UNREFERENCED_PARAMETER(LayerData);
+    UNREFERENCED_PARAMETER(ClassifyContext);
+    UNREFERENCED_PARAMETER(Filter);
+    UNREFERENCED_PARAMETER(FlowContext);
+
+    if (InFixedValues == NULL ||
+        ClassifyOut == NULL ||
+        (ClassifyOut->rights & FWPS_RIGHT_ACTION_WRITE) == 0) {
+
+        return;
+    }
+
+    if (!gDpNetFilterInitialized ||
+        InFixedValues->layerId != FWPS_LAYER_INBOUND_TRANSPORT_V4) {
+
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
+        return;
+    }
+
+    protocol = InFixedValues->incomingValue[FWPS_FIELD_INBOUND_TRANSPORT_V4_IP_PROTOCOL].value.uint8;
+    if (protocol != IPPROTO_ICMP) {
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
+        return;
+    }
+
+    localAddress = InFixedValues->incomingValue[FWPS_FIELD_INBOUND_TRANSPORT_V4_IP_LOCAL_ADDRESS].value.uint32;
+    remoteAddress = InFixedValues->incomingValue[FWPS_FIELD_INBOUND_TRANSPORT_V4_IP_REMOTE_ADDRESS].value.uint32;
+    localPort = InFixedValues->incomingValue[FWPS_FIELD_INBOUND_TRANSPORT_V4_IP_LOCAL_PORT].value.uint16;
+    remotePort = InFixedValues->incomingValue[FWPS_FIELD_INBOUND_TRANSPORT_V4_IP_REMOTE_PORT].value.uint16;
+
+    action = DpNetFilterFindAction(DpNetworkDirectionInbound,
+                                   DpNetworkProtocolIcmp,
+                                   localAddress,
+                                   localPort,
+                                   remoteAddress,
+                                   remotePort,
+                                   NULL);
+
+    if (action == DpNetworkActionBlock) {
+        ClassifyOut->actionType = FWP_ACTION_BLOCK;
+        ClassifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
+    } else {
+        ClassifyOut->actionType = FWP_ACTION_PERMIT;
+    }
+}
+
+static
+VOID
+NTAPI
 DpNetFilterSmtpClassify(
     _In_ const FWPS_INCOMING_VALUES0 *InFixedValues,
     _In_ const FWPS_INCOMING_METADATA_VALUES0 *InMetaValues,
@@ -1309,6 +1381,20 @@ DpNetFilterInitializePortCondition(
 }
 
 static
+VOID
+DpNetFilterInitializeIcmpTypeCondition(
+    _Out_ FWPM_FILTER_CONDITION0 *Condition,
+    _In_ UCHAR Type
+    )
+{
+    RtlZeroMemory(Condition, sizeof(FWPM_FILTER_CONDITION0));
+    Condition->fieldKey = FWPM_CONDITION_ICMP_TYPE;
+    Condition->matchType = FWP_MATCH_EQUAL;
+    Condition->conditionValue.type = FWP_UINT16;
+    Condition->conditionValue.uint16 = Type;
+}
+
+static
 NTSTATUS
 DpNetFilterAddAleProtocolFilters(
     _In_ const GUID *LayerGuid,
@@ -1364,6 +1450,7 @@ DpNetFilterInitialize(
     FWPM_SUBLAYER0 subLayer;
     FWPM_FILTER_CONDITION0 udpConditions[2];
     FWPM_FILTER_CONDITION0 smtpPortCondition;
+    FWPM_FILTER_CONDITION0 inboundIcmpConditions[2];
 
     InitializeListHead(&gDpNetworkRules);
     InitializeListHead(&gDpSmtpEvents);
@@ -1452,6 +1539,16 @@ DpNetFilterInitialize(
     }
 
     status = DpNetFilterRegisterCallout(gDpNetDeviceObject,
+                                        &DP_WFP_INBOUND_TRANSPORT_V4_CALLOUT_GUID,
+                                        &FWPM_LAYER_INBOUND_TRANSPORT_V4,
+                                        DpNetFilterInboundTransportClassify,
+                                        L"DataProtector Inbound Transport V4",
+                                        &gDpInboundTransportV4CalloutId);
+    if (!NT_SUCCESS(status)) {
+        goto Abort;
+    }
+
+    status = DpNetFilterRegisterCallout(gDpNetDeviceObject,
                                         &DP_WFP_SMTP_STREAM_V4_CALLOUT_GUID,
                                         &FWPM_LAYER_STREAM_V4,
                                         DpNetFilterSmtpClassify,
@@ -1494,6 +1591,18 @@ DpNetFilterInitialize(
                                             L"DataProtector outbound UDP defense",
                                             udpConditions,
                                             RTL_NUMBER_OF(udpConditions));
+    if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
+        goto Abort;
+    }
+
+    RtlZeroMemory(inboundIcmpConditions, sizeof(inboundIcmpConditions));
+    DpNetFilterInitializeProtocolCondition(&inboundIcmpConditions[0], IPPROTO_ICMP);
+    DpNetFilterInitializeIcmpTypeCondition(&inboundIcmpConditions[1], 8);
+    status = DpNetFilterAddManagementFilter(&FWPM_LAYER_INBOUND_TRANSPORT_V4,
+                                            &DP_WFP_INBOUND_TRANSPORT_V4_CALLOUT_GUID,
+                                            L"DataProtector inbound ICMP echo request defense",
+                                            inboundIcmpConditions,
+                                            RTL_NUMBER_OF(inboundIcmpConditions));
     if (!NT_SUCCESS(status) && status != STATUS_FWP_ALREADY_EXISTS) {
         goto Abort;
     }
@@ -1559,6 +1668,11 @@ DpNetFilterUninitialize(
     if (gDpSmtpStreamV4CalloutId != 0) {
         FwpsCalloutUnregisterById0(gDpSmtpStreamV4CalloutId);
         gDpSmtpStreamV4CalloutId = 0;
+    }
+
+    if (gDpInboundTransportV4CalloutId != 0) {
+        FwpsCalloutUnregisterById0(gDpInboundTransportV4CalloutId);
+        gDpInboundTransportV4CalloutId = 0;
     }
 
     if (gDpAleRecvAcceptV4CalloutId != 0) {

@@ -299,13 +299,13 @@ async function addBlockPingRule() {
   networkSubmitting.value = true;
   try {
     const payload: Api.DataProtector.NetworkRuleRequest = {
-      ruleId: Date.now() >>> 0,
+      ruleId: 0x50494e47,
       kind: 'ip',
       action: 'block',
       protocol: 'icmp',
-      direction: 'outbound',
+      direction: 'inbound',
       localAddress: '',
-      localPort: 0,
+      localPort: 8,
       remoteAddress: '*',
       remotePort: 0,
       domain: '',
@@ -313,7 +313,7 @@ async function addBlockPingRule() {
     };
     const { error, data } = await fetchAddNetworkRule(payload);
     if (!error && data.succeeded) {
-      window.$message?.success('Ping blocking rule added to central policy.');
+      window.$message?.success('Inbound ping blocking rule added to central policy.');
       await refresh();
     }
   } finally {
@@ -495,7 +495,7 @@ onMounted(refresh);
                   <NTag type="error">ICMP: {{ networkGroups.icmp }}</NTag>
                   <NTag type="error">Blocked: {{ networkGroups.blocked }}</NTag>
                   <NButton size="small" type="warning" secondary :loading="networkSubmitting" @click="addBlockPingRule">
-                    Block Ping
+                    Block Inbound Ping
                   </NButton>
                   <NButton size="small" type="error" secondary @click="clearNetworkRules">Clear</NButton>
                 </NSpace>
