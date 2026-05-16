@@ -3,6 +3,7 @@
 #include "DataProtectorPolicyApi.h"
 
 #include <fltUser.h>
+#include <stdio.h>
 #include <strsafe.h>
 
 #define DP_POLICY_PORT_NAME L"\\DataProtectorPolicyPort"
@@ -19,6 +20,8 @@
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
+#define DP_POLICY_API_ENABLE_FILE_TRACE 1
+#define DP_POLICY_API_TRACE_PATH L"C:\\ProgramData\\DataProtector\\PolicyApiTrace.log"
 
 typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandAddProcessNameRule = 1,
@@ -179,6 +182,82 @@ typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
 C_ASSERT(sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY) == 1232);
 
 static WCHAR gLastErrorMessage[512];
+
+#if DP_POLICY_API_ENABLE_FILE_TRACE
+static
+VOID
+DpPolicyTrace(
+    _In_z_ LPCWSTR Format,
+    ...
+    )
+{
+    WCHAR line[1024];
+    WCHAR timestamp[64];
+    SYSTEMTIME systemTime;
+    HANDLE fileHandle;
+    DWORD bytesWritten;
+    int prefixChars;
+    int lineChars;
+    va_list args;
+
+    if (Format == NULL) {
+        return;
+    }
+
+    GetSystemTime(&systemTime);
+    prefixChars = _snwprintf_s(timestamp,
+                               ARRAYSIZE(timestamp),
+                               _TRUNCATE,
+                               L"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ pid=%lu tid=%lu ",
+                               systemTime.wYear,
+                               systemTime.wMonth,
+                               systemTime.wDay,
+                               systemTime.wHour,
+                               systemTime.wMinute,
+                               systemTime.wSecond,
+                               systemTime.wMilliseconds,
+                               GetCurrentProcessId(),
+                               GetCurrentThreadId());
+
+    if (prefixChars < 0) {
+        return;
+    }
+
+    (VOID)StringCchCopyW(line, ARRAYSIZE(line), timestamp);
+
+    va_start(args, Format);
+    (VOID)StringCchVPrintfW(line + prefixChars,
+                            ARRAYSIZE(line) - (size_t)prefixChars,
+                            Format,
+                            args);
+    va_end(args);
+
+    (VOID)StringCchCatW(line, ARRAYSIZE(line), L"\r\n");
+    lineChars = (int)wcslen(line);
+
+    CreateDirectoryW(L"C:\\ProgramData\\DataProtector", NULL);
+    fileHandle = CreateFileW(DP_POLICY_API_TRACE_PATH,
+                             FILE_APPEND_DATA,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             NULL,
+                             OPEN_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL,
+                             NULL);
+
+    if (fileHandle == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    (VOID)WriteFile(fileHandle,
+                    line,
+                    (DWORD)(lineChars * sizeof(WCHAR)),
+                    &bytesWritten,
+                    NULL);
+    CloseHandle(fileHandle);
+}
+#else
+#define DpPolicyTrace(...) ((void)0)
+#endif
 
 static
 VOID
@@ -1803,6 +1882,13 @@ DpPolicyQueryWebShellEvents(
     DWORD copiedStringChars = 0;
     BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
 
+    DpPolicyTrace(L"WebShellEvents enter events=%p capacity=%lu stringBuffer=%p stringChars=%lu sizingOnly=%lu",
+                  Events,
+                  EventCapacity,
+                  StringBuffer,
+                  StringBufferChars,
+                  sizingOnly);
+
     if (EventCount != NULL) {
         *EventCount = 0;
     }
@@ -1815,6 +1901,11 @@ DpPolicyQueryWebShellEvents(
         (StringBufferChars != 0 && StringBuffer == NULL)) {
 
         DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        DpPolicyTrace(L"WebShellEvents invalid output buffer events=%p capacity=%lu stringBuffer=%p stringChars=%lu",
+                      Events,
+                      EventCapacity,
+                      StringBuffer,
+                      StringBufferChars);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1826,14 +1917,29 @@ DpPolicyQueryWebShellEvents(
                                           sizeof(sizingHeader),
                                           &bytesReturned);
     if (result != DP_POLICY_API_SUCCESS) {
+        DpPolicyTrace(L"WebShellEvents sizing send failed result=0x%08lX last='%s'",
+                      result,
+                      gLastErrorMessage);
         return result;
     }
+
+    DpPolicyTrace(L"WebShellEvents sizing returned bytes=%lu version=%lu events=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u",
+                  bytesReturned,
+                  sizingHeader.Version,
+                  sizingHeader.EventCount,
+                  sizingHeader.BytesRequired,
+                  sizingHeader.BytesReturned,
+                  sizingHeader.DroppedEvents);
 
     if (bytesReturned < sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER) ||
         sizingHeader.Version != DP_WEBSHELL_EVENT_QUERY_VERSION ||
         sizingHeader.BytesRequired < sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER)) {
 
         DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell event snapshot header.");
+        DpPolicyTrace(L"WebShellEvents invalid sizing header bytes=%lu version=%lu bytesRequired=%lu",
+                      bytesReturned,
+                      sizingHeader.Version,
+                      sizingHeader.BytesRequired);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1847,6 +1953,8 @@ DpPolicyQueryWebShellEvents(
                 MAXDWORD / DP_WEBSHELL_EVENT_STRING_CHARS) {
 
                 DpPolicySetLastErrorMessage(L"WebShell event snapshot is too large.");
+                DpPolicyTrace(L"WebShellEvents sizing-only too large events=%lu",
+                              sizingHeader.EventCount);
                 return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
             }
 
@@ -1854,6 +1962,9 @@ DpPolicyQueryWebShellEvents(
         }
 
         DpPolicySetLastErrorMessage(L"Success.");
+        DpPolicyTrace(L"WebShellEvents sizing-only success eventCount=%lu stringCharsRequired=%lu",
+                      EventCount != NULL ? *EventCount : 0,
+                      StringBufferCharsRequired != NULL ? *StringBufferCharsRequired : 0);
         return DP_POLICY_API_SUCCESS;
     }
 
@@ -1866,6 +1977,8 @@ DpPolicyQueryWebShellEvents(
             MAXDWORD / DP_WEBSHELL_EVENT_STRING_CHARS) {
 
             DpPolicySetLastErrorMessage(L"WebShell event snapshot is too large.");
+            DpPolicyTrace(L"WebShellEvents too large before alloc events=%lu",
+                          sizingHeader.EventCount);
             return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
         }
 
@@ -1876,6 +1989,8 @@ DpPolicyQueryWebShellEvents(
         MAXDWORD / DP_WEBSHELL_EVENT_STRING_CHARS) {
 
         DpPolicySetLastErrorMessage(L"WebShell event snapshot is too large.");
+        DpPolicyTrace(L"WebShellEvents too large before capacity check events=%lu",
+                      sizingHeader.EventCount);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1883,6 +1998,11 @@ DpPolicyQueryWebShellEvents(
         StringBufferChars < sizingHeader.EventCount * DP_WEBSHELL_EVENT_STRING_CHARS) {
 
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        DpPolicyTrace(L"WebShellEvents buffer too small before drain capacity=%lu neededEvents=%lu stringChars=%lu neededStringChars=%lu",
+                      EventCapacity,
+                      sizingHeader.EventCount,
+                      StringBufferChars,
+                      sizingHeader.EventCount * DP_WEBSHELL_EVENT_STRING_CHARS);
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
 
@@ -1890,6 +2010,8 @@ DpPolicyQueryWebShellEvents(
     queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
     if (queryBuffer == NULL) {
         DpPolicySetLastErrorMessage(L"Out of memory.");
+        DpPolicyTrace(L"WebShellEvents alloc failed bytesRequired=%lu",
+                      bytesRequired);
         return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
     }
 
@@ -1901,12 +2023,22 @@ DpPolicyQueryWebShellEvents(
                                           &bytesReturned);
     if (result != DP_POLICY_API_SUCCESS) {
         HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicyTrace(L"WebShellEvents full send failed result=0x%08lX bytesRequired=%lu last='%s'",
+                      result,
+                      bytesRequired,
+                      gLastErrorMessage);
         return result;
     }
+
+    DpPolicyTrace(L"WebShellEvents full returned bytes=%lu requested=%lu",
+                  bytesReturned,
+                  bytesRequired);
 
     if (bytesReturned < sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER)) {
         HeapFree(GetProcessHeap(), 0, queryBuffer);
         DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell event snapshot.");
+        DpPolicyTrace(L"WebShellEvents invalid full header bytes=%lu",
+                      bytesReturned);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1918,6 +2050,11 @@ DpPolicyQueryWebShellEvents(
 
         HeapFree(GetProcessHeap(), 0, queryBuffer);
         DpPolicySetLastErrorMessage(L"Driver returned an unsupported WebShell event snapshot.");
+        DpPolicyTrace(L"WebShellEvents unsupported snapshot version=%lu eventCount=%lu bytesReturned=%lu entrySize=%Iu",
+                      header->Version,
+                      header->EventCount,
+                      bytesReturned,
+                      sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY));
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1939,6 +2076,11 @@ DpPolicyQueryWebShellEvents(
 
             HeapFree(GetProcessHeap(), 0, queryBuffer);
             DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell event entry.");
+            DpPolicyTrace(L"WebShellEvents invalid entry index=%lu pathBytes=%lu extensionBytes=%lu sample=%lu",
+                          index,
+                          entry[index].PathLengthBytes,
+                          entry[index].ExtensionLengthBytes,
+                          entry[index].SampleLength);
             return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
         }
 
@@ -1957,6 +2099,18 @@ DpPolicyQueryWebShellEvents(
             Events[index].FileSize = entry[index].FileSize;
             Events[index].SampleLength = entry[index].SampleLength;
             CopyMemory(Events[index].Sample, entry[index].Sample, sizeof(Events[index].Sample));
+
+            DpPolicyTrace(L"WebShellEvents copy index=%lu seq=%I64u pid=%I64u severity=%lu op=%lu fileSize=%lu sample=%lu pathBytes=%lu extensionBytes=%lu stringOffset=%lu",
+                          index,
+                          entry[index].Sequence,
+                          entry[index].ProcessId,
+                          entry[index].Severity,
+                          entry[index].Operation,
+                          entry[index].FileSize,
+                          entry[index].SampleLength,
+                          entry[index].PathLengthBytes,
+                          entry[index].ExtensionLengthBytes,
+                          copiedStringChars);
 
             Events[index].Path = StringBuffer + copiedStringChars;
             if (pathChars != 0) {
@@ -1978,19 +2132,35 @@ DpPolicyQueryWebShellEvents(
         *StringBufferCharsRequired = requiredStringChars;
     }
 
+    DpPolicyTrace(L"WebShellEvents post-copy headerEvents=%lu requiredStringChars=%lu copiedStringChars=%lu eventCapacity=%lu stringChars=%lu",
+                  header->EventCount,
+                  requiredStringChars,
+                  copiedStringChars,
+                  EventCapacity,
+                  StringBufferChars);
+
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
     if (EventCapacity < header->EventCount || StringBufferChars < requiredStringChars) {
         if (sizingOnly) {
             DpPolicySetLastErrorMessage(L"Success.");
+            DpPolicyTrace(L"WebShellEvents sizing-only post-copy success");
             return DP_POLICY_API_SUCCESS;
         }
 
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        DpPolicyTrace(L"WebShellEvents buffer too small after copy capacity=%lu eventCount=%lu stringChars=%lu required=%lu",
+                      EventCapacity,
+                      header->EventCount,
+                      StringBufferChars,
+                      requiredStringChars);
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
 
     DpPolicySetLastErrorMessage(L"Success.");
+    DpPolicyTrace(L"WebShellEvents success eventCount=%lu stringCharsRequired=%lu",
+                  EventCount != NULL ? *EventCount : 0,
+                  StringBufferCharsRequired != NULL ? *StringBufferCharsRequired : 0);
     return DP_POLICY_API_SUCCESS;
 }
 
