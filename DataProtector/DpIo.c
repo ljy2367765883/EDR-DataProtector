@@ -659,7 +659,7 @@ DpMarkHandleEncryptOnCleanup(
 
         status = FltSetStreamHandleContext(FltObjects->Instance,
                                            FltObjects->FileObject,
-                                           FLT_SET_CONTEXT_REPLACE_IF_EXISTS,
+                                           FLT_SET_CONTEXT_KEEP_IF_EXISTS,
                                            handleContext,
                                            &oldContext);
 
@@ -667,9 +667,16 @@ DpMarkHandleEncryptOnCleanup(
             FltReleaseContext(oldContext);
         }
 
-        if (!NT_SUCCESS(status)) {
+        if (status == STATUS_FLT_CONTEXT_ALREADY_DEFINED) {
             FltReleaseContext(handleContext);
-            return status == STATUS_FLT_CONTEXT_ALREADY_DEFINED ? STATUS_SUCCESS : status;
+
+            status = DpGetHandleContext(FltObjects, &handleContext);
+            if (!NT_SUCCESS(status) || handleContext == NULL) {
+                return status;
+            }
+        } else if (!NT_SUCCESS(status)) {
+            FltReleaseContext(handleContext);
+            return status;
         }
     } else if (!NT_SUCCESS(status) || handleContext == NULL) {
         return status;
@@ -721,7 +728,7 @@ DpEnsureWebShellHandleContext(
         RtlZeroMemory(handleContext, sizeof(DP_HANDLE_CONTEXT));
         status = FltSetStreamHandleContext(FltObjects->Instance,
                                            FltObjects->FileObject,
-                                           FLT_SET_CONTEXT_REPLACE_IF_EXISTS,
+                                           FLT_SET_CONTEXT_KEEP_IF_EXISTS,
                                            handleContext,
                                            &oldContext);
 
@@ -729,9 +736,16 @@ DpEnsureWebShellHandleContext(
             FltReleaseContext(oldContext);
         }
 
-        if (!NT_SUCCESS(status)) {
+        if (status == STATUS_FLT_CONTEXT_ALREADY_DEFINED) {
             FltReleaseContext(handleContext);
-            return status == STATUS_FLT_CONTEXT_ALREADY_DEFINED ? STATUS_SUCCESS : status;
+
+            status = DpGetHandleContext(FltObjects, &handleContext);
+            if (!NT_SUCCESS(status) || handleContext == NULL) {
+                return status;
+            }
+        } else if (!NT_SUCCESS(status)) {
+            FltReleaseContext(handleContext);
+            return status;
         }
     } else if (!NT_SUCCESS(status) || handleContext == NULL) {
         return status;
@@ -777,6 +791,205 @@ DpHandleNeedsWebShellInspection(
     }
 
     return inspect;
+}
+
+static
+BOOLEAN
+DpHandleWebShellInspectionCompleted(
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    )
+{
+    NTSTATUS status;
+    PDP_HANDLE_CONTEXT handleContext = NULL;
+    BOOLEAN completed = FALSE;
+
+    status = DpGetHandleContext(FltObjects, &handleContext);
+    if (NT_SUCCESS(status) && handleContext != NULL) {
+        completed = handleContext->WebShellReported;
+        DpReleaseHandleContext(handleContext);
+    }
+
+    return completed;
+}
+
+static
+NTSTATUS
+DpMarkWebShellCandidateIfNeeded(
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ PCUNICODE_STRING Name,
+    _In_ BOOLEAN NewlyCreated
+    )
+{
+    if (Name == NULL ||
+        Name->Buffer == NULL ||
+        !DpWebShellIsProtectedPath(Name) ||
+        !DpWebShellIsScriptPath(Name, NULL)) {
+
+        return STATUS_SUCCESS;
+    }
+
+    return DpEnsureWebShellHandleContext(FltObjects, NewlyCreated);
+}
+
+static
+BOOLEAN
+DpArmWebShellWriteInspectionIfTargeted(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    )
+{
+    NTSTATUS status;
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+
+    if (DpHandleNeedsWebShellInspection(FltObjects)) {
+        return TRUE;
+    }
+
+    if (DpHandleWebShellInspectionCompleted(FltObjects)) {
+        return FALSE;
+    }
+
+    status = FltGetFileNameInformation(Data,
+                                       FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                       &nameInfo);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    status = DpMarkWebShellCandidateIfNeeded(FltObjects,
+                                             &nameInfo->Name,
+                                             TRUE);
+    FltReleaseFileNameInformation(nameInfo);
+
+    return NT_SUCCESS(status) && DpHandleNeedsWebShellInspection(FltObjects);
+}
+
+static
+NTSTATUS
+DpInspectWebShellOnCleanup(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Inout_opt_ PDP_HANDLE_CONTEXT HandleContext
+    )
+{
+    NTSTATUS status;
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+    BOOLEAN shouldInspect = FALSE;
+
+    if (Data == NULL ||
+        FltObjects == NULL ||
+        FltObjects->FileObject == NULL ||
+        FlagOn(FltObjects->FileObject->Flags, FO_VOLUME_OPEN)) {
+
+        return STATUS_SUCCESS;
+    }
+
+    if (HandleContext != NULL) {
+        shouldInspect = HandleContext->WebShellNewFile && !HandleContext->WebShellReported;
+    }
+
+    if (!shouldInspect &&
+        !FlagOn(FltObjects->FileObject->Flags, FO_FILE_MODIFIED | FO_FILE_SIZE_CHANGED)) {
+
+        return STATUS_SUCCESS;
+    }
+
+    status = FltGetFileNameInformation(Data,
+                                       FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                       &nameInfo);
+    if (!NT_SUCCESS(status)) {
+        return STATUS_SUCCESS;
+    }
+
+    if (!shouldInspect) {
+        shouldInspect = DpWebShellIsProtectedPath(&nameInfo->Name) &&
+                        DpWebShellIsScriptPath(&nameInfo->Name, NULL);
+    }
+
+    if (!shouldInspect) {
+        FltReleaseFileNameInformation(nameInfo);
+        return STATUS_SUCCESS;
+    }
+
+    status = DpWebShellInspectFileObject(FltObjects->Instance,
+                                         FltObjects->FileObject,
+                                         &nameInfo->Name,
+                                         FltGetRequestorProcessIdEx(Data),
+                                         DpWebShellOperationCleanup);
+
+    if (HandleContext != NULL) {
+        HandleContext->WebShellReported = TRUE;
+    } else {
+        DpMarkHandleWebShellReported(FltObjects);
+    }
+
+    if (status == STATUS_ACCESS_DENIED) {
+        NTSTATUS truncateStatus;
+
+        truncateStatus = DpShadowTruncateFileObject(FltObjects->Instance,
+                                                    FltObjects->FileObject);
+        DP_DBG_PRINT(DP_TRACE_IO,
+                     ("DataProtector!DpInspectWebShellOnCleanup: dangerous web script neutralized status=0x%08X path=%wZ\n",
+                      truncateStatus,
+                      &nameInfo->Name));
+    }
+
+    FltReleaseFileNameInformation(nameInfo);
+
+    return status;
+}
+
+static
+NTSTATUS
+DpTruncateWebShellFileByName(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING Name
+    )
+{
+    NTSTATUS status;
+    OBJECT_ATTRIBUTES objectAttributes;
+    IO_STATUS_BLOCK ioStatus;
+    HANDLE fileHandle = NULL;
+    PFILE_OBJECT fileObject = NULL;
+
+    if (Instance == NULL || Name == NULL || Name->Buffer == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    InitializeObjectAttributes(&objectAttributes,
+                               (PUNICODE_STRING)Name,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    status = FltCreateFileEx2(gDataProtectorFilter,
+                              Instance,
+                              &fileHandle,
+                              &fileObject,
+                              FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+                              &objectAttributes,
+                              &ioStatus,
+                              NULL,
+                              FILE_ATTRIBUTE_NORMAL,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              FILE_OPEN,
+                              FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                              NULL,
+                              0,
+                              IO_IGNORE_SHARE_ACCESS_CHECK,
+                              NULL);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = DpShadowTruncateFileObject(Instance, fileObject);
+
+    if (fileHandle != NULL) {
+        FltClose(fileHandle);
+    }
+
+    return status;
 }
 
 static
@@ -1109,6 +1322,55 @@ DpRenameTargetRemainsProtected(
 }
 
 static
+BOOLEAN
+DpRenameTargetRemainsWebShellProtected(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PDP_RENAME_CONTEXT RenameContext,
+    _Outptr_result_maybenull_ PFLT_FILE_NAME_INFORMATION *EffectiveNameInfo
+    )
+{
+    NTSTATUS status;
+    PFLT_FILE_NAME_INFORMATION tunneledNameInfo = NULL;
+    BOOLEAN protectedPath = FALSE;
+
+    *EffectiveNameInfo = NULL;
+
+    if (RenameContext == NULL || RenameContext->TargetNameInfo == NULL) {
+        return FALSE;
+    }
+
+    status = FltGetTunneledName(Data,
+                                RenameContext->TargetNameInfo,
+                                &tunneledNameInfo);
+
+    if (NT_SUCCESS(status) && tunneledNameInfo != NULL) {
+        status = FltParseFileNameInformation(tunneledNameInfo);
+        if (NT_SUCCESS(status)) {
+            protectedPath = DpWebShellIsProtectedPath(&tunneledNameInfo->Name) &&
+                            DpWebShellIsScriptPath(&tunneledNameInfo->Name, NULL);
+        }
+
+        if (protectedPath) {
+            *EffectiveNameInfo = tunneledNameInfo;
+        } else {
+            FltReleaseFileNameInformation(tunneledNameInfo);
+        }
+
+        return protectedPath;
+    }
+
+    protectedPath = DpWebShellIsProtectedPath(&RenameContext->TargetNameInfo->Name) &&
+                    DpWebShellIsScriptPath(&RenameContext->TargetNameInfo->Name, NULL);
+
+    if (protectedPath) {
+        FltReferenceFileNameInformation(RenameContext->TargetNameInfo);
+        *EffectiveNameInfo = RenameContext->TargetNameInfo;
+    }
+
+    return protectedPath;
+}
+
+static
 FLT_POSTOP_CALLBACK_STATUS
 DpPostSetInformationWhenSafe(
     _Inout_ PFLT_CALLBACK_DATA Data,
@@ -1120,7 +1382,8 @@ DpPostSetInformationWhenSafe(
     NTSTATUS status;
     PDP_RENAME_CONTEXT renameContext = (PDP_RENAME_CONTEXT)CompletionContext;
     PFLT_FILE_NAME_INFORMATION effectiveNameInfo = NULL;
-    BOOLEAN trusted;
+    PFLT_FILE_NAME_INFORMATION webShellNameInfo = NULL;
+    BOOLEAN trusted = FALSE;
 
     if (renameContext == NULL) {
         return FLT_POSTOP_FINISHED_PROCESSING;
@@ -1128,49 +1391,76 @@ DpPostSetInformationWhenSafe(
 
     if (!FlagOn(Flags, FLTFL_POST_OPERATION_DRAINING) &&
         NT_SUCCESS(Data->IoStatus.Status) &&
-        renameContext->EncryptAfterRename &&
-        DpRenameTargetRemainsProtected(Data, renameContext, &effectiveNameInfo) &&
         FltObjects->FileObject != NULL) {
 
-        trusted = DpProcessPolicyIsTrusted(Data, &effectiveNameInfo->Name);
-        DP_TRACE_PPTX_NAME("RenamePostTarget",
-                           &effectiveNameInfo->Name,
-                           Data->IoStatus.Status,
-                           trusted,
-                           renameContext->EncryptAfterRename,
-                           0,
-                           0);
-        if (!trusted) {
-            goto Exit;
+        if (renameContext->InspectWebShellAfterRename &&
+            DpRenameTargetRemainsWebShellProtected(Data, renameContext, &webShellNameInfo)) {
+
+            status = DpWebShellInspectFileByName(FltObjects->Instance,
+                                                 &webShellNameInfo->Name,
+                                                 FltGetRequestorProcessIdEx(Data),
+                                                 DpWebShellOperationRename);
+            (VOID)DpMarkWebShellCandidateIfNeeded(FltObjects,
+                                                  &webShellNameInfo->Name,
+                                                  TRUE);
+            DpMarkHandleWebShellReported(FltObjects);
+            if (status == STATUS_ACCESS_DENIED) {
+                status = DpTruncateWebShellFileByName(FltObjects->Instance,
+                                                      &webShellNameInfo->Name);
+                if (!NT_SUCCESS(status)) {
+                    (VOID)DpShadowTruncateFileObject(FltObjects->Instance,
+                                                     FltObjects->FileObject);
+                }
+            }
         }
 
-        status = DpMarkHandleEncryptOnCleanup(FltObjects,
-                                              &effectiveNameInfo->Name,
-                                              TRUE,
-                                              TRUE);
-        if (!NT_SUCCESS(status)) {
-            DP_DBG_PRINT(DP_TRACE_IO,
-                         ("DataProtector!DpPostSetInformationWhenSafe: failed to arm deferred encryption 0x%08X\n",
-                          status));
-            DP_TRACE_PPTX_NAME("RenameArmEncryptFailed",
+        if (renameContext->EncryptAfterRename &&
+            DpRenameTargetRemainsProtected(Data, renameContext, &effectiveNameInfo)) {
+
+            trusted = DpProcessPolicyIsTrusted(Data, &effectiveNameInfo->Name);
+            DP_TRACE_PPTX_NAME("RenamePostTarget",
                                &effectiveNameInfo->Name,
-                               status,
+                               Data->IoStatus.Status,
                                trusted,
                                renameContext->EncryptAfterRename,
                                0,
                                0);
-        } else {
-            DP_TRACE_PPTX_NAME("RenameArmEncryptDone",
-                               &effectiveNameInfo->Name,
-                               status,
-                               trusted,
-                               renameContext->EncryptAfterRename,
-                               0,
-                               0);
+            if (!trusted) {
+                goto Exit;
+            }
+
+            status = DpMarkHandleEncryptOnCleanup(FltObjects,
+                                                  &effectiveNameInfo->Name,
+                                                  TRUE,
+                                                  TRUE);
+            if (!NT_SUCCESS(status)) {
+                DP_DBG_PRINT(DP_TRACE_IO,
+                             ("DataProtector!DpPostSetInformationWhenSafe: failed to arm deferred encryption 0x%08X\n",
+                              status));
+                DP_TRACE_PPTX_NAME("RenameArmEncryptFailed",
+                                   &effectiveNameInfo->Name,
+                                   status,
+                                   trusted,
+                                   renameContext->EncryptAfterRename,
+                                   0,
+                                   0);
+            } else {
+                DP_TRACE_PPTX_NAME("RenameArmEncryptDone",
+                                   &effectiveNameInfo->Name,
+                                   status,
+                                   trusted,
+                                   renameContext->EncryptAfterRename,
+                                   0,
+                                   0);
+            }
         }
     }
 
 Exit:
+    if (webShellNameInfo != NULL) {
+        FltReleaseFileNameInformation(webShellNameInfo);
+    }
+
     if (effectiveNameInfo != NULL) {
         FltReleaseFileNameInformation(effectiveNameInfo);
     }
@@ -1391,11 +1681,10 @@ DpPostCreate(
                                 Data->IoStatus.Information == FILE_SUPERSEDED ||
                                 DpCreateDispositionWillReplaceFile(createDisposition);
 
-            if (createdOrReplaced &&
-                DpWebShellIsProtectedPath(&nameInfo->Name) &&
-                DpWebShellIsScriptPath(&nameInfo->Name, NULL)) {
-
-                (VOID)DpEnsureWebShellHandleContext(FltObjects, TRUE);
+            if (createdOrReplaced) {
+                (VOID)DpMarkWebShellCandidateIfNeeded(FltObjects,
+                                                      &nameInfo->Name,
+                                                      TRUE);
             }
         }
 
@@ -1416,8 +1705,8 @@ DpPreRead(
     _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
     )
 {
-    BOOLEAN isProtected;
-    BOOLEAN isTrusted;
+    BOOLEAN isProtected = FALSE;
+    BOOLEAN isTrusted = FALSE;
     BOOLEAN plaintextCacheEnabled;
     NTSTATUS status;
     ULONG length;
@@ -1706,8 +1995,8 @@ DpPreWrite(
     _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
     )
 {
-    BOOLEAN isProtected;
-    BOOLEAN isTrusted;
+    BOOLEAN isProtected = FALSE;
+    BOOLEAN isTrusted = FALSE;
     BOOLEAN plaintextCacheEnabled;
     NTSTATUS status;
     ULONG length;
@@ -1728,6 +2017,8 @@ DpPreWrite(
     if (!DpCanProcessOperation(Data, FltObjects, length)) {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
+
+    (VOID)DpArmWebShellWriteInspectionIfTargeted(Data, FltObjects);
 
     status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
     if (!NT_SUCCESS(status)) {
@@ -2037,8 +2328,6 @@ DpPreCleanup(
     NTSTATUS status;
     PDP_HANDLE_CONTEXT handleContext = NULL;
 
-    UNREFERENCED_PARAMETER(Data);
-
     *CompletionContext = NULL;
 
     if (DpShadowIsInternalIo()) {
@@ -2047,6 +2336,8 @@ DpPreCleanup(
 
     status = DpGetHandleContext(FltObjects, &handleContext);
     if (NT_SUCCESS(status) && handleContext != NULL) {
+        (VOID)DpInspectWebShellOnCleanup(Data, FltObjects, handleContext);
+
         DP_TRACE_PPTX_DATA("PreCleanupHandle",
                            Data,
                            FltObjects,
@@ -2073,6 +2364,8 @@ DpPreCleanup(
         }
 
         DpReleaseHandleContext(handleContext);
+    } else {
+        (VOID)DpInspectWebShellOnCleanup(Data, FltObjects, NULL);
     }
 
     return FLT_PREOP_SUCCESS_NO_CALLBACK;
@@ -2103,11 +2396,6 @@ DpPreSetInformation(
     if (DpIsRenameInformationClass(informationClass)) {
         (VOID)DpShadowMarkHandleDirty(FltObjects);
 
-        status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
-        if (!NT_SUCCESS(status) || isProtected) {
-            return FLT_PREOP_SUCCESS_NO_CALLBACK;
-        }
-
         status = DpGetRenameTargetInformation(Data,
                                               FltObjects,
                                               &targetNameInfo);
@@ -2124,6 +2412,12 @@ DpPreSetInformation(
             return FLT_PREOP_SUCCESS_NO_CALLBACK;
         }
 
+        status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
+        if (!NT_SUCCESS(status)) {
+            isProtected = FALSE;
+            isTrusted = FALSE;
+        }
+
         DP_TRACE_PPTX_NAME("PreRenameTarget",
                            &targetNameInfo->Name,
                            status,
@@ -2132,19 +2426,8 @@ DpPreSetInformation(
                            informationClass,
                            0);
 
-        status = DpWebShellInspectFileObject(FltObjects->Instance,
-                                             FltObjects->FileObject,
-                                             &targetNameInfo->Name,
-                                             FltGetRequestorProcessIdEx(Data),
-                                             DpWebShellOperationRename);
-        if (!NT_SUCCESS(status)) {
-            FltReleaseFileNameInformation(targetNameInfo);
-            Data->IoStatus.Status = status;
-            Data->IoStatus.Information = 0;
-            return FLT_PREOP_COMPLETE;
-        }
-
-        if (DpPolicyNameIsProtected(&targetNameInfo->Name) &&
+        if (!isProtected &&
+            DpPolicyNameIsProtected(&targetNameInfo->Name) &&
             !DpPolicyNameIsShadow(&targetNameInfo->Name)) {
 
             renameContext = ExAllocatePoolWithTag(NonPagedPoolNx,
@@ -2157,6 +2440,38 @@ DpPreSetInformation(
                 FltReferenceFileNameInformation(targetNameInfo);
                 renameContext->TargetNameInfo = targetNameInfo;
                 *CompletionContext = renameContext;
+            }
+        }
+
+        if (DpWebShellIsProtectedPath(&targetNameInfo->Name) &&
+            DpWebShellIsScriptPath(&targetNameInfo->Name, NULL)) {
+
+            if (renameContext == NULL) {
+                renameContext = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                                      sizeof(DP_RENAME_CONTEXT),
+                                                      DP_TAG_RENAME_CONTEXT);
+                if (renameContext != NULL) {
+                    RtlZeroMemory(renameContext, sizeof(DP_RENAME_CONTEXT));
+                    FltReferenceFileNameInformation(targetNameInfo);
+                    renameContext->TargetNameInfo = targetNameInfo;
+                    *CompletionContext = renameContext;
+                }
+            }
+
+            if (renameContext != NULL) {
+                renameContext->InspectWebShellAfterRename = TRUE;
+            } else {
+                status = DpWebShellInspectFileObject(FltObjects->Instance,
+                                                     FltObjects->FileObject,
+                                                     &targetNameInfo->Name,
+                                                     FltGetRequestorProcessIdEx(Data),
+                                                     DpWebShellOperationRename);
+                if (!NT_SUCCESS(status)) {
+                    FltReleaseFileNameInformation(targetNameInfo);
+                    Data->IoStatus.Status = status;
+                    Data->IoStatus.Information = 0;
+                    return FLT_PREOP_COMPLETE;
+                }
             }
         }
 

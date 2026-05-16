@@ -331,7 +331,8 @@ typedef enum _DP_WEBSHELL_SEVERITY {
 typedef enum _DP_WEBSHELL_OPERATION {
     DpWebShellOperationCreate = 1,
     DpWebShellOperationWrite = 2,
-    DpWebShellOperationRename = 3
+    DpWebShellOperationRename = 3,
+    DpWebShellOperationCleanup = 4
 } DP_WEBSHELL_OPERATION;
 
 typedef struct _DP_WEBSHELL_RULE_MESSAGE {

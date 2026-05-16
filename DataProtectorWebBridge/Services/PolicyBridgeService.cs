@@ -32,6 +32,7 @@ namespace DataProtectorWebBridge.Services
         private const uint WebShellOperationCreate = 1;
         private const uint WebShellOperationWrite = 2;
         private const uint WebShellOperationRename = 3;
+        private const uint WebShellOperationCleanup = 4;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -939,6 +940,7 @@ namespace DataProtectorWebBridge.Services
         {
             if (operation == WebShellOperationCreate) return "create";
             if (operation == WebShellOperationRename) return "rename";
+            if (operation == WebShellOperationCleanup) return "cleanup";
             return "write";
         }
 
