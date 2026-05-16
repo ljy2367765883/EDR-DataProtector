@@ -17,6 +17,7 @@ Abstract:
 typedef struct _DP_WEBSHELL_RULE_ENTRY {
     LIST_ENTRY Link;
     UNICODE_STRING Directory;
+    UNICODE_STRING TailDirectory;
 } DP_WEBSHELL_RULE_ENTRY, *PDP_WEBSHELL_RULE_ENTRY;
 
 typedef struct _DP_WEBSHELL_EVENT_ENTRY {
@@ -33,6 +34,13 @@ static ULONG gDpWebShellRuleCount = 0;
 static ULONG gDpWebShellEventCount = 0;
 static ULONGLONG gDpWebShellEventSequence = 0;
 static ULONGLONG gDpWebShellDroppedEvents = 0;
+
+#if DP_ENABLE_WEBSHELL_OPERATION_TRACE
+#define DP_WEBSHELL_TRACE(_format, ...) \
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "DataProtector[WebShell] " _format, __VA_ARGS__)
+#else
+#define DP_WEBSHELL_TRACE(_format, ...) ((void)0)
+#endif
 
 static
 VOID
@@ -107,6 +115,63 @@ DpWebShellDuplicateDirectory(
 }
 
 static
+NTSTATUS
+DpWebShellBuildTailDirectory(
+    _In_ PCUNICODE_STRING Source,
+    _Out_ PUNICODE_STRING Tail
+    )
+{
+    USHORT index;
+    USHORT characters;
+    USHORT lastSlash = 0;
+    USHORT separatorCount = 0;
+    USHORT tailStart = 0;
+    UNICODE_STRING candidate;
+
+    Tail->Buffer = NULL;
+    Tail->Length = 0;
+    Tail->MaximumLength = 0;
+
+    if (Source == NULL || Source->Buffer == NULL || Source->Length == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    characters = Source->Length / sizeof(WCHAR);
+    for (index = 0; index < characters; index++) {
+        if (Source->Buffer[index] == L'\\' || Source->Buffer[index] == L'/') {
+            lastSlash = index;
+
+            if (Source->Buffer[0] == L'\\' || Source->Buffer[0] == L'/') {
+                separatorCount++;
+                if (separatorCount == 3) {
+                    tailStart = index;
+                    break;
+                }
+            } else if (index > 0 && Source->Buffer[index - 1] == L':') {
+                tailStart = index;
+                break;
+            }
+        }
+    }
+
+    if (tailStart == 0) {
+        tailStart = lastSlash;
+    }
+
+    if (tailStart == 0 ||
+        (tailStart + 1) * sizeof(WCHAR) >= Source->Length) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    candidate.Buffer = Source->Buffer + tailStart;
+    candidate.Length = Source->Length - (tailStart * sizeof(WCHAR));
+    candidate.MaximumLength = candidate.Length;
+
+    return DpWebShellDuplicateDirectory(&candidate, Tail);
+}
+
+static
 BOOLEAN
 DpWebShellDirectoryMatches(
     _In_ PCUNICODE_STRING Directory,
@@ -133,6 +198,59 @@ DpWebShellDirectoryMatches(
 
     return Path->Buffer[Directory->Length / sizeof(WCHAR)] == L'\\' ||
            Path->Buffer[Directory->Length / sizeof(WCHAR)] == L'/';
+}
+
+static
+BOOLEAN
+DpWebShellTailDirectoryMatches(
+    _In_ PCUNICODE_STRING TailDirectory,
+    _In_ PCUNICODE_STRING Path
+    )
+{
+    USHORT pathChars;
+    USHORT tailChars;
+    USHORT index;
+
+    if (TailDirectory == NULL ||
+        Path == NULL ||
+        TailDirectory->Buffer == NULL ||
+        Path->Buffer == NULL ||
+        TailDirectory->Length == 0 ||
+        Path->Length < TailDirectory->Length) {
+
+        return FALSE;
+    }
+
+    pathChars = Path->Length / sizeof(WCHAR);
+    tailChars = TailDirectory->Length / sizeof(WCHAR);
+    if (tailChars == 0) {
+        return FALSE;
+    }
+
+    for (index = 0; index + tailChars <= pathChars; index++) {
+        UNICODE_STRING slice;
+
+        if (Path->Buffer[index] != L'\\' && Path->Buffer[index] != L'/') {
+            continue;
+        }
+
+        slice.Buffer = Path->Buffer + index;
+        slice.Length = TailDirectory->Length;
+        slice.MaximumLength = slice.Length;
+
+        if (!RtlEqualUnicodeString(&slice, TailDirectory, TRUE)) {
+            continue;
+        }
+
+        if (index + tailChars == pathChars ||
+            Path->Buffer[index + tailChars] == L'\\' ||
+            Path->Buffer[index + tailChars] == L'/') {
+
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 static
@@ -165,6 +283,7 @@ DpWebShellFreeRule(
     }
 
     DpWebShellFreeUnicodeString(&Rule->Directory);
+    DpWebShellFreeUnicodeString(&Rule->TailDirectory);
     ExFreePoolWithTag(Rule, DP_TAG_WEBSHELL_RULE);
 }
 
@@ -531,6 +650,12 @@ DpWebShellClassifyAndReport(
     if (!DpWebShellIsProtectedPath(Path) ||
         !DpWebShellIsScriptPath(Path, &extension)) {
 
+        DP_WEBSHELL_TRACE("classify bypass pid=%p op=%lu size=%lu sample=%lu path=%wZ\n",
+                          ProcessId,
+                          (ULONG)Operation,
+                          FileSize,
+                          SampleLength,
+                          Path);
         return STATUS_SUCCESS;
     }
 
@@ -554,6 +679,14 @@ DpWebShellClassifyAndReport(
                          min(SampleLength, (ULONG)DP_WEBSHELL_MAX_SAMPLE_BYTES),
                          severity,
                          Operation);
+
+    DP_WEBSHELL_TRACE("event queued pid=%p op=%lu severity=%lu size=%lu sample=%lu path=%wZ\n",
+                      ProcessId,
+                      (ULONG)Operation,
+                      (ULONG)severity,
+                      FileSize,
+                      SampleLength,
+                      Path);
 
     if (severity == DpWebShellSeverityDanger) {
         return STATUS_ACCESS_DENIED;
@@ -631,7 +764,14 @@ DpWebShellIsProtectedPath(
     for (link = gDpWebShellRules.Flink; link != &gDpWebShellRules; link = link->Flink) {
         PDP_WEBSHELL_RULE_ENTRY rule = CONTAINING_RECORD(link, DP_WEBSHELL_RULE_ENTRY, Link);
 
-        if (DpWebShellDirectoryMatches(&rule->Directory, Name)) {
+        if (DpWebShellDirectoryMatches(&rule->Directory, Name) ||
+            DpWebShellTailDirectoryMatches(&rule->TailDirectory, Name)) {
+
+            DP_WEBSHELL_TRACE("protected path matched pid=%p path=%wZ rule=%wZ tail=%wZ\n",
+                              PsGetCurrentProcessId(),
+                              Name,
+                              &rule->Directory,
+                              &rule->TailDirectory);
             protectedPath = TRUE;
             break;
         }
@@ -784,6 +924,24 @@ DpWebShellInspectFileByName(
     _In_ DP_WEBSHELL_OPERATION Operation
     )
 {
+    return DpWebShellInspectFileBySourceName(Instance,
+                                            Name,
+                                            Name,
+                                            ProcessId,
+                                            Operation,
+                                            NULL);
+}
+
+NTSTATUS
+DpWebShellInspectFileBySourceName(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING SourceName,
+    _In_ PCUNICODE_STRING ReportName,
+    _In_ HANDLE ProcessId,
+    _In_ DP_WEBSHELL_OPERATION Operation,
+    _Out_opt_ PBOOLEAN Inspected
+    )
+{
     NTSTATUS status;
     OBJECT_ATTRIBUTES objectAttributes;
     IO_STATUS_BLOCK ioStatus;
@@ -795,18 +953,24 @@ DpWebShellInspectFileByName(
     LARGE_INTEGER byteOffset;
     ULONG fileSize;
 
+    if (Inspected != NULL) {
+        *Inspected = FALSE;
+    }
+
     if (!gDpWebShellInitialized ||
         Instance == NULL ||
-        Name == NULL ||
-        Name->Buffer == NULL ||
-        !DpWebShellIsProtectedPath(Name) ||
-        !DpWebShellIsScriptPath(Name, NULL)) {
+        SourceName == NULL ||
+        SourceName->Buffer == NULL ||
+        ReportName == NULL ||
+        ReportName->Buffer == NULL ||
+        !DpWebShellIsProtectedPath(ReportName) ||
+        !DpWebShellIsScriptPath(ReportName, NULL)) {
 
         return STATUS_SUCCESS;
     }
 
     InitializeObjectAttributes(&objectAttributes,
-                               (PUNICODE_STRING)Name,
+                               (PUNICODE_STRING)SourceName,
                                OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
                                NULL,
                                NULL);
@@ -825,7 +989,7 @@ DpWebShellInspectFileByName(
                               FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
                               NULL,
                               0,
-                              0,
+                              IO_IGNORE_SHARE_ACCESS_CHECK,
                               NULL);
 
     if (!NT_SUCCESS(status)) {
@@ -851,25 +1015,36 @@ DpWebShellInspectFileByName(
     RtlZeroMemory(sample, sizeof(sample));
     byteOffset.QuadPart = 0;
     if (fileSize != 0) {
-        (VOID)FltReadFile(Instance,
-                          fileObject,
-                          &byteOffset,
-                          min(fileSize, (ULONG)sizeof(sample)),
-                          sample,
-                          0,
-                          &bytesRead,
-                          NULL,
-                          NULL);
+        status = FltReadFile(Instance,
+                             fileObject,
+                             &byteOffset,
+                             min(fileSize, (ULONG)sizeof(sample)),
+                             sample,
+                             0,
+                             &bytesRead,
+                             NULL,
+                             NULL);
+        if (!NT_SUCCESS(status)) {
+            goto Exit;
+        }
     }
 
     status = DpWebShellClassifyAndReport(ProcessId,
-                                         Name,
+                                         ReportName,
                                          fileSize,
                                          sample,
                                          bytesRead,
                                          Operation);
 
+    if (Inspected != NULL) {
+        *Inspected = TRUE;
+    }
+
 Exit:
+    if (fileObject != NULL) {
+        ObDereferenceObject(fileObject);
+    }
+
     if (fileHandle != NULL) {
         FltClose(fileHandle);
     }
@@ -950,6 +1125,12 @@ DpWebShellAddRule(
         return status;
     }
 
+    status = DpWebShellBuildTailDirectory(&entry->Directory, &entry->TailDirectory);
+    if (!NT_SUCCESS(status)) {
+        RtlZeroMemory(&entry->TailDirectory, sizeof(entry->TailDirectory));
+        status = STATUS_SUCCESS;
+    }
+
     FltAcquirePushLockExclusive(&gDpWebShellRuleLock);
 
     if (gDpWebShellRuleCount >= DP_WEBSHELL_MAX_RULES) {
@@ -959,6 +1140,10 @@ DpWebShellAddRule(
     } else {
         InsertTailList(&gDpWebShellRules, &entry->Link);
         gDpWebShellRuleCount++;
+        DP_WEBSHELL_TRACE("rule added directory=%wZ tail=%wZ count=%lu\n",
+                          &entry->Directory,
+                          &entry->TailDirectory,
+                          gDpWebShellRuleCount);
         entry = NULL;
         status = STATUS_SUCCESS;
     }

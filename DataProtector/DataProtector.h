@@ -70,6 +70,12 @@ Abstract:
 #define DP_ENABLE_PPTX_OPERATION_TRACE 1
 
 //
+// Targeted WebShell investigation switch. Keep enabled while hardening the
+// WebShell minifilter path; set to 0 for quiet production packages.
+//
+#define DP_ENABLE_WEBSHELL_OPERATION_TRACE 0
+
+//
 // Cached transparent encryption keeps plaintext in the system file cache.
 // Manual unload is therefore unsafe unless a separate safe-stop path flushes
 // and purges protected streams first.
@@ -672,6 +678,16 @@ DpWebShellInspectFileByName(
     _In_ PCUNICODE_STRING Name,
     _In_ HANDLE ProcessId,
     _In_ DP_WEBSHELL_OPERATION Operation
+    );
+
+NTSTATUS
+DpWebShellInspectFileBySourceName(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING SourceName,
+    _In_ PCUNICODE_STRING ReportName,
+    _In_ HANDLE ProcessId,
+    _In_ DP_WEBSHELL_OPERATION Operation,
+    _Out_opt_ PBOOLEAN Inspected
     );
 
 NTSTATUS

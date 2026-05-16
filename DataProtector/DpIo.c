@@ -73,6 +73,7 @@ DpGetSystemBufferAddress(
 typedef struct _DP_RENAME_CONTEXT {
     BOOLEAN EncryptAfterRename;
     BOOLEAN InspectWebShellAfterRename;
+    BOOLEAN WebShellAlreadyInspected;
     PFLT_FILE_NAME_INFORMATION TargetNameInfo;
 } DP_RENAME_CONTEXT, *PDP_RENAME_CONTEXT;
 
@@ -865,6 +866,85 @@ DpArmWebShellWriteInspectionIfTargeted(
 }
 
 static
+BOOLEAN
+DpInspectWebShellWriteByCurrentName(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ ULONG Length,
+    _Out_ PNTSTATUS InspectionStatus
+    )
+{
+    NTSTATUS status;
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+    PFLT_IO_PARAMETER_BLOCK iopb;
+    PVOID source;
+
+    *InspectionStatus = STATUS_SUCCESS;
+
+    if (Data == NULL ||
+        FltObjects == NULL ||
+        FltObjects->FileObject == NULL ||
+        Length == 0 ||
+        DpHandleWebShellInspectionCompleted(FltObjects)) {
+
+        return FALSE;
+    }
+
+    status = FltGetFileNameInformation(Data,
+                                       FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                       &nameInfo);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    if (!DpWebShellIsProtectedPath(&nameInfo->Name) ||
+        !DpWebShellIsScriptPath(&nameInfo->Name, NULL)) {
+
+        FltReleaseFileNameInformation(nameInfo);
+        return FALSE;
+    }
+
+    (VOID)DpEnsureWebShellHandleContext(FltObjects, TRUE);
+
+    iopb = Data->Iopb;
+    source = DpGetSystemBufferAddress(Data,
+                                      iopb->Parameters.Write.MdlAddress,
+                                      iopb->Parameters.Write.WriteBuffer);
+
+    if (source == NULL &&
+        iopb->Parameters.Write.MdlAddress == NULL &&
+        Data->RequestorMode != KernelMode) {
+
+        status = FltLockUserBuffer(Data);
+        if (NT_SUCCESS(status)) {
+            source = DpGetSystemBufferAddress(Data,
+                                              iopb->Parameters.Write.MdlAddress,
+                                              iopb->Parameters.Write.WriteBuffer);
+        }
+    }
+
+    if (source == NULL) {
+        FltReleaseFileNameInformation(nameInfo);
+        return FALSE;
+    }
+
+    status = DpWebShellInspectWriteByName(&nameInfo->Name,
+                                          FltGetRequestorProcessIdEx(Data),
+                                          source,
+                                          Length,
+                                          DpWebShellOperationWrite);
+    if (!NT_SUCCESS(status)) {
+        DpMarkHandleWebShellReported(FltObjects);
+    }
+
+    *InspectionStatus = status;
+
+    FltReleaseFileNameInformation(nameInfo);
+
+    return TRUE;
+}
+
+static
 NTSTATUS
 DpInspectWebShellOnCleanup(
     _In_ PFLT_CALLBACK_DATA Data,
@@ -941,6 +1021,59 @@ DpInspectWebShellOnCleanup(
 
 static
 NTSTATUS
+DpInspectWebShellRenameSource(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ PCUNICODE_STRING TargetName
+    )
+{
+    NTSTATUS status;
+    NTSTATUS sourceStatus;
+    PFLT_FILE_NAME_INFORMATION sourceNameInfo = NULL;
+    BOOLEAN sourceInspected = FALSE;
+
+    if (Data == NULL ||
+        FltObjects == NULL ||
+        FltObjects->FileObject == NULL ||
+        TargetName == NULL ||
+        TargetName->Buffer == NULL ||
+        !DpWebShellIsProtectedPath(TargetName) ||
+        !DpWebShellIsScriptPath(TargetName, NULL)) {
+
+        return STATUS_SUCCESS;
+    }
+
+    sourceStatus = FltGetFileNameInformation(Data,
+                                             FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                             &sourceNameInfo);
+    if (NT_SUCCESS(sourceStatus) && sourceNameInfo != NULL) {
+        sourceStatus = DpWebShellInspectFileBySourceName(FltObjects->Instance,
+                                                         &sourceNameInfo->Name,
+                                                         TargetName,
+                                                         FltGetRequestorProcessIdEx(Data),
+                                                         DpWebShellOperationRename,
+                                                         &sourceInspected);
+        FltReleaseFileNameInformation(sourceNameInfo);
+        if (!NT_SUCCESS(sourceStatus)) {
+            return sourceStatus;
+        }
+    }
+
+    if (sourceInspected) {
+        return sourceStatus;
+    }
+
+    status = DpWebShellInspectFileObject(FltObjects->Instance,
+                                         FltObjects->FileObject,
+                                         TargetName,
+                                         FltGetRequestorProcessIdEx(Data),
+                                         DpWebShellOperationRename);
+
+    return status;
+}
+
+static
+NTSTATUS
 DpTruncateWebShellFileByName(
     _In_ PFLT_INSTANCE Instance,
     _In_ PCUNICODE_STRING Name
@@ -984,6 +1117,10 @@ DpTruncateWebShellFileByName(
     }
 
     status = DpShadowTruncateFileObject(Instance, fileObject);
+
+    if (fileObject != NULL) {
+        ObDereferenceObject(fileObject);
+    }
 
     if (fileHandle != NULL) {
         FltClose(fileHandle);
@@ -1394,6 +1531,7 @@ DpPostSetInformationWhenSafe(
         FltObjects->FileObject != NULL) {
 
         if (renameContext->InspectWebShellAfterRename &&
+            !renameContext->WebShellAlreadyInspected &&
             DpRenameTargetRemainsWebShellProtected(Data, renameContext, &webShellNameInfo)) {
 
             status = DpWebShellInspectFileByName(FltObjects->Instance,
@@ -1999,6 +2137,7 @@ DpPreWrite(
     BOOLEAN isTrusted = FALSE;
     BOOLEAN plaintextCacheEnabled;
     NTSTATUS status;
+    NTSTATUS webShellStatus;
     ULONG length;
     LARGE_INTEGER logicalSize;
     PVOID source;
@@ -2019,6 +2158,17 @@ DpPreWrite(
     }
 
     (VOID)DpArmWebShellWriteInspectionIfTargeted(Data, FltObjects);
+
+    if (DpInspectWebShellWriteByCurrentName(Data,
+                                            FltObjects,
+                                            length,
+                                            &webShellStatus) &&
+        !NT_SUCCESS(webShellStatus)) {
+
+        Data->IoStatus.Status = webShellStatus;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
 
     status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
     if (!NT_SUCCESS(status)) {
@@ -2446,6 +2596,16 @@ DpPreSetInformation(
         if (DpWebShellIsProtectedPath(&targetNameInfo->Name) &&
             DpWebShellIsScriptPath(&targetNameInfo->Name, NULL)) {
 
+            status = DpInspectWebShellRenameSource(Data,
+                                                   FltObjects,
+                                                   &targetNameInfo->Name);
+            if (!NT_SUCCESS(status)) {
+                FltReleaseFileNameInformation(targetNameInfo);
+                Data->IoStatus.Status = status;
+                Data->IoStatus.Information = 0;
+                return FLT_PREOP_COMPLETE;
+            }
+
             if (renameContext == NULL) {
                 renameContext = ExAllocatePoolWithTag(NonPagedPoolNx,
                                                       sizeof(DP_RENAME_CONTEXT),
@@ -2460,18 +2620,7 @@ DpPreSetInformation(
 
             if (renameContext != NULL) {
                 renameContext->InspectWebShellAfterRename = TRUE;
-            } else {
-                status = DpWebShellInspectFileObject(FltObjects->Instance,
-                                                     FltObjects->FileObject,
-                                                     &targetNameInfo->Name,
-                                                     FltGetRequestorProcessIdEx(Data),
-                                                     DpWebShellOperationRename);
-                if (!NT_SUCCESS(status)) {
-                    FltReleaseFileNameInformation(targetNameInfo);
-                    Data->IoStatus.Status = status;
-                    Data->IoStatus.Information = 0;
-                    return FLT_PREOP_COMPLETE;
-                }
+                renameContext->WebShellAlreadyInspected = TRUE;
             }
         }
 
