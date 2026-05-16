@@ -72,6 +72,7 @@ DpGetSystemBufferAddress(
 
 typedef struct _DP_RENAME_CONTEXT {
     BOOLEAN EncryptAfterRename;
+    BOOLEAN InspectWebShellAfterRename;
     PFLT_FILE_NAME_INFORMATION TargetNameInfo;
 } DP_RENAME_CONTEXT, *PDP_RENAME_CONTEXT;
 
@@ -697,6 +698,89 @@ DpMarkHandleEncryptOnCleanup(
 
 static
 NTSTATUS
+DpEnsureWebShellHandleContext(
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ BOOLEAN NewlyCreated
+    )
+{
+    NTSTATUS status;
+    PDP_HANDLE_CONTEXT handleContext = NULL;
+    PFLT_CONTEXT oldContext = NULL;
+
+    status = DpGetHandleContext(FltObjects, &handleContext);
+    if (status == STATUS_NOT_FOUND) {
+        status = FltAllocateContext(gDataProtectorFilter,
+                                    FLT_STREAMHANDLE_CONTEXT,
+                                    sizeof(DP_HANDLE_CONTEXT),
+                                    NonPagedPoolNx,
+                                    &handleContext);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+
+        RtlZeroMemory(handleContext, sizeof(DP_HANDLE_CONTEXT));
+        status = FltSetStreamHandleContext(FltObjects->Instance,
+                                           FltObjects->FileObject,
+                                           FLT_SET_CONTEXT_REPLACE_IF_EXISTS,
+                                           handleContext,
+                                           &oldContext);
+
+        if (oldContext != NULL) {
+            FltReleaseContext(oldContext);
+        }
+
+        if (!NT_SUCCESS(status)) {
+            FltReleaseContext(handleContext);
+            return status == STATUS_FLT_CONTEXT_ALREADY_DEFINED ? STATUS_SUCCESS : status;
+        }
+    } else if (!NT_SUCCESS(status) || handleContext == NULL) {
+        return status;
+    }
+
+    handleContext->WebShellNewFile = NewlyCreated;
+    handleContext->WebShellReported = FALSE;
+    DpReleaseHandleContext(handleContext);
+
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+DpMarkHandleWebShellReported(
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    )
+{
+    NTSTATUS status;
+    PDP_HANDLE_CONTEXT handleContext = NULL;
+
+    status = DpGetHandleContext(FltObjects, &handleContext);
+    if (NT_SUCCESS(status) && handleContext != NULL) {
+        handleContext->WebShellReported = TRUE;
+        DpReleaseHandleContext(handleContext);
+    }
+}
+
+static
+BOOLEAN
+DpHandleNeedsWebShellInspection(
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    )
+{
+    NTSTATUS status;
+    PDP_HANDLE_CONTEXT handleContext = NULL;
+    BOOLEAN inspect = FALSE;
+
+    status = DpGetHandleContext(FltObjects, &handleContext);
+    if (NT_SUCCESS(status) && handleContext != NULL) {
+        inspect = handleContext->WebShellNewFile && !handleContext->WebShellReported;
+        DpReleaseHandleContext(handleContext);
+    }
+
+    return inspect;
+}
+
+static
+NTSTATUS
 DpArmTrustedPathEncryptOnCleanup(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
@@ -1259,6 +1343,14 @@ DpPostCreate(
                                         Data->IoStatus.Information == FILE_SUPERSEDED ||
                                         DpCreateDispositionWillReplaceFile(createDisposition);
 
+                    if (createdOrReplaced &&
+                        DpWebShellIsProtectedPath(&nameInfo->Name) &&
+                        DpWebShellIsScriptPath(&nameInfo->Name, NULL)) {
+
+                        handleContext->WebShellNewFile = TRUE;
+                        handleContext->WebShellReported = FALSE;
+                    }
+
                     if (!markerPresent &&
                         createdOrReplaced &&
                         handleContext->IsTrusted) {
@@ -1289,6 +1381,21 @@ DpPostCreate(
                 }
 
                 FltReleaseContext(handleContext);
+            }
+        }
+
+        if (!pathProtected && nameInfo != NULL) {
+            createDisposition = Data->Iopb->Parameters.Create.Options >> 24;
+            createdOrReplaced = Data->IoStatus.Information == FILE_CREATED ||
+                                Data->IoStatus.Information == FILE_OVERWRITTEN ||
+                                Data->IoStatus.Information == FILE_SUPERSEDED ||
+                                DpCreateDispositionWillReplaceFile(createDisposition);
+
+            if (createdOrReplaced &&
+                DpWebShellIsProtectedPath(&nameInfo->Name) &&
+                DpWebShellIsScriptPath(&nameInfo->Name, NULL)) {
+
+                (VOID)DpEnsureWebShellHandleContext(FltObjects, TRUE);
             }
         }
 
@@ -1638,6 +1745,39 @@ DpPreWrite(
     (VOID)DpShadowMarkHandleDirty(FltObjects);
 
     if (!isProtected) {
+        if (DpHandleNeedsWebShellInspection(FltObjects)) {
+            source = DpGetSystemBufferAddress(Data,
+                                              iopb->Parameters.Write.MdlAddress,
+                                              iopb->Parameters.Write.WriteBuffer);
+
+            if (source == NULL &&
+                iopb->Parameters.Write.MdlAddress == NULL &&
+                Data->RequestorMode != KernelMode) {
+
+                status = FltLockUserBuffer(Data);
+                if (NT_SUCCESS(status)) {
+                    source = DpGetSystemBufferAddress(Data,
+                                                      iopb->Parameters.Write.MdlAddress,
+                                                      iopb->Parameters.Write.WriteBuffer);
+                }
+            }
+
+            if (source != NULL) {
+                status = DpWebShellInspectWrite(Data,
+                                                FltObjects,
+                                                source,
+                                                length,
+                                                TRUE);
+                DpMarkHandleWebShellReported(FltObjects);
+
+                if (!NT_SUCCESS(status)) {
+                    Data->IoStatus.Status = status;
+                    Data->IoStatus.Information = 0;
+                    return FLT_PREOP_COMPLETE;
+                }
+            }
+        }
+
         status = DpArmTrustedPathEncryptOnCleanup(Data,
                                                   FltObjects,
                                                   "PreWriteArmPath",
@@ -1652,6 +1792,53 @@ DpPreWrite(
                            length,
                            DpIsPagingIo(Data));
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    if (DpHandleNeedsWebShellInspection(FltObjects)) {
+        PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+
+        source = DpGetSystemBufferAddress(Data,
+                                          iopb->Parameters.Write.MdlAddress,
+                                          iopb->Parameters.Write.WriteBuffer);
+
+        if (source == NULL &&
+            iopb->Parameters.Write.MdlAddress == NULL &&
+            Data->RequestorMode != KernelMode) {
+
+            status = FltLockUserBuffer(Data);
+            if (NT_SUCCESS(status)) {
+                source = DpGetSystemBufferAddress(Data,
+                                                  iopb->Parameters.Write.MdlAddress,
+                                                  iopb->Parameters.Write.WriteBuffer);
+            }
+        }
+
+        if (source != NULL) {
+            status = FltGetFileNameInformation(Data,
+                                               FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                               &nameInfo);
+            if (NT_SUCCESS(status)) {
+                status = DpWebShellInspectWriteByName(&nameInfo->Name,
+                                                      FltGetRequestorProcessIdEx(Data),
+                                                      source,
+                                                      length,
+                                                      DpWebShellOperationWrite);
+                FltReleaseFileNameInformation(nameInfo);
+            } else {
+                status = STATUS_SUCCESS;
+            }
+
+            DpMarkHandleWebShellReported(FltObjects);
+
+            if (!NT_SUCCESS(status)) {
+                if (handleContext != NULL) {
+                    DpReleaseHandleContext(handleContext);
+                }
+                Data->IoStatus.Status = status;
+                Data->IoStatus.Information = 0;
+                return FLT_PREOP_COMPLETE;
+            }
+        }
     }
 
 #if DP_ENABLE_UNSAFE_PLAINTEXT_CACHE_FOR_MAPPED_IO
@@ -1944,6 +2131,18 @@ DpPreSetInformation(
                            isTrusted,
                            informationClass,
                            0);
+
+        status = DpWebShellInspectFileObject(FltObjects->Instance,
+                                             FltObjects->FileObject,
+                                             &targetNameInfo->Name,
+                                             FltGetRequestorProcessIdEx(Data),
+                                             DpWebShellOperationRename);
+        if (!NT_SUCCESS(status)) {
+            FltReleaseFileNameInformation(targetNameInfo);
+            Data->IoStatus.Status = status;
+            Data->IoStatus.Information = 0;
+            return FLT_PREOP_COMPLETE;
+        }
 
         if (DpPolicyNameIsProtected(&targetNameInfo->Name) &&
             !DpPolicyNameIsShadow(&targetNameInfo->Name)) {

@@ -38,6 +38,16 @@ extern "C" {
 #define DP_POLICY_API_NETWORK_DIRECTION_OUTBOUND 1u
 #define DP_POLICY_API_NETWORK_DIRECTION_BOTH     2u
 
+#define DP_POLICY_API_WEBSHELL_SEVERITY_NOTIFY   1u
+#define DP_POLICY_API_WEBSHELL_SEVERITY_WARNING  2u
+#define DP_POLICY_API_WEBSHELL_SEVERITY_DANGER   3u
+
+#define DP_POLICY_API_WEBSHELL_OPERATION_CREATE  1u
+#define DP_POLICY_API_WEBSHELL_OPERATION_WRITE   2u
+#define DP_POLICY_API_WEBSHELL_OPERATION_RENAME  3u
+
+#define DP_POLICY_API_WEBSHELL_SAMPLE_BYTES      100u
+
 typedef struct _DP_POLICY_API_RULE {
     DWORD RuleType;
     LPCWSTR Value;
@@ -69,6 +79,22 @@ typedef struct _DP_POLICY_API_SMTP_EVENT {
     LPCWSTR From;
     LPCWSTR To;
 } DP_POLICY_API_SMTP_EVENT, *PDP_POLICY_API_SMTP_EVENT;
+
+typedef struct _DP_POLICY_API_WEBSHELL_RULE {
+    LPCWSTR Directory;
+} DP_POLICY_API_WEBSHELL_RULE, *PDP_POLICY_API_WEBSHELL_RULE;
+
+typedef struct _DP_POLICY_API_WEBSHELL_EVENT {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    DWORD Severity;
+    DWORD Operation;
+    DWORD FileSize;
+    DWORD SampleLength;
+    LPCWSTR Path;
+    LPCWSTR Extension;
+    BYTE Sample[DP_POLICY_API_WEBSHELL_SAMPLE_BYTES];
+} DP_POLICY_API_WEBSHELL_EVENT, *PDP_POLICY_API_WEBSHELL_EVENT;
 
 DP_POLICY_API
 DWORD
@@ -198,6 +224,44 @@ DP_POLICY_API
 DWORD
 DpPolicyQuerySmtpEvents(
     _Out_writes_opt_(eventCapacity) DP_POLICY_API_SMTP_EVENT *events,
+    _In_ DWORD eventCapacity,
+    _Out_opt_ DWORD *eventCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyAddWebShellRule(
+    _In_z_ LPCWSTR directoryPath
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyRemoveWebShellRule(
+    _In_z_ LPCWSTR directoryPath
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyClearWebShellRules(void);
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryWebShellRules(
+    _Out_writes_opt_(ruleCapacity) DP_POLICY_API_WEBSHELL_RULE *rules,
+    _In_ DWORD ruleCapacity,
+    _Out_opt_ DWORD *ruleCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryWebShellEvents(
+    _Out_writes_opt_(eventCapacity) DP_POLICY_API_WEBSHELL_EVENT *events,
     _In_ DWORD eventCapacity,
     _Out_opt_ DWORD *eventCount,
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,

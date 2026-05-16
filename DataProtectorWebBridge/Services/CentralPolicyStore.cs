@@ -76,6 +76,17 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public PolicyBridgeService.WebShellRuleDto[] QueryWebShellRules()
+        {
+            lock (syncRoot)
+            {
+                return state.WebShellRules
+                    .Select(CloneWebShellRule)
+                    .OrderBy(rule => rule.directory, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+        }
+
         public PolicyBridgeService.OperationResult AddRule(PolicyBridgeService.PolicyRuleRequest request)
         {
             PolicyBridgeService.PolicyRuleRequest normalized = NormalizeRequest(request);
@@ -194,6 +205,59 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("All central network rules cleared.");
+        }
+
+        public PolicyBridgeService.OperationResult AddWebShellRule(PolicyBridgeService.WebShellRuleRequest request)
+        {
+            PolicyBridgeService.WebShellRuleDto normalized = NormalizeWebShellRequest(request);
+            lock (syncRoot)
+            {
+                if (!state.WebShellRules.Any(rule => SameWebShellRule(rule, normalized)))
+                {
+                    state.WebShellRules.Add(normalized);
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(normalized.actor, "central.policy.webshell.add", normalized.directory, "web-script", true, "0x00000000", "WebShell protected directory stored on central server.");
+                Save();
+            }
+
+            return Success("WebShell protected directory stored on central server.");
+        }
+
+        public PolicyBridgeService.OperationResult RemoveWebShellRule(PolicyBridgeService.WebShellRuleRequest request)
+        {
+            PolicyBridgeService.WebShellRuleDto normalized = NormalizeWebShellRequest(request);
+            lock (syncRoot)
+            {
+                int removed = state.WebShellRules.RemoveAll(rule => SameWebShellRule(rule, normalized));
+                if (removed > 0)
+                {
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(normalized.actor, "central.policy.webshell.remove", normalized.directory, "web-script", true, "0x00000000", "WebShell protected directory removed from central server.");
+                Save();
+            }
+
+            return Success("WebShell protected directory removed from central server.");
+        }
+
+        public PolicyBridgeService.OperationResult ClearWebShellRules(string actor)
+        {
+            lock (syncRoot)
+            {
+                if (state.WebShellRules.Count > 0)
+                {
+                    state.WebShellRules.Clear();
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(actor, "central.policy.webshell.clear", "*", "web-script", true, "0x00000000", "All central WebShell rules cleared.");
+                Save();
+            }
+
+            return Success("All central WebShell rules cleared.");
         }
 
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
@@ -354,6 +418,7 @@ namespace DataProtectorWebBridge.Services
                     policyVersion = state.PolicyVersion,
                     rules = QueryRules(),
                     networkRules = QueryNetworkRules(),
+                    webShellRules = QueryWebShellRules(),
                     tasks = assignedTasks
                 };
             }
@@ -375,6 +440,10 @@ namespace DataProtectorWebBridge.Services
                     if (loaded != null && loaded.NetworkRules == null)
                     {
                         loaded.NetworkRules = new List<PolicyBridgeService.NetworkRuleDto>();
+                    }
+                    if (loaded != null && loaded.WebShellRules == null)
+                    {
+                        loaded.WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
                     }
                     return loaded ?? new CentralState();
                 }
@@ -657,6 +726,26 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static PolicyBridgeService.WebShellRuleDto NormalizeWebShellRequest(PolicyBridgeService.WebShellRuleRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "WebShell rule request body is required.");
+            }
+
+            string directory = (request.directory ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Protected web directory is required.");
+            }
+
+            return new PolicyBridgeService.WebShellRuleDto
+            {
+                directory = directory,
+                actor = request.actor
+            };
+        }
+
         private static uint GenerateRuleId(
             string kind,
             string action,
@@ -719,6 +808,20 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static PolicyBridgeService.WebShellRuleDto CloneWebShellRule(PolicyBridgeService.WebShellRuleDto rule)
+        {
+            return new PolicyBridgeService.WebShellRuleDto
+            {
+                directory = rule.directory,
+                actor = rule.actor
+            };
+        }
+
+        private static bool SameWebShellRule(PolicyBridgeService.WebShellRuleDto rule, PolicyBridgeService.WebShellRuleDto request)
+        {
+            return string.Equals(rule.directory, request.directory, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static RemoteTaskDto CloneTask(RemoteTaskState task)
         {
             return new RemoteTaskDto
@@ -777,6 +880,7 @@ namespace DataProtectorWebBridge.Services
                 PolicyVersion = 1;
                 Rules = new List<PolicyBridgeService.PolicyRuleDto>();
                 NetworkRules = new List<PolicyBridgeService.NetworkRuleDto>();
+                WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 Audit = new List<AuditLog.AuditRecord>();
                 Tasks = new List<RemoteTaskState>();
@@ -785,6 +889,7 @@ namespace DataProtectorWebBridge.Services
             public long PolicyVersion { get; set; }
             public List<PolicyBridgeService.PolicyRuleDto> Rules { get; set; }
             public List<PolicyBridgeService.NetworkRuleDto> NetworkRules { get; set; }
+            public List<PolicyBridgeService.WebShellRuleDto> WebShellRules { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public List<AuditLog.AuditRecord> Audit { get; set; }
             public List<RemoteTaskState> Tasks { get; set; }
@@ -848,6 +953,7 @@ namespace DataProtectorWebBridge.Services
             public long policyVersion { get; set; }
             public PolicyBridgeService.PolicyRuleDto[] rules { get; set; }
             public PolicyBridgeService.NetworkRuleDto[] networkRules { get; set; }
+            public PolicyBridgeService.WebShellRuleDto[] webShellRules { get; set; }
             public RemoteTaskDto[] tasks { get; set; }
         }
 

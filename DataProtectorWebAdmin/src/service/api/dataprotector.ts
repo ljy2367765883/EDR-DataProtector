@@ -90,6 +90,36 @@ export function fetchClearNetworkRules() {
   });
 }
 
+export function fetchWebShellRules() {
+  return request<Api.DataProtector.WebShellRule[]>({
+    url: '/webshell/rules',
+    method: 'get'
+  });
+}
+
+export function fetchAddWebShellRule(data: Api.DataProtector.WebShellRuleRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/webshell/rules',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchRemoveWebShellRule(data: Api.DataProtector.WebShellRuleRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/webshell/rules',
+    method: 'delete',
+    data
+  });
+}
+
+export function fetchClearWebShellRules() {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/webshell/clear',
+    method: 'post'
+  });
+}
+
 export function fetchAuditEvents(limit = 200) {
   return request<Api.DataProtector.AuditRecord[]>({
     url: '/audit/events',

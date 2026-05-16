@@ -101,6 +101,7 @@ namespace DataProtectorWebBridge.Services
                 ApplyPolicy(
                     response.rules ?? new PolicyBridgeService.PolicyRuleDto[0],
                     response.networkRules ?? new PolicyBridgeService.NetworkRuleDto[0],
+                    response.webShellRules ?? new PolicyBridgeService.WebShellRuleDto[0],
                     response.policyVersion);
             }
 
@@ -152,11 +153,11 @@ namespace DataProtectorWebBridge.Services
         {
             try
             {
-                return policyService.DrainSmtpAuditRecords();
+                return policyService.DrainSecurityAuditRecords();
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine(DateTime.Now.ToString("s") + " SMTP audit drain failed: " + ex.Message);
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " security audit drain failed: " + ex.Message);
                 return new AuditLog.AuditRecord[0];
             }
         }
@@ -164,6 +165,7 @@ namespace DataProtectorWebBridge.Services
         private void ApplyPolicy(
             PolicyBridgeService.PolicyRuleDto[] rules,
             PolicyBridgeService.NetworkRuleDto[] networkRules,
+            PolicyBridgeService.WebShellRuleDto[] webShellRules,
             long policyVersion)
         {
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
@@ -180,6 +182,15 @@ namespace DataProtectorWebBridge.Services
             {
                 lastApplyStatus = clear.statusText;
                 lastApplyMessage = "Cannot clear local network policy before central apply: " + clear.message;
+                SaveState();
+                return;
+            }
+
+            clear = policyService.ClearWebShellRules("central-agent");
+            if (!clear.succeeded)
+            {
+                lastApplyStatus = clear.statusText;
+                lastApplyMessage = "Cannot clear local WebShell policy before central apply: " + clear.message;
                 SaveState();
                 return;
             }
@@ -229,9 +240,26 @@ namespace DataProtectorWebBridge.Services
                 }
             }
 
+            foreach (PolicyBridgeService.WebShellRuleDto rule in webShellRules)
+            {
+                PolicyBridgeService.OperationResult result = policyService.AddWebShellRule(new PolicyBridgeService.WebShellRuleRequest
+                {
+                    directory = rule.directory,
+                    actor = "central-agent"
+                });
+
+                if (!result.succeeded)
+                {
+                    lastApplyStatus = result.statusText;
+                    lastApplyMessage = "Cannot apply central WebShell rule " + rule.directory + ": " + result.message;
+                    SaveState();
+                    return;
+                }
+            }
+
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length;
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length;
             SaveState();
         }
 

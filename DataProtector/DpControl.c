@@ -103,6 +103,18 @@ DpControlMessageNotify(
                                           ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryWebShellRules) {
+        return DpWebShellQueryRules(OutputBuffer,
+                                    OutputBufferLength,
+                                    ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryWebShellEvents) {
+        return DpWebShellQueryEvents(OutputBuffer,
+                                     OutputBufferLength,
+                                     ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandAddNetworkRule) {
         PDP_NETWORK_RULE_MESSAGE rule;
 
@@ -130,6 +142,30 @@ DpControlMessageNotify(
 
     if (message->Command == DpPolicyCommandClearNetworkRules) {
         DpNetFilterClearRules();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandAddWebShellRule ||
+        message->Command == DpPolicyCommandRemoveWebShellRule) {
+
+        PDP_WEBSHELL_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_WEBSHELL_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_WEBSHELL_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_WEBSHELL_RULE_MESSAGE)message->Data;
+        if (message->Command == DpPolicyCommandAddWebShellRule) {
+            return DpWebShellAddRule(rule);
+        }
+
+        return DpWebShellRemoveRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandClearWebShellRules) {
+        DpWebShellClearRules();
         return STATUS_SUCCESS;
     }
 

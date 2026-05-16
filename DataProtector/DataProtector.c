@@ -216,6 +216,14 @@ DriverEntry(
         return status;
     }
 
+    status = DpWebShellInitialize();
+    if (!NT_SUCCESS(status)) {
+        DpCryptoUninitialize();
+        DpProcessPolicyUninitialize();
+        DpShadowUninitialize();
+        return status;
+    }
+
     status = FltRegisterFilter(DriverObject,
                                &FilterRegistration,
                                &gDataProtectorFilter);
@@ -248,6 +256,7 @@ DriverEntry(
     }
 
     if (!NT_SUCCESS(status)) {
+        DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
         DpShadowUninitialize();
@@ -268,6 +277,8 @@ DataProtectorUnload(
     DpNetFilterUninitialize();
 
     DpControlUninitialize();
+
+    DpWebShellUninitialize();
 
     if (gDataProtectorFilter != NULL) {
         FltUnregisterFilter(gDataProtectorFilter);

@@ -69,6 +69,33 @@ namespace DataProtectorWebBridge.Native
             out uint stringBufferCharsRequired);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyAddWebShellRule(string directoryPath);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyRemoveWebShellRule(string directoryPath);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyClearWebShellRules();
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryWebShellRules(
+            [Out] NativeWebShellRule[] rules,
+            uint ruleCapacity,
+            out uint ruleCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryWebShellEvents(
+            [Out] NativeWebShellEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyGetLastErrorMessage(StringBuilder buffer, uint bufferChars);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -107,6 +134,28 @@ namespace DataProtectorWebBridge.Native
             public ushort RemotePort;
             public IntPtr From;
             public IntPtr To;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeWebShellRule
+        {
+            public IntPtr Directory;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeWebShellEvent
+        {
+            public ulong Sequence;
+            public ulong ProcessId;
+            public uint Severity;
+            public uint Operation;
+            public uint FileSize;
+            public uint SampleLength;
+            public IntPtr Path;
+            public IntPtr Extension;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 100)]
+            public byte[] Sample;
         }
     }
 }

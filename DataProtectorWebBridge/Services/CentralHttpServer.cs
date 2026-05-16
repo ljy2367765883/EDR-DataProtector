@@ -145,6 +145,37 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/webshell/rules")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryWebShellRules());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/webshell/rules")
+                {
+                    PolicyBridgeService.WebShellRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.WebShellRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.AddWebShellRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/webshell/rules")
+                {
+                    PolicyBridgeService.WebShellRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.WebShellRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveWebShellRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/webshell/clear")
+                {
+                    PolicyBridgeService.OperationResult result = store.ClearWebShellRules(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     int limit = ParseLimit(context.Request.QueryString["limit"]);

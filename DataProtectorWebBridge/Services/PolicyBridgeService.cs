@@ -26,6 +26,12 @@ namespace DataProtectorWebBridge.Services
         private const uint NetworkDirectionInbound = 0;
         private const uint NetworkDirectionOutbound = 1;
         private const uint NetworkDirectionBoth = 2;
+        private const uint WebShellSeverityNotify = 1;
+        private const uint WebShellSeverityWarning = 2;
+        private const uint WebShellSeverityDanger = 3;
+        private const uint WebShellOperationCreate = 1;
+        private const uint WebShellOperationWrite = 2;
+        private const uint WebShellOperationRename = 3;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -289,6 +295,98 @@ namespace DataProtectorWebBridge.Services
             return result;
         }
 
+        public WebShellRuleDto[] QueryWebShellRules()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint ruleCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryWebShellRules(
+                    new DataProtectorPolicyNative.NativeWebShellRule[0],
+                    0,
+                    out ruleCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeWebShellRule[] nativeRules =
+                    new DataProtectorPolicyNative.NativeWebShellRule[checked((int)ruleCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryWebShellRules(
+                        nativeRules,
+                        (uint)nativeRules.Length,
+                        out ruleCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)ruleCount);
+                        List<WebShellRuleDto> rules = new List<WebShellRuleDto>();
+                        for (int index = 0; index < returned && index < nativeRules.Length; index++)
+                        {
+                            rules.Add(ConvertWebShellRule(nativeRules[index]));
+                        }
+
+                        return rules.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver WebShell rule set changed while querying. Please retry.");
+        }
+
+        public OperationResult AddWebShellRule(WebShellRuleRequest request)
+        {
+            WebShellRuleDto normalized = NormalizeWebShellRule(request);
+            OperationResult result = Invoke(() => DataProtectorPolicyNative.DpPolicyAddWebShellRule(normalized.directory));
+            auditLog.Append(normalized.actor, "policy.webshell.add", normalized.directory, "web-script", result.succeeded, result.status, result.message);
+            return result;
+        }
+
+        public OperationResult RemoveWebShellRule(WebShellRuleRequest request)
+        {
+            WebShellRuleDto normalized = NormalizeWebShellRule(request);
+            OperationResult result = Invoke(() => DataProtectorPolicyNative.DpPolicyRemoveWebShellRule(normalized.directory));
+            auditLog.Append(normalized.actor, "policy.webshell.remove", normalized.directory, "web-script", result.succeeded, result.status, result.message);
+            return result;
+        }
+
+        public OperationResult ClearWebShellRules(string actor)
+        {
+            OperationResult result = Invoke(DataProtectorPolicyNative.DpPolicyClearWebShellRules);
+            auditLog.Append(actor, "policy.webshell.clear", "*", "web-script", result.succeeded, result.status, result.message);
+            return result;
+        }
+
         public SmtpEventDto[] QuerySmtpEvents()
         {
             uint status = SuccessStatus;
@@ -358,6 +456,75 @@ namespace DataProtectorWebBridge.Services
             throw new BridgeException(BufferTooSmallStatus, "The driver SMTP event queue changed while querying. Please retry.");
         }
 
+        public WebShellEventDto[] QueryWebShellEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryWebShellEvents(
+                    new DataProtectorPolicyNative.NativeWebShellEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeWebShellEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeWebShellEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryWebShellEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<WebShellEventDto> events = new List<WebShellEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertWebShellEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver WebShell event queue changed while querying. Please retry.");
+        }
+
         public AuditLog.AuditRecord[] DrainSmtpAuditRecords()
         {
             SmtpEventDto[] events = QuerySmtpEvents();
@@ -387,6 +554,50 @@ namespace DataProtectorWebBridge.Services
                     Succeeded = true,
                     Status = "0x00000000",
                     Message = message
+                });
+            }
+
+            return records.ToArray();
+        }
+
+        public AuditLog.AuditRecord[] DrainSecurityAuditRecords()
+        {
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+            records.AddRange(DrainSmtpAuditRecords());
+            records.AddRange(DrainWebShellAuditRecords());
+            return records.ToArray();
+        }
+
+        public AuditLog.AuditRecord[] DrainWebShellAuditRecords()
+        {
+            WebShellEventDto[] events = QueryWebShellEvents();
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+
+            foreach (WebShellEventDto item in events)
+            {
+                string action = "webshell." + item.severity;
+                string message = "WebShell " + item.severity + " on " + item.operation + " by PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+                bool allowed = !string.Equals(item.severity, "danger", StringComparison.OrdinalIgnoreCase);
+                uint status = allowed ? SuccessStatus : 0xC0000022u;
+
+                auditLog.Append("webshell-sensor",
+                                action,
+                                item.path,
+                                item.extension,
+                                allowed,
+                                status,
+                                message + " Sample: " + item.sample);
+
+                records.Add(new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Actor = "webshell-sensor",
+                    Action = action,
+                    Target = item.path,
+                    Extension = item.extension,
+                    Succeeded = allowed,
+                    Status = "0x" + status.ToString("X8"),
+                    Message = message + " Sample: " + item.sample
                 });
             }
 
@@ -577,6 +788,82 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static WebShellRuleDto ConvertWebShellRule(DataProtectorPolicyNative.NativeWebShellRule nativeRule)
+        {
+            return new WebShellRuleDto
+            {
+                directory = Marshal.PtrToStringUni(nativeRule.Directory) ?? string.Empty
+            };
+        }
+
+        private static WebShellEventDto ConvertWebShellEvent(DataProtectorPolicyNative.NativeWebShellEvent nativeEvent)
+        {
+            uint sampleLength = Math.Min(nativeEvent.SampleLength, nativeEvent.Sample == null ? 0u : (uint)nativeEvent.Sample.Length);
+            string sample = string.Empty;
+            if (nativeEvent.Sample != null && sampleLength != 0)
+            {
+                sample = DecodeWebShellSample(nativeEvent.Sample, checked((int)sampleLength));
+            }
+
+            return new WebShellEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                processId = nativeEvent.ProcessId,
+                severity = FromWebShellSeverity(nativeEvent.Severity),
+                operation = FromWebShellOperation(nativeEvent.Operation),
+                fileSize = nativeEvent.FileSize,
+                path = Marshal.PtrToStringUni(nativeEvent.Path) ?? string.Empty,
+                extension = Marshal.PtrToStringUni(nativeEvent.Extension) ?? string.Empty,
+                sample = sample
+            };
+        }
+
+        private static string DecodeWebShellSample(byte[] sample, int length)
+        {
+            if (sample == null || length <= 0)
+            {
+                return string.Empty;
+            }
+
+            StringBuilder builder = new StringBuilder(length);
+            int take = Math.Min(length, sample.Length);
+            for (int index = 0; index < take; index++)
+            {
+                byte value = sample[index];
+                if (value == 0)
+                {
+                    continue;
+                }
+
+                if (value == (byte)'\r' || value == (byte)'\n' || value == (byte)'\t' || (value >= 0x20 && value <= 0x7E))
+                {
+                    builder.Append((char)value);
+                }
+            }
+
+            return builder.ToString();
+        }
+
+        private static WebShellRuleDto NormalizeWebShellRule(WebShellRuleRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(1, "WebShell rule request body is required.");
+            }
+
+            string directory = (request.directory ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                throw new BridgeException(1, "Protected web directory is required.");
+            }
+
+            return new WebShellRuleDto
+            {
+                directory = directory,
+                actor = request.actor
+            };
+        }
+
         private static DataProtectorPolicyNative.NativeNetworkRule ToNativeNetworkRule(NetworkRuleDto rule)
         {
             uint localAddress;
@@ -639,6 +926,20 @@ namespace DataProtectorWebBridge.Services
             if (direction == NetworkDirectionInbound) return "inbound";
             if (direction == NetworkDirectionBoth) return "both";
             return "outbound";
+        }
+
+        private static string FromWebShellSeverity(uint severity)
+        {
+            if (severity == WebShellSeverityDanger) return "danger";
+            if (severity == WebShellSeverityWarning) return "warning";
+            return "notify";
+        }
+
+        private static string FromWebShellOperation(uint operation)
+        {
+            if (operation == WebShellOperationCreate) return "create";
+            if (operation == WebShellOperationRename) return "rename";
+            return "write";
         }
 
         private static void ParseAddress(string value, out uint address, out uint mask)
@@ -824,6 +1125,28 @@ namespace DataProtectorWebBridge.Services
             public string remoteEndpoint { get; set; }
             public string from { get; set; }
             public string to { get; set; }
+        }
+
+        public class WebShellRuleRequest
+        {
+            public string directory { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class WebShellRuleDto : WebShellRuleRequest
+        {
+        }
+
+        public sealed class WebShellEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong processId { get; set; }
+            public string severity { get; set; }
+            public string operation { get; set; }
+            public uint fileSize { get; set; }
+            public string path { get; set; }
+            public string extension { get; set; }
+            public string sample { get; set; }
         }
 
         public sealed class OperationResult

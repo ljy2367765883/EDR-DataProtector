@@ -21,5 +21,10 @@ EXPORTS
     DpPolicyClearNetworkRules
     DpPolicyQueryNetworkRules
     DpPolicyQuerySmtpEvents
+    DpPolicyAddWebShellRule
+    DpPolicyRemoveWebShellRule
+    DpPolicyClearWebShellRules
+    DpPolicyQueryWebShellRules
+    DpPolicyQueryWebShellEvents
     DpPolicyConvertDosPathToNtPath
     DpPolicyGetLastErrorMessage

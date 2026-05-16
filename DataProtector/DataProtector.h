@@ -32,6 +32,9 @@ Abstract:
 #define DP_TAG_NET_BUFFER      'bNpD'
 #define DP_TAG_SMTP_EVENT      'eSpD'
 #define DP_TAG_SMTP_FLOW       'fSpD'
+#define DP_TAG_WEBSHELL_RULE   'rWpD'
+#define DP_TAG_WEBSHELL_EVENT  'eWpD'
+#define DP_TAG_WEBSHELL_BUFFER 'bWpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
@@ -39,6 +42,12 @@ Abstract:
 #define DP_POLICY_MAX_DOMAIN_BYTES (260 * sizeof(WCHAR))
 #define DP_POLICY_MAX_SMTP_EVENTS 128
 #define DP_SMTP_MAX_ADDRESS_CHARS 256
+#define DP_WEBSHELL_MAX_RULES 256
+#define DP_WEBSHELL_MAX_PATH_BYTES (1024 * sizeof(WCHAR))
+#define DP_WEBSHELL_MAX_EVENTS 256
+#define DP_WEBSHELL_MAX_SAMPLE_BYTES 100
+#define DP_WEBSHELL_EVENT_PATH_CHARS 512
+#define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
 #define DP_PROTECTION_MAGIC 0x32465044u
@@ -155,6 +164,8 @@ typedef struct _DP_HANDLE_CONTEXT {
     UNICODE_STRING OriginalName;
     UNICODE_STRING ShadowName;
     UNICODE_STRING PendingName;
+    BOOLEAN WebShellNewFile;
+    BOOLEAN WebShellReported;
 } DP_HANDLE_CONTEXT, *PDP_HANDLE_CONTEXT;
 
 typedef struct _DP_CREATE_CONTEXT {
@@ -184,7 +195,12 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandRemoveNetworkRule = 21,
     DpPolicyCommandClearNetworkRules = 22,
     DpPolicyCommandQueryNetworkRules = 23,
-    DpPolicyCommandQuerySmtpEvents = 24
+    DpPolicyCommandQuerySmtpEvents = 24,
+    DpPolicyCommandAddWebShellRule = 40,
+    DpPolicyCommandRemoveWebShellRule = 41,
+    DpPolicyCommandClearWebShellRules = 42,
+    DpPolicyCommandQueryWebShellRules = 43,
+    DpPolicyCommandQueryWebShellEvents = 44
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -305,6 +321,63 @@ typedef struct _DP_SMTP_EVENT_QUERY_ENTRY {
 } DP_SMTP_EVENT_QUERY_ENTRY, *PDP_SMTP_EVENT_QUERY_ENTRY;
 
 #define DP_SMTP_EVENT_QUERY_VERSION 1
+
+typedef enum _DP_WEBSHELL_SEVERITY {
+    DpWebShellSeverityNotify = 1,
+    DpWebShellSeverityWarning = 2,
+    DpWebShellSeverityDanger = 3
+} DP_WEBSHELL_SEVERITY;
+
+typedef enum _DP_WEBSHELL_OPERATION {
+    DpWebShellOperationCreate = 1,
+    DpWebShellOperationWrite = 2,
+    DpWebShellOperationRename = 3
+} DP_WEBSHELL_OPERATION;
+
+typedef struct _DP_WEBSHELL_RULE_MESSAGE {
+    ULONG Version;
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[512];
+} DP_WEBSHELL_RULE_MESSAGE, *PDP_WEBSHELL_RULE_MESSAGE;
+
+typedef struct _DP_WEBSHELL_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_WEBSHELL_RULE_QUERY_HEADER, *PDP_WEBSHELL_RULE_QUERY_HEADER;
+
+typedef struct _DP_WEBSHELL_RULE_QUERY_ENTRY {
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[1];
+} DP_WEBSHELL_RULE_QUERY_ENTRY, *PDP_WEBSHELL_RULE_QUERY_ENTRY;
+
+typedef struct _DP_WEBSHELL_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_WEBSHELL_EVENT_QUERY_HEADER, *PDP_WEBSHELL_EVENT_QUERY_HEADER;
+
+typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG Severity;
+    ULONG Operation;
+    ULONG FileSize;
+    ULONG SampleLength;
+    ULONG PathLengthBytes;
+    ULONG ExtensionLengthBytes;
+    WCHAR Path[DP_WEBSHELL_EVENT_PATH_CHARS];
+    WCHAR Extension[DP_WEBSHELL_EVENT_EXTENSION_CHARS];
+    CHAR Sample[DP_WEBSHELL_MAX_SAMPLE_BYTES];
+} DP_WEBSHELL_EVENT_QUERY_ENTRY, *PDP_WEBSHELL_EVENT_QUERY_ENTRY;
+
+#define DP_WEBSHELL_RULE_MESSAGE_VERSION 1
+#define DP_WEBSHELL_RULE_QUERY_VERSION 1
+#define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
+#define DP_WEBSHELL_EVENT_QUERY_VERSION 1
 
 EXTERN_C_START
 
@@ -522,6 +595,91 @@ DpNetFilterInitialize(
 VOID
 DpNetFilterUninitialize(
     VOID
+    );
+
+NTSTATUS
+DpWebShellInitialize(
+    VOID
+    );
+
+VOID
+DpWebShellUninitialize(
+    VOID
+    );
+
+NTSTATUS
+DpWebShellAddRule(
+    _In_ const DP_WEBSHELL_RULE_MESSAGE *Rule
+    );
+
+NTSTATUS
+DpWebShellRemoveRule(
+    _In_ const DP_WEBSHELL_RULE_MESSAGE *Rule
+    );
+
+VOID
+DpWebShellClearRules(
+    VOID
+    );
+
+NTSTATUS
+DpWebShellQueryRules(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpWebShellQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+BOOLEAN
+DpWebShellIsScriptPath(
+    _In_ PCUNICODE_STRING Name,
+    _Out_opt_ PUNICODE_STRING Extension
+    );
+
+BOOLEAN
+DpWebShellIsProtectedPath(
+    _In_ PCUNICODE_STRING Name
+    );
+
+NTSTATUS
+DpWebShellInspectWrite(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_reads_bytes_(Length) const VOID *Buffer,
+    _In_ ULONG Length,
+    _In_ BOOLEAN NewlyCreated
+    );
+
+NTSTATUS
+DpWebShellInspectWriteByName(
+    _In_ PCUNICODE_STRING Name,
+    _In_ HANDLE ProcessId,
+    _In_reads_bytes_(Length) const VOID *Buffer,
+    _In_ ULONG Length,
+    _In_ DP_WEBSHELL_OPERATION Operation
+    );
+
+NTSTATUS
+DpWebShellInspectFileByName(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING Name,
+    _In_ HANDLE ProcessId,
+    _In_ DP_WEBSHELL_OPERATION Operation
+    );
+
+NTSTATUS
+DpWebShellInspectFileObject(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PFILE_OBJECT FileObject,
+    _In_ PCUNICODE_STRING ReportName,
+    _In_ HANDLE ProcessId,
+    _In_ DP_WEBSHELL_OPERATION Operation
     );
 
 NTSTATUS

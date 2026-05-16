@@ -7,10 +7,14 @@ import {
   fetchBridgeStatus,
   fetchClearNetworkRules,
   fetchClearPolicyRules,
+  fetchClearWebShellRules,
   fetchNetworkRules,
   fetchPolicyRules,
+  fetchWebShellRules,
   fetchRemoveNetworkRule,
-  fetchRemovePolicyRule
+  fetchRemovePolicyRule,
+  fetchAddWebShellRule,
+  fetchRemoveWebShellRule
 } from '@/service/api';
 
 defineOptions({
@@ -20,11 +24,14 @@ defineOptions({
 const loading = ref(false);
 const submitting = ref(false);
 const networkSubmitting = ref(false);
+const webShellSubmitting = ref(false);
 const connected = ref(false);
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
+const webShellRules = ref<Api.DataProtector.WebShellRule[]>([]);
 const formRef = ref<FormInst | null>(null);
 const networkFormRef = ref<FormInst | null>(null);
+const webShellFormRef = ref<FormInst | null>(null);
 
 const form = reactive<Api.DataProtector.PolicyRuleRequest>({
   kind: 'processName',
@@ -44,6 +51,11 @@ const networkForm = reactive<Api.DataProtector.NetworkRuleRequest>({
   remoteAddress: '',
   remotePort: 0,
   domain: '',
+  actor: 'web-admin'
+});
+
+const webShellForm = reactive<Api.DataProtector.WebShellRuleRequest>({
+  directory: '',
   actor: 'web-admin'
 });
 
@@ -73,6 +85,10 @@ const networkFormRules: FormRules = {
       return networkForm.remoteAddress.trim().length > 0 ? true : new Error('Remote address is required');
     }
   }
+};
+
+const webShellFormRules: FormRules = {
+  directory: { required: true, message: 'Protected web directory is required', trigger: 'input' }
 };
 
 const kindOptions = [
@@ -121,6 +137,10 @@ const networkGroups = computed(() => ({
   ip: networkRules.value.filter(rule => rule.kind === 'ip').length,
   icmp: networkRules.value.filter(rule => rule.protocol === 'icmp').length,
   blocked: networkRules.value.filter(rule => rule.action === 'block').length
+}));
+
+const webShellGroups = computed(() => ({
+  directories: webShellRules.value.length
 }));
 
 const columns: DataTableColumns<Api.DataProtector.PolicyRule> = [
@@ -239,17 +259,52 @@ const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
   }
 ];
 
+const webShellColumns: DataTableColumns<Api.DataProtector.WebShellRule> = [
+  {
+    title: 'Protected web directory',
+    key: 'directory',
+    ellipsis: { tooltip: true }
+  },
+  {
+    title: 'Detection',
+    key: 'detection',
+    width: 170,
+    render() {
+      return h(NTag, { type: 'warning', bordered: false }, { default: () => 'Web scripts' });
+    }
+  },
+  {
+    title: 'Action',
+    key: 'actions',
+    width: 120,
+    render(row) {
+      return h(
+        NButton,
+        {
+          size: 'small',
+          type: 'error',
+          secondary: true,
+          onClick: () => removeWebShellRule(row)
+        },
+        { default: () => 'Remove' }
+      );
+    }
+  }
+];
+
 async function refresh() {
   loading.value = true;
   try {
-    const [statusResult, rulesResult, networkRulesResult] = await Promise.all([
+    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult] = await Promise.all([
       fetchBridgeStatus(),
       fetchPolicyRules(),
-      fetchNetworkRules()
+      fetchNetworkRules(),
+      fetchWebShellRules()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
     if (!rulesResult.error) rules.value = rulesResult.data;
     if (!networkRulesResult.error) networkRules.value = networkRulesResult.data;
+    if (!webShellRulesResult.error) webShellRules.value = webShellRulesResult.data;
   } finally {
     loading.value = false;
   }
@@ -363,6 +418,48 @@ async function clearNetworkRules() {
       const { error, data } = await fetchClearNetworkRules();
       if (!error && data.succeeded) {
         window.$message?.success('Central network policy cleared.');
+        await refresh();
+      }
+    }
+  });
+}
+
+async function addWebShellRule() {
+  await webShellFormRef.value?.validate();
+  webShellSubmitting.value = true;
+  try {
+    const { error, data } = await fetchAddWebShellRule({
+      directory: webShellForm.directory.trim(),
+      actor: 'web-admin'
+    });
+    if (!error && data.succeeded) {
+      window.$message?.success('WebShell protected directory added to central policy.');
+      webShellForm.directory = '';
+      await refresh();
+    }
+  } finally {
+    webShellSubmitting.value = false;
+  }
+}
+
+async function removeWebShellRule(rule: Api.DataProtector.WebShellRule) {
+  const { error, data } = await fetchRemoveWebShellRule({ directory: rule.directory, actor: 'web-admin' });
+  if (!error && data.succeeded) {
+    window.$message?.success('WebShell protected directory removed from central policy.');
+    await refresh();
+  }
+}
+
+async function clearWebShellRules() {
+  window.$dialog?.warning({
+    title: 'Clear WebShell rules',
+    content: 'This removes all protected web directories from the central policy.',
+    positiveText: 'Clear',
+    negativeText: 'Cancel',
+    onPositiveClick: async () => {
+      const { error, data } = await fetchClearWebShellRules();
+      if (!error && data.succeeded) {
+        window.$message?.success('Central WebShell policy cleared.');
         await refresh();
       }
     }
@@ -513,6 +610,37 @@ onMounted(refresh);
                 </NSpace>
               </template>
               <NDataTable :columns="networkColumns" :data="networkRules" :loading="loading" :pagination="{ pageSize: 10 }" />
+            </NCard>
+          </NGi>
+        </NGrid>
+      </NTabPane>
+
+      <NTabPane name="webshell" tab="WebShell Defense">
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 m:8">
+            <NCard title="Add Protected Web Directory" :bordered="false" class="card-wrapper">
+              <NForm ref="webShellFormRef" :model="webShellForm" :rules="webShellFormRules" label-placement="top">
+                <NFormItem label="Web root directory" path="directory">
+                  <NInput v-model:value="webShellForm.directory" placeholder="C:\\inetpub\\wwwroot" />
+                </NFormItem>
+                <NButton block type="primary" :loading="webShellSubmitting" @click="addWebShellRule">
+                  <template #icon><SvgIcon icon="mdi:shield-bug-outline" /></template>
+                  Add WebShell Defense Rule
+                </NButton>
+              </NForm>
+            </NCard>
+          </NGi>
+
+          <NGi span="24 m:16">
+            <NCard title="Protected Web Directory Inventory" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NSpace>
+                  <NTag type="warning">Directories: {{ webShellGroups.directories }}</NTag>
+                  <NTag type="error">Danger blocks enabled</NTag>
+                  <NButton size="small" type="error" secondary @click="clearWebShellRules">Clear</NButton>
+                </NSpace>
+              </template>
+              <NDataTable :columns="webShellColumns" :data="webShellRules" :loading="loading" :pagination="{ pageSize: 10 }" />
             </NCard>
           </NGi>
         </NGrid>

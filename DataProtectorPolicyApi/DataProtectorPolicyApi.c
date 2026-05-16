@@ -12,6 +12,10 @@
 #define DP_POLICY_MAX_EXTENSION_BYTES (64u * sizeof(WCHAR))
 #define DP_POLICY_MAX_DOMAIN_BYTES (260u * sizeof(WCHAR))
 #define DP_SMTP_MAX_ADDRESS_CHARS 256u
+#define DP_WEBSHELL_MAX_PATH_BYTES (1024u * sizeof(WCHAR))
+#define DP_WEBSHELL_EVENT_PATH_CHARS 512u
+#define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32u
+#define DP_WEBSHELL_MAX_SAMPLE_BYTES 100u
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 
 typedef enum _DP_POLICY_COMMAND {
@@ -27,7 +31,12 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandRemoveNetworkRule = 21,
     DpPolicyCommandClearNetworkRules = 22,
     DpPolicyCommandQueryNetworkRules = 23,
-    DpPolicyCommandQuerySmtpEvents = 24
+    DpPolicyCommandQuerySmtpEvents = 24,
+    DpPolicyCommandAddWebShellRule = 40,
+    DpPolicyCommandRemoveWebShellRule = 41,
+    DpPolicyCommandClearWebShellRules = 42,
+    DpPolicyCommandQueryWebShellRules = 43,
+    DpPolicyCommandQueryWebShellEvents = 44
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -114,12 +123,56 @@ typedef struct _DP_SMTP_EVENT_QUERY_ENTRY {
     WCHAR From[DP_SMTP_MAX_ADDRESS_CHARS];
     WCHAR To[DP_SMTP_MAX_ADDRESS_CHARS];
 } DP_SMTP_EVENT_QUERY_ENTRY, *PDP_SMTP_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_WEBSHELL_RULE_MESSAGE {
+    ULONG Version;
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[512];
+} DP_WEBSHELL_RULE_MESSAGE, *PDP_WEBSHELL_RULE_MESSAGE;
+
+typedef struct _DP_WEBSHELL_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_WEBSHELL_RULE_QUERY_HEADER, *PDP_WEBSHELL_RULE_QUERY_HEADER;
+
+typedef struct _DP_WEBSHELL_RULE_QUERY_ENTRY {
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[1];
+} DP_WEBSHELL_RULE_QUERY_ENTRY, *PDP_WEBSHELL_RULE_QUERY_ENTRY;
+
+typedef struct _DP_WEBSHELL_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_WEBSHELL_EVENT_QUERY_HEADER, *PDP_WEBSHELL_EVENT_QUERY_HEADER;
+
+typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG Severity;
+    ULONG Operation;
+    ULONG FileSize;
+    ULONG SampleLength;
+    ULONG PathLengthBytes;
+    ULONG ExtensionLengthBytes;
+    WCHAR Path[DP_WEBSHELL_EVENT_PATH_CHARS];
+    WCHAR Extension[DP_WEBSHELL_EVENT_EXTENSION_CHARS];
+    CHAR Sample[DP_WEBSHELL_MAX_SAMPLE_BYTES];
+} DP_WEBSHELL_EVENT_QUERY_ENTRY, *PDP_WEBSHELL_EVENT_QUERY_ENTRY;
 #pragma pack(pop)
 
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
 #define DP_SMTP_EVENT_QUERY_VERSION 1u
+#define DP_WEBSHELL_RULE_MESSAGE_VERSION 1u
+#define DP_WEBSHELL_RULE_QUERY_VERSION 1u
+#define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
+#define DP_WEBSHELL_EVENT_QUERY_VERSION 1u
 
 static WCHAR gLastErrorMessage[512];
 
@@ -1404,6 +1457,416 @@ DpPolicyQuerySmtpEvents(
             if (toChars != 0) {
                 CopyMemory(StringBuffer + copiedStringChars, entry[index].To, entry[index].ToLengthBytes);
                 copiedStringChars += toChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < header->EventCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyBuildWebShellRuleMessage(
+    _In_z_ LPCWSTR DirectoryPath,
+    _Out_ DP_WEBSHELL_RULE_MESSAGE *Message
+    )
+{
+    DWORD result;
+    LPWSTR ntPath = NULL;
+    size_t length;
+
+    if (Message == NULL) {
+        DpPolicySetLastErrorMessage(L"WebShell rule message is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(Message, sizeof(*Message));
+
+    result = DpPolicyConvertDosPathToNtPathAlloc(DirectoryPath, &ntPath);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    length = wcslen(ntPath);
+    if (length == 0 ||
+        length * sizeof(WCHAR) > DP_WEBSHELL_MAX_PATH_BYTES ||
+        length >= ARRAYSIZE(Message->Directory)) {
+
+        HeapFree(GetProcessHeap(), 0, ntPath);
+        DpPolicySetLastErrorMessage(L"Web directory path is empty or too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    Message->Version = DP_WEBSHELL_RULE_MESSAGE_VERSION;
+    Message->DirectoryLengthBytes = (ULONG)(length * sizeof(WCHAR));
+    CopyMemory(Message->Directory, ntPath, Message->DirectoryLengthBytes);
+
+    HeapFree(GetProcessHeap(), 0, ntPath);
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyAddWebShellRule(
+    _In_z_ LPCWSTR DirectoryPath
+    )
+{
+    DWORD result;
+    DP_WEBSHELL_RULE_MESSAGE message;
+
+    result = DpPolicyBuildWebShellRuleMessage(DirectoryPath, &message);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandAddWebShellRule,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyRemoveWebShellRule(
+    _In_z_ LPCWSTR DirectoryPath
+    )
+{
+    DWORD result;
+    DP_WEBSHELL_RULE_MESSAGE message;
+
+    result = DpPolicyBuildWebShellRuleMessage(DirectoryPath, &message);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandRemoveWebShellRule,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyClearWebShellRules(void)
+{
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandClearWebShellRules,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryWebShellRules(
+    _Out_writes_opt_(RuleCapacity) DP_POLICY_API_WEBSHELL_RULE *Rules,
+    _In_ DWORD RuleCapacity,
+    _Out_opt_ DWORD *RuleCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_WEBSHELL_RULE_QUERY_HEADER header;
+    DP_WEBSHELL_RULE_QUERY_HEADER sizingHeader;
+    PBYTE cursor;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
+
+    if (RuleCount != NULL) {
+        *RuleCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((RuleCapacity != 0 && Rules == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryWebShellRules,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_WEBSHELL_RULE_QUERY_HEADER) ||
+        sizingHeader.Version != DP_WEBSHELL_RULE_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_WEBSHELL_RULE_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell rule snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryWebShellRules,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_WEBSHELL_RULE_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell rule snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_WEBSHELL_RULE_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_WEBSHELL_RULE_QUERY_VERSION) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported WebShell rule snapshot version.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (RuleCount != NULL) {
+        *RuleCount = header->RuleCount;
+    }
+
+    cursor = queryBuffer + sizeof(DP_WEBSHELL_RULE_QUERY_HEADER);
+
+    for (index = 0; index < header->RuleCount; index++) {
+        PDP_WEBSHELL_RULE_QUERY_ENTRY entry;
+        DWORD directoryChars;
+        DWORD entryBytes;
+
+        if ((ULONG_PTR)(cursor - queryBuffer) + DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE > bytesReturned) {
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned a truncated WebShell rule snapshot.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        entry = (PDP_WEBSHELL_RULE_QUERY_ENTRY)cursor;
+        entryBytes = (DWORD)DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE + entry->DirectoryLengthBytes;
+        if ((ULONG_PTR)(cursor - queryBuffer) + entryBytes > bytesReturned ||
+            entry->DirectoryLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell rule entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        directoryChars = entry->DirectoryLengthBytes / sizeof(WCHAR);
+        requiredStringChars += directoryChars + 1;
+
+        if (index < RuleCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + directoryChars + 1 <= StringBufferChars) {
+
+            Rules[index].Directory = StringBuffer + copiedStringChars;
+            if (directoryChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry->Directory, entry->DirectoryLengthBytes);
+                copiedStringChars += directoryChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+
+        cursor += entryBytes;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (RuleCapacity < header->RuleCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryWebShellEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_WEBSHELL_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_WEBSHELL_EVENT_QUERY_HEADER header;
+    DP_WEBSHELL_EVENT_QUERY_HEADER sizingHeader;
+    PDP_WEBSHELL_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryWebShellEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_WEBSHELL_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell event snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryWebShellEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_WEBSHELL_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_WEBSHELL_EVENT_QUERY_VERSION ||
+        (header->EventCount > (MAXDWORD - sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER)) / sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported WebShell event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = header->EventCount;
+    }
+
+    entry = (PDP_WEBSHELL_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_WEBSHELL_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < header->EventCount; index++) {
+        DWORD pathChars;
+        DWORD extensionChars;
+
+        if (entry[index].PathLengthBytes > sizeof(entry[index].Path) ||
+            entry[index].ExtensionLengthBytes > sizeof(entry[index].Extension) ||
+            entry[index].SampleLength > sizeof(entry[index].Sample) ||
+            entry[index].PathLengthBytes % sizeof(WCHAR) != 0 ||
+            entry[index].ExtensionLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid WebShell event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        pathChars = entry[index].PathLengthBytes / sizeof(WCHAR);
+        extensionChars = entry[index].ExtensionLengthBytes / sizeof(WCHAR);
+        requiredStringChars += pathChars + 1 + extensionChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + pathChars + 1 + extensionChars + 1 <= StringBufferChars) {
+
+            Events[index].Sequence = entry[index].Sequence;
+            Events[index].ProcessId = entry[index].ProcessId;
+            Events[index].Severity = entry[index].Severity;
+            Events[index].Operation = entry[index].Operation;
+            Events[index].FileSize = entry[index].FileSize;
+            Events[index].SampleLength = entry[index].SampleLength;
+            CopyMemory(Events[index].Sample, entry[index].Sample, sizeof(Events[index].Sample));
+
+            Events[index].Path = StringBuffer + copiedStringChars;
+            if (pathChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].Path, entry[index].PathLengthBytes);
+                copiedStringChars += pathChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].Extension = StringBuffer + copiedStringChars;
+            if (extensionChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].Extension, entry[index].ExtensionLengthBytes);
+                copiedStringChars += extensionChars;
             }
             StringBuffer[copiedStringChars++] = L'\0';
         }

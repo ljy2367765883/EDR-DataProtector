@@ -65,6 +65,13 @@ declare namespace Api {
       displayTarget?: string;
     }
 
+    interface WebShellRule {
+      directory: string;
+      actor?: string;
+    }
+
+    interface WebShellRuleRequest extends WebShellRule {}
+
     interface OperationResult {
       succeeded: boolean;
       status: number;
