@@ -55,6 +55,26 @@ namespace DataProtectorWebBridge.Services
             HashProtectFlagCredentialFiles |
             HashProtectFlagRegistryHives |
             HashProtectFlagRawExtents;
+        private const uint LateralOperationSmbExecutableCreate = 1;
+        private const uint LateralOperationSmbExecutableWrite = 2;
+        private const uint LateralOperationSmbExecutableRename = 3;
+        private const uint LateralOperationIpcTaskScheduler = 4;
+        private const uint LateralOperationIpcServiceControl = 5;
+        private const uint LateralOperationRemoteScheduledTaskTool = 6;
+        private const uint LateralOperationRemoteServiceTool = 7;
+        private const uint LateralOperationWmiProcessCreate = 8;
+        private const uint LateralOperationPowerShellRemoteTask = 9;
+        private const uint LateralDefenseFlagEnabled = 0x00000001;
+        private const uint LateralDefenseFlagSmbExecutables = 0x00000002;
+        private const uint LateralDefenseFlagIpcTasks = 0x00000004;
+        private const uint LateralDefenseFlagIpcServices = 0x00000008;
+        private const uint LateralDefenseFlagProcessTools = 0x00000010;
+        private const uint LateralDefenseAllowedFlags =
+            LateralDefenseFlagEnabled |
+            LateralDefenseFlagSmbExecutables |
+            LateralDefenseFlagIpcTasks |
+            LateralDefenseFlagIpcServices |
+            LateralDefenseFlagProcessTools;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -733,6 +753,18 @@ namespace DataProtectorWebBridge.Services
             return FromHashProtectFlags(nativePolicy.Flags);
         }
 
+        public LateralDefensePolicyDto QueryLateralDefensePolicy()
+        {
+            DataProtectorPolicyNative.NativeLateralDefensePolicy nativePolicy;
+            uint status = DataProtectorPolicyNative.DpPolicyQueryLateralDefensePolicy(out nativePolicy);
+            if (status != SuccessStatus)
+            {
+                throw new BridgeException(status, ReadLastErrorMessage());
+            }
+
+            return FromLateralDefenseFlags(nativePolicy.Flags);
+        }
+
         public OperationResult SetHashProtectPolicy(HashProtectPolicyRequest request)
         {
             HashProtectPolicyDto normalized = NormalizeHashProtectPolicy(request);
@@ -751,6 +783,30 @@ namespace DataProtectorWebBridge.Services
                 "policy.hashprotect.update",
                 "anti-dump",
                 HashProtectPolicySummary(normalized),
+                result.succeeded,
+                result.status,
+                result.message);
+            return result;
+        }
+
+        public OperationResult SetLateralDefensePolicy(LateralDefensePolicyRequest request)
+        {
+            LateralDefensePolicyDto normalized = NormalizeLateralDefensePolicy(request);
+            OperationResult result = Invoke(() =>
+            {
+                DataProtectorPolicyNative.NativeLateralDefensePolicy nativePolicy = new DataProtectorPolicyNative.NativeLateralDefensePolicy
+                {
+                    Flags = ToLateralDefenseFlags(normalized)
+                };
+
+                return DataProtectorPolicyNative.DpPolicySetLateralDefensePolicy(ref nativePolicy);
+            });
+
+            auditLog.Append(
+                normalized.actor,
+                "policy.lateral.update",
+                "lateral-defense",
+                LateralDefensePolicySummary(normalized),
                 result.succeeded,
                 result.status,
                 result.message);
@@ -831,6 +887,75 @@ namespace DataProtectorWebBridge.Services
             throw new BridgeException(BufferTooSmallStatus, "The driver network connection event queue changed while querying. Please retry.");
         }
 
+        public LateralDefenseEventDto[] QueryLateralDefenseEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryLateralDefenseEvents(
+                    new DataProtectorPolicyNative.NativeLateralDefenseEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeLateralDefenseEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeLateralDefenseEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryLateralDefenseEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<LateralDefenseEventDto> events = new List<LateralDefenseEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertLateralDefenseEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver lateral defense event queue changed while querying. Please retry.");
+        }
+
         public AuditLog.AuditRecord[] DrainSmtpAuditRecords()
         {
             SmtpEventDto[] events = QuerySmtpEvents();
@@ -867,6 +992,7 @@ namespace DataProtectorWebBridge.Services
             records.AddRange(TryDrainSecurityAuditSource("smtp", DrainSmtpAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("webshell", DrainWebShellAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("hashprotect", DrainHashProtectAuditRecords));
+            records.AddRange(TryDrainSecurityAuditSource("lateral", DrainLateralDefenseAuditRecords));
             return records.ToArray();
         }
 
@@ -892,6 +1018,39 @@ namespace DataProtectorWebBridge.Services
                     Succeeded = allowed,
                     Status = "0x" + status.ToString("X8"),
                     Message = message + " Sample: " + item.sample
+                };
+
+                records.Add(record);
+                TryAppendAudit(record);
+            }
+
+            return records.ToArray();
+        }
+
+        public AuditLog.AuditRecord[] DrainLateralDefenseAuditRecords()
+        {
+            LateralDefenseEventDto[] events = QueryLateralDefenseEvents();
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+
+            foreach (LateralDefenseEventDto item in events)
+            {
+                string message = "Lateral movement attempt blocked: " + item.operation + " by PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+                if (!string.IsNullOrWhiteSpace(item.processImage))
+                {
+                    message += " Process: " + item.processImage + ".";
+                }
+
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
+                    Actor = "lateral-defense-sensor",
+                    Action = "lateral.blocked." + item.operation,
+                    Target = item.target,
+                    Extension = item.processImage,
+                    Succeeded = true,
+                    Status = item.statusText,
+                    Message = message + " DesiredAccess: 0x" + item.desiredAccess.ToString("X8", CultureInfo.InvariantCulture) + "."
                 };
 
                 records.Add(record);
@@ -1244,6 +1403,22 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static LateralDefenseEventDto ConvertLateralDefenseEvent(DataProtectorPolicyNative.NativeLateralDefenseEvent nativeEvent)
+        {
+            return new LateralDefenseEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                processId = nativeEvent.ProcessId,
+                operation = FromLateralDefenseOperation(nativeEvent.Operation),
+                status = nativeEvent.Status,
+                statusText = "0x" + nativeEvent.Status.ToString("X8", CultureInfo.InvariantCulture),
+                desiredAccess = nativeEvent.DesiredAccess,
+                flags = nativeEvent.Flags,
+                target = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Target) ?? string.Empty),
+                processImage = Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty
+            };
+        }
+
         private static HashProtectPolicyDto FromHashProtectFlags(uint flags)
         {
             return new HashProtectPolicyDto
@@ -1325,6 +1500,90 @@ namespace DataProtectorWebBridge.Services
                 normalized.protectCredentialFiles,
                 normalized.protectRegistryHives,
                 normalized.protectRawExtents,
+                normalized.flags);
+        }
+
+        private static LateralDefensePolicyDto FromLateralDefenseFlags(uint flags)
+        {
+            return new LateralDefensePolicyDto
+            {
+                enabled = (flags & LateralDefenseFlagEnabled) != 0,
+                blockSmbExecutableCopy = (flags & LateralDefenseFlagSmbExecutables) != 0,
+                blockIpcScheduledTasks = (flags & LateralDefenseFlagIpcTasks) != 0,
+                blockIpcServiceCreation = (flags & LateralDefenseFlagIpcServices) != 0,
+                blockRemoteAdminTools = (flags & LateralDefenseFlagProcessTools) != 0,
+                flags = flags & LateralDefenseAllowedFlags
+            };
+        }
+
+        internal static uint ToLateralDefenseFlags(LateralDefensePolicyDto policy)
+        {
+            if (policy == null)
+            {
+                return LateralDefenseAllowedFlags;
+            }
+
+            uint flags = 0;
+            if (policy.enabled) flags |= LateralDefenseFlagEnabled;
+            if (policy.blockSmbExecutableCopy) flags |= LateralDefenseFlagSmbExecutables;
+            if (policy.blockIpcScheduledTasks) flags |= LateralDefenseFlagIpcTasks;
+            if (policy.blockIpcServiceCreation) flags |= LateralDefenseFlagIpcServices;
+            if (policy.blockRemoteAdminTools) flags |= LateralDefenseFlagProcessTools;
+            return flags & LateralDefenseAllowedFlags;
+        }
+
+        internal static LateralDefensePolicyDto DefaultLateralDefensePolicy()
+        {
+            return FromLateralDefenseFlags(LateralDefenseAllowedFlags);
+        }
+
+        internal static LateralDefensePolicyDto CloneLateralDefensePolicy(LateralDefensePolicyDto policy)
+        {
+            LateralDefensePolicyDto source = policy ?? DefaultLateralDefensePolicy();
+            return new LateralDefensePolicyDto
+            {
+                enabled = source.enabled,
+                blockSmbExecutableCopy = source.blockSmbExecutableCopy,
+                blockIpcScheduledTasks = source.blockIpcScheduledTasks,
+                blockIpcServiceCreation = source.blockIpcServiceCreation,
+                blockRemoteAdminTools = source.blockRemoteAdminTools,
+                flags = ToLateralDefenseFlags(source),
+                actor = source.actor
+            };
+        }
+
+        internal static LateralDefensePolicyDto NormalizeLateralDefensePolicy(LateralDefensePolicyRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(1, "Lateral defense policy body is required.");
+            }
+
+            LateralDefensePolicyDto normalized = new LateralDefensePolicyDto
+            {
+                enabled = request.enabled,
+                blockSmbExecutableCopy = request.blockSmbExecutableCopy,
+                blockIpcScheduledTasks = request.blockIpcScheduledTasks,
+                blockIpcServiceCreation = request.blockIpcServiceCreation,
+                blockRemoteAdminTools = request.blockRemoteAdminTools,
+                actor = request.actor
+            };
+
+            normalized.flags = ToLateralDefenseFlags(normalized);
+            return normalized;
+        }
+
+        internal static string LateralDefensePolicySummary(LateralDefensePolicyDto policy)
+        {
+            LateralDefensePolicyDto normalized = CloneLateralDefensePolicy(policy);
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "enabled={0};smbExecutables={1};ipcTasks={2};ipcServices={3};remoteTools={4};flags=0x{5:X8}",
+                normalized.enabled,
+                normalized.blockSmbExecutableCopy,
+                normalized.blockIpcScheduledTasks,
+                normalized.blockIpcServiceCreation,
+                normalized.blockRemoteAdminTools,
                 normalized.flags);
         }
 
@@ -1504,6 +1763,20 @@ namespace DataProtectorWebBridge.Services
             if (operation == HashOperationCredentialFile) return "credential-file";
             if (operation == HashOperationRegistryHive) return "registry-hive";
             if (operation == HashOperationRawExtent) return "raw-extents";
+            return "unknown";
+        }
+
+        private static string FromLateralDefenseOperation(uint operation)
+        {
+            if (operation == LateralOperationSmbExecutableCreate) return "smb-executable-create";
+            if (operation == LateralOperationSmbExecutableWrite) return "smb-executable-write";
+            if (operation == LateralOperationSmbExecutableRename) return "smb-executable-rename";
+            if (operation == LateralOperationIpcTaskScheduler) return "ipc-task-scheduler";
+            if (operation == LateralOperationIpcServiceControl) return "ipc-service-control";
+            if (operation == LateralOperationRemoteScheduledTaskTool) return "remote-scheduled-task-tool";
+            if (operation == LateralOperationRemoteServiceTool) return "remote-service-tool";
+            if (operation == LateralOperationWmiProcessCreate) return "wmi-process-create";
+            if (operation == LateralOperationPowerShellRemoteTask) return "powershell-remote-task";
             return "unknown";
         }
 
@@ -1916,6 +2189,19 @@ namespace DataProtectorWebBridge.Services
             public string processImage { get; set; }
         }
 
+        public sealed class LateralDefenseEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong processId { get; set; }
+            public string operation { get; set; }
+            public uint status { get; set; }
+            public string statusText { get; set; }
+            public uint desiredAccess { get; set; }
+            public uint flags { get; set; }
+            public string target { get; set; }
+            public string processImage { get; set; }
+        }
+
         public class HashProtectPolicyRequest
         {
             public bool enabled { get; set; }
@@ -1927,6 +2213,21 @@ namespace DataProtectorWebBridge.Services
         }
 
         public sealed class HashProtectPolicyDto : HashProtectPolicyRequest
+        {
+            public uint flags { get; set; }
+        }
+
+        public class LateralDefensePolicyRequest
+        {
+            public bool enabled { get; set; }
+            public bool blockSmbExecutableCopy { get; set; }
+            public bool blockIpcScheduledTasks { get; set; }
+            public bool blockIpcServiceCreation { get; set; }
+            public bool blockRemoteAdminTools { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class LateralDefensePolicyDto : LateralDefensePolicyRequest
         {
             public uint flags { get; set; }
         }

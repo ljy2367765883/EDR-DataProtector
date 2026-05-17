@@ -55,6 +55,7 @@ const categoryOptions: CategoryOption[] = [
   { label: 'SMTP audit', value: 'smtp', icon: 'mdi:email-fast-outline', tagType: 'success' },
   { label: 'WebShell', value: 'webshell', icon: 'mdi:webhook', tagType: 'error' },
   { label: 'Hash dump', value: 'hashdump', icon: 'mdi:account-lock-outline', tagType: 'error' },
+  { label: 'Lateral movement', value: 'lateral', icon: 'mdi:lan-disconnect', tagType: 'error' },
   { label: 'Remote ops', value: 'remote', icon: 'mdi:remote-desktop', tagType: 'info' },
   { label: 'Agent sync', value: 'agent', icon: 'mdi:desktop-classic', tagType: 'success' },
   { label: 'System', value: 'system', icon: 'mdi:cog-outline', tagType: 'default' }
@@ -329,6 +330,9 @@ function classifyAudit(record: Api.DataProtector.AuditRecord): AuditCategory {
   if (action.startsWith('hashdump.') || action.startsWith('hashprotect.') || action.includes('.hashdump.')) {
     return 'hashdump';
   }
+  if (action.startsWith('lateral.') || action.startsWith('policy.lateral') || action.startsWith('central.policy.lateral') || action.includes('.lateral.')) {
+    return 'lateral';
+  }
   if (action.startsWith('network.smtp') || action.endsWith('.smtp')) return 'smtp';
   if (action.includes('.network.') || action.startsWith('policy.network') || action.startsWith('central.policy.network')) {
     return 'network';
@@ -356,7 +360,13 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
   const message = record.Message || '';
   const status = record.Status || '';
 
-  if (action.startsWith('webshell.danger') || action.startsWith('hashdump.blocked') || action.includes('.blocked') || status.toUpperCase() === '0XC0000022') {
+  if (
+    action.startsWith('webshell.danger') ||
+    action.startsWith('hashdump.blocked') ||
+    action.startsWith('lateral.blocked') ||
+    action.includes('.blocked') ||
+    status.toUpperCase() === '0XC0000022'
+  ) {
     return 'critical';
   }
 
@@ -378,7 +388,7 @@ function resolveDisposition(record: Api.DataProtector.AuditRecord): Exclude<Audi
 
   if (status.toUpperCase() === '0XC0000022' || /blocked|denied/i.test(message)) return 'blocked';
   if (!record.Succeeded) return 'failed';
-  if (action.startsWith('webshell.') || action.startsWith('hashdump.') || action.startsWith('network.smtp')) return 'observed';
+  if (action.startsWith('webshell.') || action.startsWith('hashdump.') || action.startsWith('lateral.') || action.startsWith('network.smtp')) return 'observed';
 
   return 'completed';
 }

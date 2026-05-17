@@ -274,6 +274,21 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/lateral/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryLateralDefensePolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/lateral/policy")
+                {
+                    PolicyBridgeService.LateralDefensePolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.LateralDefensePolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.UpdateLateralDefensePolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", store.QueryAudit(ParseAuditQuery(context.Request)));

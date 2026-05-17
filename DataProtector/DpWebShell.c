@@ -594,7 +594,7 @@ DpWebShellQueueEvent(
                                   DP_TAG_WEBSHELL_EVENT);
 
     if (entry == NULL) {
-        DP_WEBSHELL_TRACE("77 queue alloc failed pid=%p severity=%lu op=%lu path=%wZ\n",
+        DP_WEBSHELL_TRACE("queue alloc failed pid=%p severity=%lu op=%lu path=%wZ\n",
                           ProcessId,
                           (ULONG)Severity,
                           (ULONG)Operation,
@@ -629,7 +629,7 @@ DpWebShellQueueEvent(
     entry->Event.Sequence = ++gDpWebShellEventSequence;
     InsertTailList(&gDpWebShellEvents, &entry->Link);
     gDpWebShellEventCount++;
-    DP_WEBSHELL_TRACE("77 queued seq=%I64u count=%lu pid=%p severity=%lu op=%lu size=%lu sample=%lu path=%wZ\n",
+    DP_WEBSHELL_TRACE("queued seq=%I64u count=%lu pid=%p severity=%lu op=%lu size=%lu sample=%lu path=%wZ\n",
                       entry->Event.Sequence,
                       gDpWebShellEventCount,
                       ProcessId,
@@ -644,7 +644,7 @@ DpWebShellQueueEvent(
         PDP_WEBSHELL_EVENT_ENTRY oldEvent = CONTAINING_RECORD(oldLink, DP_WEBSHELL_EVENT_ENTRY, Link);
         gDpWebShellEventCount--;
         gDpWebShellDroppedEvents++;
-        DP_WEBSHELL_TRACE("77 queue trim dropped=%I64u remaining=%lu\n",
+        DP_WEBSHELL_TRACE("queue trim dropped=%I64u remaining=%lu\n",
                           gDpWebShellDroppedEvents,
                           gDpWebShellEventCount);
         KeReleaseSpinLock(&gDpWebShellEventLock, oldIrql);
@@ -673,7 +673,7 @@ DpWebShellClassifyAndReport(
     if (!DpWebShellIsProtectedPath(Path) ||
         !DpWebShellIsScriptPath(Path, &extension)) {
 
-        DP_WEBSHELL_TRACE("77 classify bypass pid=%p op=%lu size=%lu sample=%lu path=%wZ\n",
+        DP_WEBSHELL_TRACE("classify bypass pid=%p op=%lu size=%lu sample=%lu path=%wZ\n",
                           ProcessId,
                           (ULONG)Operation,
                           FileSize,
@@ -694,7 +694,7 @@ DpWebShellClassifyAndReport(
         severity = DpWebShellSeverityNotify;
     }
 
-    DP_WEBSHELL_TRACE("77 classify hit pid=%p op=%lu severity=%lu oneLiner=%u size=%lu sample=%lu path=%wZ\n",
+    DP_WEBSHELL_TRACE("classify hit pid=%p op=%lu severity=%lu oneLiner=%u size=%lu sample=%lu path=%wZ\n",
                       ProcessId,
                       (ULONG)Operation,
                       (ULONG)severity,
@@ -712,7 +712,7 @@ DpWebShellClassifyAndReport(
                          severity,
                          Operation);
 
-    DP_WEBSHELL_TRACE("77 classify return pid=%p op=%lu severity=%lu status=0x%08X path=%wZ\n",
+    DP_WEBSHELL_TRACE("classify return pid=%p op=%lu severity=%lu status=0x%08X path=%wZ\n",
                       ProcessId,
                       (ULONG)Operation,
                       (ULONG)severity,
@@ -798,7 +798,7 @@ DpWebShellIsProtectedPath(
         if (DpWebShellDirectoryMatches(&rule->Directory, Name) ||
             DpWebShellTailDirectoryMatches(&rule->TailDirectory, Name)) {
 
-            DP_WEBSHELL_TRACE("77 protected path matched pid=%p path=%wZ rule=%wZ tail=%wZ\n",
+            DP_WEBSHELL_TRACE("protected path matched pid=%p path=%wZ rule=%wZ tail=%wZ\n",
                               PsGetCurrentProcessId(),
                               Name,
                               &rule->Directory,
@@ -867,7 +867,7 @@ DpWebShellInspectWrite(
                                        FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
                                        &nameInfo);
     if (!NT_SUCCESS(status)) {
-        DP_WEBSHELL_TRACE("77 inspect write name failed status=0x%08X length=%lu\n",
+        DP_WEBSHELL_TRACE("inspect write name failed status=0x%08X length=%lu\n",
                           status,
                           Length);
         return STATUS_SUCCESS;
@@ -921,7 +921,7 @@ DpWebShellInspectFileObject(
                                      FileStandardInformation,
                                      NULL);
     if (!NT_SUCCESS(status)) {
-        DP_WEBSHELL_TRACE("77 inspect fileobject query failed status=0x%08X pid=%p op=%lu report=%wZ\n",
+        DP_WEBSHELL_TRACE("inspect fileobject query failed status=0x%08X pid=%p op=%lu report=%wZ\n",
                           status,
                           ProcessId,
                           (ULONG)Operation,
@@ -954,7 +954,7 @@ DpWebShellInspectFileObject(
                                          bytesRead,
                                          Operation);
 
-    DP_WEBSHELL_TRACE("77 inspect fileobject status=0x%08X pid=%p op=%lu size=%lu read=%lu report=%wZ\n",
+    DP_WEBSHELL_TRACE("inspect fileobject status=0x%08X pid=%p op=%lu size=%lu read=%lu report=%wZ\n",
                       status,
                       ProcessId,
                       (ULONG)Operation,
@@ -1042,7 +1042,7 @@ DpWebShellInspectFileBySourceName(
                               NULL);
 
     if (!NT_SUCCESS(status)) {
-        DP_WEBSHELL_TRACE("77 source open failed status=0x%08X source=%wZ report=%wZ\n",
+        DP_WEBSHELL_TRACE("source open failed status=0x%08X source=%wZ report=%wZ\n",
                           status,
                           SourceName,
                           ReportName);
@@ -1058,7 +1058,7 @@ DpWebShellInspectFileBySourceName(
                                      NULL);
 
     if (!NT_SUCCESS(status)) {
-        DP_WEBSHELL_TRACE("77 source query failed status=0x%08X source=%wZ report=%wZ\n",
+        DP_WEBSHELL_TRACE("source query failed status=0x%08X source=%wZ report=%wZ\n",
                           status,
                           SourceName,
                           ReportName);
@@ -1082,7 +1082,7 @@ DpWebShellInspectFileBySourceName(
                              NULL,
                              NULL);
         if (!NT_SUCCESS(status)) {
-            DP_WEBSHELL_TRACE("77 source read failed status=0x%08X source=%wZ report=%wZ\n",
+            DP_WEBSHELL_TRACE("source read failed status=0x%08X source=%wZ report=%wZ\n",
                               status,
                               SourceName,
                               ReportName);
@@ -1101,7 +1101,7 @@ DpWebShellInspectFileBySourceName(
         *Inspected = TRUE;
     }
 
-    DP_WEBSHELL_TRACE("77 inspect source status=0x%08X pid=%p op=%lu size=%lu read=%lu source=%wZ report=%wZ\n",
+    DP_WEBSHELL_TRACE("inspect source status=0x%08X pid=%p op=%lu size=%lu read=%lu source=%wZ report=%wZ\n",
                       status,
                       ProcessId,
                       (ULONG)Operation,
@@ -1210,7 +1210,7 @@ DpWebShellAddRule(
     } else {
         InsertTailList(&gDpWebShellRules, &entry->Link);
         gDpWebShellRuleCount++;
-        DP_WEBSHELL_TRACE("77 rule added directory=%wZ tail=%wZ count=%lu\n",
+        DP_WEBSHELL_TRACE("rule added directory=%wZ tail=%wZ count=%lu\n",
                           &entry->Directory,
                           &entry->TailDirectory,
                           gDpWebShellRuleCount);
@@ -1454,7 +1454,7 @@ DpWebShellQueryEvents(
     header->BytesReturned = bytesReturned;
     *ReturnOutputBufferLength = bytesReturned;
 
-    DP_WEBSHELL_TRACE("77 query events pid=%p image=%s sizing=%u events=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u\n",
+    DP_WEBSHELL_TRACE("query events pid=%p image=%s sizing=%u events=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u\n",
                       queryProcessId,
                       queryImageName != NULL ? queryImageName : "<unknown>",
                       sizingOnly,
@@ -1469,7 +1469,7 @@ DpWebShellQueryEvents(
             PLIST_ENTRY eventLink = RemoveHeadList(&gDpWebShellEvents);
             PDP_WEBSHELL_EVENT_ENTRY event = CONTAINING_RECORD(eventLink, DP_WEBSHELL_EVENT_ENTRY, Link);
             gDpWebShellEventCount--;
-            DP_WEBSHELL_TRACE("77 query drain pid=%p image=%s seq=%I64u remaining=%lu\n",
+            DP_WEBSHELL_TRACE("query drain pid=%p image=%s seq=%I64u remaining=%lu\n",
                               queryProcessId,
                               queryImageName != NULL ? queryImageName : "<unknown>",
                               event->Event.Sequence,

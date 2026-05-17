@@ -120,6 +120,7 @@ namespace DataProtectorWebBridge.Services
                     response.webShellRules ?? new PolicyBridgeService.WebShellRuleDto[0],
                     response.deviceRules ?? new PolicyBridgeService.DeviceRuleDto[0],
                     response.hashProtectPolicy ?? PolicyBridgeService.DefaultHashProtectPolicy(),
+                    response.lateralDefensePolicy ?? PolicyBridgeService.DefaultLateralDefensePolicy(),
                     response.policyVersion);
             }
 
@@ -182,15 +183,17 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] smtpRecords = DrainAuditSource("smtp", policyService.DrainSmtpAuditRecords);
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
             AuditLog.AuditRecord[] hashProtectRecords = DrainAuditSource("hashprotect", policyService.DrainHashProtectAuditRecords);
-            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0)
+            AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
+            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0)
             {
-                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ".");
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length + lateralRecords.Length);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
             records.AddRange(hashProtectRecords);
+            records.AddRange(lateralRecords);
             return records.ToArray();
         }
 
@@ -275,6 +278,7 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.WebShellRuleDto[] webShellRules,
             PolicyBridgeService.DeviceRuleDto[] deviceRules,
             PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy,
+            PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy,
             long policyVersion)
         {
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
@@ -412,9 +416,27 @@ namespace DataProtectorWebBridge.Services
                 return;
             }
 
+            PolicyBridgeService.OperationResult lateralPolicyResult = policyService.SetLateralDefensePolicy(new PolicyBridgeService.LateralDefensePolicyRequest
+            {
+                enabled = lateralDefensePolicy.enabled,
+                blockSmbExecutableCopy = lateralDefensePolicy.blockSmbExecutableCopy,
+                blockIpcScheduledTasks = lateralDefensePolicy.blockIpcScheduledTasks,
+                blockIpcServiceCreation = lateralDefensePolicy.blockIpcServiceCreation,
+                blockRemoteAdminTools = lateralDefensePolicy.blockRemoteAdminTools,
+                actor = "central-agent"
+            });
+
+            if (!lateralPolicyResult.succeeded)
+            {
+                lastApplyStatus = lateralPolicyResult.statusText;
+                lastApplyMessage = "Cannot apply central lateral movement defense policy: " + lateralPolicyResult.message;
+                SaveState();
+                return;
+            }
+
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy);
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy);
             SaveState();
         }
 

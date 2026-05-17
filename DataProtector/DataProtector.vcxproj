@@ -43,6 +43,7 @@
     <ClCompile Include="DpDeviceControl.c" />
     <ClCompile Include="DpHashProtect.c" />
     <ClCompile Include="DpIo.c" />
+    <ClCompile Include="DpLateralDefense.c" />
     <ClCompile Include="DpNetFilter.c" />
     <ClCompile Include="DpPolicy.c" />
     <ClCompile Include="DpProcessPolicy.c" />

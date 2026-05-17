@@ -53,6 +53,7 @@ namespace DataProtectorWebBridge.Services
                     auditPath = filePath,
                     policyVersion = state.PolicyVersion,
                     hashProtectEnabled = QueryHashProtectPolicy().enabled,
+                    lateralDefenseEnabled = QueryLateralDefensePolicy().enabled,
                     deviceCount = state.Devices.Count,
                     onlineDeviceCount = state.Devices.Values.Count(IsOnline),
                     pendingTaskCount = state.Tasks.Count(task => task.status == "queued" || task.status == "sent")
@@ -112,6 +113,15 @@ namespace DataProtectorWebBridge.Services
             {
                 EnsureHashProtectPolicy();
                 return PolicyBridgeService.CloneHashProtectPolicy(state.HashProtectPolicy);
+            }
+        }
+
+        public PolicyBridgeService.LateralDefensePolicyDto QueryLateralDefensePolicy()
+        {
+            lock (syncRoot)
+            {
+                EnsureLateralDefensePolicy();
+                return PolicyBridgeService.CloneLateralDefensePolicy(state.LateralDefensePolicy);
             }
         }
 
@@ -427,6 +437,36 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("Hash dump protection policy stored on central server.");
+        }
+
+        public PolicyBridgeService.OperationResult UpdateLateralDefensePolicy(PolicyBridgeService.LateralDefensePolicyRequest request)
+        {
+            PolicyBridgeService.LateralDefensePolicyDto normalized = PolicyBridgeService.NormalizeLateralDefensePolicy(request);
+            lock (syncRoot)
+            {
+                EnsureLateralDefensePolicy();
+                if (PolicyBridgeService.ToLateralDefenseFlags(state.LateralDefensePolicy) != PolicyBridgeService.ToLateralDefenseFlags(normalized))
+                {
+                    state.LateralDefensePolicy = PolicyBridgeService.CloneLateralDefensePolicy(normalized);
+                    state.PolicyVersion++;
+                }
+                else
+                {
+                    state.LateralDefensePolicy = PolicyBridgeService.CloneLateralDefensePolicy(normalized);
+                }
+
+                AppendAudit(
+                    normalized.actor,
+                    "central.policy.lateral.update",
+                    "lateral-defense",
+                    PolicyBridgeService.LateralDefensePolicySummary(normalized),
+                    true,
+                    "0x00000000",
+                    "IPC and SMB lateral movement defense policy stored on central server.");
+                Save();
+            }
+
+            return Success("IPC and SMB lateral movement defense policy stored on central server.");
         }
 
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
@@ -778,6 +818,7 @@ namespace DataProtectorWebBridge.Services
                     webShellRules = QueryWebShellRules(),
                     deviceRules = BuildEffectiveDeviceRules(deviceId),
                     hashProtectPolicy = QueryHashProtectPolicy(),
+                    lateralDefensePolicy = QueryLateralDefensePolicy(),
                     tasks = assignedTasks
                 };
             }
@@ -828,6 +869,10 @@ namespace DataProtectorWebBridge.Services
                     {
                         loaded.HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
                     }
+                    if (loaded != null && loaded.LateralDefensePolicy == null)
+                    {
+                        loaded.LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
+                    }
                     return loaded ?? new CentralState();
                 }
                 catch
@@ -874,6 +919,18 @@ namespace DataProtectorWebBridge.Services
             else
             {
                 state.HashProtectPolicy = PolicyBridgeService.CloneHashProtectPolicy(state.HashProtectPolicy);
+            }
+        }
+
+        private void EnsureLateralDefensePolicy()
+        {
+            if (state.LateralDefensePolicy == null)
+            {
+                state.LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
+            }
+            else
+            {
+                state.LateralDefensePolicy = PolicyBridgeService.CloneLateralDefensePolicy(state.LateralDefensePolicy);
             }
         }
 
@@ -2637,6 +2694,7 @@ namespace DataProtectorWebBridge.Services
                 WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
                 DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
                 HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
+                LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableAuthorizations = new Dictionary<string, RemovableDeviceAuthorizationRule>(StringComparer.OrdinalIgnoreCase);
@@ -2652,6 +2710,7 @@ namespace DataProtectorWebBridge.Services
             public List<PolicyBridgeService.WebShellRuleDto> WebShellRules { get; set; }
             public List<PolicyBridgeService.DeviceRuleDto> DeviceRules { get; set; }
             public PolicyBridgeService.HashProtectPolicyDto HashProtectPolicy { get; set; }
+            public PolicyBridgeService.LateralDefensePolicyDto LateralDefensePolicy { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public Dictionary<string, RemovableDeviceState> RemovableDevices { get; set; }
             public Dictionary<string, RemovableDeviceAuthorizationRule> RemovableAuthorizations { get; set; }
@@ -2964,6 +3023,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.WebShellRuleDto[] webShellRules { get; set; }
             public PolicyBridgeService.DeviceRuleDto[] deviceRules { get; set; }
             public PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy { get; set; }
+            public PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy { get; set; }
             public RemoteTaskDto[] tasks { get; set; }
         }
 

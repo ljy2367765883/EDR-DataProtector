@@ -167,6 +167,20 @@ declare namespace Api {
       flags?: number;
     }
 
+    interface LateralDefensePolicy {
+      enabled: boolean;
+      blockSmbExecutableCopy: boolean;
+      blockIpcScheduledTasks: boolean;
+      blockIpcServiceCreation: boolean;
+      blockRemoteAdminTools: boolean;
+      flags: number;
+      actor?: string;
+    }
+
+    interface LateralDefensePolicyRequest extends Omit<LateralDefensePolicy, 'flags'> {
+      flags?: number;
+    }
+
     type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
 
     interface RemovableVolume {
@@ -260,7 +274,7 @@ declare namespace Api {
       Message: string;
     }
 
-    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'hashdump' | 'remote' | 'agent' | 'system';
+    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'hashdump' | 'lateral' | 'remote' | 'agent' | 'system';
     type AuditResult = 'all' | 'success' | 'failed';
     type AuditSeverity = 'all' | 'critical' | 'warning' | 'info' | 'operational';
     type AuditDisposition = 'all' | 'blocked' | 'observed' | 'completed' | 'failed';

@@ -139,6 +139,18 @@ DpControlMessageNotify(
                                         ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryLateralDefenseEvents) {
+        return DpLateralDefenseQueryEvents(OutputBuffer,
+                                           OutputBufferLength,
+                                           ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryLateralDefensePolicy) {
+        return DpLateralDefenseQueryPolicy(OutputBuffer,
+                                           OutputBufferLength,
+                                           ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandSetHashProtectPolicy) {
         PDP_HASH_PROTECT_POLICY policy;
 
@@ -150,6 +162,19 @@ DpControlMessageNotify(
 
         policy = (PDP_HASH_PROTECT_POLICY)message->Data;
         return DpHashProtectSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandSetLateralDefensePolicy) {
+        PDP_LATERAL_DEFENSE_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_LATERAL_DEFENSE_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_LATERAL_DEFENSE_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_LATERAL_DEFENSE_POLICY)message->Data;
+        return DpLateralDefenseSetPolicy(policy);
     }
 
     if (message->Command == DpPolicyCommandAddDeviceRule ||

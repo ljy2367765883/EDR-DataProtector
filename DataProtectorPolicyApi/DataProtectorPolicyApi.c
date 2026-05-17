@@ -23,10 +23,13 @@
 #define DP_DEVICE_MAX_ID_BYTES (DP_DEVICE_MAX_ID_CHARS * sizeof(WCHAR))
 #define DP_HASH_PROTECT_TARGET_CHARS 512u
 #define DP_HASH_PROTECT_PROCESS_CHARS 64u
+#define DP_LATERAL_DEFENSE_TARGET_CHARS 512u
+#define DP_LATERAL_DEFENSE_PROCESS_CHARS 64u
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
 #define DP_NETWORK_CONNECTION_EVENT_STRING_CHARS (DP_NETWORK_EVENT_PROCESS_PATH_CHARS + DP_NETWORK_EVENT_DOMAIN_CHARS + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
 #define DP_HASH_PROTECT_EVENT_STRING_CHARS (DP_HASH_PROTECT_TARGET_CHARS + DP_HASH_PROTECT_PROCESS_CHARS + 2u)
+#define DP_LATERAL_DEFENSE_EVENT_STRING_CHARS (DP_LATERAL_DEFENSE_TARGET_CHARS + DP_LATERAL_DEFENSE_PROCESS_CHARS + 2u)
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_API_ENABLE_FILE_TRACE 1
 #define DP_POLICY_API_TRACE_PATH L"C:\\ProgramData\\DataProtector\\PolicyApiTrace.log"
@@ -57,7 +60,10 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryDeviceRules = 63,
     DpPolicyCommandQueryHashProtectEvents = 80,
     DpPolicyCommandSetHashProtectPolicy = 81,
-    DpPolicyCommandQueryHashProtectPolicy = 82
+    DpPolicyCommandQueryHashProtectPolicy = 82,
+    DpPolicyCommandQueryLateralDefenseEvents = 90,
+    DpPolicyCommandSetLateralDefensePolicy = 91,
+    DpPolicyCommandQueryLateralDefensePolicy = 92
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -259,6 +265,32 @@ typedef struct _DP_HASH_PROTECT_POLICY_MESSAGE {
     ULONG Flags;
 } DP_HASH_PROTECT_POLICY_MESSAGE, *PDP_HASH_PROTECT_POLICY_MESSAGE;
 
+typedef struct _DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER, *PDP_LATERAL_DEFENSE_EVENT_QUERY_HEADER;
+
+typedef struct _DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG Operation;
+    ULONG Status;
+    ULONG DesiredAccess;
+    ULONG Flags;
+    ULONG TargetLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    WCHAR Target[DP_LATERAL_DEFENSE_TARGET_CHARS];
+    WCHAR ProcessImage[DP_LATERAL_DEFENSE_PROCESS_CHARS];
+} DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY, *PDP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_LATERAL_DEFENSE_POLICY_MESSAGE {
+    ULONG Version;
+    ULONG Flags;
+} DP_LATERAL_DEFENSE_POLICY_MESSAGE, *PDP_LATERAL_DEFENSE_POLICY_MESSAGE;
+
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
@@ -274,7 +306,16 @@ typedef struct _DP_HASH_PROTECT_POLICY_MESSAGE {
     (DP_POLICY_API_HASH_PROTECT_FLAG_ENABLED | \
      DP_POLICY_API_HASH_PROTECT_FLAG_LSASS_HANDLES | \
      DP_POLICY_API_HASH_PROTECT_FLAG_CREDENTIAL_FILES | \
-     DP_POLICY_API_HASH_PROTECT_FLAG_REGISTRY_HIVES)
+     DP_POLICY_API_HASH_PROTECT_FLAG_REGISTRY_HIVES | \
+     DP_POLICY_API_HASH_PROTECT_FLAG_RAW_EXTENTS)
+#define DP_LATERAL_DEFENSE_EVENT_QUERY_VERSION 1u
+#define DP_LATERAL_DEFENSE_POLICY_VERSION 1u
+#define DP_LATERAL_DEFENSE_ALLOWED_FLAGS \
+    (DP_POLICY_API_LATERAL_DEFENSE_FLAG_ENABLED | \
+     DP_POLICY_API_LATERAL_DEFENSE_FLAG_SMB_EXECUTABLES | \
+     DP_POLICY_API_LATERAL_DEFENSE_FLAG_IPC_TASKS | \
+     DP_POLICY_API_LATERAL_DEFENSE_FLAG_IPC_SERVICES | \
+     DP_POLICY_API_LATERAL_DEFENSE_FLAG_PROCESS_TOOLS)
 #define DP_DEVICE_RULE_MESSAGE_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
@@ -2859,6 +2900,289 @@ DpPolicyQueryHashProtectPolicy(
         (message.Flags & ~DP_HASH_PROTECT_ALLOWED_FLAGS) != 0) {
 
         DpPolicySetLastErrorMessage(L"Driver returned an invalid hash protection policy.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    Policy->Flags = message.Flags;
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryLateralDefenseEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_LATERAL_DEFENSE_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_LATERAL_DEFENSE_EVENT_QUERY_HEADER header;
+    DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER sizingHeader;
+    PDP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryLateralDefenseEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_LATERAL_DEFENSE_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid lateral defense event snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount >
+                MAXDWORD / DP_LATERAL_DEFENSE_EVENT_STRING_CHARS) {
+
+                DpPolicySetLastErrorMessage(L"Lateral defense event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+
+            *StringBufferCharsRequired =
+                sizingHeader.EventCount * DP_LATERAL_DEFENSE_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = sizingHeader.EventCount;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        if (sizingHeader.EventCount >
+            MAXDWORD / DP_LATERAL_DEFENSE_EVENT_STRING_CHARS) {
+
+            DpPolicySetLastErrorMessage(L"Lateral defense event snapshot is too large.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        *StringBufferCharsRequired =
+            sizingHeader.EventCount * DP_LATERAL_DEFENSE_EVENT_STRING_CHARS;
+    }
+
+    if (sizingHeader.EventCount >
+        MAXDWORD / DP_LATERAL_DEFENSE_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Lateral defense event snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        StringBufferChars <
+            sizingHeader.EventCount * DP_LATERAL_DEFENSE_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryLateralDefenseEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid lateral defense event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_LATERAL_DEFENSE_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_LATERAL_DEFENSE_EVENT_QUERY_VERSION ||
+        (header->EventCount >
+            (MAXDWORD - sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER)) /
+                sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported lateral defense event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedEventCount = header->EventCount;
+    if (EventCount != NULL) {
+        *EventCount = returnedEventCount;
+    }
+
+    entry = (PDP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < returnedEventCount; index++) {
+        DWORD targetChars;
+        DWORD processImageChars;
+
+        if (entry[index].TargetLengthBytes > sizeof(entry[index].Target) ||
+            entry[index].ProcessImageLengthBytes > sizeof(entry[index].ProcessImage) ||
+            entry[index].TargetLengthBytes % sizeof(WCHAR) != 0 ||
+            entry[index].ProcessImageLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid lateral defense event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        targetChars = entry[index].TargetLengthBytes / sizeof(WCHAR);
+        processImageChars = entry[index].ProcessImageLengthBytes / sizeof(WCHAR);
+        requiredStringChars += targetChars + 1 + processImageChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + targetChars + 1 + processImageChars + 1 <= StringBufferChars) {
+
+            Events[index].Sequence = entry[index].Sequence;
+            Events[index].ProcessId = entry[index].ProcessId;
+            Events[index].Operation = entry[index].Operation;
+            Events[index].Status = entry[index].Status;
+            Events[index].DesiredAccess = entry[index].DesiredAccess;
+            Events[index].Flags = entry[index].Flags;
+
+            Events[index].Target = StringBuffer + copiedStringChars;
+            if (targetChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars,
+                           entry[index].Target,
+                           entry[index].TargetLengthBytes);
+                copiedStringChars += targetChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].ProcessImage = StringBuffer + copiedStringChars;
+            if (processImageChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars,
+                           entry[index].ProcessImage,
+                           entry[index].ProcessImageLengthBytes);
+                copiedStringChars += processImageChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicySetLateralDefensePolicy(
+    _In_ const DP_POLICY_API_LATERAL_DEFENSE_POLICY *Policy
+    )
+{
+    DP_LATERAL_DEFENSE_POLICY_MESSAGE message;
+
+    if (Policy == NULL ||
+        (Policy->Flags & ~DP_LATERAL_DEFENSE_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Lateral defense policy is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_LATERAL_DEFENSE_POLICY_VERSION;
+    message.Flags = Policy->Flags;
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandSetLateralDefensePolicy,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryLateralDefensePolicy(
+    _Out_ DP_POLICY_API_LATERAL_DEFENSE_POLICY *Policy
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    DP_LATERAL_DEFENSE_POLICY_MESSAGE message;
+
+    if (Policy == NULL) {
+        DpPolicySetLastErrorMessage(L"Lateral defense policy output is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(Policy, sizeof(*Policy));
+    ZeroMemory(&message, sizeof(message));
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryLateralDefensePolicy,
+                                          NULL,
+                                          0,
+                                          &message,
+                                          sizeof(message),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(message) ||
+        message.Version != DP_LATERAL_DEFENSE_POLICY_VERSION ||
+        (message.Flags & ~DP_LATERAL_DEFENSE_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid lateral defense policy.");
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 

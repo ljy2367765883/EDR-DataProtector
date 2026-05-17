@@ -893,12 +893,12 @@ DpInspectWebShellWriteByCurrentName(
         FltObjects->FileObject == NULL ||
         Length == 0) {
 
-        DP_WEBSHELL_IO_TRACE("77 write skip invalid length=%lu\n", Length);
+        DP_WEBSHELL_IO_TRACE("write skip invalid length=%lu\n", Length);
         return FALSE;
     }
 
     if (DpHandleWebShellInspectionCompleted(FltObjects)) {
-        DP_WEBSHELL_IO_TRACE("77 write skip completed length=%lu\n", Length);
+        DP_WEBSHELL_IO_TRACE("write skip completed length=%lu\n", Length);
         return FALSE;
     }
 
@@ -906,7 +906,7 @@ DpInspectWebShellWriteByCurrentName(
                                        FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
                                        &nameInfo);
     if (!NT_SUCCESS(status)) {
-        DP_WEBSHELL_IO_TRACE("77 write name failed status=0x%08X length=%lu\n",
+        DP_WEBSHELL_IO_TRACE("write name failed status=0x%08X length=%lu\n",
                              status,
                              Length);
         return FALSE;
@@ -915,7 +915,7 @@ DpInspectWebShellWriteByCurrentName(
     if (!DpWebShellIsProtectedPath(&nameInfo->Name) ||
         !DpWebShellIsScriptPath(&nameInfo->Name, NULL)) {
 
-        DP_WEBSHELL_IO_TRACE("77 write bypass length=%lu path=%wZ\n",
+        DP_WEBSHELL_IO_TRACE("write bypass length=%lu path=%wZ\n",
                              Length,
                              &nameInfo->Name);
         FltReleaseFileNameInformation(nameInfo);
@@ -923,7 +923,7 @@ DpInspectWebShellWriteByCurrentName(
     }
 
     (VOID)DpEnsureWebShellHandleContext(FltObjects, TRUE);
-    DP_WEBSHELL_IO_TRACE("77 write targeted pid=%p length=%lu path=%wZ\n",
+    DP_WEBSHELL_IO_TRACE("write targeted pid=%p length=%lu path=%wZ\n",
                          FltGetRequestorProcessIdEx(Data),
                          Length,
                          &nameInfo->Name);
@@ -946,7 +946,7 @@ DpInspectWebShellWriteByCurrentName(
     }
 
     if (source == NULL) {
-        DP_WEBSHELL_IO_TRACE("77 write buffer unavailable length=%lu path=%wZ\n",
+        DP_WEBSHELL_IO_TRACE("write buffer unavailable length=%lu path=%wZ\n",
                              Length,
                              &nameInfo->Name);
         FltReleaseFileNameInformation(nameInfo);
@@ -964,7 +964,7 @@ DpInspectWebShellWriteByCurrentName(
 
     *InspectionStatus = status;
 
-    DP_WEBSHELL_IO_TRACE("77 write inspected status=0x%08X length=%lu path=%wZ\n",
+    DP_WEBSHELL_IO_TRACE("write inspected status=0x%08X length=%lu path=%wZ\n",
                          status,
                          Length,
                          &nameInfo->Name);
@@ -1069,19 +1069,19 @@ DpInspectWebShellRenameSource(
         TargetName->Buffer == NULL ||
         TargetName->Length == 0) {
 
-        DP_WEBSHELL_IO_TRACE("77 rename skip invalid target\n");
+        DP_WEBSHELL_IO_TRACE("rename skip invalid target\n");
         return STATUS_SUCCESS;
     }
 
     if (!DpWebShellIsProtectedPath(TargetName) ||
         !DpWebShellIsScriptPath(TargetName, NULL)) {
 
-        DP_WEBSHELL_IO_TRACE("77 rename skip unprotected target=%wZ\n",
+        DP_WEBSHELL_IO_TRACE("rename skip unprotected target=%wZ\n",
                              TargetName);
         return STATUS_SUCCESS;
     }
 
-    DP_WEBSHELL_IO_TRACE("77 rename targeted pid=%p target=%wZ\n",
+    DP_WEBSHELL_IO_TRACE("rename targeted pid=%p target=%wZ\n",
                          FltGetRequestorProcessIdEx(Data),
                          TargetName);
 
@@ -1089,7 +1089,7 @@ DpInspectWebShellRenameSource(
                                              FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
                                              &sourceNameInfo);
     if (NT_SUCCESS(sourceStatus) && sourceNameInfo != NULL) {
-        DP_WEBSHELL_IO_TRACE("77 rename source name=%wZ target=%wZ\n",
+        DP_WEBSHELL_IO_TRACE("rename source name=%wZ target=%wZ\n",
                              &sourceNameInfo->Name,
                              TargetName);
         sourceStatus = DpWebShellInspectFileBySourceName(FltObjects->Instance,
@@ -1100,19 +1100,19 @@ DpInspectWebShellRenameSource(
                                                          &sourceInspected);
         FltReleaseFileNameInformation(sourceNameInfo);
         if (!NT_SUCCESS(sourceStatus)) {
-            DP_WEBSHELL_IO_TRACE("77 rename denied from source status=0x%08X target=%wZ\n",
+            DP_WEBSHELL_IO_TRACE("rename denied from source status=0x%08X target=%wZ\n",
                                  sourceStatus,
                                  TargetName);
             return sourceStatus;
         }
     } else {
-        DP_WEBSHELL_IO_TRACE("77 rename source name failed status=0x%08X target=%wZ\n",
+        DP_WEBSHELL_IO_TRACE("rename source name failed status=0x%08X target=%wZ\n",
                              sourceStatus,
                              TargetName);
     }
 
     if (sourceInspected) {
-        DP_WEBSHELL_IO_TRACE("77 rename source inspected status=0x%08X target=%wZ\n",
+        DP_WEBSHELL_IO_TRACE("rename source inspected status=0x%08X target=%wZ\n",
                              sourceStatus,
                              TargetName);
         return sourceStatus;
@@ -1124,7 +1124,7 @@ DpInspectWebShellRenameSource(
                                          FltGetRequestorProcessIdEx(Data),
                                          DpWebShellOperationRename);
 
-    DP_WEBSHELL_IO_TRACE("77 rename fallback fileobject status=0x%08X target=%wZ\n",
+    DP_WEBSHELL_IO_TRACE("rename fallback fileobject status=0x%08X target=%wZ\n",
                          status,
                          TargetName);
 
@@ -1679,6 +1679,22 @@ DpPreCreate(
 
     *CompletionContext = NULL;
 
+    if (DpLateralDefenseShouldBlockIpcCreate(Data, FltObjects)) {
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
+
+    if (DpLateralDefenseIsNamedPipeOrMailslot(FltObjects)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    if (DpLateralDefenseShouldBlockCreate(Data, FltObjects)) {
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
+
     if (DpDeviceControlShouldBlockCreate(Data, FltObjects)) {
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
@@ -1940,6 +1956,7 @@ DpPreRead(
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
     }
+
     if (!DpCanProcessOperation(Data, FltObjects, length)) {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
@@ -2229,6 +2246,16 @@ DpPreWrite(
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
+    if (DpLateralDefenseShouldBlockWrite(Data, FltObjects)) {
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
+
+    if (DpLateralDefenseIsNamedPipeOrMailslot(FltObjects)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
     if (DpDeviceControlShouldBlockWrite(Data, FltObjects)) {
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
@@ -2247,7 +2274,7 @@ DpPreWrite(
                                             &webShellStatus) &&
         !NT_SUCCESS(webShellStatus)) {
 
-        DP_WEBSHELL_IO_TRACE("77 prewrite complete deny status=0x%08X length=%lu\n",
+        DP_WEBSHELL_IO_TRACE("prewrite complete deny status=0x%08X length=%lu\n",
                              webShellStatus,
                              length);
         Data->IoStatus.Status = webShellStatus;
@@ -2626,6 +2653,10 @@ DpPreSetInformation(
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
+    if (DpLateralDefenseIsNamedPipeOrMailslot(FltObjects)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
     if (DpDeviceControlShouldBlockSetInformation(Data, FltObjects)) {
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
@@ -2651,6 +2682,15 @@ DpPreSetInformation(
                                informationClass,
                                0);
             return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        }
+
+        if (DpLateralDefenseShouldBlockRename(Data,
+                                              FltObjects,
+                                              &targetNameInfo->Name)) {
+            FltReleaseFileNameInformation(targetNameInfo);
+            Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+            Data->IoStatus.Information = 0;
+            return FLT_PREOP_COMPLETE;
         }
 
         status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
@@ -2691,7 +2731,7 @@ DpPreSetInformation(
                                                    FltObjects,
                                                    &targetNameInfo->Name);
             if (!NT_SUCCESS(status)) {
-                DP_WEBSHELL_IO_TRACE("77 prerename complete deny status=0x%08X target=%wZ\n",
+                DP_WEBSHELL_IO_TRACE("prerename complete deny status=0x%08X target=%wZ\n",
                                      status,
                                      &targetNameInfo->Name);
                 FltReleaseFileNameInformation(targetNameInfo);

@@ -195,6 +195,21 @@ export function fetchUpdateHashProtectPolicy(data: Api.DataProtector.HashProtect
   });
 }
 
+export function fetchLateralDefensePolicy() {
+  return request<Api.DataProtector.LateralDefensePolicy>({
+    url: '/lateral/policy',
+    method: 'get'
+  });
+}
+
+export function fetchUpdateLateralDefensePolicy(data: Api.DataProtector.LateralDefensePolicyRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/lateral/policy',
+    method: 'post',
+    data
+  });
+}
+
 export function fetchRemovableDevices() {
   return request<Api.DataProtector.RemovableDevice[]>({
     url: '/device/removable',

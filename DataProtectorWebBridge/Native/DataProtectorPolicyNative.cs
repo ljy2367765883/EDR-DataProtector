@@ -120,6 +120,21 @@ namespace DataProtectorWebBridge.Native
         internal static extern uint DpPolicyQueryHashProtectPolicy(out NativeHashProtectPolicy policy);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryLateralDefenseEvents(
+            [Out] NativeLateralDefenseEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicySetLateralDefensePolicy(ref NativeLateralDefensePolicy policy);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryLateralDefensePolicy(out NativeLateralDefensePolicy policy);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyAddDeviceRule(ref NativeDeviceRule rule);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -237,6 +252,25 @@ namespace DataProtectorWebBridge.Native
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct NativeHashProtectPolicy
+        {
+            public uint Flags;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeLateralDefenseEvent
+        {
+            public ulong Sequence;
+            public ulong ProcessId;
+            public uint Operation;
+            public uint Status;
+            public uint DesiredAccess;
+            public uint Flags;
+            public IntPtr Target;
+            public IntPtr ProcessImage;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct NativeLateralDefensePolicy
         {
             public uint Flags;
         }

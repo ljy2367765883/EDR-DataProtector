@@ -93,7 +93,7 @@ CONST FLT_REGISTRATION FilterRegistration = {
 
     sizeof(FLT_REGISTRATION),
     FLT_REGISTRATION_VERSION,
-    0,
+    FLTFL_REGISTRATION_SUPPORT_NPFS_MSFS,
 
     Contexts,
     Callbacks,
@@ -136,6 +136,15 @@ DataProtectorInstanceSetup(
     UNREFERENCED_PARAMETER(Flags);
 
     PAGED_CODE();
+
+    switch (VolumeFilesystemType) {
+    case FLT_FSTYPE_NPFS:
+    case FLT_FSTYPE_MSFS:
+        return STATUS_SUCCESS;
+
+    default:
+        break;
+    }
 
     if (VolumeDeviceType != FILE_DEVICE_DISK_FILE_SYSTEM &&
         VolumeDeviceType != FILE_DEVICE_NETWORK_FILE_SYSTEM) {
@@ -236,8 +245,19 @@ DriverEntry(
         return status;
     }
 
+    status = DpLateralDefenseInitialize();
+    if (!NT_SUCCESS(status)) {
+        DpDeviceControlUninitialize();
+        DpWebShellUninitialize();
+        DpCryptoUninitialize();
+        DpProcessPolicyUninitialize();
+        DpShadowUninitialize();
+        return status;
+    }
+
     status = DpHashProtectInitialize(DriverObject);
     if (!NT_SUCCESS(status)) {
+        DpLateralDefenseUninitialize();
         DpDeviceControlUninitialize();
         DpWebShellUninitialize();
         DpCryptoUninitialize();
@@ -279,6 +299,7 @@ DriverEntry(
 
     if (!NT_SUCCESS(status)) {
         DpHashProtectUninitialize();
+        DpLateralDefenseUninitialize();
         DpDeviceControlUninitialize();
         DpWebShellUninitialize();
         DpCryptoUninitialize();
@@ -303,6 +324,8 @@ DataProtectorUnload(
     DpControlUninitialize();
 
     DpHashProtectUninitialize();
+
+    DpLateralDefenseUninitialize();
 
     DpDeviceControlUninitialize();
 

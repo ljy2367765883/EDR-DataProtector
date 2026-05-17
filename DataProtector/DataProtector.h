@@ -18,6 +18,10 @@ Abstract:
 
 #pragma prefast(disable:__WARNING_ENCODE_MEMBER_FUNCTION_POINTER, "Not valid for kernel mode drivers")
 
+#ifndef FLTFL_REGISTRATION_SUPPORT_NPFS_MSFS
+#define FLTFL_REGISTRATION_SUPPORT_NPFS_MSFS 0x00000002
+#endif
+
 #define DP_TAG_IO_CONTEXT      'cIpD'
 #define DP_TAG_IO_BUFFER       'bIpD'
 #define DP_TAG_STREAM_CONTEXT  'sCpD'
@@ -38,6 +42,7 @@ Abstract:
 #define DP_TAG_WEBSHELL_BUFFER 'bWpD'
 #define DP_TAG_DEVICE_RULE     'rDpD'
 #define DP_TAG_HASH_PROTECT    'hHpD'
+#define DP_TAG_LATERAL_DEFENSE 'lLpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
@@ -60,6 +65,9 @@ Abstract:
 #define DP_HASH_PROTECT_MAX_EVENTS 256
 #define DP_HASH_PROTECT_TARGET_CHARS 512
 #define DP_HASH_PROTECT_PROCESS_CHARS 64
+#define DP_LATERAL_DEFENSE_MAX_EVENTS 512
+#define DP_LATERAL_DEFENSE_TARGET_CHARS 512
+#define DP_LATERAL_DEFENSE_PROCESS_CHARS 64
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
 #define DP_PROTECTION_MAGIC 0x32465044u
@@ -99,6 +107,12 @@ Abstract:
 // when the Configuration Manager denies the request before registry callbacks.
 //
 #define DP_ENABLE_HASH_PROTECT_REG_PROCESS_GUARD 1
+
+//
+// Targeted lateral movement defense diagnostics. The module only prints when
+// it blocks or queues high-risk IPC/SMB activity.
+//
+#define DP_ENABLE_LATERAL_DEFENSE_TRACE 1
 
 //
 // Cached transparent encryption keeps plaintext in the system file cache.
@@ -239,7 +253,10 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryDeviceRules = 63,
     DpPolicyCommandQueryHashProtectEvents = 80,
     DpPolicyCommandSetHashProtectPolicy = 81,
-    DpPolicyCommandQueryHashProtectPolicy = 82
+    DpPolicyCommandQueryHashProtectPolicy = 82,
+    DpPolicyCommandQueryLateralDefenseEvents = 90,
+    DpPolicyCommandSetLateralDefensePolicy = 91,
+    DpPolicyCommandQueryLateralDefensePolicy = 92
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -525,6 +542,60 @@ typedef struct _DP_HASH_PROTECT_EVENT_QUERY_ENTRY {
 } DP_HASH_PROTECT_EVENT_QUERY_ENTRY, *PDP_HASH_PROTECT_EVENT_QUERY_ENTRY;
 
 #define DP_HASH_PROTECT_EVENT_QUERY_VERSION 1
+
+typedef enum _DP_LATERAL_DEFENSE_OPERATION {
+    DpLateralDefenseOperationSmbExecutableCreate = 1,
+    DpLateralDefenseOperationSmbExecutableWrite = 2,
+    DpLateralDefenseOperationSmbExecutableRename = 3,
+    DpLateralDefenseOperationIpcTaskScheduler = 4,
+    DpLateralDefenseOperationIpcServiceControl = 5,
+    DpLateralDefenseOperationRemoteScheduledTaskTool = 6,
+    DpLateralDefenseOperationRemoteServiceTool = 7,
+    DpLateralDefenseOperationWmiProcessCreate = 8,
+    DpLateralDefenseOperationPowerShellRemoteTask = 9
+} DP_LATERAL_DEFENSE_OPERATION;
+
+#define DP_LATERAL_DEFENSE_POLICY_VERSION 1
+#define DP_LATERAL_DEFENSE_FLAG_ENABLED            0x00000001
+#define DP_LATERAL_DEFENSE_FLAG_SMB_EXECUTABLES    0x00000002
+#define DP_LATERAL_DEFENSE_FLAG_IPC_TASKS          0x00000004
+#define DP_LATERAL_DEFENSE_FLAG_IPC_SERVICES       0x00000008
+#define DP_LATERAL_DEFENSE_FLAG_PROCESS_TOOLS      0x00000010
+#define DP_LATERAL_DEFENSE_DEFAULT_FLAGS \
+    (DP_LATERAL_DEFENSE_FLAG_ENABLED | \
+     DP_LATERAL_DEFENSE_FLAG_SMB_EXECUTABLES | \
+     DP_LATERAL_DEFENSE_FLAG_IPC_TASKS | \
+     DP_LATERAL_DEFENSE_FLAG_IPC_SERVICES | \
+     DP_LATERAL_DEFENSE_FLAG_PROCESS_TOOLS)
+#define DP_LATERAL_DEFENSE_ALLOWED_FLAGS DP_LATERAL_DEFENSE_DEFAULT_FLAGS
+
+typedef struct _DP_LATERAL_DEFENSE_POLICY {
+    ULONG Version;
+    ULONG Flags;
+} DP_LATERAL_DEFENSE_POLICY, *PDP_LATERAL_DEFENSE_POLICY;
+
+typedef struct _DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_LATERAL_DEFENSE_EVENT_QUERY_HEADER, *PDP_LATERAL_DEFENSE_EVENT_QUERY_HEADER;
+
+typedef struct _DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG Operation;
+    ULONG Status;
+    ULONG DesiredAccess;
+    ULONG Flags;
+    ULONG TargetLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    WCHAR Target[DP_LATERAL_DEFENSE_TARGET_CHARS];
+    WCHAR ProcessImage[DP_LATERAL_DEFENSE_PROCESS_CHARS];
+} DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY, *PDP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY;
+
+#define DP_LATERAL_DEFENSE_EVENT_QUERY_VERSION 1
 
 EXTERN_C_START
 
@@ -840,6 +911,72 @@ DpHashProtectSetPolicy(
 
 NTSTATUS
 DpHashProtectQueryPolicy(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpLateralDefenseInitialize(
+    VOID
+    );
+
+VOID
+DpLateralDefenseUninitialize(
+    VOID
+    );
+
+BOOLEAN
+DpLateralDefenseIsNamedPipeOrMailslot(
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpLateralDefenseShouldBlockCreate(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpLateralDefenseShouldBlockWrite(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpLateralDefenseShouldBlockRename(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ PCUNICODE_STRING TargetName
+    );
+
+BOOLEAN
+DpLateralDefenseShouldBlockIpcCreate(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpLateralDefenseShouldBlockProcessCreate(
+    _In_ PEPROCESS Process,
+    _In_ HANDLE ProcessId,
+    _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
+    );
+
+NTSTATUS
+DpLateralDefenseQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpLateralDefenseSetPolicy(
+    _In_ const DP_LATERAL_DEFENSE_POLICY *Policy
+    );
+
+NTSTATUS
+DpLateralDefenseQueryPolicy(
     _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
     _In_ ULONG OutputBufferLength,
     _Out_ PULONG ReturnOutputBufferLength

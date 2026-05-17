@@ -45,6 +45,9 @@
     <ClCompile Include="DpIo.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DpLateralDefense.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DpNetFilter.c">
       <Filter>Source Files</Filter>
     </ClCompile>

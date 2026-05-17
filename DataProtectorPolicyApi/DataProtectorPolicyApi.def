@@ -30,6 +30,9 @@ EXPORTS
     DpPolicyQueryHashProtectEvents
     DpPolicySetHashProtectPolicy
     DpPolicyQueryHashProtectPolicy
+    DpPolicyQueryLateralDefenseEvents
+    DpPolicySetLateralDefensePolicy
+    DpPolicyQueryLateralDefensePolicy
     DpPolicyAddDeviceRule
     DpPolicyRemoveDeviceRule
     DpPolicyClearDeviceRules

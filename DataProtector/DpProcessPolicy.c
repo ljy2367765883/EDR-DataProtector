@@ -572,6 +572,10 @@ DpProcessPolicyCreateProcessNotify(
         return;
     }
 
+    if (DpLateralDefenseShouldBlockProcessCreate(Process, ProcessId, CreateInfo)) {
+        return;
+    }
+
     if (DpHashProtectShouldBlockProcessCreate(Process, ProcessId, CreateInfo)) {
         return;
     }

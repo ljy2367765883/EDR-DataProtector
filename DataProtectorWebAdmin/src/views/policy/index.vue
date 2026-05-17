@@ -13,6 +13,7 @@ import {
   fetchClearWebShellRules,
   fetchDeviceRules,
   fetchHashProtectPolicy,
+  fetchLateralDefensePolicy,
   fetchNetworkRules,
   fetchPolicyRules,
   fetchWebShellRules,
@@ -23,7 +24,8 @@ import {
   fetchRemovableDevices,
   fetchAddWebShellRule,
   fetchRemoveWebShellRule,
-  fetchUpdateHashProtectPolicy
+  fetchUpdateHashProtectPolicy,
+  fetchUpdateLateralDefensePolicy
 } from '@/service/api';
 
 defineOptions({
@@ -36,6 +38,7 @@ const networkSubmitting = ref(false);
 const webShellSubmitting = ref(false);
 const deviceSubmitting = ref(false);
 const hashProtectSubmitting = ref(false);
+const lateralDefenseSubmitting = ref(false);
 const connected = ref(false);
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
@@ -48,6 +51,15 @@ const hashProtectPolicy = reactive<Api.DataProtector.HashProtectPolicy>({
   protectCredentialFiles: true,
   protectRegistryHives: true,
   protectRawExtents: true,
+  flags: 0x0000001f,
+  actor: 'web-admin'
+});
+const lateralDefensePolicy = reactive<Api.DataProtector.LateralDefensePolicy>({
+  enabled: true,
+  blockSmbExecutableCopy: true,
+  blockIpcScheduledTasks: true,
+  blockIpcServiceCreation: true,
+  blockRemoteAdminTools: true,
   flags: 0x0000001f,
   actor: 'web-admin'
 });
@@ -231,6 +243,53 @@ const hashProtectAssets = computed(() => [
     detail: 'Allows raw volume reads except when the byte range overlaps sensitive hive and NTDS file extents.',
     enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectRawExtents,
     icon: 'mdi:harddisk'
+  }
+]);
+
+const lateralDefenseGroups = computed(() => {
+  const enabledFeatures = [
+    lateralDefensePolicy.blockSmbExecutableCopy,
+    lateralDefensePolicy.blockIpcScheduledTasks,
+    lateralDefensePolicy.blockIpcServiceCreation,
+    lateralDefensePolicy.blockRemoteAdminTools
+  ].filter(Boolean).length;
+
+  return {
+    mode: lateralDefensePolicy.enabled ? 'Enforcing' : 'Disabled',
+    enabledFeatures,
+    activeControls: lateralDefensePolicy.enabled ? enabledFeatures : 0,
+    flags: `0x${lateralDefensePolicy.flags.toString(16).toUpperCase().padStart(8, '0')}`
+  };
+});
+
+const lateralDefenseControls = computed(() => [
+  {
+    key: 'smb-executable',
+    title: 'SMB executable staging',
+    detail: 'Blocks remote-origin writes, creates and renames that land executable payloads through SMB shares.',
+    enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockSmbExecutableCopy,
+    icon: 'mdi:file-alert-outline'
+  },
+  {
+    key: 'ipc-tasks',
+    title: 'IPC task scheduler',
+    detail: 'Blocks named-pipe access used by AT and Task Scheduler RPC lateral movement.',
+    enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockIpcScheduledTasks,
+    icon: 'mdi:calendar-lock-outline'
+  },
+  {
+    key: 'ipc-services',
+    title: 'IPC service control',
+    detail: 'Blocks Service Control Manager named-pipe abuse for remote service creation and execution.',
+    enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockIpcServiceCreation,
+    icon: 'mdi:cog-stop-outline'
+  },
+  {
+    key: 'remote-admin-tools',
+    title: 'Remote admin tool launch',
+    detail: 'Blocks schtasks, at, sc, wmic and PowerShell remoting launch patterns before execution.',
+    enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockRemoteAdminTools,
+    icon: 'mdi:console-network-outline'
   }
 ]);
 
@@ -597,17 +656,66 @@ function setHashProtectFeature(
   syncHashProtectFlags();
 }
 
+function applyLateralDefensePolicy(policy?: Api.DataProtector.LateralDefensePolicy) {
+  if (!policy) return;
+
+  lateralDefensePolicy.enabled = Boolean(policy.enabled);
+  lateralDefensePolicy.blockSmbExecutableCopy = Boolean(policy.blockSmbExecutableCopy);
+  lateralDefensePolicy.blockIpcScheduledTasks = Boolean(policy.blockIpcScheduledTasks);
+  lateralDefensePolicy.blockIpcServiceCreation = Boolean(policy.blockIpcServiceCreation);
+  lateralDefensePolicy.blockRemoteAdminTools = Boolean(policy.blockRemoteAdminTools);
+  lateralDefensePolicy.flags = policy.flags ?? calculateLateralDefenseFlags();
+  lateralDefensePolicy.actor = 'web-admin';
+}
+
+function calculateLateralDefenseFlags() {
+  let flags = 0;
+  if (lateralDefensePolicy.enabled) flags |= 0x00000001;
+  if (lateralDefensePolicy.blockSmbExecutableCopy) flags |= 0x00000002;
+  if (lateralDefensePolicy.blockIpcScheduledTasks) flags |= 0x00000004;
+  if (lateralDefensePolicy.blockIpcServiceCreation) flags |= 0x00000008;
+  if (lateralDefensePolicy.blockRemoteAdminTools) flags |= 0x00000010;
+  return flags;
+}
+
+function syncLateralDefenseFlags() {
+  lateralDefensePolicy.flags = calculateLateralDefenseFlags();
+}
+
+function setLateralDefenseEnabled(value: boolean) {
+  lateralDefensePolicy.enabled = value;
+  syncLateralDefenseFlags();
+}
+
+function setLateralDefenseFeature(
+  key: 'blockSmbExecutableCopy' | 'blockIpcScheduledTasks' | 'blockIpcServiceCreation' | 'blockRemoteAdminTools',
+  value: boolean
+) {
+  lateralDefensePolicy[key] = value;
+  syncLateralDefenseFlags();
+}
+
 async function refresh() {
   loading.value = true;
   try {
-    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult, deviceRulesResult, removableDevicesResult, hashProtectPolicyResult] = await Promise.all([
+    const [
+      statusResult,
+      rulesResult,
+      networkRulesResult,
+      webShellRulesResult,
+      deviceRulesResult,
+      removableDevicesResult,
+      hashProtectPolicyResult,
+      lateralDefensePolicyResult
+    ] = await Promise.all([
       fetchBridgeStatus(),
       fetchPolicyRules(),
       fetchNetworkRules(),
       fetchWebShellRules(),
       fetchDeviceRules(),
       fetchRemovableDevices(),
-      fetchHashProtectPolicy()
+      fetchHashProtectPolicy(),
+      fetchLateralDefensePolicy()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
     if (!rulesResult.error) rules.value = rulesResult.data;
@@ -616,6 +724,7 @@ async function refresh() {
     if (!deviceRulesResult.error) deviceRules.value = deviceRulesResult.data;
     if (!removableDevicesResult.error) removableDevices.value = removableDevicesResult.data;
     if (!hashProtectPolicyResult.error) applyHashProtectPolicy(hashProtectPolicyResult.data);
+    if (!lateralDefensePolicyResult.error) applyLateralDefensePolicy(lateralDefensePolicyResult.data);
   } finally {
     loading.value = false;
   }
@@ -849,6 +958,28 @@ async function saveHashProtectPolicy() {
   }
 }
 
+async function saveLateralDefensePolicy() {
+  syncLateralDefenseFlags();
+  lateralDefenseSubmitting.value = true;
+  try {
+    const { error, data } = await fetchUpdateLateralDefensePolicy({
+      enabled: lateralDefensePolicy.enabled,
+      blockSmbExecutableCopy: lateralDefensePolicy.blockSmbExecutableCopy,
+      blockIpcScheduledTasks: lateralDefensePolicy.blockIpcScheduledTasks,
+      blockIpcServiceCreation: lateralDefensePolicy.blockIpcServiceCreation,
+      blockRemoteAdminTools: lateralDefensePolicy.blockRemoteAdminTools,
+      actor: 'web-admin'
+    });
+
+    if (!error && data.succeeded) {
+      window.$message?.success('Lateral movement defense policy saved to central policy.');
+      await refresh();
+    }
+  } finally {
+    lateralDefenseSubmitting.value = false;
+  }
+}
+
 async function authorizeRemovableDevice(device: Api.DataProtector.RemovableDevice, allowWrite: boolean) {
   deviceSubmitting.value = true;
   try {
@@ -1042,6 +1173,123 @@ onMounted(refresh);
                 </NSpace>
               </template>
               <NDataTable :columns="networkColumns" :data="networkRules" :loading="loading" :pagination="{ pageSize: 10 }" />
+            </NCard>
+          </NGi>
+        </NGrid>
+      </NTabPane>
+
+      <NTabPane name="lateral" tab="IPC / SMB Defense">
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 m:8">
+            <NCard title="Lateral Movement Defense Policy" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NTag :type="lateralDefensePolicy.enabled ? 'success' : 'error'" :bordered="false">
+                  {{ lateralDefenseGroups.mode }}
+                </NTag>
+              </template>
+
+              <NSpace vertical :size="18">
+                <div class="flex items-center justify-between gap-16px rounded-8px bg-gray-50 p-14px dark:bg-dark-3">
+                  <div class="min-w-0">
+                    <div class="text-15px font-700">Protection enforcement</div>
+                    <div class="m-t-4px text-12px text-gray-500">Central policy controls SMB executable staging and IPC remote execution surfaces.</div>
+                  </div>
+                  <NSwitch :value="lateralDefensePolicy.enabled" @update:value="setLateralDefenseEnabled">
+                    <template #checked>Enabled</template>
+                    <template #unchecked>Disabled</template>
+                  </NSwitch>
+                </div>
+
+                <NGrid :x-gap="12" :y-gap="12" cols="1 m:2">
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">SMB executable copy</div>
+                        <NSwitch
+                          :value="lateralDefensePolicy.blockSmbExecutableCopy"
+                          :disabled="!lateralDefensePolicy.enabled"
+                          @update:value="value => setLateralDefenseFeature('blockSmbExecutableCopy', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Blocks executable payload creation, write and rename on remote-origin SMB file operations.</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">IPC scheduled tasks</div>
+                        <NSwitch
+                          :value="lateralDefensePolicy.blockIpcScheduledTasks"
+                          :disabled="!lateralDefensePolicy.enabled"
+                          @update:value="value => setLateralDefenseFeature('blockIpcScheduledTasks', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Blocks remote Task Scheduler named-pipe access and matching command-line launch patterns.</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">IPC service creation</div>
+                        <NSwitch
+                          :value="lateralDefensePolicy.blockIpcServiceCreation"
+                          :disabled="!lateralDefensePolicy.enabled"
+                          @update:value="value => setLateralDefenseFeature('blockIpcServiceCreation', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Blocks Service Control Manager named-pipe abuse and remote service command patterns.</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">Remote admin tools</div>
+                        <NSwitch
+                          :value="lateralDefensePolicy.blockRemoteAdminTools"
+                          :disabled="!lateralDefensePolicy.enabled"
+                          @update:value="value => setLateralDefenseFeature('blockRemoteAdminTools', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Blocks schtasks, at, sc, wmic and PowerShell remoting process creation before execution.</div>
+                    </div>
+                  </NGi>
+                </NGrid>
+
+                <div class="flex flex-wrap items-center justify-between gap-12px">
+                  <NSpace>
+                    <NTag type="info">Controls: {{ lateralDefenseGroups.enabledFeatures }}/4</NTag>
+                    <NTag type="warning">Flags: {{ lateralDefenseGroups.flags }}</NTag>
+                    <NTag :type="lateralDefensePolicy.enabled ? 'success' : 'default'">Active: {{ lateralDefenseGroups.activeControls }}</NTag>
+                  </NSpace>
+                  <NButton type="primary" :loading="lateralDefenseSubmitting" @click="saveLateralDefensePolicy">
+                    <template #icon><SvgIcon icon="mdi:content-save-cog-outline" /></template>
+                    Save Lateral Defense
+                  </NButton>
+                </div>
+              </NSpace>
+            </NCard>
+          </NGi>
+
+          <NGi span="24 m:16">
+            <NCard title="Protected Lateral Movement Surfaces" :bordered="false" class="card-wrapper">
+              <NGrid :x-gap="12" :y-gap="12" cols="1 l:2 xl:4">
+                <NGi v-for="control in lateralDefenseControls" :key="control.key">
+                  <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
+                    <div class="flex items-start justify-between gap-12px">
+                      <div class="flex min-w-0 items-center gap-10px">
+                        <SvgIcon :icon="control.icon" class="text-22px text-primary" />
+                        <div class="min-w-0">
+                          <div class="truncate text-15px font-700">{{ control.title }}</div>
+                          <div class="m-t-6px text-12px leading-5 text-gray-500">{{ control.detail }}</div>
+                        </div>
+                      </div>
+                      <NTag :type="control.enabled ? 'success' : 'default'" :bordered="false">
+                        {{ control.enabled ? 'Active' : 'Inactive' }}
+                      </NTag>
+                    </div>
+                  </div>
+                </NGi>
+              </NGrid>
             </NCard>
           </NGi>
         </NGrid>
