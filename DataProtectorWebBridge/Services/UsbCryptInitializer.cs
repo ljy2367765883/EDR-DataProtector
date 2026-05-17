@@ -53,7 +53,7 @@ namespace DataProtectorWebBridge.Services
 
             if (!normalized.confirmed)
             {
-                ValidateUsbCryptInitializationPlan(disk, normalized.publicToolAreaBytes);
+                ValidateUsbCryptInitializationPlan(disk, normalized.publicToolAreaBytes, normalized.hardwareId);
                 return BuildDryRun(normalized, target, targetRoot, disk);
             }
 
@@ -72,9 +72,9 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 UsbRuntimePackage runtimePackage = DownloadAndExtractRuntimePackage(normalized, serverBaseUri, extractionRoot);
-                targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes, targetRoot);
+                targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes, targetRoot, normalized.hardwareId);
                 disk = ResolvePhysicalDiskTarget(targetRoot);
-                ValidateUsbCryptLayout(disk, normalized.publicToolAreaBytes);
+                ValidateUsbCryptLayout(disk, normalized.publicToolAreaBytes, normalized.hardwareId);
                 PreparePublicToolArea(targetRoot, runtimePackage);
 
                 long dataLength = normalized.dataLengthBytes > 0
@@ -408,7 +408,7 @@ namespace DataProtectorWebBridge.Services
             return "0x" + status.ToString("X8") + (string.IsNullOrWhiteSpace(text) ? string.Empty : " (" + text + ")");
         }
 
-        private static string ReinitializeDiskLayout(PhysicalDiskTarget disk, long publicToolAreaBytes, string currentDriveRoot)
+        private static string ReinitializeDiskLayout(PhysicalDiskTarget disk, long publicToolAreaBytes, string currentDriveRoot, string expectedHardwareId)
         {
             if (disk == null || string.IsNullOrWhiteSpace(disk.physicalDrivePath))
             {
@@ -416,6 +416,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             int diskNumber = ParsePhysicalDriveNumber(disk.physicalDrivePath);
+            ValidateUsbCryptInitializationPlan(disk, publicToolAreaBytes, expectedHardwareId);
             string volumeLabel = "DPUSB";
             Exception lastError = null;
 
@@ -423,6 +424,7 @@ namespace DataProtectorWebBridge.Services
             {
                 try
                 {
+                    ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
                     BestEffortDismountPublicVolume(currentDriveRoot);
                     RunDiskPartScript(
                         diskNumber,
@@ -437,6 +439,7 @@ namespace DataProtectorWebBridge.Services
                         });
 
                     WaitForPhysicalDisk(diskNumber, "after clean");
+                    ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
                     RunDiskPartScript(
                         diskNumber,
                         "create-public-tool-partition",
@@ -634,6 +637,29 @@ namespace DataProtectorWebBridge.Services
             return false;
         }
 
+        private static void ValidatePhysicalDiskStillMatches(int diskNumber, long publicToolAreaBytes, string expectedHardwareId)
+        {
+            PhysicalDiskTarget current = ResolvePhysicalDiskTargetByNumber(diskNumber);
+            ValidateUsbCryptInitializationPlan(current, publicToolAreaBytes, expectedHardwareId);
+        }
+
+        private static PhysicalDiskTarget ResolvePhysicalDiskTargetByNumber(int diskNumber)
+        {
+            using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                "SELECT * FROM Win32_DiskDrive WHERE Index=" + diskNumber))
+            {
+                foreach (ManagementObject disk in searcher.Get())
+                {
+                    using (disk)
+                    {
+                        return PhysicalDiskTargetFromDisk(disk, 0);
+                    }
+                }
+            }
+
+            throw new InvalidOperationException("Physical disk " + diskNumber + " is not available.");
+        }
+
         private static string WaitForToolPartition(int diskNumber)
         {
             DateTime deadline = DateTime.UtcNow.AddSeconds(30);
@@ -721,12 +747,7 @@ namespace DataProtectorWebBridge.Services
                                         continue;
                                     }
 
-                                    return new PhysicalDiskTarget
-                                    {
-                                        physicalDrivePath = physicalPath,
-                                        firstPartitionOffsetBytes = partitionOffset,
-                                        diskSizeBytes = Convert.ToInt64(disk["Size"] ?? 0)
-                                    };
+                                    return PhysicalDiskTargetFromDisk(disk, partitionOffset);
                                 }
                             }
                         }
@@ -737,8 +758,25 @@ namespace DataProtectorWebBridge.Services
             throw new InvalidOperationException("Unable to resolve the removable drive to a physical disk.");
         }
 
-        private static void ValidateUsbCryptLayout(PhysicalDiskTarget disk, long publicToolAreaBytes)
+        private static PhysicalDiskTarget PhysicalDiskTargetFromDisk(ManagementBaseObject disk, long firstPartitionOffsetBytes)
         {
+            return new PhysicalDiskTarget
+            {
+                physicalDrivePath = Convert.ToString(disk["DeviceID"]),
+                firstPartitionOffsetBytes = firstPartitionOffsetBytes,
+                diskSizeBytes = Convert.ToInt64(disk["Size"] ?? 0),
+                model = Convert.ToString(disk["Model"]),
+                serialNumber = Convert.ToString(disk["SerialNumber"]),
+                pnpDeviceId = Convert.ToString(disk["PNPDeviceID"]),
+                interfaceType = Convert.ToString(disk["InterfaceType"]),
+                mediaType = Convert.ToString(disk["MediaType"])
+            };
+        }
+
+        private static void ValidateUsbCryptLayout(PhysicalDiskTarget disk, long publicToolAreaBytes, string expectedHardwareId)
+        {
+            ValidateUsbCryptInitializationPlan(disk, publicToolAreaBytes, expectedHardwareId);
+
             if (disk.diskSizeBytes <= DataOffsetBytes + MetadataBytes)
             {
                 throw new InvalidOperationException("Target disk is too small for the Secure USB layout.");
@@ -760,7 +798,7 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private static void ValidateUsbCryptInitializationPlan(PhysicalDiskTarget disk, long publicToolAreaBytes)
+        private static void ValidateUsbCryptInitializationPlan(PhysicalDiskTarget disk, long publicToolAreaBytes, string expectedHardwareId)
         {
             if (disk == null || string.IsNullOrWhiteSpace(disk.physicalDrivePath))
             {
@@ -770,6 +808,23 @@ namespace DataProtectorWebBridge.Services
             if (disk.diskSizeBytes <= DataOffsetBytes + MetadataBytes)
             {
                 throw new InvalidOperationException("Target disk is too small for the Secure USB layout.");
+            }
+
+            if (!disk.IsUsbOrRemovable)
+            {
+                throw new InvalidOperationException("Refusing Secure USB initialization because the target physical disk is not reported as USB/removable.");
+            }
+
+            string actualHardwareId = RemovableDeviceInventory.ComputeHardwareIdFromDiskIdentity(
+                disk.pnpDeviceId,
+                disk.serialNumber,
+                disk.model,
+                disk.interfaceType,
+                disk.mediaType);
+            if (string.IsNullOrWhiteSpace(actualHardwareId) ||
+                !string.Equals(actualHardwareId, expectedHardwareId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Refusing Secure USB initialization because the physical disk identity no longer matches the selected removable device.");
             }
 
             if (publicToolAreaBytes != PublicToolAreaBytes)
@@ -927,6 +982,26 @@ namespace DataProtectorWebBridge.Services
             public string physicalDrivePath { get; set; }
             public long firstPartitionOffsetBytes { get; set; }
             public long diskSizeBytes { get; set; }
+            public string model { get; set; }
+            public string serialNumber { get; set; }
+            public string pnpDeviceId { get; set; }
+            public string interfaceType { get; set; }
+            public string mediaType { get; set; }
+
+            public bool IsUsbOrRemovable
+            {
+                get
+                {
+                    string normalizedInterface = (interfaceType ?? string.Empty).Trim();
+                    string normalizedPnp = (pnpDeviceId ?? string.Empty).Trim();
+                    string normalizedMedia = (mediaType ?? string.Empty).Trim();
+                    return string.Equals(normalizedInterface, "USB", StringComparison.OrdinalIgnoreCase) ||
+                           normalizedPnp.StartsWith("USB", StringComparison.OrdinalIgnoreCase) ||
+                           normalizedPnp.IndexOf("USBSTOR", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                           normalizedMedia.IndexOf("removable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                           normalizedMedia.IndexOf("flash", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
         }
 
         public sealed class UsbCryptInitializationRequest

@@ -305,6 +305,23 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        internal static string ComputeHardwareIdFromDiskIdentity(
+            string pnpDeviceId,
+            string serialNumber,
+            string model,
+            string interfaceType,
+            string mediaType)
+        {
+            return ComputeHardwareId(BuildPhysicalIdentity(new DiskMetadata
+            {
+                PnpDeviceId = Clean(pnpDeviceId),
+                SerialNumber = Clean(serialNumber),
+                Model = Clean(model),
+                InterfaceType = Clean(interfaceType),
+                MediaType = Clean(mediaType)
+            }));
+        }
+
         private static string BuildPhysicalIdentity(DiskMetadata metadata)
         {
             if (metadata == null)
