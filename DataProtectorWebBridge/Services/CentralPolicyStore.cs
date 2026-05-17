@@ -663,12 +663,22 @@ namespace DataProtectorWebBridge.Services
                 if (request.RemovableDevices != null)
                 {
                     int removableCount = 0;
+                    bool dynamicDevicePolicyChanged = false;
+                    HashSet<string> seenRemovableVolumes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (RemovableDeviceObservation item in request.RemovableDevices)
                     {
-                        if (IngestRemovableDevice(deviceId, device, item))
+                        bool policyAffectingChange;
+                        if (IngestRemovableDevice(deviceId, device, item, seenRemovableVolumes, out policyAffectingChange))
                         {
                             removableCount++;
+                            dynamicDevicePolicyChanged = dynamicDevicePolicyChanged || policyAffectingChange;
                         }
+                    }
+
+                    dynamicDevicePolicyChanged = MarkMissingRemovableVolumesOffline(deviceId, seenRemovableVolumes) || dynamicDevicePolicyChanged;
+                    if (dynamicDevicePolicyChanged)
+                    {
+                        state.PolicyVersion++;
                     }
 
                     if (removableCount > 0)
@@ -834,6 +844,11 @@ namespace DataProtectorWebBridge.Services
         private void TrimRemovableDevices()
         {
             EnsureDeviceAuthorizationState();
+            foreach (RemovableDeviceState device in state.RemovableDevices.Values)
+            {
+                NormalizeRemovableVolumeState(device);
+            }
+
             if (state.RemovableDevices.Count <= 5000)
             {
                 return;
@@ -987,8 +1002,14 @@ namespace DataProtectorWebBridge.Services
             return true;
         }
 
-        private bool IngestRemovableDevice(string deviceId, CentralDeviceState device, RemovableDeviceObservation observation)
+        private bool IngestRemovableDevice(
+            string deviceId,
+            CentralDeviceState device,
+            RemovableDeviceObservation observation,
+            HashSet<string> seenVolumeKeys,
+            out bool policyAffectingChange)
         {
+            policyAffectingChange = false;
             if (observation == null)
             {
                 return false;
@@ -1014,21 +1035,38 @@ namespace DataProtectorWebBridge.Services
                 state.RemovableDevices[hardwareId] = existing;
             }
 
+            NormalizeRemovableVolumeState(existing);
+
+            string now = DateTime.UtcNow.ToString("o");
             existing.deviceId = deviceId ?? string.Empty;
             existing.host = device == null ? string.Empty : device.Machine ?? string.Empty;
             existing.user = device == null ? string.Empty : device.User ?? string.Empty;
-            existing.driveLetter = NormalizeDeviceText(observation.driveLetter).ToUpperInvariant();
-            existing.volumeGuid = NormalizeDeviceText(observation.volumeGuid);
-            existing.volumeLabel = NormalizeDeviceText(observation.volumeLabel);
-            existing.fileSystem = NormalizeDeviceText(observation.fileSystem);
-            existing.sizeBytes = observation.sizeBytes;
+            existing.lastSeenUtc = now;
+            existing.online = true;
             existing.model = NormalizeDeviceText(observation.model);
             existing.serialNumber = NormalizeDeviceText(observation.serialNumber);
             existing.pnpDeviceId = NormalizeDeviceText(observation.pnpDeviceId);
             existing.interfaceType = NormalizeDeviceText(observation.interfaceType);
             existing.mediaType = NormalizeDeviceText(observation.mediaType);
-            existing.lastSeenUtc = DateTime.UtcNow.ToString("o");
-            existing.online = true;
+
+            RemovableVolumeState volume = UpsertRemovableVolume(existing, deviceId, device, observation, now, out policyAffectingChange);
+            if (policyAffectingChange && ResolveRemovableAuthorization(hardwareId) == null)
+            {
+                policyAffectingChange = false;
+            }
+            if (volume != null)
+            {
+                existing.driveLetter = volume.driveLetter;
+                existing.volumeGuid = volume.volumeGuid;
+                existing.volumeLabel = volume.volumeLabel;
+                existing.fileSystem = volume.fileSystem;
+                existing.sizeBytes = volume.sizeBytes;
+
+                if (seenVolumeKeys != null)
+                {
+                    seenVolumeKeys.Add(RemovableVolumeKey(existing.hardwareId, volume));
+                }
+            }
 
             if (isNew)
             {
@@ -1036,6 +1074,137 @@ namespace DataProtectorWebBridge.Services
             }
 
             return true;
+        }
+
+        private bool MarkMissingRemovableVolumesOffline(string endpointDeviceId, HashSet<string> seenVolumeKeys)
+        {
+            if (string.IsNullOrWhiteSpace(endpointDeviceId))
+            {
+                return false;
+            }
+
+            EnsureDeviceAuthorizationState();
+            HashSet<string> seen = seenVolumeKeys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool changed = false;
+
+            foreach (RemovableDeviceState device in state.RemovableDevices.Values)
+            {
+                if (device == null)
+                {
+                    continue;
+                }
+
+                NormalizeRemovableVolumeState(device);
+                if (device.volumes == null)
+                {
+                    continue;
+                }
+
+                foreach (RemovableVolumeState volume in device.volumes)
+                {
+                    if (volume == null ||
+                        !string.Equals(volume.deviceId, endpointDeviceId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (!seen.Contains(RemovableVolumeKey(device.hardwareId, volume)))
+                    {
+                        if (volume.online)
+                        {
+                            volume.online = false;
+                            changed = ResolveRemovableAuthorization(device.hardwareId) != null || changed;
+                        }
+                    }
+                }
+
+                RemovableVolumeState primary = SelectPrimaryRemovableVolume(device);
+                if (primary != null)
+                {
+                    device.deviceId = primary.deviceId;
+                    device.host = primary.host;
+                    device.user = primary.user;
+                    device.driveLetter = primary.driveLetter;
+                    device.volumeGuid = primary.volumeGuid;
+                    device.volumeLabel = primary.volumeLabel;
+                    device.fileSystem = primary.fileSystem;
+                    device.sizeBytes = primary.sizeBytes;
+                    device.lastSeenUtc = primary.lastSeenUtc;
+                    device.online = IsRemovableVolumeOnline(primary);
+                }
+                else
+                {
+                    device.online = false;
+                }
+            }
+
+            return changed;
+        }
+
+        private static RemovableVolumeState UpsertRemovableVolume(
+            RemovableDeviceState device,
+            string deviceId,
+            CentralDeviceState endpoint,
+            RemovableDeviceObservation observation,
+            string now,
+            out bool policyAffectingChange)
+        {
+            policyAffectingChange = false;
+            if (device == null || observation == null)
+            {
+                return null;
+            }
+
+            NormalizeRemovableVolumeState(device);
+
+            string volumeGuid = NormalizeDeviceText(observation.volumeGuid);
+            string driveLetter = NormalizeDeviceText(observation.driveLetter).ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(volumeGuid) && string.IsNullOrWhiteSpace(driveLetter))
+            {
+                return null;
+            }
+
+            RemovableVolumeState volume = device.volumes.FirstOrDefault(item =>
+                item != null &&
+                !string.IsNullOrWhiteSpace(volumeGuid) &&
+                string.Equals(item.volumeGuid, volumeGuid, StringComparison.OrdinalIgnoreCase));
+
+            if (volume == null)
+            {
+                volume = device.volumes.FirstOrDefault(item =>
+                    item != null &&
+                    !string.IsNullOrWhiteSpace(driveLetter) &&
+                    string.Equals(item.driveLetter, driveLetter, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (volume == null)
+            {
+                volume = new RemovableVolumeState
+                {
+                    firstSeenUtc = now
+                };
+                device.volumes.Add(volume);
+                policyAffectingChange = true;
+            }
+            else if (!volume.online ||
+                     !string.Equals(volume.deviceId, deviceId, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(volume.volumeGuid, volumeGuid, StringComparison.OrdinalIgnoreCase))
+            {
+                policyAffectingChange = true;
+            }
+
+            volume.deviceId = deviceId ?? string.Empty;
+            volume.host = endpoint == null ? string.Empty : endpoint.Machine ?? string.Empty;
+            volume.user = endpoint == null ? string.Empty : endpoint.User ?? string.Empty;
+            volume.driveLetter = driveLetter;
+            volume.volumeGuid = volumeGuid;
+            volume.volumeLabel = NormalizeDeviceText(observation.volumeLabel);
+            volume.fileSystem = NormalizeDeviceText(observation.fileSystem);
+            volume.sizeBytes = observation.sizeBytes;
+            volume.lastSeenUtc = now;
+            volume.online = true;
+
+            return volume;
         }
 
         private PolicyBridgeService.NetworkConnectionEventDto TryDeserializeNetworkConnectionDetails(string message)
@@ -1085,9 +1254,7 @@ namespace DataProtectorWebBridge.Services
             foreach (RemovableDeviceState device in state.RemovableDevices.Values)
             {
                 if (device == null ||
-                    string.IsNullOrWhiteSpace(device.volumeGuid) ||
                     string.IsNullOrWhiteSpace(device.hardwareId) ||
-                    !string.Equals(device.deviceId, endpointDeviceId, StringComparison.OrdinalIgnoreCase) ||
                     !IsRemovableDeviceOnline(device))
                 {
                     continue;
@@ -1099,22 +1266,30 @@ namespace DataProtectorWebBridge.Services
                     continue;
                 }
 
-                PolicyBridgeService.DeviceRuleDto rule = new PolicyBridgeService.DeviceRuleDto
+                foreach (RemovableVolumeState volume in EnumerateOnlineRemovableVolumes(device, endpointDeviceId))
                 {
-                    deviceId = device.volumeGuid,
-                    allowInsert = string.Equals(authorization.status, "authorized", StringComparison.OrdinalIgnoreCase),
-                    allowWrite = string.Equals(authorization.status, "authorized", StringComparison.OrdinalIgnoreCase) && authorization.allowWrite,
-                    actor = "central-device-authorization"
-                };
+                    if (volume == null || string.IsNullOrWhiteSpace(volume.volumeGuid))
+                    {
+                        continue;
+                    }
 
-                int existing = rules.FindIndex(item => string.Equals(item.deviceId, rule.deviceId, StringComparison.OrdinalIgnoreCase));
-                if (existing >= 0)
-                {
-                    rules[existing] = rule;
-                }
-                else
-                {
-                    rules.Add(rule);
+                    PolicyBridgeService.DeviceRuleDto rule = new PolicyBridgeService.DeviceRuleDto
+                    {
+                        deviceId = volume.volumeGuid,
+                        allowInsert = string.Equals(authorization.status, "authorized", StringComparison.OrdinalIgnoreCase),
+                        allowWrite = string.Equals(authorization.status, "authorized", StringComparison.OrdinalIgnoreCase) && authorization.allowWrite,
+                        actor = "central-device-authorization"
+                    };
+
+                    int existing = rules.FindIndex(item => string.Equals(item.deviceId, rule.deviceId, StringComparison.OrdinalIgnoreCase));
+                    if (existing >= 0)
+                    {
+                        rules[existing] = rule;
+                    }
+                    else
+                    {
+                        rules.Add(rule);
+                    }
                 }
             }
 
@@ -1133,10 +1308,49 @@ namespace DataProtectorWebBridge.Services
 
         private static bool IsRemovableDeviceOnline(RemovableDeviceState device)
         {
+            NormalizeRemovableVolumeState(device);
+            if (device != null &&
+                device.volumes != null &&
+                device.volumes.Any(IsRemovableVolumeOnline))
+            {
+                return true;
+            }
+
             DateTime lastSeen;
             return device != null &&
                    DateTime.TryParse(device.lastSeenUtc, out lastSeen) &&
                    DateTime.UtcNow - lastSeen.ToUniversalTime() < TimeSpan.FromMinutes(3);
+        }
+
+        private static bool IsRemovableVolumeOnline(RemovableVolumeState volume)
+        {
+            DateTime lastSeen;
+            return volume != null &&
+                   volume.online &&
+                   DateTime.TryParse(volume.lastSeenUtc, out lastSeen) &&
+                   DateTime.UtcNow - lastSeen.ToUniversalTime() < TimeSpan.FromMinutes(3);
+        }
+
+        private static IEnumerable<RemovableVolumeState> EnumerateOnlineRemovableVolumes(RemovableDeviceState device, string endpointDeviceId)
+        {
+            NormalizeRemovableVolumeState(device);
+            if (device == null || device.volumes == null)
+            {
+                yield break;
+            }
+
+            foreach (RemovableVolumeState volume in device.volumes)
+            {
+                if (volume == null ||
+                    string.IsNullOrWhiteSpace(volume.volumeGuid) ||
+                    !string.Equals(volume.deviceId, endpointDeviceId, StringComparison.OrdinalIgnoreCase) ||
+                    !IsRemovableVolumeOnline(volume))
+                {
+                    continue;
+                }
+
+                yield return volume;
+            }
         }
 
         private static int ClampHours(int value, int min, int max)
@@ -1826,34 +2040,64 @@ namespace DataProtectorWebBridge.Services
 
         private RemovableDeviceDto ToRemovableDeviceDto(RemovableDeviceState device)
         {
+            NormalizeRemovableVolumeState(device);
+            RemovableVolumeState primary = SelectPrimaryRemovableVolume(device);
             RemovableDeviceAuthorizationRule authorization = ResolveRemovableAuthorization(device.hardwareId);
             string status = authorization == null ? "pending" : authorization.status;
             bool allowWrite = authorization != null && authorization.allowWrite;
+            RemovableVolumeDto[] volumes = device.volumes == null
+                ? new RemovableVolumeDto[0]
+                : device.volumes
+                    .Where(volume => volume != null)
+                    .OrderByDescending(IsRemovableVolumeOnline)
+                    .ThenBy(volume => volume.driveLetter, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(volume => volume.volumeGuid, StringComparer.OrdinalIgnoreCase)
+                    .Select(ToRemovableVolumeDto)
+                    .ToArray();
 
             return new RemovableDeviceDto
             {
                 hardwareId = device.hardwareId,
-                deviceId = device.deviceId,
-                host = device.host,
-                user = device.user,
-                driveLetter = device.driveLetter,
-                volumeGuid = device.volumeGuid,
-                volumeLabel = device.volumeLabel,
-                fileSystem = device.fileSystem,
-                sizeBytes = device.sizeBytes,
+                deviceId = primary == null ? device.deviceId : primary.deviceId,
+                host = primary == null ? device.host : primary.host,
+                user = primary == null ? device.user : primary.user,
+                driveLetter = primary == null ? device.driveLetter : primary.driveLetter,
+                volumeGuid = primary == null ? device.volumeGuid : primary.volumeGuid,
+                volumeLabel = primary == null ? device.volumeLabel : primary.volumeLabel,
+                fileSystem = primary == null ? device.fileSystem : primary.fileSystem,
+                sizeBytes = device.volumes == null || device.volumes.Count == 0 ? device.sizeBytes : device.volumes.Sum(volume => volume == null ? 0 : volume.sizeBytes),
                 model = device.model,
                 serialNumber = device.serialNumber,
                 pnpDeviceId = device.pnpDeviceId,
                 interfaceType = device.interfaceType,
                 mediaType = device.mediaType,
                 firstSeenUtc = device.firstSeenUtc,
-                lastSeenUtc = device.lastSeenUtc,
+                lastSeenUtc = primary == null ? device.lastSeenUtc : primary.lastSeenUtc,
                 online = IsRemovableDeviceOnline(device),
+                volumes = volumes,
                 status = status,
                 allowWrite = allowWrite,
                 authorizedBy = authorization == null ? string.Empty : authorization.actor,
                 authorizedUtc = authorization == null ? string.Empty : authorization.updatedUtc,
                 note = authorization == null ? string.Empty : authorization.note
+            };
+        }
+
+        private static RemovableVolumeDto ToRemovableVolumeDto(RemovableVolumeState volume)
+        {
+            return new RemovableVolumeDto
+            {
+                deviceId = volume.deviceId,
+                host = volume.host,
+                user = volume.user,
+                driveLetter = volume.driveLetter,
+                volumeGuid = volume.volumeGuid,
+                volumeLabel = volume.volumeLabel,
+                fileSystem = volume.fileSystem,
+                sizeBytes = volume.sizeBytes,
+                firstSeenUtc = volume.firstSeenUtc,
+                lastSeenUtc = volume.lastSeenUtc,
+                online = IsRemovableVolumeOnline(volume)
             };
         }
 
@@ -1920,6 +2164,77 @@ namespace DataProtectorWebBridge.Services
         private static string NormalizeDeviceText(string value)
         {
             return (value ?? string.Empty).Trim();
+        }
+
+        private static void NormalizeRemovableVolumeState(RemovableDeviceState device)
+        {
+            if (device == null)
+            {
+                return;
+            }
+
+            if (device.volumes == null)
+            {
+                device.volumes = new List<RemovableVolumeState>();
+            }
+
+            if (!string.IsNullOrWhiteSpace(device.volumeGuid) ||
+                !string.IsNullOrWhiteSpace(device.driveLetter))
+            {
+                bool exists = device.volumes.Any(volume =>
+                    volume != null &&
+                    ((!string.IsNullOrWhiteSpace(device.volumeGuid) &&
+                      string.Equals(volume.volumeGuid, device.volumeGuid, StringComparison.OrdinalIgnoreCase)) ||
+                     (!string.IsNullOrWhiteSpace(device.driveLetter) &&
+                      string.Equals(volume.driveLetter, device.driveLetter, StringComparison.OrdinalIgnoreCase))));
+
+                if (!exists)
+                {
+                    device.volumes.Add(new RemovableVolumeState
+                    {
+                        deviceId = device.deviceId ?? string.Empty,
+                        host = device.host ?? string.Empty,
+                        user = device.user ?? string.Empty,
+                        driveLetter = (device.driveLetter ?? string.Empty).ToUpperInvariant(),
+                        volumeGuid = device.volumeGuid ?? string.Empty,
+                        volumeLabel = device.volumeLabel ?? string.Empty,
+                        fileSystem = device.fileSystem ?? string.Empty,
+                        sizeBytes = device.sizeBytes,
+                        firstSeenUtc = device.firstSeenUtc ?? string.Empty,
+                        lastSeenUtc = device.lastSeenUtc ?? string.Empty,
+                        online = device.online
+                    });
+                }
+            }
+        }
+
+        private static RemovableVolumeState SelectPrimaryRemovableVolume(RemovableDeviceState device)
+        {
+            NormalizeRemovableVolumeState(device);
+            if (device == null || device.volumes == null || device.volumes.Count == 0)
+            {
+                return null;
+            }
+
+            return device.volumes
+                .Where(volume => volume != null)
+                .OrderByDescending(IsRemovableVolumeOnline)
+                .ThenByDescending(volume => volume.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(volume => volume.driveLetter, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+        }
+
+        private static string RemovableVolumeKey(string hardwareId, RemovableVolumeState volume)
+        {
+            if (volume == null)
+            {
+                return NormalizeHardwareId(hardwareId) + "|";
+            }
+
+            string identity = string.IsNullOrWhiteSpace(volume.volumeGuid)
+                ? volume.driveLetter
+                : volume.volumeGuid;
+            return NormalizeHardwareId(hardwareId) + "|" + NormalizeDeviceText(identity).ToUpperInvariant();
         }
 
         private static PolicyBridgeService.PolicyRuleRequest NormalizeRequest(PolicyBridgeService.PolicyRuleRequest request)
@@ -2459,6 +2774,22 @@ namespace DataProtectorWebBridge.Services
             public string firstSeenUtc { get; set; }
             public string lastSeenUtc { get; set; }
             public bool online { get; set; }
+            public List<RemovableVolumeState> volumes { get; set; }
+        }
+
+        private sealed class RemovableVolumeState
+        {
+            public string deviceId { get; set; }
+            public string host { get; set; }
+            public string user { get; set; }
+            public string driveLetter { get; set; }
+            public string volumeGuid { get; set; }
+            public string volumeLabel { get; set; }
+            public string fileSystem { get; set; }
+            public long sizeBytes { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public bool online { get; set; }
         }
 
         private sealed class RemovableDeviceAuthorizationRule
@@ -2511,11 +2842,27 @@ namespace DataProtectorWebBridge.Services
             public string user { get; set; }
             public string firstSeenUtc { get; set; }
             public bool online { get; set; }
+            public RemovableVolumeDto[] volumes { get; set; }
             public string status { get; set; }
             public bool allowWrite { get; set; }
             public string authorizedBy { get; set; }
             public string authorizedUtc { get; set; }
             public string note { get; set; }
+        }
+
+        public sealed class RemovableVolumeDto
+        {
+            public string deviceId { get; set; }
+            public string host { get; set; }
+            public string user { get; set; }
+            public string driveLetter { get; set; }
+            public string volumeGuid { get; set; }
+            public string volumeLabel { get; set; }
+            public string fileSystem { get; set; }
+            public long sizeBytes { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public bool online { get; set; }
         }
 
         public sealed class RemovableDeviceAuthorizationRequest

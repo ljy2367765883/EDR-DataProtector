@@ -175,6 +175,37 @@ const deviceGroups = computed(() => ({
   blockedHardware: removableDevices.value.filter(device => device.status === 'blocked').length
 }));
 
+function formatRemovableVolumes(device: Api.DataProtector.RemovableDevice) {
+  const volumes = device.volumes?.length
+    ? device.volumes
+    : [
+        {
+          driveLetter: device.driveLetter,
+          volumeGuid: device.volumeGuid,
+          volumeLabel: device.volumeLabel,
+          fileSystem: device.fileSystem,
+          sizeBytes: device.sizeBytes,
+          online: device.online
+        }
+      ];
+
+  const driveLetters = volumes
+    .map(volume => volume.driveLetter)
+    .filter(Boolean)
+    .join(', ');
+
+  const volumeGuids = volumes
+    .map(volume => volume.volumeGuid)
+    .filter(Boolean)
+    .join(' | ');
+
+  return {
+    driveLetters: driveLetters || '-',
+    volumeGuids: volumeGuids || '-',
+    count: volumes.length
+  };
+}
+
 const columns: DataTableColumns<Api.DataProtector.PolicyRule> = [
   {
     title: 'Kind',
@@ -382,9 +413,10 @@ const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice
     key: 'model',
     minWidth: 260,
     render(row) {
+      const volumeInfo = formatRemovableVolumes(row);
       return h('div', { class: 'min-w-0' }, [
         h('div', { class: 'truncate text-14px font-600' }, row.model || row.volumeLabel || 'Removable storage'),
-        h('div', { class: 'truncate text-12px text-gray-500' }, `${row.driveLetter || '-'} ${row.volumeGuid || ''}`)
+        h('div', { class: 'truncate text-12px text-gray-500' }, `${volumeInfo.driveLetters} (${volumeInfo.count} volume${volumeInfo.count > 1 ? 's' : ''})`)
       ]);
     }
   },
@@ -397,6 +429,15 @@ const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice
         h('div', { class: 'truncate text-13px font-600' }, row.host || '-'),
         h('div', { class: 'truncate text-12px text-gray-500' }, row.user || '-')
       ]);
+    }
+  },
+  {
+    title: 'Volumes',
+    key: 'volumes',
+    minWidth: 280,
+    ellipsis: { tooltip: true },
+    render(row) {
+      return formatRemovableVolumes(row).volumeGuids;
     }
   },
   {
@@ -931,7 +972,7 @@ onMounted(refresh);
                 :data="removableDevices"
                 :loading="loading || deviceSubmitting"
                 :pagination="{ pageSize: 8 }"
-                :scroll-x="1180"
+                :scroll-x="1460"
               />
             </NCard>
           </NGi>

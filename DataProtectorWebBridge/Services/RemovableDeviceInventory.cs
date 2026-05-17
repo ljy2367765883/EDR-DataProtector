@@ -35,10 +35,7 @@ namespace DataProtectorWebBridge.Services
                 return devices.ToArray();
             }
 
-            return devices
-                .GroupBy(item => item.hardwareId, StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.First())
-                .ToArray();
+            return devices.ToArray();
         }
 
         private static CentralPolicyStore.RemovableDeviceObservation BuildObservation(DriveInfo drive)
@@ -66,26 +63,7 @@ namespace DataProtectorWebBridge.Services
                 totalSize = 0;
             }
 
-            string rawIdentity = string.Join("|", new[]
-            {
-                metadata.PnpDeviceId,
-                metadata.SerialNumber,
-                metadata.Model,
-                metadata.InterfaceType,
-                metadata.MediaType,
-                totalSize.ToString()
-            });
-
-            string fallbackIdentity = string.Join("|", new[]
-            {
-                driveName,
-                volumeGuid,
-                volumeLabel,
-                fileSystem,
-                totalSize.ToString()
-            });
-
-            string hardwareId = ComputeHardwareId(string.IsNullOrWhiteSpace(rawIdentity.Replace("|", string.Empty)) ? fallbackIdentity : rawIdentity);
+            string hardwareId = ComputeHardwareId(BuildPhysicalIdentity(metadata));
             if (string.IsNullOrWhiteSpace(hardwareId))
             {
                 return null;
@@ -116,7 +94,7 @@ namespace DataProtectorWebBridge.Services
                 StringBuilder buffer = new StringBuilder(128);
                 if (GetVolumeNameForVolumeMountPoint(root, buffer, buffer.Capacity))
                 {
-                    return buffer.ToString().TrimEnd('\\');
+                    return NormalizeKernelVolumeName(buffer.ToString());
                 }
             }
             catch
@@ -188,6 +166,45 @@ namespace DataProtectorWebBridge.Services
                 byte[] bytes = Encoding.UTF8.GetBytes(normalized);
                 return BitConverter.ToString(sha256.ComputeHash(bytes)).Replace("-", string.Empty).ToLowerInvariant();
             }
+        }
+
+        private static string BuildPhysicalIdentity(DiskMetadata metadata)
+        {
+            if (metadata == null)
+            {
+                return string.Empty;
+            }
+
+            string pnpDeviceId = Clean(metadata.PnpDeviceId);
+            if (!string.IsNullOrWhiteSpace(pnpDeviceId))
+            {
+                return "USB-PNP|" + pnpDeviceId;
+            }
+
+            string serialNumber = Clean(metadata.SerialNumber);
+            string model = Clean(metadata.Model);
+            if (!string.IsNullOrWhiteSpace(serialNumber))
+            {
+                return "DISK-SERIAL|" + serialNumber + "|" + model + "|" + Clean(metadata.InterfaceType);
+            }
+
+            if (!string.IsNullOrWhiteSpace(model) || !string.IsNullOrWhiteSpace(metadata.InterfaceType))
+            {
+                return "DISK-PHYSICAL|" + model + "|" + Clean(metadata.InterfaceType) + "|" + Clean(metadata.MediaType);
+            }
+
+            return string.Empty;
+        }
+
+        private static string NormalizeKernelVolumeName(string value)
+        {
+            string normalized = Clean(value).TrimEnd('\\');
+            if (normalized.StartsWith("\\\\?\\", StringComparison.Ordinal))
+            {
+                normalized = "\\??\\" + normalized.Substring(4);
+            }
+
+            return normalized;
         }
 
         private static string NormalizeDriveName(string driveName)

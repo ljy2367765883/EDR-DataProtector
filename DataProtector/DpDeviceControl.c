@@ -160,7 +160,8 @@ BOOLEAN
 DpDeviceLookupDecision(
     _In_ PCUNICODE_STRING DeviceId,
     _Out_ PBOOLEAN AllowInsert,
-    _Out_ PBOOLEAN AllowWrite
+    _Out_ PBOOLEAN AllowWrite,
+    _Out_opt_ PBOOLEAN MatchedWildcard
     )
 {
     PLIST_ENTRY link;
@@ -171,6 +172,9 @@ DpDeviceLookupDecision(
 
     *AllowInsert = TRUE;
     *AllowWrite = TRUE;
+    if (MatchedWildcard != NULL) {
+        *MatchedWildcard = FALSE;
+    }
 
     FltAcquirePushLockShared(&gDpDeviceRuleLock);
     for (link = gDpDeviceRules.Flink; link != &gDpDeviceRules; link = link->Flink) {
@@ -193,6 +197,9 @@ DpDeviceLookupDecision(
     if (!found && wildcardFound) {
         *AllowInsert = wildcardAllowInsert;
         *AllowWrite = wildcardAllowWrite;
+        if (MatchedWildcard != NULL) {
+            *MatchedWildcard = TRUE;
+        }
         found = TRUE;
     }
 
@@ -215,6 +222,8 @@ DpDeviceShouldBlock(
     UNICODE_STRING deviceId;
     BOOLEAN allowInsert = TRUE;
     BOOLEAN allowWrite = TRUE;
+    BOOLEAN found;
+    BOOLEAN matchedWildcard = FALSE;
     BOOLEAN block = FALSE;
 
     if (Data == NULL ||
@@ -231,18 +240,25 @@ DpDeviceShouldBlock(
         return FALSE;
     }
 
-    if (!DpDeviceIsRemovableVolume(volume)) {
-        FltObjectDereference(volume);
-        return FALSE;
-    }
-
     status = DpDeviceBuildVolumeId(volume, deviceIdBuffer, &deviceId);
     if (!NT_SUCCESS(status)) {
         FltObjectDereference(volume);
         return FALSE;
     }
 
-    (VOID)DpDeviceLookupDecision(&deviceId, &allowInsert, &allowWrite);
+    found = DpDeviceLookupDecision(&deviceId,
+                                   &allowInsert,
+                                   &allowWrite,
+                                   &matchedWildcard);
+    if (!found) {
+        FltObjectDereference(volume);
+        return FALSE;
+    }
+
+    if (matchedWildcard && !DpDeviceIsRemovableVolume(volume)) {
+        FltObjectDereference(volume);
+        return FALSE;
+    }
 
     block = ForWrite ? !allowWrite : !allowInsert;
     FltObjectDereference(volume);

@@ -155,6 +155,20 @@ declare namespace Api {
 
     type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
 
+    interface RemovableVolume {
+      deviceId: string;
+      host: string;
+      user: string;
+      driveLetter: string;
+      volumeGuid: string;
+      volumeLabel: string;
+      fileSystem: string;
+      sizeBytes: number;
+      firstSeenUtc: string;
+      lastSeenUtc: string;
+      online: boolean;
+    }
+
     interface RemovableDevice {
       hardwareId: string;
       deviceId: string;
@@ -173,6 +187,7 @@ declare namespace Api {
       firstSeenUtc: string;
       lastSeenUtc: string;
       online: boolean;
+      volumes?: RemovableVolume[];
       status: RemovableDeviceStatus;
       allowWrite: boolean;
       authorizedBy: string;
