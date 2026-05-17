@@ -77,6 +77,20 @@ Abstract:
 
 #define DP_HASH_OB_ALTITUDE       L"385201.77"
 #define DP_HASH_REG_ALTITUDE      L"385202.77"
+#define DP_HASH_LSASS_DEDUP_SLOTS 64
+#define DP_HASH_LSASS_DEDUP_WINDOW_100NS (30LL * 1000LL * 10000LL)
+
+typedef struct _DP_HASH_PROTECT_DEDUP_ENTRY {
+    BOOLEAN Valid;
+    ULONG Operation;
+    ULONGLONG ProcessId;
+    ULONG Status;
+    ACCESS_MASK DesiredAccess;
+    ULONG TargetHash;
+    ULONG ProcessImageHash;
+    LONGLONG LastSeenTime;
+    ULONGLONG SuppressedCount;
+} DP_HASH_PROTECT_DEDUP_ENTRY, *PDP_HASH_PROTECT_DEDUP_ENTRY;
 
 static PVOID gDpHashProtectObHandle = NULL;
 static LARGE_INTEGER gDpHashProtectRegistryCookie;
@@ -88,6 +102,8 @@ static BOOLEAN gDpHashProtectInitialized = FALSE;
 static ULONG gDpHashProtectEventCount = 0;
 static ULONGLONG gDpHashProtectEventSequence = 0;
 static ULONGLONG gDpHashProtectDroppedEvents = 0;
+static ULONGLONG gDpHashProtectSuppressedDuplicates = 0;
+static DP_HASH_PROTECT_DEDUP_ENTRY gDpHashProtectDedup[DP_HASH_LSASS_DEDUP_SLOTS];
 
 extern
 UCHAR *
@@ -304,6 +320,105 @@ DpHashProtectFreeEvent(
 }
 
 static
+ULONG
+DpHashProtectHashUnicodeBuffer(
+    _In_reads_bytes_opt_(LengthBytes) PCWCHAR Buffer,
+    _In_ ULONG LengthBytes
+    )
+{
+    ULONG hash = 2166136261u;
+    ULONG index;
+    ULONG chars = LengthBytes / sizeof(WCHAR);
+
+    if (Buffer == NULL || LengthBytes == 0) {
+        return hash;
+    }
+
+    for (index = 0; index < chars; index++) {
+        WCHAR character = RtlUpcaseUnicodeChar(Buffer[index]);
+        hash ^= (ULONG)character;
+        hash *= 16777619u;
+    }
+
+    return hash;
+}
+
+static
+BOOLEAN
+DpHashProtectSuppressDuplicateLocked(
+    _In_ const DP_HASH_PROTECT_EVENT_QUERY_ENTRY *Event,
+    _In_ LONGLONG CurrentTime,
+    _In_ ULONG TargetHash,
+    _In_ ULONG ProcessImageHash,
+    _Out_ PULONGLONG SuppressedCount
+    )
+{
+    ULONG index;
+    ULONG replaceIndex = 0;
+    LONGLONG oldestTime = MAXLONGLONG;
+    PDP_HASH_PROTECT_DEDUP_ENTRY slot;
+
+    *SuppressedCount = 0;
+
+    if (Event == NULL ||
+        Event->Operation != (ULONG)DpHashProtectOperationLsassHandle) {
+
+        return FALSE;
+    }
+
+    for (index = 0; index < RTL_NUMBER_OF(gDpHashProtectDedup); index++) {
+        slot = &gDpHashProtectDedup[index];
+
+        if (!slot->Valid) {
+            replaceIndex = index;
+            oldestTime = MINLONGLONG;
+            continue;
+        }
+
+        if (slot->LastSeenTime < oldestTime) {
+            oldestTime = slot->LastSeenTime;
+            replaceIndex = index;
+        }
+
+        if (slot->Operation == Event->Operation &&
+            slot->ProcessId == Event->ProcessId &&
+            slot->Status == Event->Status &&
+            slot->DesiredAccess == Event->DesiredAccess &&
+            slot->TargetHash == TargetHash &&
+            slot->ProcessImageHash == ProcessImageHash) {
+
+            if (CurrentTime >= slot->LastSeenTime &&
+                CurrentTime - slot->LastSeenTime <= DP_HASH_LSASS_DEDUP_WINDOW_100NS) {
+
+                slot->LastSeenTime = CurrentTime;
+                slot->SuppressedCount++;
+                gDpHashProtectSuppressedDuplicates++;
+                *SuppressedCount = slot->SuppressedCount;
+                return TRUE;
+            }
+
+            replaceIndex = index;
+            break;
+        }
+    }
+
+    slot = &gDpHashProtectDedup[replaceIndex];
+    RtlZeroMemory(slot, sizeof(*slot));
+    slot->Valid = TRUE;
+    slot->Operation = Event->Operation;
+    slot->ProcessId = Event->ProcessId;
+    slot->Status = Event->Status;
+    slot->DesiredAccess = Event->DesiredAccess;
+    slot->TargetHash = TargetHash;
+    slot->ProcessImageHash = ProcessImageHash;
+    slot->LastSeenTime = CurrentTime;
+
+    UNREFERENCED_PARAMETER(oldestTime);
+
+    return FALSE;
+}
+
+static
 VOID
 DpHashProtectClearEvents(
     VOID
@@ -345,6 +460,10 @@ DpHashProtectQueueEvent(
     ULONGLONG droppedEvents;
     UNICODE_STRING targetText;
     UNICODE_STRING processText;
+    LARGE_INTEGER currentTime;
+    ULONG targetHash;
+    ULONG processHash;
+    ULONGLONG suppressedCount;
 
     if (!gDpHashProtectInitialized) {
         DP_HASH_TRACE("queue skipped uninitialized pid=%p op=%lu status=0x%08X\n",
@@ -383,6 +502,10 @@ DpHashProtectQueueEvent(
                                        ProcessImage,
                                        &entry->Event.ProcessImageLengthBytes);
 
+    targetHash = DpHashProtectHashUnicodeBuffer(entry->Event.Target,
+                                                entry->Event.TargetLengthBytes);
+    processHash = DpHashProtectHashUnicodeBuffer(entry->Event.ProcessImage,
+                                                 entry->Event.ProcessImageLengthBytes);
     targetText.Buffer = entry->Event.Target;
     targetText.Length = (USHORT)entry->Event.TargetLengthBytes;
     targetText.MaximumLength = (USHORT)sizeof(entry->Event.Target);
@@ -398,7 +521,28 @@ DpHashProtectQueueEvent(
                   &targetText,
                   &processText);
 
+    KeQuerySystemTimePrecise(&currentTime);
     KeAcquireSpinLock(&gDpHashProtectEventLock, &oldIrql);
+
+    if (DpHashProtectSuppressDuplicateLocked(&entry->Event,
+                                             currentTime.QuadPart,
+                                             targetHash,
+                                             processHash,
+                                             &suppressedCount)) {
+
+        KeReleaseSpinLock(&gDpHashProtectEventLock, oldIrql);
+        DP_HASH_TRACE("dedup suppressed pid=%p op=%lu status=0x%08X access=0x%08X suppressed=%I64u total=%I64u target=%wZ image=%wZ\n",
+                      ProcessId,
+                      (ULONG)Operation,
+                      Status,
+                      DesiredAccess,
+                      suppressedCount,
+                      gDpHashProtectSuppressedDuplicates,
+                      &targetText,
+                      &processText);
+        DpHashProtectFreeEvent(entry);
+        return;
+    }
 
     entry->Event.Sequence = ++gDpHashProtectEventSequence;
     InsertTailList(&gDpHashProtectEvents, &entry->Link);
@@ -1118,6 +1262,8 @@ DpHashProtectInitialize(
     gDpHashProtectEventCount = 0;
     gDpHashProtectEventSequence = 0;
     gDpHashProtectDroppedEvents = 0;
+    gDpHashProtectSuppressedDuplicates = 0;
+    RtlZeroMemory(gDpHashProtectDedup, sizeof(gDpHashProtectDedup));
     gDpHashProtectInitialized = TRUE;
 
     obStatus = DpHashProtectRegisterObCallback();
