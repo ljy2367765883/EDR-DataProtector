@@ -599,15 +599,19 @@ namespace DataProtectorWebBridge.Services
                     .Select(CloneNetworkObservation)
                     .ToList();
 
-                HashSet<string> baselineKeys = new HashSet<string>(
-                    state.NetworkConnections
-                        .Where(item => IsNetworkInsightMatch(item, normalized) && ParseUtcOrMin(item.firstSeenUtc) < baselineUtc)
-                        .Select(NetworkObservationKey),
-                    StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, NetworkConnectionObservation> firstSeenByKey = state.NetworkConnections
+                    .Where(item => item != null)
+                    .GroupBy(NetworkObservationKey, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(
+                        group => group.Key,
+                        group => group
+                            .OrderBy(item => ParseUtcOrMax(item.firstSeenUtc))
+                            .First(),
+                        StringComparer.OrdinalIgnoreCase);
 
                 allItems = current
                     .GroupBy(NetworkObservationKey, StringComparer.OrdinalIgnoreCase)
-                    .Select(group => ToNetworkInsightItem(group.ToList(), baselineKeys))
+                    .Select(group => ToNetworkInsightItem(group.ToList(), firstSeenByKey, baselineUtc))
                     .Where(item => item.isNew)
                     .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
                     .ToArray();
@@ -1907,17 +1911,31 @@ namespace DataProtectorWebBridge.Services
             return !string.IsNullOrWhiteSpace(GetIpInfoToken());
         }
 
-        private static NetworkInsightItem ToNetworkInsightItem(List<NetworkConnectionObservation> items, HashSet<string> baselineKeys)
+        private static NetworkInsightItem ToNetworkInsightItem(
+            List<NetworkConnectionObservation> items,
+            Dictionary<string, NetworkConnectionObservation> firstSeenByKey,
+            DateTime baselineUtc)
         {
             NetworkConnectionObservation latest = items
                 .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
                 .First();
+            NetworkConnectionObservation first;
+            if (firstSeenByKey == null ||
+                !firstSeenByKey.TryGetValue(NetworkObservationKey(latest), out first) ||
+                first == null)
+            {
+                first = items
+                    .OrderBy(item => ParseUtcOrMax(item.firstSeenUtc))
+                    .First();
+            }
+
+            DateTime firstSeenUtc = ParseUtcOrMin(first.firstSeenUtc);
 
             return new NetworkInsightItem
             {
                 key = NetworkObservationFingerprint(latest),
-                isNew = !baselineKeys.Contains(NetworkObservationKey(latest)),
-                firstSeenUtc = items.Min(item => item.firstSeenUtc),
+                isNew = firstSeenUtc == DateTime.MinValue || firstSeenUtc > baselineUtc,
+                firstSeenUtc = first.firstSeenUtc,
                 lastSeenUtc = latest.lastSeenUtc,
                 count = items.Sum(item => item.count),
                 hosts = items.Select(item => item.host).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value).ToArray(),
@@ -2232,6 +2250,14 @@ namespace DataProtectorWebBridge.Services
             return DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out parsed)
                 ? parsed.ToUniversalTime()
                 : DateTime.MinValue;
+        }
+
+        private static DateTime ParseUtcOrMax(string value)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out parsed)
+                ? parsed.ToUniversalTime()
+                : DateTime.MaxValue;
         }
 
         private void TrimTasks()
