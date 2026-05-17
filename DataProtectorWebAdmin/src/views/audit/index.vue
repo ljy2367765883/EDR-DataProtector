@@ -2,7 +2,7 @@
 import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NTag, type DataTableColumns } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
-import { fetchAuditEvents } from '@/service/api';
+import { fetchAuditEvents, fetchDevices } from '@/service/api';
 
 defineOptions({
   name: 'Audit'
@@ -36,6 +36,7 @@ interface HostSummary {
 
 const loading = ref(false);
 const events = ref<Api.DataProtector.AuditRecord[]>([]);
+const devices = ref<Api.DataProtector.Device[]>([]);
 const activeCategory = ref<AuditCategory>('all');
 const timeRange = ref<[number, number] | null>(null);
 
@@ -108,19 +109,33 @@ const visibleEvents = computed(() => {
   return events.value.filter(record => classifyAudit(record) === activeCategory.value);
 });
 
-const hostOptions = computed(() => {
-  const hosts = Array.from(new Set(events.value.map(record => resolveHost(record)).filter(Boolean))).sort((a, b) =>
-    a.localeCompare(b)
-  );
+const onlineHostnames = computed(() =>
+  Array.from(
+    new Set(
+      devices.value
+        .filter(device => device.online && device.machine)
+        .map(device => device.machine.trim())
+        .filter(Boolean)
+    )
+  ).sort((a, b) => a.localeCompare(b))
+);
 
-  return [{ label: 'All hosts', value: 'all' }, ...hosts.map(host => ({ label: host, value: host }))];
+const hostOptions = computed(() => {
+  return [{ label: 'All online agents', value: 'all' }, ...onlineHostnames.value.map(host => ({ label: host, value: host }))];
 });
 
 const hostSummaries = computed(() => {
   const groups = new Map<string, HostSummary>();
+  const onlineHosts = onlineHostnames.value;
+
+  for (const host of onlineHosts) {
+    groups.set(host, { host, total: 0, critical: 0, warning: 0, blocked: 0 });
+  }
 
   for (const record of visibleEvents.value) {
-    const host = resolveHost(record) || 'Unknown';
+    const host = resolveOnlineHost(record, onlineHosts);
+    if (!host) continue;
+
     const current = groups.get(host) || { host, total: 0, critical: 0, warning: 0, blocked: 0 };
     current.total += 1;
     if (resolveSeverity(record) === 'critical') current.critical += 1;
@@ -134,7 +149,7 @@ const hostSummaries = computed(() => {
       (left, right) =>
         right.critical - left.critical || right.warning - left.warning || right.blocked - left.blocked || right.total - left.total || left.host.localeCompare(right.host)
     )
-    .slice(0, 8);
+    .slice(0, 12);
 });
 
 const trendBuckets = computed(() => buildTrendBuckets(events.value));
@@ -325,6 +340,13 @@ function resolveHost(record: Api.DataProtector.AuditRecord) {
   return record.Host || record.Actor || '';
 }
 
+function resolveOnlineHost(record: Api.DataProtector.AuditRecord, onlineHosts: string[]) {
+  const host = (record.Host || '').trim();
+  if (!host) return '';
+
+  return onlineHosts.find(item => item.localeCompare(host, undefined, { sensitivity: 'accent' }) === 0) || '';
+}
+
 function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSeverity, 'all'> {
   const action = record.Action || '';
   const message = record.Message || '';
@@ -456,8 +478,9 @@ function buildQuery(): Api.DataProtector.AuditQuery {
 async function refresh() {
   loading.value = true;
   try {
-    const { error, data } = await fetchAuditEvents(buildQuery());
-    if (!error) events.value = data;
+    const [auditResult, deviceResult] = await Promise.all([fetchAuditEvents(buildQuery()), fetchDevices()]);
+    if (!auditResult.error) events.value = auditResult.data;
+    if (!deviceResult.error) devices.value = deviceResult.data;
   } finally {
     loading.value = false;
   }
