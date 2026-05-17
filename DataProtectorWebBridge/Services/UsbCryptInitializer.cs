@@ -35,21 +35,26 @@ namespace DataProtectorWebBridge.Services
         private const string RuntimeDirectoryName = "DataProtectorUsbRuntime";
         private const string ToolFileName = "DataProtectorUsbTool.exe";
         private const string DriverFileName = "DataProtectorUsbCrypt.sys";
+        private const string InitializationTraceFileName = "UsbCryptInitTrace.log";
         private static readonly Encoding Utf16NoBom = new UnicodeEncoding(false, false, true);
+        private static readonly object TraceSync = new object();
 
         private readonly RemovableDeviceInventory inventory = new RemovableDeviceInventory();
 
         public UsbCryptInitializationResult Initialize(UsbCryptInitializationRequest request, string agentDirectory, Uri serverBaseUri)
         {
             UsbCryptInitializationRequest normalized = NormalizeRequest(request);
+            Trace(agentDirectory, "initialize begin confirmed=" + normalized.confirmed + " hardwareId=" + normalized.hardwareId + " toolArea=" + normalized.publicToolAreaBytes);
             CentralPolicyStore.RemovableDeviceObservation target = ResolveTarget(normalized.hardwareId);
             string targetRoot = NormalizeDriveRoot(target.driveLetter);
+            Trace(agentDirectory, "target removable drive=" + targetRoot + " label=" + target.volumeLabel + " fs=" + target.fileSystem + " size=" + target.sizeBytes + " pnp=" + target.pnpDeviceId);
             if (string.IsNullOrWhiteSpace(targetRoot) || !Directory.Exists(targetRoot))
             {
                 throw new InvalidOperationException("Target removable device is not mounted with a writable public drive letter.");
             }
 
             PhysicalDiskTarget disk = ResolvePhysicalDiskTarget(targetRoot);
+            Trace(agentDirectory, "resolved physical disk " + DescribeDisk(disk));
 
             if (!normalized.confirmed)
             {
@@ -71,11 +76,16 @@ namespace DataProtectorWebBridge.Services
                     rng.GetBytes(key);
                 }
 
+                Trace(agentDirectory, "download runtime package path=" + normalized.driverPackageDownloadPath + " sha256=" + normalized.driverPackageSha256);
                 UsbRuntimePackage runtimePackage = DownloadAndExtractRuntimePackage(normalized, serverBaseUri, extractionRoot);
-                targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes, targetRoot, normalized.hardwareId);
+                Trace(agentDirectory, "runtime package extracted tool=" + runtimePackage.toolPath + " driverDir=" + runtimePackage.driverDirectory);
+                targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes, targetRoot, normalized.hardwareId, agentDirectory);
+                Trace(agentDirectory, "public tool partition root=" + targetRoot);
                 disk = ResolvePhysicalDiskTarget(targetRoot);
+                Trace(agentDirectory, "resolved physical disk after layout " + DescribeDisk(disk));
                 ValidateUsbCryptLayout(disk, normalized.publicToolAreaBytes, normalized.hardwareId);
                 PreparePublicToolArea(targetRoot, runtimePackage);
+                Trace(agentDirectory, "runtime copied to " + targetRoot);
 
                 long dataLength = normalized.dataLengthBytes > 0
                     ? normalized.dataLengthBytes
@@ -83,6 +93,7 @@ namespace DataProtectorWebBridge.Services
 
                 byte[] metadata = BuildRawMetadata(normalized, target, key, dataLength);
                 DataProtectorPolicyNative.NativeUsbMetadataWriteResult writeResult = WriteRawMetadataThroughDriver(disk.physicalDrivePath, metadata);
+                Trace(agentDirectory, "metadata written status=0x" + writeResult.Status.ToString("X8") + " offset=" + writeResult.OffsetBytes + " diskSize=" + writeResult.DiskSizeBytes + " partitions=" + writeResult.PartitionCount);
 
                 return new UsbCryptInitializationResult
                 {
@@ -408,7 +419,7 @@ namespace DataProtectorWebBridge.Services
             return "0x" + status.ToString("X8") + (string.IsNullOrWhiteSpace(text) ? string.Empty : " (" + text + ")");
         }
 
-        private static string ReinitializeDiskLayout(PhysicalDiskTarget disk, long publicToolAreaBytes, string currentDriveRoot, string expectedHardwareId)
+        private static string ReinitializeDiskLayout(PhysicalDiskTarget disk, long publicToolAreaBytes, string currentDriveRoot, string expectedHardwareId, string agentDirectory)
         {
             if (disk == null || string.IsNullOrWhiteSpace(disk.physicalDrivePath))
             {
@@ -418,56 +429,65 @@ namespace DataProtectorWebBridge.Services
             int diskNumber = ParsePhysicalDriveNumber(disk.physicalDrivePath);
             ValidateUsbCryptInitializationPlan(disk, publicToolAreaBytes, expectedHardwareId);
             string volumeLabel = "DPUSB";
-            Exception lastError = null;
 
-            for (int attempt = 1; attempt <= 3; attempt++)
+            try
             {
-                try
-                {
-                    ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
-                    BestEffortDismountPublicVolume(currentDriveRoot);
-                    RunDiskPartScript(
-                        diskNumber,
-                        "prepare",
-                        new[]
-                        {
-                            "rescan",
-                            "select disk " + diskNumber,
-                            "online disk noerr",
-                            "attributes disk clear readonly noerr",
-                            "clean"
-                        });
+                Trace(agentDirectory, "layout destructive stage begin disk=" + diskNumber + " root=" + currentDriveRoot);
+                ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
+                BestEffortDismountPublicVolume(currentDriveRoot, agentDirectory);
+                RunDiskPartScript(
+                    diskNumber,
+                    "prepare",
+                    agentDirectory,
+                    new[]
+                    {
+                        "rescan",
+                        "select disk " + diskNumber,
+                        "online disk noerr",
+                        "attributes disk clear readonly noerr",
+                        "clean"
+                    });
 
-                    WaitForPhysicalDisk(diskNumber, "after clean");
-                    ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
-                    RunDiskPartScript(
-                        diskNumber,
-                        "create-public-tool-partition",
-                        new[]
-                        {
-                            "rescan",
-                            "select disk " + diskNumber,
-                            "online disk noerr",
-                            "attributes disk clear readonly noerr",
-                            "convert mbr",
-                            "create partition primary size=5 offset=2048",
-                            "format fs=ntfs quick unit=512 label=" + volumeLabel,
-                            "assign",
-                            "rescan"
-                        });
+                WaitForPhysicalDisk(diskNumber, "after clean", agentDirectory);
+                ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
+                RunDiskPartScript(
+                    diskNumber,
+                    "create-public-tool-partition",
+                    agentDirectory,
+                    new[]
+                    {
+                        "rescan",
+                        "select disk " + diskNumber,
+                        "online disk noerr",
+                        "attributes disk clear readonly noerr",
+                        "convert mbr",
+                        "create partition primary size=5 offset=2048",
+                        "format fs=ntfs quick unit=512 label=" + volumeLabel,
+                        "assign",
+                        "rescan"
+                    });
 
-                    Thread.Sleep(1500);
-                    return WaitForToolPartition(diskNumber);
-                }
-                catch (Exception ex)
-                {
-                    lastError = ex;
-                    RunDiskPartRescanBestEffort();
-                    Thread.Sleep(1500 * attempt);
-                }
+                Thread.Sleep(1500);
+                return WaitForToolPartition(diskNumber, agentDirectory);
             }
+            catch (Exception ex)
+            {
+                Trace(agentDirectory, "layout stage failed disk=" + diskNumber + " error=" + ex);
+                RunDiskPartRescanBestEffort(agentDirectory);
 
-            throw new InvalidOperationException("Secure USB disk layout initialization failed after 3 attempts. Last error: " + (lastError == null ? "unknown" : lastError.Message), lastError);
+                string existingRoot = TryFindToolPartitionRoot(diskNumber, agentDirectory);
+                if (!string.IsNullOrWhiteSpace(existingRoot))
+                {
+                    Trace(agentDirectory, "layout stage recovered existing tool root=" + existingRoot);
+                    return existingRoot;
+                }
+
+                throw new InvalidOperationException(
+                    "Secure USB disk layout initialization failed after the single destructive layout pass. " +
+                    "The operation will not repeat clean/create to avoid repeatedly remounting the 5 MB public partition. " +
+                    "Last error: " + ex.Message + " Snapshot: " + SnapshotDiskLayout(diskNumber),
+                    ex);
+            }
         }
 
         private static int ParsePhysicalDriveNumber(string physicalDrivePath)
@@ -532,17 +552,19 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private static void RunDiskPartScript(int diskNumber, string stage, string[] commands)
+        private static void RunDiskPartScript(int diskNumber, string stage, string agentDirectory, string[] commands)
         {
             string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-" + stage + "-" + Guid.NewGuid().ToString("N") + ".txt");
             string script = string.Join(Environment.NewLine, commands) + Environment.NewLine + "exit" + Environment.NewLine;
             try
             {
                 File.WriteAllText(scriptPath, script, Encoding.ASCII);
-                RunProcessChecked(
+                Trace(agentDirectory, "diskpart stage=" + stage + " disk=" + diskNumber + " script=" + script.Replace(Environment.NewLine, " | "));
+                string output = RunProcessChecked(
                     "diskpart.exe",
                     "/s \"" + scriptPath + "\"",
                     "Secure USB disk layout initialization failed at stage '" + stage + "' for disk " + diskNumber + ". Script: " + script.Replace(Environment.NewLine, " | "));
+                Trace(agentDirectory, "diskpart stage=" + stage + " output=" + Collapse(output));
             }
             finally
             {
@@ -559,13 +581,14 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private static void RunDiskPartRescanBestEffort()
+        private static void RunDiskPartRescanBestEffort(string agentDirectory)
         {
             string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-rescan-" + Guid.NewGuid().ToString("N") + ".txt");
             try
             {
                 File.WriteAllText(scriptPath, "rescan" + Environment.NewLine + "exit" + Environment.NewLine, Encoding.ASCII);
-                RunProcessChecked("diskpart.exe", "/s \"" + scriptPath + "\"", "DiskPart rescan failed.");
+                string output = RunProcessChecked("diskpart.exe", "/s \"" + scriptPath + "\"", "DiskPart rescan failed.");
+                Trace(agentDirectory, "diskpart rescan output=" + Collapse(output));
             }
             catch
             {
@@ -585,7 +608,7 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private static void BestEffortDismountPublicVolume(string currentDriveRoot)
+        private static void BestEffortDismountPublicVolume(string currentDriveRoot, string agentDirectory)
         {
             string root = NormalizeDriveRoot(currentDriveRoot);
             if (string.IsNullOrWhiteSpace(root) || root.Length < 3 || root[1] != ':')
@@ -595,29 +618,33 @@ namespace DataProtectorWebBridge.Services
 
             try
             {
-                RunProcessChecked("mountvol.exe", "\"" + root + "\" /p", "Secure USB public volume dismount failed.");
+                Trace(agentDirectory, "dismount public volume root=" + root);
+                string output = RunProcessChecked("mountvol.exe", "\"" + root + "\" /d", "Secure USB public volume dismount failed.");
+                Trace(agentDirectory, "dismount output=" + Collapse(output));
             }
-            catch
+            catch (Exception ex)
             {
+                Trace(agentDirectory, "dismount ignored error=" + ex.Message);
             }
 
             Thread.Sleep(500);
         }
 
-        private static void WaitForPhysicalDisk(int diskNumber, string stage)
+        private static void WaitForPhysicalDisk(int diskNumber, string stage, string agentDirectory)
         {
             DateTime deadline = DateTime.UtcNow.AddSeconds(20);
             while (DateTime.UtcNow < deadline)
             {
                 if (PhysicalDiskExists(diskNumber))
                 {
+                    Trace(agentDirectory, "physical disk available disk=" + diskNumber + " stage=" + stage);
                     return;
                 }
 
                 Thread.Sleep(500);
             }
 
-            throw new InvalidOperationException("Physical disk " + diskNumber + " did not become available " + stage + ".");
+            throw new InvalidOperationException("Physical disk " + diskNumber + " did not become available " + stage + ". Snapshot: " + SnapshotDiskLayout(diskNumber));
         }
 
         private static bool PhysicalDiskExists(int diskNumber)
@@ -660,24 +687,26 @@ namespace DataProtectorWebBridge.Services
             throw new InvalidOperationException("Physical disk " + diskNumber + " is not available.");
         }
 
-        private static string WaitForToolPartition(int diskNumber)
+        private static string WaitForToolPartition(int diskNumber, string agentDirectory)
         {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(45);
             while (DateTime.UtcNow < deadline)
             {
-                string root = TryFindToolPartitionRoot(diskNumber);
+                string root = TryFindToolPartitionRoot(diskNumber, agentDirectory);
                 if (!string.IsNullOrWhiteSpace(root))
                 {
+                    Trace(agentDirectory, "tool partition found root=" + root);
                     return root;
                 }
 
+                RunDiskPartRescanBestEffort(agentDirectory);
                 Thread.Sleep(1000);
             }
 
-            throw new InvalidOperationException("Secure USB public tool partition was created, but no drive letter became available.");
+            throw new InvalidOperationException("Secure USB public tool partition was created, but no drive letter became available. Snapshot: " + SnapshotDiskLayout(diskNumber));
         }
 
-        private static string TryFindToolPartitionRoot(int diskNumber)
+        private static string TryFindToolPartitionRoot(int diskNumber, string agentDirectory)
         {
             using (ManagementObjectSearcher partitionSearcher = new ManagementObjectSearcher(
                 "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='\\\\\\\\.\\\\PHYSICALDRIVE" + diskNumber + "'} WHERE AssocClass=Win32_DiskDriveToDiskPartition"))
@@ -687,6 +716,8 @@ namespace DataProtectorWebBridge.Services
                     using (partition)
                     {
                         long offset = Convert.ToInt64(partition["StartingOffset"] ?? 0);
+                        long size = Convert.ToInt64(partition["Size"] ?? 0);
+                        Trace(agentDirectory, "tool partition candidate disk=" + diskNumber + " offset=" + offset + " size=" + size + " id=" + Convert.ToString(partition["DeviceID"]));
                         if (offset != MetadataReservedBytes)
                         {
                             continue;
@@ -703,12 +734,58 @@ namespace DataProtectorWebBridge.Services
                                     string deviceId = Convert.ToString(logical["DeviceID"]);
                                     if (!string.IsNullOrWhiteSpace(deviceId))
                                     {
+                                        Trace(agentDirectory, "tool partition WMI logical root=" + deviceId);
                                         return NormalizeDriveRoot(deviceId);
                                     }
                                 }
                             }
                         }
                     }
+                }
+            }
+
+            string byVolume = TryFindToolPartitionRootByVolume(diskNumber);
+            if (!string.IsNullOrWhiteSpace(byVolume))
+            {
+                Trace(agentDirectory, "tool partition volume fallback root=" + byVolume);
+                return byVolume;
+            }
+
+            return string.Empty;
+        }
+
+        private static string TryFindToolPartitionRootByVolume(int diskNumber)
+        {
+            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (!drive.IsReady)
+                    {
+                        continue;
+                    }
+
+                    string label = drive.VolumeLabel ?? string.Empty;
+                    if (!string.Equals(label, "DPUSB", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    long delta = Math.Abs(drive.TotalSize - PublicToolAreaBytes);
+                    if (delta > 1024L * 1024L)
+                    {
+                        continue;
+                    }
+
+                    string root = NormalizeDriveRoot(drive.Name);
+                    PhysicalDiskTarget candidate = ResolvePhysicalDiskTarget(root);
+                    if (ParsePhysicalDriveNumber(candidate.physicalDrivePath) == diskNumber)
+                    {
+                        return root;
+                    }
+                }
+                catch
+                {
                 }
             }
 
@@ -953,6 +1030,153 @@ namespace DataProtectorWebBridge.Services
         private static string EscapeJson(string value)
         {
             return (value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
+        private static void Trace(string agentDirectory, string message)
+        {
+            try
+            {
+                string directory = string.IsNullOrWhiteSpace(agentDirectory)
+                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector")
+                    : agentDirectory;
+                Directory.CreateDirectory(directory);
+                string line = DateTime.Now.ToString("s") + " " + message + Environment.NewLine;
+                lock (TraceSync)
+                {
+                    File.AppendAllText(Path.Combine(directory, InitializationTraceFileName), line, Encoding.UTF8);
+                }
+
+                Console.WriteLine(DateTime.Now.ToString("s") + " USB crypt init: " + message);
+            }
+            catch
+            {
+            }
+        }
+
+        private static string Collapse(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            string collapsed = value.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+            while (collapsed.IndexOf("  ", StringComparison.Ordinal) >= 0)
+            {
+                collapsed = collapsed.Replace("  ", " ");
+            }
+
+            return collapsed.Trim();
+        }
+
+        private static string DescribeDisk(PhysicalDiskTarget disk)
+        {
+            if (disk == null)
+            {
+                return "<null>";
+            }
+
+            return "path=" + disk.physicalDrivePath +
+                   " size=" + disk.diskSizeBytes +
+                   " firstOffset=" + disk.firstPartitionOffsetBytes +
+                   " model=" + disk.model +
+                   " serial=" + disk.serialNumber +
+                   " interface=" + disk.interfaceType +
+                   " media=" + disk.mediaType +
+                   " pnp=" + disk.pnpDeviceId;
+        }
+
+        private static string SnapshotDiskLayout(int diskNumber)
+        {
+            StringBuilder builder = new StringBuilder();
+            try
+            {
+                builder.Append("disk=");
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT * FROM Win32_DiskDrive WHERE Index=" + diskNumber))
+                {
+                    foreach (ManagementObject disk in searcher.Get())
+                    {
+                        using (disk)
+                        {
+                            builder.Append("[");
+                            builder.Append(DescribeDisk(PhysicalDiskTargetFromDisk(disk, 0)));
+                            builder.Append("]");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                builder.Append("[disk query failed: ");
+                builder.Append(ex.Message);
+                builder.Append("]");
+            }
+
+            try
+            {
+                builder.Append(" partitions=");
+                using (ManagementObjectSearcher partitionSearcher = new ManagementObjectSearcher(
+                    "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='\\\\\\\\.\\\\PHYSICALDRIVE" + diskNumber + "'} WHERE AssocClass=Win32_DiskDriveToDiskPartition"))
+                {
+                    foreach (ManagementObject partition in partitionSearcher.Get())
+                    {
+                        using (partition)
+                        {
+                            builder.Append("[id=");
+                            builder.Append(Convert.ToString(partition["DeviceID"]));
+                            builder.Append(",offset=");
+                            builder.Append(Convert.ToString(partition["StartingOffset"]));
+                            builder.Append(",size=");
+                            builder.Append(Convert.ToString(partition["Size"]));
+                            builder.Append("]");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                builder.Append("[partition query failed: ");
+                builder.Append(ex.Message);
+                builder.Append("]");
+            }
+
+            try
+            {
+                builder.Append(" volumes=");
+                foreach (DriveInfo drive in DriveInfo.GetDrives())
+                {
+                    try
+                    {
+                        builder.Append("[");
+                        builder.Append(drive.Name);
+                        builder.Append(",type=");
+                        builder.Append(drive.DriveType);
+                        if (drive.IsReady)
+                        {
+                            builder.Append(",label=");
+                            builder.Append(drive.VolumeLabel);
+                            builder.Append(",fs=");
+                            builder.Append(drive.DriveFormat);
+                            builder.Append(",size=");
+                            builder.Append(drive.TotalSize);
+                        }
+
+                        builder.Append("]");
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                builder.Append("[volume query failed: ");
+                builder.Append(ex.Message);
+                builder.Append("]");
+            }
+
+            return Collapse(builder.ToString());
         }
 
         private static void DeleteDirectorySafe(string path)
