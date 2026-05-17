@@ -2218,14 +2218,14 @@ DpPreWrite(
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
-    if (!DpCanProcessOperation(Data, FltObjects, length)) {
-        return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
-
     if (DpDeviceControlShouldBlockWrite(Data, FltObjects)) {
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
+    }
+
+    if (!DpCanProcessOperation(Data, FltObjects, length)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     (VOID)DpArmWebShellWriteInspectionIfTargeted(Data, FltObjects);
@@ -2613,6 +2613,12 @@ DpPreSetInformation(
 
     if (DpShadowIsInternalIo()) {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    if (DpDeviceControlShouldBlockSetInformation(Data, FltObjects)) {
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
     }
 
     informationClass = Data->Iopb->Parameters.SetFileInformation.FileInformationClass;

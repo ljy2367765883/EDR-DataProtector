@@ -157,6 +157,85 @@ DpDeviceIsRemovableVolume(
 
 static
 BOOLEAN
+DpDeviceCreateRequestsWriteAccess(
+    _In_ PFLT_CALLBACK_DATA Data
+    )
+{
+    ACCESS_MASK desiredAccess;
+    ULONG createDisposition;
+    PFLT_IO_PARAMETER_BLOCK iopb;
+
+    if (Data == NULL || Data->Iopb == NULL) {
+        return FALSE;
+    }
+
+    iopb = Data->Iopb;
+    if (iopb->MajorFunction != IRP_MJ_CREATE ||
+        iopb->Parameters.Create.SecurityContext == NULL) {
+
+        return FALSE;
+    }
+
+    desiredAccess = iopb->Parameters.Create.SecurityContext->DesiredAccess;
+    if (FlagOn(desiredAccess,
+               FILE_WRITE_DATA |
+               FILE_APPEND_DATA |
+               FILE_WRITE_EA |
+               FILE_WRITE_ATTRIBUTES |
+               FILE_DELETE_CHILD |
+               DELETE |
+               WRITE_DAC |
+               WRITE_OWNER |
+               GENERIC_WRITE |
+               GENERIC_ALL)) {
+
+        return TRUE;
+    }
+
+    createDisposition = (iopb->Parameters.Create.Options >> 24) & 0xFF;
+    switch (createDisposition) {
+    case FILE_CREATE:
+    case FILE_OPEN_IF:
+    case FILE_OVERWRITE:
+    case FILE_OVERWRITE_IF:
+    case FILE_SUPERSEDE:
+        return TRUE;
+
+    default:
+        return FALSE;
+    }
+}
+
+static
+BOOLEAN
+DpDeviceSetInformationChangesMedia(
+    _In_ FILE_INFORMATION_CLASS InformationClass
+    )
+{
+    switch (InformationClass) {
+    case FileBasicInformation:
+    case FileRenameInformation:
+    case FileLinkInformation:
+    case FileAllocationInformation:
+    case FileEndOfFileInformation:
+    case FileDispositionInformation:
+    case FileValidDataLengthInformation:
+    case FileShortNameInformation:
+    case FileLinkInformationBypassAccessCheck:
+    case FileDispositionInformationEx:
+    case FileRenameInformationEx:
+    case FileRenameInformationExBypassAccessCheck:
+    case FileLinkInformationEx:
+    case FileLinkInformationExBypassAccessCheck:
+        return TRUE;
+
+    default:
+        return FALSE;
+    }
+}
+
+static
+BOOLEAN
 DpDeviceLookupDecision(
     _In_ PCUNICODE_STRING DeviceId,
     _Out_ PBOOLEAN AllowInsert,
@@ -228,10 +307,13 @@ DpDeviceShouldBlock(
 
     if (Data == NULL ||
         KeGetCurrentIrql() != PASSIVE_LEVEL ||
-        Data->RequestorMode == KernelMode ||
         FltObjects == NULL ||
         FltObjects->Instance == NULL) {
 
+        return FALSE;
+    }
+
+    if (!ForWrite && Data->RequestorMode == KernelMode) {
         return FALSE;
     }
 
@@ -260,7 +342,14 @@ DpDeviceShouldBlock(
         return FALSE;
     }
 
-    block = ForWrite ? !allowWrite : !allowInsert;
+    if (!allowInsert) {
+        block = TRUE;
+    } else if (ForWrite) {
+        block = !allowWrite;
+    } else if (!allowWrite && DpDeviceCreateRequestsWriteAccess(Data)) {
+        block = TRUE;
+    }
+
     FltObjectDereference(volume);
 
     return block;
@@ -496,5 +585,21 @@ DpDeviceControlShouldBlockWrite(
     _In_ PCFLT_RELATED_OBJECTS FltObjects
     )
 {
+    return DpDeviceShouldBlock(Data, FltObjects, TRUE);
+}
+
+BOOLEAN
+DpDeviceControlShouldBlockSetInformation(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    )
+{
+    if (Data == NULL ||
+        Data->Iopb == NULL ||
+        !DpDeviceSetInformationChangesMedia(Data->Iopb->Parameters.SetFileInformation.FileInformationClass)) {
+
+        return FALSE;
+    }
+
     return DpDeviceShouldBlock(Data, FltObjects, TRUE);
 }

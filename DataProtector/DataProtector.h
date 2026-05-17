@@ -730,6 +730,12 @@ DpDeviceControlShouldBlockWrite(
     _In_ PCFLT_RELATED_OBJECTS FltObjects
     );
 
+BOOLEAN
+DpDeviceControlShouldBlockSetInformation(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
 NTSTATUS
 DpWebShellAddRule(
     _In_ const DP_WEBSHELL_RULE_MESSAGE *Rule
