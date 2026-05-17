@@ -395,6 +395,110 @@ namespace DataProtectorWebBridge.Services
             return result;
         }
 
+        public DeviceRuleDto[] QueryDeviceRules()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint ruleCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryDeviceRules(
+                    new DataProtectorPolicyNative.NativeDeviceRule[0],
+                    0,
+                    out ruleCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeDeviceRule[] nativeRules =
+                    new DataProtectorPolicyNative.NativeDeviceRule[checked((int)ruleCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryDeviceRules(
+                        nativeRules,
+                        (uint)nativeRules.Length,
+                        out ruleCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)ruleCount);
+                        List<DeviceRuleDto> rules = new List<DeviceRuleDto>();
+                        for (int index = 0; index < returned && index < nativeRules.Length; index++)
+                        {
+                            rules.Add(ConvertDeviceRule(nativeRules[index]));
+                        }
+
+                        return rules.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver device rule set changed while querying. Please retry.");
+        }
+
+        public OperationResult AddDeviceRule(DeviceRuleRequest request)
+        {
+            DeviceRuleDto normalized = NormalizeDeviceRule(request);
+            OperationResult result = Invoke(() =>
+            {
+                DataProtectorPolicyNative.NativeDeviceRule nativeRule = ToNativeDeviceRule(normalized);
+                try
+                {
+                    return DataProtectorPolicyNative.DpPolicyAddDeviceRule(ref nativeRule);
+                }
+                finally
+                {
+                    FreeNativeDeviceRule(nativeRule);
+                }
+            });
+
+            auditLog.Append(normalized.actor, "policy.device.add", normalized.deviceId, "removable-storage", result.succeeded, result.status, result.message);
+            return result;
+        }
+
+        public OperationResult RemoveDeviceRule(DeviceRuleRequest request)
+        {
+            DeviceRuleDto normalized = NormalizeDeviceRule(request);
+            OperationResult result = Invoke(() => DataProtectorPolicyNative.DpPolicyRemoveDeviceRule(normalized.deviceId));
+            auditLog.Append(normalized.actor, "policy.device.remove", normalized.deviceId, "removable-storage", result.succeeded, result.status, result.message);
+            return result;
+        }
+
+        public OperationResult ClearDeviceRules(string actor)
+        {
+            OperationResult result = Invoke(DataProtectorPolicyNative.DpPolicyClearDeviceRules);
+            auditLog.Append(actor, "policy.device.clear", "*", "removable-storage", result.succeeded, result.status, result.message);
+            return result;
+        }
+
         public SmtpEventDto[] QuerySmtpEvents()
         {
             uint status = SuccessStatus;
@@ -944,6 +1048,16 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static DeviceRuleDto ConvertDeviceRule(DataProtectorPolicyNative.NativeDeviceRule nativeRule)
+        {
+            return new DeviceRuleDto
+            {
+                deviceId = Marshal.PtrToStringUni(nativeRule.DeviceId) ?? string.Empty,
+                allowInsert = nativeRule.AllowInsert != 0,
+                allowWrite = nativeRule.AllowWrite != 0
+            };
+        }
+
         private static WebShellEventDto ConvertWebShellEvent(DataProtectorPolicyNative.NativeWebShellEvent nativeEvent)
         {
             string sample = DecodeWebShellSample(nativeEvent.Sample, checked((int)Math.Min(nativeEvent.SampleLength, 100u)));
@@ -1007,6 +1121,33 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static DeviceRuleDto NormalizeDeviceRule(DeviceRuleRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(1, "Device rule request body is required.");
+            }
+
+            string deviceId = (request.deviceId ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                throw new BridgeException(1, "Device id is required. Use * for all removable storage.");
+            }
+
+            if (deviceId.Length > 259)
+            {
+                throw new BridgeException(1, "Device id is too long.");
+            }
+
+            return new DeviceRuleDto
+            {
+                deviceId = deviceId,
+                allowInsert = request.allowInsert,
+                allowWrite = request.allowInsert && request.allowWrite,
+                actor = request.actor
+            };
+        }
+
         private static DataProtectorPolicyNative.NativeNetworkRule ToNativeNetworkRule(NetworkRuleDto rule)
         {
             uint localAddress;
@@ -1038,6 +1179,24 @@ namespace DataProtectorWebBridge.Services
             if (rule.Domain != IntPtr.Zero)
             {
                 Marshal.FreeHGlobal(rule.Domain);
+            }
+        }
+
+        private static DataProtectorPolicyNative.NativeDeviceRule ToNativeDeviceRule(DeviceRuleDto rule)
+        {
+            return new DataProtectorPolicyNative.NativeDeviceRule
+            {
+                DeviceId = Marshal.StringToHGlobalUni(rule.deviceId),
+                AllowInsert = rule.allowInsert ? 1u : 0u,
+                AllowWrite = rule.allowWrite ? 1u : 0u
+            };
+        }
+
+        internal static void FreeNativeDeviceRule(DataProtectorPolicyNative.NativeDeviceRule rule)
+        {
+            if (rule.DeviceId != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(rule.DeviceId);
             }
         }
 
@@ -1456,6 +1615,18 @@ namespace DataProtectorWebBridge.Services
         }
 
         public sealed class WebShellRuleDto : WebShellRuleRequest
+        {
+        }
+
+        public class DeviceRuleRequest
+        {
+            public string deviceId { get; set; }
+            public bool allowInsert { get; set; }
+            public bool allowWrite { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class DeviceRuleDto : DeviceRuleRequest
         {
         }
 

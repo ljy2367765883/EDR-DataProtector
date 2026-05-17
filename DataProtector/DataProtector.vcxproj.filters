@@ -36,6 +36,9 @@
     <ClCompile Include="DpCrypto.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DpDeviceControl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DpIo.c">
       <Filter>Source Files</Filter>
     </ClCompile>

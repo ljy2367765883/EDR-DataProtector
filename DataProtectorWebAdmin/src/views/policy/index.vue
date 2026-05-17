@@ -2,15 +2,19 @@
 import { computed, h, onMounted, reactive, ref } from 'vue';
 import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui';
 import {
+  fetchAddDeviceRule,
   fetchAddNetworkRule,
   fetchAddPolicyRule,
+  fetchClearDeviceRules,
   fetchBridgeStatus,
   fetchClearNetworkRules,
   fetchClearPolicyRules,
   fetchClearWebShellRules,
+  fetchDeviceRules,
   fetchNetworkRules,
   fetchPolicyRules,
   fetchWebShellRules,
+  fetchRemoveDeviceRule,
   fetchRemoveNetworkRule,
   fetchRemovePolicyRule,
   fetchAddWebShellRule,
@@ -25,13 +29,16 @@ const loading = ref(false);
 const submitting = ref(false);
 const networkSubmitting = ref(false);
 const webShellSubmitting = ref(false);
+const deviceSubmitting = ref(false);
 const connected = ref(false);
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
 const webShellRules = ref<Api.DataProtector.WebShellRule[]>([]);
+const deviceRules = ref<Api.DataProtector.DeviceRule[]>([]);
 const formRef = ref<FormInst | null>(null);
 const networkFormRef = ref<FormInst | null>(null);
 const webShellFormRef = ref<FormInst | null>(null);
+const deviceFormRef = ref<FormInst | null>(null);
 
 const form = reactive<Api.DataProtector.PolicyRuleRequest>({
   kind: 'processName',
@@ -56,6 +63,13 @@ const networkForm = reactive<Api.DataProtector.NetworkRuleRequest>({
 
 const webShellForm = reactive<Api.DataProtector.WebShellRuleRequest>({
   directory: '',
+  actor: 'web-admin'
+});
+
+const deviceForm = reactive<Api.DataProtector.DeviceRuleRequest>({
+  deviceId: '*',
+  allowInsert: true,
+  allowWrite: false,
   actor: 'web-admin'
 });
 
@@ -89,6 +103,10 @@ const networkFormRules: FormRules = {
 
 const webShellFormRules: FormRules = {
   directory: { required: true, message: 'Protected web directory is required', trigger: 'input' }
+};
+
+const deviceFormRules: FormRules = {
+  deviceId: { required: true, message: 'Device identifier is required', trigger: 'input' }
 };
 
 const kindOptions = [
@@ -141,6 +159,13 @@ const networkGroups = computed(() => ({
 
 const webShellGroups = computed(() => ({
   directories: webShellRules.value.length
+}));
+
+const deviceGroups = computed(() => ({
+  total: deviceRules.value.length,
+  blockedInsert: deviceRules.value.filter(rule => !rule.allowInsert).length,
+  readOnly: deviceRules.value.filter(rule => rule.allowInsert && !rule.allowWrite).length,
+  writable: deviceRules.value.filter(rule => rule.allowInsert && rule.allowWrite).length
 }));
 
 const columns: DataTableColumns<Api.DataProtector.PolicyRule> = [
@@ -292,19 +317,73 @@ const webShellColumns: DataTableColumns<Api.DataProtector.WebShellRule> = [
   }
 ];
 
+const deviceColumns: DataTableColumns<Api.DataProtector.DeviceRule> = [
+  {
+    title: 'Device identifier',
+    key: 'deviceId',
+    ellipsis: { tooltip: true },
+    render(row) {
+      return row.deviceId === '*' ? 'All removable storage' : row.deviceId;
+    }
+  },
+  {
+    title: 'Access',
+    key: 'allowInsert',
+    width: 150,
+    render(row) {
+      return h(
+        NTag,
+        { type: row.allowInsert ? 'success' : 'error', bordered: false },
+        { default: () => (row.allowInsert ? 'Allowed' : 'Blocked') }
+      );
+    }
+  },
+  {
+    title: 'Write',
+    key: 'allowWrite',
+    width: 150,
+    render(row) {
+      return h(
+        NTag,
+        { type: row.allowWrite ? 'success' : 'warning', bordered: false },
+        { default: () => (row.allowWrite ? 'Writable' : 'Read-only') }
+      );
+    }
+  },
+  {
+    title: 'Action',
+    key: 'actions',
+    width: 120,
+    render(row) {
+      return h(
+        NButton,
+        {
+          size: 'small',
+          type: 'error',
+          secondary: true,
+          onClick: () => removeDeviceRule(row)
+        },
+        { default: () => 'Remove' }
+      );
+    }
+  }
+];
+
 async function refresh() {
   loading.value = true;
   try {
-    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult] = await Promise.all([
+    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult, deviceRulesResult] = await Promise.all([
       fetchBridgeStatus(),
       fetchPolicyRules(),
       fetchNetworkRules(),
-      fetchWebShellRules()
+      fetchWebShellRules(),
+      fetchDeviceRules()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
     if (!rulesResult.error) rules.value = rulesResult.data;
     if (!networkRulesResult.error) networkRules.value = networkRulesResult.data;
     if (!webShellRulesResult.error) webShellRules.value = webShellRulesResult.data;
+    if (!deviceRulesResult.error) deviceRules.value = deviceRulesResult.data;
   } finally {
     loading.value = false;
   }
@@ -460,6 +539,56 @@ async function clearWebShellRules() {
       const { error, data } = await fetchClearWebShellRules();
       if (!error && data.succeeded) {
         window.$message?.success('Central WebShell policy cleared.');
+        await refresh();
+      }
+    }
+  });
+}
+
+function setDeviceInsert(value: boolean) {
+  deviceForm.allowInsert = value;
+  if (!value) {
+    deviceForm.allowWrite = false;
+  }
+}
+
+async function addDeviceRule() {
+  await deviceFormRef.value?.validate();
+  deviceSubmitting.value = true;
+  try {
+    const { error, data } = await fetchAddDeviceRule({
+      deviceId: deviceForm.deviceId.trim(),
+      allowInsert: deviceForm.allowInsert,
+      allowWrite: deviceForm.allowInsert ? deviceForm.allowWrite : false,
+      actor: 'web-admin'
+    });
+    if (!error && data.succeeded) {
+      window.$message?.success('Device control rule added to central policy.');
+      await refresh();
+    }
+  } finally {
+    deviceSubmitting.value = false;
+  }
+}
+
+async function removeDeviceRule(rule: Api.DataProtector.DeviceRule) {
+  const { error, data } = await fetchRemoveDeviceRule({ ...rule, actor: 'web-admin' });
+  if (!error && data.succeeded) {
+    window.$message?.success('Device control rule removed from central policy.');
+    await refresh();
+  }
+}
+
+async function clearDeviceRules() {
+  window.$dialog?.warning({
+    title: 'Clear device control rules',
+    content: 'This removes all removable storage access and write policies from the central policy.',
+    positiveText: 'Clear',
+    negativeText: 'Cancel',
+    onPositiveClick: async () => {
+      const { error, data } = await fetchClearDeviceRules();
+      if (!error && data.succeeded) {
+        window.$message?.success('Central device control policy cleared.');
         await refresh();
       }
     }
@@ -641,6 +770,51 @@ onMounted(refresh);
                 </NSpace>
               </template>
               <NDataTable :columns="webShellColumns" :data="webShellRules" :loading="loading" :pagination="{ pageSize: 10 }" />
+            </NCard>
+          </NGi>
+        </NGrid>
+      </NTabPane>
+
+      <NTabPane name="device" tab="Device Control">
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 m:8">
+            <NCard title="Add Removable Storage Rule" :bordered="false" class="card-wrapper">
+              <NForm ref="deviceFormRef" :model="deviceForm" :rules="deviceFormRules" label-placement="top">
+                <NFormItem label="Device identifier" path="deviceId">
+                  <NInput v-model:value="deviceForm.deviceId" placeholder="* or \Device\HarddiskVolumeX" />
+                </NFormItem>
+                <NFormItem label="Insertion access">
+                  <NSwitch :value="deviceForm.allowInsert" @update:value="setDeviceInsert">
+                    <template #checked>Allowed</template>
+                    <template #unchecked>Blocked</template>
+                  </NSwitch>
+                </NFormItem>
+                <NFormItem label="Write access">
+                  <NSwitch v-model:value="deviceForm.allowWrite" :disabled="!deviceForm.allowInsert">
+                    <template #checked>Writable</template>
+                    <template #unchecked>Read-only</template>
+                  </NSwitch>
+                </NFormItem>
+                <NButton block type="primary" :loading="deviceSubmitting" @click="addDeviceRule">
+                  <template #icon><SvgIcon icon="mdi:usb-flash-drive-outline" /></template>
+                  Add Device Control Rule
+                </NButton>
+              </NForm>
+            </NCard>
+          </NGi>
+
+          <NGi span="24 m:16">
+            <NCard title="Central Device Control Inventory" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NSpace>
+                  <NTag type="info">Rules: {{ deviceGroups.total }}</NTag>
+                  <NTag type="error">Blocked: {{ deviceGroups.blockedInsert }}</NTag>
+                  <NTag type="warning">Read-only: {{ deviceGroups.readOnly }}</NTag>
+                  <NTag type="success">Writable: {{ deviceGroups.writable }}</NTag>
+                  <NButton size="small" type="error" secondary @click="clearDeviceRules">Clear</NButton>
+                </NSpace>
+              </template>
+              <NDataTable :columns="deviceColumns" :data="deviceRules" :loading="loading" :pagination="{ pageSize: 10 }" />
             </NCard>
           </NGi>
         </NGrid>

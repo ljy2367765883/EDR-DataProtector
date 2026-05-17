@@ -47,6 +47,7 @@ extern "C" {
 #define DP_POLICY_API_WEBSHELL_OPERATION_RENAME  3u
 
 #define DP_POLICY_API_WEBSHELL_SAMPLE_BYTES      100u
+#define DP_POLICY_API_DEVICE_ID_CHARS            260u
 
 #define DP_POLICY_API_NETWORK_EVENT_FLAG_DNS       0x00000001u
 #define DP_POLICY_API_NETWORK_EVENT_FLAG_QUIC      0x00000002u
@@ -102,6 +103,12 @@ typedef struct _DP_POLICY_API_NETWORK_CONNECTION_EVENT {
 typedef struct _DP_POLICY_API_WEBSHELL_RULE {
     LPCWSTR Directory;
 } DP_POLICY_API_WEBSHELL_RULE, *PDP_POLICY_API_WEBSHELL_RULE;
+
+typedef struct _DP_POLICY_API_DEVICE_RULE {
+    LPCWSTR DeviceId;
+    DWORD AllowInsert;
+    DWORD AllowWrite;
+} DP_POLICY_API_DEVICE_RULE, *PDP_POLICY_API_DEVICE_RULE;
 
 typedef struct _DP_POLICY_API_WEBSHELL_EVENT {
     ULONGLONG Sequence;
@@ -294,6 +301,33 @@ DpPolicyQueryWebShellEvents(
     _Out_writes_opt_(eventCapacity) DP_POLICY_API_WEBSHELL_EVENT *events,
     _In_ DWORD eventCapacity,
     _Out_opt_ DWORD *eventCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyAddDeviceRule(
+    _In_ const DP_POLICY_API_DEVICE_RULE *rule
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyRemoveDeviceRule(
+    _In_z_ LPCWSTR deviceId
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyClearDeviceRules(void);
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryDeviceRules(
+    _Out_writes_opt_(ruleCapacity) DP_POLICY_API_DEVICE_RULE *rules,
+    _In_ DWORD ruleCapacity,
+    _Out_opt_ DWORD *ruleCount,
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
     _In_ DWORD stringBufferChars,
     _Out_opt_ DWORD *stringBufferCharsRequired

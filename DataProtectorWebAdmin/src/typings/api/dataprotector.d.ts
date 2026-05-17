@@ -144,6 +144,15 @@ declare namespace Api {
 
     interface WebShellRuleRequest extends WebShellRule {}
 
+    interface DeviceRule {
+      deviceId: string;
+      allowInsert: boolean;
+      allowWrite: boolean;
+      actor?: string;
+    }
+
+    interface DeviceRuleRequest extends DeviceRule {}
+
     interface OperationResult {
       succeeded: boolean;
       status: number;

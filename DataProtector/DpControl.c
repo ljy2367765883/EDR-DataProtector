@@ -121,6 +121,36 @@ DpControlMessageNotify(
                                      ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryDeviceRules) {
+        return DpDeviceControlQueryRules(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandAddDeviceRule ||
+        message->Command == DpPolicyCommandRemoveDeviceRule) {
+
+        PDP_DEVICE_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_DEVICE_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_DEVICE_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_DEVICE_RULE_MESSAGE)message->Data;
+        if (message->Command == DpPolicyCommandAddDeviceRule) {
+            return DpDeviceControlAddRule(rule);
+        }
+
+        return DpDeviceControlRemoveRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandClearDeviceRules) {
+        DpDeviceControlClearRules();
+        return STATUS_SUCCESS;
+    }
+
     if (message->Command == DpPolicyCommandAddNetworkRule) {
         PDP_NETWORK_RULE_MESSAGE rule;
 

@@ -36,6 +36,7 @@ Abstract:
 #define DP_TAG_WEBSHELL_RULE   'rWpD'
 #define DP_TAG_WEBSHELL_EVENT  'eWpD'
 #define DP_TAG_WEBSHELL_BUFFER 'bWpD'
+#define DP_TAG_DEVICE_RULE     'rDpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
@@ -52,6 +53,9 @@ Abstract:
 #define DP_WEBSHELL_MAX_SAMPLE_BYTES 100
 #define DP_WEBSHELL_EVENT_PATH_CHARS 512
 #define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32
+#define DP_DEVICE_MAX_RULES 256
+#define DP_DEVICE_MAX_ID_CHARS 260
+#define DP_DEVICE_MAX_ID_BYTES (DP_DEVICE_MAX_ID_CHARS * sizeof(WCHAR))
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
 #define DP_PROTECTION_MAGIC 0x32465044u
@@ -211,7 +215,11 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandRemoveWebShellRule = 41,
     DpPolicyCommandClearWebShellRules = 42,
     DpPolicyCommandQueryWebShellRules = 43,
-    DpPolicyCommandQueryWebShellEvents = 44
+    DpPolicyCommandQueryWebShellEvents = 44,
+    DpPolicyCommandAddDeviceRule = 60,
+    DpPolicyCommandRemoveDeviceRule = 61,
+    DpPolicyCommandClearDeviceRules = 62,
+    DpPolicyCommandQueryDeviceRules = 63
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -423,6 +431,32 @@ typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
 #define DP_WEBSHELL_RULE_QUERY_VERSION 1
 #define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
 #define DP_WEBSHELL_EVENT_QUERY_VERSION 1
+
+typedef struct _DP_DEVICE_RULE_MESSAGE {
+    ULONG Version;
+    ULONG AllowInsert;
+    ULONG AllowWrite;
+    ULONG DeviceIdLengthBytes;
+    WCHAR DeviceId[DP_DEVICE_MAX_ID_CHARS];
+} DP_DEVICE_RULE_MESSAGE, *PDP_DEVICE_RULE_MESSAGE;
+
+typedef struct _DP_DEVICE_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_DEVICE_RULE_QUERY_HEADER, *PDP_DEVICE_RULE_QUERY_HEADER;
+
+typedef struct _DP_DEVICE_RULE_QUERY_ENTRY {
+    ULONG AllowInsert;
+    ULONG AllowWrite;
+    ULONG DeviceIdLengthBytes;
+    WCHAR DeviceId[1];
+} DP_DEVICE_RULE_QUERY_ENTRY, *PDP_DEVICE_RULE_QUERY_ENTRY;
+
+#define DP_DEVICE_RULE_MESSAGE_VERSION 1
+#define DP_DEVICE_RULE_QUERY_VERSION 1
+#define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
 
 EXTERN_C_START
 
@@ -650,6 +684,50 @@ DpWebShellInitialize(
 VOID
 DpWebShellUninitialize(
     VOID
+    );
+
+NTSTATUS
+DpDeviceControlInitialize(
+    VOID
+    );
+
+VOID
+DpDeviceControlUninitialize(
+    VOID
+    );
+
+NTSTATUS
+DpDeviceControlAddRule(
+    _In_ const DP_DEVICE_RULE_MESSAGE *Rule
+    );
+
+NTSTATUS
+DpDeviceControlRemoveRule(
+    _In_ const DP_DEVICE_RULE_MESSAGE *Rule
+    );
+
+VOID
+DpDeviceControlClearRules(
+    VOID
+    );
+
+NTSTATUS
+DpDeviceControlQueryRules(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+BOOLEAN
+DpDeviceControlShouldBlockCreate(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpDeviceControlShouldBlockWrite(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
     );
 
 NTSTATUS

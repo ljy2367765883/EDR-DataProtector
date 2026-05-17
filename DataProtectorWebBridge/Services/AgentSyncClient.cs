@@ -115,6 +115,7 @@ namespace DataProtectorWebBridge.Services
                     response.rules ?? new PolicyBridgeService.PolicyRuleDto[0],
                     response.networkRules ?? new PolicyBridgeService.NetworkRuleDto[0],
                     response.webShellRules ?? new PolicyBridgeService.WebShellRuleDto[0],
+                    response.deviceRules ?? new PolicyBridgeService.DeviceRuleDto[0],
                     response.policyVersion);
             }
 
@@ -264,6 +265,7 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.PolicyRuleDto[] rules,
             PolicyBridgeService.NetworkRuleDto[] networkRules,
             PolicyBridgeService.WebShellRuleDto[] webShellRules,
+            PolicyBridgeService.DeviceRuleDto[] deviceRules,
             long policyVersion)
         {
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
@@ -289,6 +291,15 @@ namespace DataProtectorWebBridge.Services
             {
                 lastApplyStatus = clear.statusText;
                 lastApplyMessage = "Cannot clear local WebShell policy before central apply: " + clear.message;
+                SaveState();
+                return;
+            }
+
+            clear = policyService.ClearDeviceRules("central-agent");
+            if (!clear.succeeded)
+            {
+                lastApplyStatus = clear.statusText;
+                lastApplyMessage = "Cannot clear local device control policy before central apply: " + clear.message;
                 SaveState();
                 return;
             }
@@ -355,9 +366,28 @@ namespace DataProtectorWebBridge.Services
                 }
             }
 
+            foreach (PolicyBridgeService.DeviceRuleDto rule in deviceRules)
+            {
+                PolicyBridgeService.OperationResult result = policyService.AddDeviceRule(new PolicyBridgeService.DeviceRuleRequest
+                {
+                    deviceId = rule.deviceId,
+                    allowInsert = rule.allowInsert,
+                    allowWrite = rule.allowWrite,
+                    actor = "central-agent"
+                });
+
+                if (!result.succeeded)
+                {
+                    lastApplyStatus = result.statusText;
+                    lastApplyMessage = "Cannot apply central device rule " + rule.deviceId + ": " + result.message;
+                    SaveState();
+                    return;
+                }
+            }
+
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length;
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length;
             SaveState();
         }
 

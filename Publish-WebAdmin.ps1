@@ -24,9 +24,15 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $webRoot = Join-Path $root "DataProtectorWebAdmin"
 $webDist = Join-Path $webRoot "dist"
 $bridgeOutput = Join-Path $root "DataProtectorWebBridge\bin\$Platform\$Configuration"
+$driverPackage = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector"
+$driverCertificate = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector.cer"
 
 Push-Location $root
 try {
+    & $msBuild ".\DataProtector\DataProtector.vcxproj" `
+        /p:Configuration=$Configuration `
+        /p:Platform=$Platform
+
     & $msBuild ".\DataProtectorPolicyApi\DataProtectorPolicyApi.vcxproj" `
         /p:Configuration=$Configuration `
         /p:Platform=$Platform
@@ -52,6 +58,10 @@ try {
         throw "Bridge build output was not found: $bridgeOutput"
     }
 
+    if (-not (Test-Path -LiteralPath $driverPackage)) {
+        throw "Driver package output was not found: $driverPackage"
+    }
+
     if (Test-Path -LiteralPath $OutputDirectory) {
         $resolvedOutput = (Resolve-Path -LiteralPath $OutputDirectory).Path
         $resolvedRoot = (Resolve-Path -LiteralPath $root).Path
@@ -64,8 +74,9 @@ try {
 
     $serverPublish = Join-Path $OutputDirectory "server"
     $agentPublish = Join-Path $OutputDirectory "agent"
+    $agentDriverPublish = Join-Path $agentPublish "driver"
     $staticOutput = Join-Path $serverPublish "web"
-    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish | Out-Null
+    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish | Out-Null
 
     Copy-Item -Path (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
 
@@ -81,6 +92,11 @@ try {
             Copy-Item -LiteralPath $source -Destination $serverPublish -Force
             Copy-Item -LiteralPath $source -Destination $agentPublish -Force
         }
+    }
+
+    Copy-Item -Path (Join-Path $driverPackage "*") -Destination $agentDriverPublish -Recurse -Force
+    if (Test-Path -LiteralPath $driverCertificate) {
+        Copy-Item -LiteralPath $driverCertificate -Destination $agentDriverPublish -Force
     }
 
     $notes = @"
@@ -100,6 +116,11 @@ http://<server-ip>:17643/
 
 Run the endpoint agent on every protected client:
 agent\DataProtectorWebBridge.exe agent http://<server-ip>:17643/ 15
+
+Endpoint driver package:
+agent\driver\DataProtector.inf
+agent\driver\DataProtector.sys
+agent\driver\dataprotector.cat
 
 Central state:
 C:\ProgramData\DataProtector\CentralState.json

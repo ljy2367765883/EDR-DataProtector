@@ -179,11 +179,26 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/device/rules")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryDeviceRules());
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/webshell/rules")
                 {
                     PolicyBridgeService.WebShellRuleRequest request =
                         JsonResponse.Read<PolicyBridgeService.WebShellRuleRequest>(context.Request.InputStream);
                     PolicyBridgeService.OperationResult result = store.AddWebShellRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/device/rules")
+                {
+                    PolicyBridgeService.DeviceRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.DeviceRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.AddDeviceRule(request);
                     JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
                     return;
                 }
@@ -197,9 +212,25 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "DELETE" && path == "/api/device/rules")
+                {
+                    PolicyBridgeService.DeviceRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.DeviceRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveDeviceRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/webshell/clear")
                 {
                     PolicyBridgeService.OperationResult result = store.ClearWebShellRules(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/device/clear")
+                {
+                    PolicyBridgeService.OperationResult result = store.ClearDeviceRules(context.Request.UserHostAddress);
                     JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
                     return;
                 }

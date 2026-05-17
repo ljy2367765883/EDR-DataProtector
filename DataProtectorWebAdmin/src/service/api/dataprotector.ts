@@ -150,6 +150,36 @@ export function fetchClearWebShellRules() {
   });
 }
 
+export function fetchDeviceRules() {
+  return request<Api.DataProtector.DeviceRule[]>({
+    url: '/device/rules',
+    method: 'get'
+  });
+}
+
+export function fetchAddDeviceRule(data: Api.DataProtector.DeviceRuleRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/device/rules',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchRemoveDeviceRule(data: Api.DataProtector.DeviceRuleRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/device/rules',
+    method: 'delete',
+    data
+  });
+}
+
+export function fetchClearDeviceRules() {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/device/clear',
+    method: 'post'
+  });
+}
+
 export function fetchAuditEvents(params: number | Api.DataProtector.AuditQuery = 200) {
   const query = typeof params === 'number' ? { limit: params } : params;
 

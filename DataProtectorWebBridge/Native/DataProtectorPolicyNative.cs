@@ -105,6 +105,24 @@ namespace DataProtectorWebBridge.Native
             out uint stringBufferCharsRequired);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyAddDeviceRule(ref NativeDeviceRule rule);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyRemoveDeviceRule(string deviceId);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyClearDeviceRules();
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryDeviceRules(
+            [Out] NativeDeviceRule[] rules,
+            uint ruleCapacity,
+            out uint ruleCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyGetLastErrorMessage(StringBuilder buffer, uint bufferChars);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -165,6 +183,14 @@ namespace DataProtectorWebBridge.Native
         internal struct NativeWebShellRule
         {
             public IntPtr Directory;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeDeviceRule
+        {
+            public IntPtr DeviceId;
+            public uint AllowInsert;
+            public uint AllowWrite;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

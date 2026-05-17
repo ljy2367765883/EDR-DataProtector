@@ -27,5 +27,9 @@ EXPORTS
     DpPolicyClearWebShellRules
     DpPolicyQueryWebShellRules
     DpPolicyQueryWebShellEvents
+    DpPolicyAddDeviceRule
+    DpPolicyRemoveDeviceRule
+    DpPolicyClearDeviceRules
+    DpPolicyQueryDeviceRules
     DpPolicyConvertDosPathToNtPath
     DpPolicyGetLastErrorMessage

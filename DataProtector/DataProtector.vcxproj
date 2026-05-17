@@ -40,6 +40,7 @@
     <ClCompile Include="DpBuffer.c" />
     <ClCompile Include="DpControl.c" />
     <ClCompile Include="DpCrypto.c" />
+    <ClCompile Include="DpDeviceControl.c" />
     <ClCompile Include="DpIo.c" />
     <ClCompile Include="DpNetFilter.c" />
     <ClCompile Include="DpPolicy.c" />

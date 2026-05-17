@@ -94,6 +94,17 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public PolicyBridgeService.DeviceRuleDto[] QueryDeviceRules()
+        {
+            lock (syncRoot)
+            {
+                return state.DeviceRules
+                    .Select(CloneDeviceRule)
+                    .OrderBy(rule => rule.deviceId, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+        }
+
         public PolicyBridgeService.OperationResult AddRule(PolicyBridgeService.PolicyRuleRequest request)
         {
             PolicyBridgeService.PolicyRuleRequest normalized = NormalizeRequest(request);
@@ -265,6 +276,64 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("All central WebShell rules cleared.");
+        }
+
+        public PolicyBridgeService.OperationResult AddDeviceRule(PolicyBridgeService.DeviceRuleRequest request)
+        {
+            PolicyBridgeService.DeviceRuleDto normalized = NormalizeDeviceRequest(request);
+            lock (syncRoot)
+            {
+                int existing = state.DeviceRules.FindIndex(rule => SameDeviceRule(rule, normalized));
+                if (existing >= 0)
+                {
+                    state.DeviceRules[existing] = normalized;
+                }
+                else
+                {
+                    state.DeviceRules.Add(normalized);
+                }
+
+                state.PolicyVersion++;
+                AppendAudit(normalized.actor, "central.policy.device.add", normalized.deviceId, "removable-storage", true, "0x00000000", "Device control rule stored on central server.");
+                Save();
+            }
+
+            return Success("Device control rule stored on central server.");
+        }
+
+        public PolicyBridgeService.OperationResult RemoveDeviceRule(PolicyBridgeService.DeviceRuleRequest request)
+        {
+            PolicyBridgeService.DeviceRuleDto normalized = NormalizeDeviceRequest(request);
+            lock (syncRoot)
+            {
+                int removed = state.DeviceRules.RemoveAll(rule => SameDeviceRule(rule, normalized));
+                if (removed > 0)
+                {
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(normalized.actor, "central.policy.device.remove", normalized.deviceId, "removable-storage", true, "0x00000000", "Device control rule removed from central server.");
+                Save();
+            }
+
+            return Success("Device control rule removed from central server.");
+        }
+
+        public PolicyBridgeService.OperationResult ClearDeviceRules(string actor)
+        {
+            lock (syncRoot)
+            {
+                if (state.DeviceRules.Count > 0)
+                {
+                    state.DeviceRules.Clear();
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(actor, "central.policy.device.clear", "*", "removable-storage", true, "0x00000000", "All central device control rules cleared.");
+                Save();
+            }
+
+            return Success("All central device control rules cleared.");
         }
 
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
@@ -587,6 +656,7 @@ namespace DataProtectorWebBridge.Services
                     rules = QueryRules(),
                     networkRules = QueryNetworkRules(),
                     webShellRules = QueryWebShellRules(),
+                    deviceRules = QueryDeviceRules(),
                     tasks = assignedTasks
                 };
             }
@@ -612,6 +682,10 @@ namespace DataProtectorWebBridge.Services
                     if (loaded != null && loaded.WebShellRules == null)
                     {
                         loaded.WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
+                    }
+                    if (loaded != null && loaded.DeviceRules == null)
+                    {
+                        loaded.DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
                     }
                     if (loaded != null && loaded.NetworkConnections == null)
                     {
@@ -1708,6 +1782,33 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static PolicyBridgeService.DeviceRuleDto NormalizeDeviceRequest(PolicyBridgeService.DeviceRuleRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Device rule request body is required.");
+            }
+
+            string deviceId = (request.deviceId ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Device id is required. Use * for all removable storage.");
+            }
+
+            if (deviceId.Length > 259)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Device id is too long.");
+            }
+
+            return new PolicyBridgeService.DeviceRuleDto
+            {
+                deviceId = deviceId,
+                allowInsert = request.allowInsert,
+                allowWrite = request.allowInsert && request.allowWrite,
+                actor = request.actor
+            };
+        }
+
         private static uint GenerateRuleId(
             string kind,
             string action,
@@ -1779,9 +1880,25 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static PolicyBridgeService.DeviceRuleDto CloneDeviceRule(PolicyBridgeService.DeviceRuleDto rule)
+        {
+            return new PolicyBridgeService.DeviceRuleDto
+            {
+                deviceId = rule.deviceId,
+                allowInsert = rule.allowInsert,
+                allowWrite = rule.allowWrite,
+                actor = rule.actor
+            };
+        }
+
         private static bool SameWebShellRule(PolicyBridgeService.WebShellRuleDto rule, PolicyBridgeService.WebShellRuleDto request)
         {
             return string.Equals(rule.directory, request.directory, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool SameDeviceRule(PolicyBridgeService.DeviceRuleDto rule, PolicyBridgeService.DeviceRuleDto request)
+        {
+            return string.Equals(rule.deviceId, request.deviceId, StringComparison.OrdinalIgnoreCase);
         }
 
         private static RemoteTaskDto CloneTask(RemoteTaskState task)
@@ -1844,6 +1961,7 @@ namespace DataProtectorWebBridge.Services
                 Rules = new List<PolicyBridgeService.PolicyRuleDto>();
                 NetworkRules = new List<PolicyBridgeService.NetworkRuleDto>();
                 WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
+                DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 Audit = new List<AuditLog.AuditRecord>();
                 Tasks = new List<RemoteTaskState>();
@@ -1855,6 +1973,7 @@ namespace DataProtectorWebBridge.Services
             public List<PolicyBridgeService.PolicyRuleDto> Rules { get; set; }
             public List<PolicyBridgeService.NetworkRuleDto> NetworkRules { get; set; }
             public List<PolicyBridgeService.WebShellRuleDto> WebShellRules { get; set; }
+            public List<PolicyBridgeService.DeviceRuleDto> DeviceRules { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public List<AuditLog.AuditRecord> Audit { get; set; }
             public List<RemoteTaskState> Tasks { get; set; }
@@ -2059,6 +2178,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.PolicyRuleDto[] rules { get; set; }
             public PolicyBridgeService.NetworkRuleDto[] networkRules { get; set; }
             public PolicyBridgeService.WebShellRuleDto[] webShellRules { get; set; }
+            public PolicyBridgeService.DeviceRuleDto[] deviceRules { get; set; }
             public RemoteTaskDto[] tasks { get; set; }
         }
 

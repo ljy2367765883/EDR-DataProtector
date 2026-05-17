@@ -19,6 +19,8 @@
 #define DP_WEBSHELL_EVENT_PATH_CHARS 512u
 #define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32u
 #define DP_WEBSHELL_MAX_SAMPLE_BYTES 100u
+#define DP_DEVICE_MAX_ID_CHARS 260u
+#define DP_DEVICE_MAX_ID_BYTES (DP_DEVICE_MAX_ID_CHARS * sizeof(WCHAR))
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
 #define DP_NETWORK_CONNECTION_EVENT_STRING_CHARS (DP_NETWORK_EVENT_PROCESS_PATH_CHARS + DP_NETWORK_EVENT_DOMAIN_CHARS + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
@@ -45,7 +47,11 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandRemoveWebShellRule = 41,
     DpPolicyCommandClearWebShellRules = 42,
     DpPolicyCommandQueryWebShellRules = 43,
-    DpPolicyCommandQueryWebShellEvents = 44
+    DpPolicyCommandQueryWebShellEvents = 44,
+    DpPolicyCommandAddDeviceRule = 60,
+    DpPolicyCommandRemoveDeviceRule = 61,
+    DpPolicyCommandClearDeviceRules = 62,
+    DpPolicyCommandQueryDeviceRules = 63
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -158,6 +164,28 @@ typedef struct _DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY {
     WCHAR ProcessPath[DP_NETWORK_EVENT_PROCESS_PATH_CHARS];
     WCHAR Domain[DP_NETWORK_EVENT_DOMAIN_CHARS];
 } DP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY, *PDP_NETWORK_CONNECTION_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_DEVICE_RULE_MESSAGE {
+    ULONG Version;
+    ULONG AllowInsert;
+    ULONG AllowWrite;
+    ULONG DeviceIdLengthBytes;
+    WCHAR DeviceId[DP_DEVICE_MAX_ID_CHARS];
+} DP_DEVICE_RULE_MESSAGE, *PDP_DEVICE_RULE_MESSAGE;
+
+typedef struct _DP_DEVICE_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_DEVICE_RULE_QUERY_HEADER, *PDP_DEVICE_RULE_QUERY_HEADER;
+
+typedef struct _DP_DEVICE_RULE_QUERY_ENTRY {
+    ULONG AllowInsert;
+    ULONG AllowWrite;
+    ULONG DeviceIdLengthBytes;
+    WCHAR DeviceId[1];
+} DP_DEVICE_RULE_QUERY_ENTRY, *PDP_DEVICE_RULE_QUERY_ENTRY;
 #pragma pack(pop)
 
 typedef struct _DP_WEBSHELL_RULE_MESSAGE {
@@ -209,6 +237,9 @@ typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
 #define DP_WEBSHELL_RULE_QUERY_VERSION 1u
 #define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
 #define DP_WEBSHELL_EVENT_QUERY_VERSION 1u
+#define DP_DEVICE_RULE_MESSAGE_VERSION 1u
+#define DP_DEVICE_RULE_QUERY_VERSION 1u
+#define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
 
 C_ASSERT(sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY) == 1232);
 
@@ -2464,6 +2495,257 @@ DpPolicyConvertDosPathToNtPath(
     HeapFree(GetProcessHeap(), 0, converted);
 
     if (FAILED(hr)) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyBuildDeviceRuleMessage(
+    _In_z_ LPCWSTR DeviceId,
+    _In_ DWORD AllowInsert,
+    _In_ DWORD AllowWrite,
+    _Out_ DP_DEVICE_RULE_MESSAGE *Message
+    )
+{
+    size_t length;
+
+    if (DeviceId == NULL || Message == NULL) {
+        DpPolicySetLastErrorMessage(L"Device rule is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    length = wcslen(DeviceId);
+    if (length == 0 ||
+        length >= DP_DEVICE_MAX_ID_CHARS ||
+        length * sizeof(WCHAR) > DP_DEVICE_MAX_ID_BYTES) {
+
+        DpPolicySetLastErrorMessage(L"Device id is empty or too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    ZeroMemory(Message, sizeof(*Message));
+    Message->Version = DP_DEVICE_RULE_MESSAGE_VERSION;
+    Message->AllowInsert = AllowInsert ? 1u : 0u;
+    Message->AllowWrite = AllowWrite ? 1u : 0u;
+    Message->DeviceIdLengthBytes = (ULONG)(length * sizeof(WCHAR));
+    CopyMemory(Message->DeviceId, DeviceId, Message->DeviceIdLengthBytes);
+
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyAddDeviceRule(
+    _In_ const DP_POLICY_API_DEVICE_RULE *Rule
+    )
+{
+    DWORD result;
+    DP_DEVICE_RULE_MESSAGE message;
+
+    if (Rule == NULL) {
+        DpPolicySetLastErrorMessage(L"Device rule is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    result = DpPolicyBuildDeviceRuleMessage(Rule->DeviceId,
+                                            Rule->AllowInsert,
+                                            Rule->AllowWrite,
+                                            &message);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandAddDeviceRule,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyRemoveDeviceRule(
+    _In_z_ LPCWSTR DeviceId
+    )
+{
+    DWORD result;
+    DP_DEVICE_RULE_MESSAGE message;
+
+    result = DpPolicyBuildDeviceRuleMessage(DeviceId, 1u, 1u, &message);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandRemoveDeviceRule,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyClearDeviceRules(void)
+{
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandClearDeviceRules,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryDeviceRules(
+    _Out_writes_opt_(RuleCapacity) DP_POLICY_API_DEVICE_RULE *Rules,
+    _In_ DWORD RuleCapacity,
+    _Out_opt_ DWORD *RuleCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_DEVICE_RULE_QUERY_HEADER header;
+    DP_DEVICE_RULE_QUERY_HEADER sizingHeader;
+    PBYTE cursor;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedRuleCount = 0;
+    BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
+
+    if (RuleCount != NULL) {
+        *RuleCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((RuleCapacity != 0 && Rules == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryDeviceRules,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_DEVICE_RULE_QUERY_HEADER) ||
+        sizingHeader.Version != DP_DEVICE_RULE_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_DEVICE_RULE_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid device rule snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryDeviceRules,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_DEVICE_RULE_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid device rule snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_DEVICE_RULE_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_DEVICE_RULE_QUERY_VERSION) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported device rule snapshot version.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedRuleCount = header->RuleCount;
+    if (RuleCount != NULL) {
+        *RuleCount = returnedRuleCount;
+    }
+
+    cursor = queryBuffer + sizeof(DP_DEVICE_RULE_QUERY_HEADER);
+    for (index = 0; index < returnedRuleCount; index++) {
+        PDP_DEVICE_RULE_QUERY_ENTRY entry;
+        DWORD deviceIdChars;
+        DWORD entryBytes;
+
+        if ((ULONG_PTR)(cursor - queryBuffer) + DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE > bytesReturned) {
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned a truncated device rule snapshot.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        entry = (PDP_DEVICE_RULE_QUERY_ENTRY)cursor;
+        entryBytes = (DWORD)DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE + entry->DeviceIdLengthBytes;
+        if ((ULONG_PTR)(cursor - queryBuffer) + entryBytes > bytesReturned ||
+            entry->DeviceIdLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid device rule entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        deviceIdChars = entry->DeviceIdLengthBytes / sizeof(WCHAR);
+        requiredStringChars += deviceIdChars + 1;
+
+        if (index < RuleCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + deviceIdChars + 1 <= StringBufferChars) {
+
+            Rules[index].DeviceId = StringBuffer + copiedStringChars;
+            Rules[index].AllowInsert = entry->AllowInsert;
+            Rules[index].AllowWrite = entry->AllowWrite;
+            CopyMemory(StringBuffer + copiedStringChars,
+                       entry->DeviceId,
+                       entry->DeviceIdLengthBytes);
+            copiedStringChars += deviceIdChars;
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+
+        cursor += entryBytes;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (RuleCapacity < returnedRuleCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
