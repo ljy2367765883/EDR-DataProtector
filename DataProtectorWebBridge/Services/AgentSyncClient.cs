@@ -19,6 +19,7 @@ namespace DataProtectorWebBridge.Services
         private readonly string statePath;
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly RemoteTaskExecutor taskExecutor = new RemoteTaskExecutor();
+        private readonly RemovableDeviceInventory removableDeviceInventory = new RemovableDeviceInventory();
         private readonly List<CentralPolicyStore.RemoteTaskResult> pendingTaskResults = new List<CentralPolicyStore.RemoteTaskResult>();
         private string deviceId;
         private long appliedPolicyVersion;
@@ -74,6 +75,7 @@ namespace DataProtectorWebBridge.Services
             object rawStatus = policyService.GetStatus();
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
             PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
+            CentralPolicyStore.RemovableDeviceObservation[] removableDevices = removableDeviceInventory.Snapshot();
             if (auditRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s).");
@@ -93,6 +95,7 @@ namespace DataProtectorWebBridge.Services
                 LastApplyMessage = lastApplyMessage,
                 Audit = auditRecords,
                 NetworkConnections = networkConnections,
+                RemovableDevices = removableDevices,
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = false
             };
@@ -143,6 +146,7 @@ namespace DataProtectorWebBridge.Services
             object rawStatus = policyService.GetStatus();
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
             PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
+            CentralPolicyStore.RemovableDeviceObservation[] removableDevices = removableDeviceInventory.Snapshot();
             if (auditRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s) during task result flush.");
@@ -162,6 +166,7 @@ namespace DataProtectorWebBridge.Services
                 LastApplyMessage = lastApplyMessage,
                 Audit = auditRecords,
                 NetworkConnections = networkConnections,
+                RemovableDevices = removableDevices,
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = true
             };

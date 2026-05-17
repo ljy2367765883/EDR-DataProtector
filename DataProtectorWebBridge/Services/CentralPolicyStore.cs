@@ -105,6 +105,59 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public RemovableDeviceDto[] QueryRemovableDevices()
+        {
+            lock (syncRoot)
+            {
+                EnsureDeviceAuthorizationState();
+                return state.RemovableDevices.Values
+                    .Select(ToRemovableDeviceDto)
+                    .OrderByDescending(device => device.online)
+                    .ThenBy(device => device.status, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(device => device.host, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(device => device.driveLetter, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+        }
+
+        public PolicyBridgeService.OperationResult AuthorizeRemovableDevice(RemovableDeviceAuthorizationRequest request)
+        {
+            RemovableDeviceAuthorizationRule normalized = NormalizeRemovableAuthorizationRequest(request);
+            lock (syncRoot)
+            {
+                EnsureDeviceAuthorizationState();
+                state.RemovableAuthorizations[normalized.hardwareId] = normalized;
+                state.PolicyVersion++;
+                AppendAudit(normalized.actor, "central.device.authorization." + normalized.status, normalized.hardwareId, "removable-storage", true, "0x00000000", "Removable device authorization updated.");
+                Save();
+            }
+
+            return Success("Removable device authorization updated.");
+        }
+
+        public PolicyBridgeService.OperationResult RemoveRemovableDeviceAuthorization(RemovableDeviceAuthorizationRequest request)
+        {
+            string hardwareId = NormalizeHardwareId(request == null ? string.Empty : request.hardwareId);
+            if (string.IsNullOrWhiteSpace(hardwareId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Hardware id is required.");
+            }
+
+            lock (syncRoot)
+            {
+                EnsureDeviceAuthorizationState();
+                if (state.RemovableAuthorizations.Remove(hardwareId))
+                {
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(request == null ? string.Empty : request.actor, "central.device.authorization.remove", hardwareId, "removable-storage", true, "0x00000000", "Removable device authorization removed.");
+                Save();
+            }
+
+            return Success("Removable device authorization removed.");
+        }
+
         public PolicyBridgeService.OperationResult AddRule(PolicyBridgeService.PolicyRuleRequest request)
         {
             PolicyBridgeService.PolicyRuleRequest normalized = NormalizeRequest(request);
@@ -607,6 +660,23 @@ namespace DataProtectorWebBridge.Services
                     }
                 }
 
+                if (request.RemovableDevices != null)
+                {
+                    int removableCount = 0;
+                    foreach (RemovableDeviceObservation item in request.RemovableDevices)
+                    {
+                        if (IngestRemovableDevice(deviceId, device, item))
+                        {
+                            removableCount++;
+                        }
+                    }
+
+                    if (removableCount > 0)
+                    {
+                        Console.WriteLine(DateTime.Now.ToString("s") + " Central received " + removableCount + " removable device observation(s) from " + device.Machine + " (" + device.DeviceId + ").");
+                    }
+                }
+
                 if (request.Audit != null)
                 {
                     int acceptedAuditCount = 0;
@@ -656,7 +726,7 @@ namespace DataProtectorWebBridge.Services
                     rules = QueryRules(),
                     networkRules = QueryNetworkRules(),
                     webShellRules = QueryWebShellRules(),
-                    deviceRules = QueryDeviceRules(),
+                    deviceRules = BuildEffectiveDeviceRules(deviceId),
                     tasks = assignedTasks
                 };
             }
@@ -687,6 +757,14 @@ namespace DataProtectorWebBridge.Services
                     {
                         loaded.DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
                     }
+                    if (loaded != null && loaded.RemovableDevices == null)
+                    {
+                        loaded.RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
+                    }
+                    if (loaded != null && loaded.RemovableAuthorizations == null)
+                    {
+                        loaded.RemovableAuthorizations = new Dictionary<string, RemovableDeviceAuthorizationRule>(StringComparer.OrdinalIgnoreCase);
+                    }
                     if (loaded != null && loaded.NetworkConnections == null)
                     {
                         loaded.NetworkConnections = new List<NetworkConnectionObservation>();
@@ -710,6 +788,7 @@ namespace DataProtectorWebBridge.Services
             TrimAudit();
             TrimTasks();
             TrimNetworkConnections();
+            TrimRemovableDevices();
             TrimIpInfoCache();
             string json = serializer.Serialize(state);
             File.WriteAllText(filePath, json, Encoding.UTF8);
@@ -750,6 +829,22 @@ namespace DataProtectorWebBridge.Services
                     .Take(maxNetworkObservations)
                 .ToList();
             }
+        }
+
+        private void TrimRemovableDevices()
+        {
+            EnsureDeviceAuthorizationState();
+            if (state.RemovableDevices.Count <= 5000)
+            {
+                return;
+            }
+
+            state.RemovableDevices = state.RemovableDevices
+                .Values
+                .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
+                .Take(5000)
+                .Where(item => !string.IsNullOrWhiteSpace(item.hardwareId))
+                .ToDictionary(item => item.hardwareId, item => item, StringComparer.OrdinalIgnoreCase);
         }
 
         private void TrimIpInfoCache()
@@ -892,6 +987,57 @@ namespace DataProtectorWebBridge.Services
             return true;
         }
 
+        private bool IngestRemovableDevice(string deviceId, CentralDeviceState device, RemovableDeviceObservation observation)
+        {
+            if (observation == null)
+            {
+                return false;
+            }
+
+            string hardwareId = NormalizeHardwareId(observation.hardwareId);
+            if (string.IsNullOrWhiteSpace(hardwareId))
+            {
+                return false;
+            }
+
+            EnsureDeviceAuthorizationState();
+
+            RemovableDeviceState existing;
+            bool isNew = !state.RemovableDevices.TryGetValue(hardwareId, out existing);
+            if (isNew)
+            {
+                existing = new RemovableDeviceState
+                {
+                    hardwareId = hardwareId,
+                    firstSeenUtc = DateTime.UtcNow.ToString("o")
+                };
+                state.RemovableDevices[hardwareId] = existing;
+            }
+
+            existing.deviceId = deviceId ?? string.Empty;
+            existing.host = device == null ? string.Empty : device.Machine ?? string.Empty;
+            existing.user = device == null ? string.Empty : device.User ?? string.Empty;
+            existing.driveLetter = NormalizeDeviceText(observation.driveLetter).ToUpperInvariant();
+            existing.volumeGuid = NormalizeDeviceText(observation.volumeGuid);
+            existing.volumeLabel = NormalizeDeviceText(observation.volumeLabel);
+            existing.fileSystem = NormalizeDeviceText(observation.fileSystem);
+            existing.sizeBytes = observation.sizeBytes;
+            existing.model = NormalizeDeviceText(observation.model);
+            existing.serialNumber = NormalizeDeviceText(observation.serialNumber);
+            existing.pnpDeviceId = NormalizeDeviceText(observation.pnpDeviceId);
+            existing.interfaceType = NormalizeDeviceText(observation.interfaceType);
+            existing.mediaType = NormalizeDeviceText(observation.mediaType);
+            existing.lastSeenUtc = DateTime.UtcNow.ToString("o");
+            existing.online = true;
+
+            if (isNew)
+            {
+                AppendAudit(existing.host, "central.device.removable.discovered", hardwareId, "removable-storage", true, "0x00000000", "New removable device discovered on " + existing.host + ".");
+            }
+
+            return true;
+        }
+
         private PolicyBridgeService.NetworkConnectionEventDto TryDeserializeNetworkConnectionDetails(string message)
         {
             if (string.IsNullOrWhiteSpace(message))
@@ -926,6 +1072,71 @@ namespace DataProtectorWebBridge.Services
             normalized.baseline = TimeSpan.FromHours(normalized.baselineHours);
             normalized.window = TimeSpan.FromHours(normalized.windowHours);
             return normalized;
+        }
+
+        private PolicyBridgeService.DeviceRuleDto[] BuildEffectiveDeviceRules(string endpointDeviceId)
+        {
+            EnsureDeviceAuthorizationState();
+
+            List<PolicyBridgeService.DeviceRuleDto> rules = state.DeviceRules
+                .Select(CloneDeviceRule)
+                .ToList();
+
+            foreach (RemovableDeviceState device in state.RemovableDevices.Values)
+            {
+                if (device == null ||
+                    string.IsNullOrWhiteSpace(device.volumeGuid) ||
+                    string.IsNullOrWhiteSpace(device.hardwareId) ||
+                    !string.Equals(device.deviceId, endpointDeviceId, StringComparison.OrdinalIgnoreCase) ||
+                    !IsRemovableDeviceOnline(device))
+                {
+                    continue;
+                }
+
+                RemovableDeviceAuthorizationRule authorization = ResolveRemovableAuthorization(device.hardwareId);
+                if (authorization == null)
+                {
+                    continue;
+                }
+
+                PolicyBridgeService.DeviceRuleDto rule = new PolicyBridgeService.DeviceRuleDto
+                {
+                    deviceId = device.volumeGuid,
+                    allowInsert = string.Equals(authorization.status, "authorized", StringComparison.OrdinalIgnoreCase),
+                    allowWrite = string.Equals(authorization.status, "authorized", StringComparison.OrdinalIgnoreCase) && authorization.allowWrite,
+                    actor = "central-device-authorization"
+                };
+
+                int existing = rules.FindIndex(item => string.Equals(item.deviceId, rule.deviceId, StringComparison.OrdinalIgnoreCase));
+                if (existing >= 0)
+                {
+                    rules[existing] = rule;
+                }
+                else
+                {
+                    rules.Add(rule);
+                }
+            }
+
+            return rules
+                .OrderBy(rule => rule.deviceId, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private RemovableDeviceAuthorizationRule ResolveRemovableAuthorization(string hardwareId)
+        {
+            RemovableDeviceAuthorizationRule authorization;
+            return state.RemovableAuthorizations.TryGetValue(NormalizeHardwareId(hardwareId), out authorization)
+                ? authorization
+                : null;
+        }
+
+        private static bool IsRemovableDeviceOnline(RemovableDeviceState device)
+        {
+            DateTime lastSeen;
+            return device != null &&
+                   DateTime.TryParse(device.lastSeenUtc, out lastSeen) &&
+                   DateTime.UtcNow - lastSeen.ToUniversalTime() < TimeSpan.FromMinutes(3);
         }
 
         private static int ClampHours(int value, int min, int max)
@@ -1613,6 +1824,39 @@ namespace DataProtectorWebBridge.Services
             return DateTime.TryParse(device.LastSeenUtc, out lastSeen) && DateTime.UtcNow - lastSeen.ToUniversalTime() < TimeSpan.FromMinutes(3);
         }
 
+        private RemovableDeviceDto ToRemovableDeviceDto(RemovableDeviceState device)
+        {
+            RemovableDeviceAuthorizationRule authorization = ResolveRemovableAuthorization(device.hardwareId);
+            string status = authorization == null ? "pending" : authorization.status;
+            bool allowWrite = authorization != null && authorization.allowWrite;
+
+            return new RemovableDeviceDto
+            {
+                hardwareId = device.hardwareId,
+                deviceId = device.deviceId,
+                host = device.host,
+                user = device.user,
+                driveLetter = device.driveLetter,
+                volumeGuid = device.volumeGuid,
+                volumeLabel = device.volumeLabel,
+                fileSystem = device.fileSystem,
+                sizeBytes = device.sizeBytes,
+                model = device.model,
+                serialNumber = device.serialNumber,
+                pnpDeviceId = device.pnpDeviceId,
+                interfaceType = device.interfaceType,
+                mediaType = device.mediaType,
+                firstSeenUtc = device.firstSeenUtc,
+                lastSeenUtc = device.lastSeenUtc,
+                online = IsRemovableDeviceOnline(device),
+                status = status,
+                allowWrite = allowWrite,
+                authorizedBy = authorization == null ? string.Empty : authorization.actor,
+                authorizedUtc = authorization == null ? string.Empty : authorization.updatedUtc,
+                note = authorization == null ? string.Empty : authorization.note
+            };
+        }
+
         private static CentralDeviceDto ToDeviceDto(CentralDeviceState device)
         {
             return new CentralDeviceDto
@@ -1631,6 +1875,51 @@ namespace DataProtectorWebBridge.Services
                 lastApplyMessage = device.LastApplyMessage,
                 online = IsOnline(device)
             };
+        }
+
+        private static RemovableDeviceAuthorizationRule NormalizeRemovableAuthorizationRequest(RemovableDeviceAuthorizationRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Removable device authorization request body is required.");
+            }
+
+            string hardwareId = NormalizeHardwareId(request.hardwareId);
+            if (string.IsNullOrWhiteSpace(hardwareId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Hardware id is required.");
+            }
+
+            string status = (request.status ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(status))
+            {
+                status = request.allowInsert ? "authorized" : "blocked";
+            }
+
+            if (status != "authorized" && status != "blocked")
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Authorization status must be authorized or blocked.");
+            }
+
+            return new RemovableDeviceAuthorizationRule
+            {
+                hardwareId = hardwareId,
+                status = status,
+                allowWrite = status == "authorized" && request.allowWrite,
+                actor = string.IsNullOrWhiteSpace(request.actor) ? "web-admin" : request.actor.Trim(),
+                note = NormalizeDeviceText(request.note),
+                updatedUtc = DateTime.UtcNow.ToString("o")
+            };
+        }
+
+        private static string NormalizeHardwareId(string value)
+        {
+            return (value ?? string.Empty).Trim().ToLowerInvariant();
+        }
+
+        private static string NormalizeDeviceText(string value)
+        {
+            return (value ?? string.Empty).Trim();
         }
 
         private static PolicyBridgeService.PolicyRuleRequest NormalizeRequest(PolicyBridgeService.PolicyRuleRequest request)
@@ -1901,6 +2190,19 @@ namespace DataProtectorWebBridge.Services
             return string.Equals(rule.deviceId, request.deviceId, StringComparison.OrdinalIgnoreCase);
         }
 
+        private void EnsureDeviceAuthorizationState()
+        {
+            if (state.RemovableDevices == null)
+            {
+                state.RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            if (state.RemovableAuthorizations == null)
+            {
+                state.RemovableAuthorizations = new Dictionary<string, RemovableDeviceAuthorizationRule>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
         private static RemoteTaskDto CloneTask(RemoteTaskState task)
         {
             return new RemoteTaskDto
@@ -1963,6 +2265,8 @@ namespace DataProtectorWebBridge.Services
                 WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
                 DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
+                RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
+                RemovableAuthorizations = new Dictionary<string, RemovableDeviceAuthorizationRule>(StringComparer.OrdinalIgnoreCase);
                 Audit = new List<AuditLog.AuditRecord>();
                 Tasks = new List<RemoteTaskState>();
                 NetworkConnections = new List<NetworkConnectionObservation>();
@@ -1975,6 +2279,8 @@ namespace DataProtectorWebBridge.Services
             public List<PolicyBridgeService.WebShellRuleDto> WebShellRules { get; set; }
             public List<PolicyBridgeService.DeviceRuleDto> DeviceRules { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
+            public Dictionary<string, RemovableDeviceState> RemovableDevices { get; set; }
+            public Dictionary<string, RemovableDeviceAuthorizationRule> RemovableAuthorizations { get; set; }
             public List<AuditLog.AuditRecord> Audit { get; set; }
             public List<RemoteTaskState> Tasks { get; set; }
             public List<NetworkConnectionObservation> NetworkConnections { get; set; }
@@ -2134,6 +2440,37 @@ namespace DataProtectorWebBridge.Services
             public string LastApplyMessage { get; set; }
         }
 
+        private sealed class RemovableDeviceState
+        {
+            public string hardwareId { get; set; }
+            public string deviceId { get; set; }
+            public string host { get; set; }
+            public string user { get; set; }
+            public string driveLetter { get; set; }
+            public string volumeGuid { get; set; }
+            public string volumeLabel { get; set; }
+            public string fileSystem { get; set; }
+            public long sizeBytes { get; set; }
+            public string model { get; set; }
+            public string serialNumber { get; set; }
+            public string pnpDeviceId { get; set; }
+            public string interfaceType { get; set; }
+            public string mediaType { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public bool online { get; set; }
+        }
+
+        private sealed class RemovableDeviceAuthorizationRule
+        {
+            public string hardwareId { get; set; }
+            public string status { get; set; }
+            public bool allowWrite { get; set; }
+            public string actor { get; set; }
+            public string note { get; set; }
+            public string updatedUtc { get; set; }
+        }
+
         public sealed class CentralDeviceDto
         {
             public string deviceId { get; set; }
@@ -2151,6 +2488,46 @@ namespace DataProtectorWebBridge.Services
             public bool online { get; set; }
         }
 
+        public class RemovableDeviceObservation
+        {
+            public string hardwareId { get; set; }
+            public string driveLetter { get; set; }
+            public string volumeGuid { get; set; }
+            public string volumeLabel { get; set; }
+            public string fileSystem { get; set; }
+            public long sizeBytes { get; set; }
+            public string model { get; set; }
+            public string serialNumber { get; set; }
+            public string pnpDeviceId { get; set; }
+            public string interfaceType { get; set; }
+            public string mediaType { get; set; }
+            public string lastSeenUtc { get; set; }
+        }
+
+        public sealed class RemovableDeviceDto : RemovableDeviceObservation
+        {
+            public string deviceId { get; set; }
+            public string host { get; set; }
+            public string user { get; set; }
+            public string firstSeenUtc { get; set; }
+            public bool online { get; set; }
+            public string status { get; set; }
+            public bool allowWrite { get; set; }
+            public string authorizedBy { get; set; }
+            public string authorizedUtc { get; set; }
+            public string note { get; set; }
+        }
+
+        public sealed class RemovableDeviceAuthorizationRequest
+        {
+            public string hardwareId { get; set; }
+            public string status { get; set; }
+            public bool allowInsert { get; set; }
+            public bool allowWrite { get; set; }
+            public string actor { get; set; }
+            public string note { get; set; }
+        }
+
         public sealed class AgentSyncRequest
         {
             public string DeviceId { get; set; }
@@ -2165,6 +2542,7 @@ namespace DataProtectorWebBridge.Services
             public string LastApplyMessage { get; set; }
             public AuditLog.AuditRecord[] Audit { get; set; }
             public PolicyBridgeService.NetworkConnectionEventDto[] NetworkConnections { get; set; }
+            public RemovableDeviceObservation[] RemovableDevices { get; set; }
             public RemoteTaskResult[] TaskResults { get; set; }
             public bool ResultOnly { get; set; }
         }

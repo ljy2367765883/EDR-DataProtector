@@ -185,6 +185,12 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/device/removable")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryRemovableDevices());
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/webshell/rules")
                 {
                     PolicyBridgeService.WebShellRuleRequest request =
@@ -203,6 +209,15 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "POST" && path == "/api/device/removable/authorization")
+                {
+                    CentralPolicyStore.RemovableDeviceAuthorizationRequest request =
+                        JsonResponse.Read<CentralPolicyStore.RemovableDeviceAuthorizationRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.AuthorizeRemovableDevice(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "DELETE" && path == "/api/webshell/rules")
                 {
                     PolicyBridgeService.WebShellRuleRequest request =
@@ -217,6 +232,15 @@ namespace DataProtectorWebBridge.Services
                     PolicyBridgeService.DeviceRuleRequest request =
                         JsonResponse.Read<PolicyBridgeService.DeviceRuleRequest>(context.Request.InputStream);
                     PolicyBridgeService.OperationResult result = store.RemoveDeviceRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/device/removable/authorization")
+                {
+                    CentralPolicyStore.RemovableDeviceAuthorizationRequest request =
+                        JsonResponse.Read<CentralPolicyStore.RemovableDeviceAuthorizationRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveRemovableDeviceAuthorization(request);
                     JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
                     return;
                 }

@@ -180,6 +180,29 @@ export function fetchClearDeviceRules() {
   });
 }
 
+export function fetchRemovableDevices() {
+  return request<Api.DataProtector.RemovableDevice[]>({
+    url: '/device/removable',
+    method: 'get'
+  });
+}
+
+export function fetchAuthorizeRemovableDevice(data: Api.DataProtector.RemovableDeviceAuthorizationRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/device/removable/authorization',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchRemoveRemovableDeviceAuthorization(data: Pick<Api.DataProtector.RemovableDeviceAuthorizationRequest, 'hardwareId'> & { actor?: string }) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/device/removable/authorization',
+    method: 'delete',
+    data
+  });
+}
+
 export function fetchAuditEvents(params: number | Api.DataProtector.AuditQuery = 200) {
   const query = typeof params === 'number' ? { limit: params } : params;
 

@@ -39,6 +39,7 @@
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Drawing" />
+    <Reference Include="System.Management" />
     <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.Web.Extensions" />
   </ItemGroup>
@@ -52,6 +53,7 @@
     <Compile Include="Services\HttpBridgeServer.cs" />
     <Compile Include="Services\JsonResponse.cs" />
     <Compile Include="Services\PolicyBridgeService.cs" />
+    <Compile Include="Services\RemovableDeviceInventory.cs" />
     <Compile Include="Services\RemoteTaskExecutor.cs" />
     <Compile Include="Services\StaticWebContent.cs" />
   </ItemGroup>

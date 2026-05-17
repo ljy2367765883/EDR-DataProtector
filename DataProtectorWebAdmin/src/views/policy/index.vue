@@ -5,6 +5,7 @@ import {
   fetchAddDeviceRule,
   fetchAddNetworkRule,
   fetchAddPolicyRule,
+  fetchAuthorizeRemovableDevice,
   fetchClearDeviceRules,
   fetchBridgeStatus,
   fetchClearNetworkRules,
@@ -17,6 +18,8 @@ import {
   fetchRemoveDeviceRule,
   fetchRemoveNetworkRule,
   fetchRemovePolicyRule,
+  fetchRemoveRemovableDeviceAuthorization,
+  fetchRemovableDevices,
   fetchAddWebShellRule,
   fetchRemoveWebShellRule
 } from '@/service/api';
@@ -35,6 +38,7 @@ const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
 const webShellRules = ref<Api.DataProtector.WebShellRule[]>([]);
 const deviceRules = ref<Api.DataProtector.DeviceRule[]>([]);
+const removableDevices = ref<Api.DataProtector.RemovableDevice[]>([]);
 const formRef = ref<FormInst | null>(null);
 const networkFormRef = ref<FormInst | null>(null);
 const webShellFormRef = ref<FormInst | null>(null);
@@ -165,7 +169,10 @@ const deviceGroups = computed(() => ({
   total: deviceRules.value.length,
   blockedInsert: deviceRules.value.filter(rule => !rule.allowInsert).length,
   readOnly: deviceRules.value.filter(rule => rule.allowInsert && !rule.allowWrite).length,
-  writable: deviceRules.value.filter(rule => rule.allowInsert && rule.allowWrite).length
+  writable: deviceRules.value.filter(rule => rule.allowInsert && rule.allowWrite).length,
+  pendingHardware: removableDevices.value.filter(device => device.status === 'pending').length,
+  authorizedHardware: removableDevices.value.filter(device => device.status === 'authorized').length,
+  blockedHardware: removableDevices.value.filter(device => device.status === 'blocked').length
 }));
 
 const columns: DataTableColumns<Api.DataProtector.PolicyRule> = [
@@ -369,21 +376,105 @@ const deviceColumns: DataTableColumns<Api.DataProtector.DeviceRule> = [
   }
 ];
 
+const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice> = [
+  {
+    title: 'Device',
+    key: 'model',
+    minWidth: 260,
+    render(row) {
+      return h('div', { class: 'min-w-0' }, [
+        h('div', { class: 'truncate text-14px font-600' }, row.model || row.volumeLabel || 'Removable storage'),
+        h('div', { class: 'truncate text-12px text-gray-500' }, `${row.driveLetter || '-'} ${row.volumeGuid || ''}`)
+      ]);
+    }
+  },
+  {
+    title: 'Host',
+    key: 'host',
+    width: 170,
+    render(row) {
+      return h('div', { class: 'min-w-0' }, [
+        h('div', { class: 'truncate text-13px font-600' }, row.host || '-'),
+        h('div', { class: 'truncate text-12px text-gray-500' }, row.user || '-')
+      ]);
+    }
+  },
+  {
+    title: 'Hardware code',
+    key: 'hardwareId',
+    minWidth: 260,
+    ellipsis: { tooltip: true }
+  },
+  {
+    title: 'Status',
+    key: 'status',
+    width: 130,
+    render(row) {
+      const type = row.status === 'authorized' ? 'success' : row.status === 'blocked' ? 'error' : 'warning';
+      const label = row.status === 'authorized' && !row.allowWrite ? 'Read-only' : row.status;
+      return h(NTag, { type, bordered: false }, { default: () => label });
+    }
+  },
+  {
+    title: 'Seen',
+    key: 'lastSeenUtc',
+    width: 120,
+    render(row) {
+      return h(NTag, { type: row.online ? 'success' : 'default', bordered: false }, { default: () => (row.online ? 'Online' : 'Offline') });
+    }
+  },
+  {
+    title: 'Action',
+    key: 'actions',
+    width: 290,
+    render(row) {
+      return h(
+        'div',
+        { class: 'flex flex-wrap gap-8px' },
+        [
+          h(
+            NButton,
+            { size: 'small', type: 'success', secondary: true, onClick: () => authorizeRemovableDevice(row, true) },
+            { default: () => 'Authorize' }
+          ),
+          h(
+            NButton,
+            { size: 'small', type: 'warning', secondary: true, onClick: () => authorizeRemovableDevice(row, false) },
+            { default: () => 'Read-only' }
+          ),
+          h(
+            NButton,
+            { size: 'small', type: 'error', secondary: true, onClick: () => blockRemovableDevice(row) },
+            { default: () => 'Block' }
+          ),
+          h(
+            NButton,
+            { size: 'small', secondary: true, onClick: () => removeRemovableAuthorization(row) },
+            { default: () => 'Reset' }
+          )
+        ]
+      );
+    }
+  }
+];
+
 async function refresh() {
   loading.value = true;
   try {
-    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult, deviceRulesResult] = await Promise.all([
+    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult, deviceRulesResult, removableDevicesResult] = await Promise.all([
       fetchBridgeStatus(),
       fetchPolicyRules(),
       fetchNetworkRules(),
       fetchWebShellRules(),
-      fetchDeviceRules()
+      fetchDeviceRules(),
+      fetchRemovableDevices()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
     if (!rulesResult.error) rules.value = rulesResult.data;
     if (!networkRulesResult.error) networkRules.value = networkRulesResult.data;
     if (!webShellRulesResult.error) webShellRules.value = webShellRulesResult.data;
     if (!deviceRulesResult.error) deviceRules.value = deviceRulesResult.data;
+    if (!removableDevicesResult.error) removableDevices.value = removableDevicesResult.data;
   } finally {
     loading.value = false;
   }
@@ -595,6 +686,55 @@ async function clearDeviceRules() {
   });
 }
 
+async function authorizeRemovableDevice(device: Api.DataProtector.RemovableDevice, allowWrite: boolean) {
+  deviceSubmitting.value = true;
+  try {
+    const { error, data } = await fetchAuthorizeRemovableDevice({
+      hardwareId: device.hardwareId,
+      status: 'authorized',
+      allowInsert: true,
+      allowWrite,
+      actor: 'web-admin'
+    });
+    if (!error && data.succeeded) {
+      window.$message?.success(allowWrite ? 'Removable device authorized.' : 'Removable device authorized as read-only.');
+      await refresh();
+    }
+  } finally {
+    deviceSubmitting.value = false;
+  }
+}
+
+async function blockRemovableDevice(device: Api.DataProtector.RemovableDevice) {
+  deviceSubmitting.value = true;
+  try {
+    const { error, data } = await fetchAuthorizeRemovableDevice({
+      hardwareId: device.hardwareId,
+      status: 'blocked',
+      allowInsert: false,
+      allowWrite: false,
+      actor: 'web-admin'
+    });
+    if (!error && data.succeeded) {
+      window.$message?.success('Removable device blocked.');
+      await refresh();
+    }
+  } finally {
+    deviceSubmitting.value = false;
+  }
+}
+
+async function removeRemovableAuthorization(device: Api.DataProtector.RemovableDevice) {
+  const { error, data } = await fetchRemoveRemovableDeviceAuthorization({
+    hardwareId: device.hardwareId,
+    actor: 'web-admin'
+  });
+  if (!error && data.succeeded) {
+    window.$message?.success('Removable device authorization reset.');
+    await refresh();
+  }
+}
+
 onMounted(refresh);
 </script>
 
@@ -777,11 +917,30 @@ onMounted(refresh);
 
       <NTabPane name="device" tab="Device Control">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24">
+            <NCard title="Discovered Removable Devices" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NSpace>
+                  <NTag type="warning">Pending: {{ deviceGroups.pendingHardware }}</NTag>
+                  <NTag type="success">Authorized: {{ deviceGroups.authorizedHardware }}</NTag>
+                  <NTag type="error">Blocked: {{ deviceGroups.blockedHardware }}</NTag>
+                </NSpace>
+              </template>
+              <NDataTable
+                :columns="removableDeviceColumns"
+                :data="removableDevices"
+                :loading="loading || deviceSubmitting"
+                :pagination="{ pageSize: 8 }"
+                :scroll-x="1180"
+              />
+            </NCard>
+          </NGi>
+
           <NGi span="24 m:8">
             <NCard title="Add Removable Storage Rule" :bordered="false" class="card-wrapper">
               <NForm ref="deviceFormRef" :model="deviceForm" :rules="deviceFormRules" label-placement="top">
                 <NFormItem label="Device identifier" path="deviceId">
-                  <NInput v-model:value="deviceForm.deviceId" placeholder="* or \Device\HarddiskVolumeX" />
+                  <NInput v-model:value="deviceForm.deviceId" placeholder="* or \\?\\Volume{...}" />
                 </NFormItem>
                 <NFormItem label="Insertion access">
                   <NSwitch :value="deviceForm.allowInsert" @update:value="setDeviceInsert">

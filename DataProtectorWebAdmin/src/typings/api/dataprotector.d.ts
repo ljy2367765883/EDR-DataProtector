@@ -153,6 +153,42 @@ declare namespace Api {
 
     interface DeviceRuleRequest extends DeviceRule {}
 
+    type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
+
+    interface RemovableDevice {
+      hardwareId: string;
+      deviceId: string;
+      host: string;
+      user: string;
+      driveLetter: string;
+      volumeGuid: string;
+      volumeLabel: string;
+      fileSystem: string;
+      sizeBytes: number;
+      model: string;
+      serialNumber: string;
+      pnpDeviceId: string;
+      interfaceType: string;
+      mediaType: string;
+      firstSeenUtc: string;
+      lastSeenUtc: string;
+      online: boolean;
+      status: RemovableDeviceStatus;
+      allowWrite: boolean;
+      authorizedBy: string;
+      authorizedUtc: string;
+      note: string;
+    }
+
+    interface RemovableDeviceAuthorizationRequest {
+      hardwareId: string;
+      status: 'authorized' | 'blocked';
+      allowInsert?: boolean;
+      allowWrite: boolean;
+      actor?: string;
+      note?: string;
+    }
+
     interface OperationResult {
       succeeded: boolean;
       status: number;
