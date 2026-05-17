@@ -919,7 +919,7 @@ namespace DataProtectorWebBridge.Services
                     Action = "hashdump.blocked." + item.operation,
                     Target = item.target,
                     Extension = item.processImage,
-                    Succeeded = false,
+                    Succeeded = true,
                     Status = item.statusText,
                     Message = message + " DesiredAccess: 0x" + item.desiredAccess.ToString("X8", CultureInfo.InvariantCulture) + "."
                 };

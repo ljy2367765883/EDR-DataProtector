@@ -94,6 +94,13 @@ Abstract:
 #define DP_ENABLE_HASH_PROTECT_TRACE 1
 
 //
+// Blocks well-known built-in hive export tools at process creation time so
+// failed reg.exe hive-save attempts still produce a security audit record even
+// when the Configuration Manager denies the request before registry callbacks.
+//
+#define DP_ENABLE_HASH_PROTECT_REG_PROCESS_GUARD 1
+
+//
 // Cached transparent encryption keeps plaintext in the system file cache.
 // Manual unload is therefore unsafe unless a separate safe-stop path flushes
 // and purges protected streams first.
@@ -796,6 +803,13 @@ BOOLEAN
 DpHashProtectShouldBlockCreate(
     _In_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpHashProtectShouldBlockProcessCreate(
+    _In_ PEPROCESS Process,
+    _In_ HANDLE ProcessId,
+    _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
     );
 
 NTSTATUS

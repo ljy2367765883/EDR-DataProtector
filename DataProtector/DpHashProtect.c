@@ -340,8 +340,17 @@ DpHashProtectQueueEvent(
 {
     PDP_HASH_PROTECT_EVENT_ENTRY entry;
     KIRQL oldIrql;
+    ULONGLONG sequence;
+    ULONG eventCount;
+    ULONGLONG droppedEvents;
+    UNICODE_STRING targetText;
+    UNICODE_STRING processText;
 
     if (!gDpHashProtectInitialized) {
+        DP_HASH_TRACE("queue skipped uninitialized pid=%p op=%lu status=0x%08X\n",
+                      ProcessId,
+                      (ULONG)Operation,
+                      Status);
         return;
     }
 
@@ -351,7 +360,12 @@ DpHashProtectQueueEvent(
     if (entry == NULL) {
         KeAcquireSpinLock(&gDpHashProtectEventLock, &oldIrql);
         gDpHashProtectDroppedEvents++;
+        droppedEvents = gDpHashProtectDroppedEvents;
         KeReleaseSpinLock(&gDpHashProtectEventLock, oldIrql);
+        DP_HASH_TRACE("queue allocation failed pid=%p op=%lu dropped=%I64u\n",
+                      ProcessId,
+                      (ULONG)Operation,
+                      droppedEvents);
         return;
     }
 
@@ -368,6 +382,21 @@ DpHashProtectQueueEvent(
                                        RTL_NUMBER_OF(entry->Event.ProcessImage),
                                        ProcessImage,
                                        &entry->Event.ProcessImageLengthBytes);
+
+    targetText.Buffer = entry->Event.Target;
+    targetText.Length = (USHORT)entry->Event.TargetLengthBytes;
+    targetText.MaximumLength = (USHORT)sizeof(entry->Event.Target);
+    processText.Buffer = entry->Event.ProcessImage;
+    processText.Length = (USHORT)entry->Event.ProcessImageLengthBytes;
+    processText.MaximumLength = (USHORT)sizeof(entry->Event.ProcessImage);
+
+    DP_HASH_TRACE("queue event pid=%p op=%lu status=0x%08X access=0x%08X target=%wZ image=%wZ\n",
+                  ProcessId,
+                  (ULONG)Operation,
+                  Status,
+                  DesiredAccess,
+                  &targetText,
+                  &processText);
 
     KeAcquireSpinLock(&gDpHashProtectEventLock, &oldIrql);
 
@@ -387,7 +416,19 @@ DpHashProtectQueueEvent(
         KeAcquireSpinLock(&gDpHashProtectEventLock, &oldIrql);
     }
 
+    sequence = entry->Event.Sequence;
+    eventCount = gDpHashProtectEventCount;
+    droppedEvents = gDpHashProtectDroppedEvents;
     KeReleaseSpinLock(&gDpHashProtectEventLock, oldIrql);
+
+    DP_HASH_TRACE("queued seq=%I64u count=%lu dropped=%I64u pid=%p op=%lu status=0x%08X access=0x%08X\n",
+                  sequence,
+                  eventCount,
+                  droppedEvents,
+                  ProcessId,
+                  (ULONG)Operation,
+                  Status,
+                  DesiredAccess);
 }
 
 static
@@ -724,6 +765,198 @@ DpHashProtectIsProtectedRegistryKey(
 }
 
 static
+BOOLEAN
+DpHashProtectIsRegToolImage(
+    _In_opt_ PCUNICODE_STRING ImageFileName
+    )
+{
+    UNICODE_STRING regExe;
+
+    if (ImageFileName == NULL ||
+        ImageFileName->Buffer == NULL ||
+        ImageFileName->Length == 0) {
+
+        return FALSE;
+    }
+
+    RtlInitUnicodeString(&regExe, L"reg.exe");
+    if (RtlEqualUnicodeString(ImageFileName, &regExe, TRUE)) {
+        return TRUE;
+    }
+
+    return DpHashProtectSuffix(ImageFileName, L"\\reg.exe");
+}
+
+static
+BOOLEAN
+DpHashProtectCommandSeparator(
+    _In_ WCHAR Character
+    )
+{
+    return Character == L'\0' ||
+           Character == L' ' ||
+           Character == L'\t' ||
+           Character == L'\r' ||
+           Character == L'\n' ||
+           Character == L'"' ||
+           Character == L'\'' ||
+           Character == L',' ||
+           Character == L';' ||
+           Character == L'=';
+}
+
+static
+BOOLEAN
+DpHashProtectCommandHasToken(
+    _In_ PCUNICODE_STRING CommandLine,
+    _In_z_ PCWSTR Token
+    )
+{
+    UNICODE_STRING tokenString;
+    USHORT commandChars;
+    USHORT tokenChars;
+    USHORT index;
+
+    if (CommandLine == NULL ||
+        CommandLine->Buffer == NULL ||
+        CommandLine->Length == 0 ||
+        Token == NULL) {
+
+        return FALSE;
+    }
+
+    RtlInitUnicodeString(&tokenString, Token);
+    if (tokenString.Length == 0 ||
+        CommandLine->Length < tokenString.Length) {
+
+        return FALSE;
+    }
+
+    commandChars = CommandLine->Length / sizeof(WCHAR);
+    tokenChars = tokenString.Length / sizeof(WCHAR);
+
+    for (index = 0; index <= commandChars - tokenChars; index++) {
+        USHORT tokenIndex;
+        BOOLEAN matched = TRUE;
+
+        if (index != 0 &&
+            !DpHashProtectCommandSeparator(CommandLine->Buffer[index - 1])) {
+
+            continue;
+        }
+
+        for (tokenIndex = 0; tokenIndex < tokenChars; tokenIndex++) {
+            if (!DpHashProtectUnicodeCharEqualsInsensitive(CommandLine->Buffer[index + tokenIndex],
+                                                           tokenString.Buffer[tokenIndex])) {
+                matched = FALSE;
+                break;
+            }
+        }
+
+        if (matched &&
+            (index + tokenChars == commandChars ||
+             DpHashProtectCommandSeparator(CommandLine->Buffer[index + tokenChars]))) {
+
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
+DpHashProtectCommandTargetsSensitiveHive(
+    _In_opt_ PCUNICODE_STRING CommandLine
+    )
+{
+    if (CommandLine == NULL ||
+        CommandLine->Buffer == NULL ||
+        CommandLine->Length == 0) {
+
+        return FALSE;
+    }
+
+    return DpHashProtectContainsInsensitive(CommandLine, L"HKLM\\SAM") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"HKLM\\SECURITY") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"HKLM\\SYSTEM") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"HKEY_LOCAL_MACHINE\\SAM") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"HKEY_LOCAL_MACHINE\\SECURITY") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"HKEY_LOCAL_MACHINE\\SYSTEM") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"\\Registry\\Machine\\SAM") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"\\Registry\\Machine\\SECURITY") ||
+           DpHashProtectContainsInsensitive(CommandLine, L"\\Registry\\Machine\\SYSTEM");
+}
+
+static
+BOOLEAN
+DpHashProtectCommandIsSensitiveHiveExport(
+    _In_opt_ PCUNICODE_STRING CommandLine
+    )
+{
+    if (!DpHashProtectCommandTargetsSensitiveHive(CommandLine)) {
+        return FALSE;
+    }
+
+    return DpHashProtectCommandHasToken(CommandLine, L"save") ||
+           DpHashProtectCommandHasToken(CommandLine, L"export");
+}
+
+BOOLEAN
+DpHashProtectShouldBlockProcessCreate(
+    _In_ PEPROCESS Process,
+    _In_ HANDLE ProcessId,
+    _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
+    )
+{
+#if DP_ENABLE_HASH_PROTECT_REG_PROCESS_GUARD
+    PCUNICODE_STRING imageFileName;
+    PCUNICODE_STRING commandLine;
+    const CHAR *processImage;
+
+    UNREFERENCED_PARAMETER(Process);
+
+    if (!gDpHashProtectInitialized ||
+        CreateInfo == NULL ||
+        !DpHashProtectFeatureEnabled(DP_HASH_PROTECT_FLAG_REGISTRY_HIVES)) {
+
+        return FALSE;
+    }
+
+    imageFileName = CreateInfo->ImageFileName;
+    commandLine = CreateInfo->CommandLine;
+
+    if (!DpHashProtectIsRegToolImage(imageFileName) ||
+        !DpHashProtectCommandIsSensitiveHiveExport(commandLine) ||
+        DpHashProtectIsAllowedCurrentProcess()) {
+
+        return FALSE;
+    }
+
+    processImage = imageFileName != NULL ? "reg.exe" : NULL;
+    DpHashProtectQueueEvent(DpHashProtectOperationRegistryHive,
+                            ProcessId,
+                            (ULONG)STATUS_ACCESS_DENIED,
+                            0,
+                            commandLine,
+                            processImage);
+
+    DP_HASH_TRACE("blocked registry hive export process create pid=%p image=%wZ command=%wZ\n",
+                  ProcessId,
+                  imageFileName,
+                  commandLine);
+
+    CreateInfo->CreationStatus = STATUS_ACCESS_DENIED;
+    return TRUE;
+#else
+    UNREFERENCED_PARAMETER(Process);
+    UNREFERENCED_PARAMETER(ProcessId);
+    UNREFERENCED_PARAMETER(CreateInfo);
+    return FALSE;
+#endif
+}
+
+static
 NTSTATUS
 DpHashProtectRegistryCallback(
     _In_ PVOID CallbackContext,
@@ -1046,6 +1279,11 @@ DpHashProtectQueryEvents(
     ULONG bytesReturned = sizeof(DP_HASH_PROTECT_EVENT_QUERY_HEADER);
     ULONG eventCount = 0;
     ULONG returnedEventCount = 0;
+    ULONG traceEventCount = 0;
+    ULONG traceReturnedEventCount = 0;
+    ULONG traceBytesRequired = 0;
+    ULONG traceBytesReturned = 0;
+    ULONGLONG traceDroppedEvents = 0;
     PLIST_ENTRY link;
     KIRQL oldIrql;
     BOOLEAN sizingOnly;
@@ -1072,6 +1310,9 @@ DpHashProtectQueryEvents(
     if (!gDpHashProtectInitialized) {
         header->BytesRequired = sizeof(DP_HASH_PROTECT_EVENT_QUERY_HEADER);
         *ReturnOutputBufferLength = sizeof(DP_HASH_PROTECT_EVENT_QUERY_HEADER);
+        DP_HASH_TRACE("query events uninitialized sizing=%lu bytesReturned=%lu\n",
+                      sizingOnly ? 1u : 0u,
+                      *ReturnOutputBufferLength);
         return STATUS_SUCCESS;
     }
 
@@ -1098,19 +1339,39 @@ DpHashProtectQueryEvents(
     header->BytesRequired = bytesRequired;
     header->BytesReturned = bytesReturned;
     *ReturnOutputBufferLength = bytesReturned;
+    traceEventCount = eventCount;
+    traceReturnedEventCount = returnedEventCount;
+    traceBytesRequired = bytesRequired;
+    traceBytesReturned = bytesReturned;
+    traceDroppedEvents = gDpHashProtectDroppedEvents;
 
     if (!sizingOnly && returnedEventCount == eventCount) {
         while (!IsListEmpty(&gDpHashProtectEvents)) {
             PLIST_ENTRY eventLink = RemoveHeadList(&gDpHashProtectEvents);
             PDP_HASH_PROTECT_EVENT_ENTRY event = CONTAINING_RECORD(eventLink, DP_HASH_PROTECT_EVENT_ENTRY, Link);
+            ULONGLONG drainedSequence = event->Event.Sequence;
+            ULONG remainingEvents;
+
             gDpHashProtectEventCount--;
+            remainingEvents = gDpHashProtectEventCount;
             KeReleaseSpinLock(&gDpHashProtectEventLock, oldIrql);
+            DP_HASH_TRACE("query drain seq=%I64u remaining=%lu\n",
+                          drainedSequence,
+                          remainingEvents);
             DpHashProtectFreeEvent(event);
             KeAcquireSpinLock(&gDpHashProtectEventLock, &oldIrql);
         }
     }
 
     KeReleaseSpinLock(&gDpHashProtectEventLock, oldIrql);
+
+    DP_HASH_TRACE("query events sizing=%lu events=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u\n",
+                  sizingOnly ? 1u : 0u,
+                  traceEventCount,
+                  traceReturnedEventCount,
+                  traceBytesRequired,
+                  traceBytesReturned,
+                  traceDroppedEvents);
 
     if (sizingOnly) {
         return STATUS_SUCCESS;

@@ -2529,6 +2529,13 @@ DpPolicyQueryHashProtectEvents(
     DWORD returnedEventCount = 0;
     BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
 
+    DpPolicyTrace(L"HashProtectEvents enter events=%p capacity=%lu stringBuffer=%p stringChars=%lu sizingOnly=%lu",
+                  Events,
+                  EventCapacity,
+                  StringBuffer,
+                  StringBufferChars,
+                  sizingOnly ? 1u : 0u);
+
     if (EventCount != NULL) {
         *EventCount = 0;
     }
@@ -2541,6 +2548,11 @@ DpPolicyQueryHashProtectEvents(
         (StringBufferChars != 0 && StringBuffer == NULL)) {
 
         DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        DpPolicyTrace(L"HashProtectEvents invalid output buffer events=%p capacity=%lu stringBuffer=%p stringChars=%lu",
+                      Events,
+                      EventCapacity,
+                      StringBuffer,
+                      StringBufferChars);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -2552,14 +2564,29 @@ DpPolicyQueryHashProtectEvents(
                                           sizeof(sizingHeader),
                                           &bytesReturned);
     if (result != DP_POLICY_API_SUCCESS) {
+        DpPolicyTrace(L"HashProtectEvents sizing send failed result=0x%08lX last='%s'",
+                      result,
+                      gLastErrorMessage);
         return result;
     }
+
+    DpPolicyTrace(L"HashProtectEvents sizing returned bytes=%lu version=%lu events=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u",
+                  bytesReturned,
+                  sizingHeader.Version,
+                  sizingHeader.EventCount,
+                  sizingHeader.BytesRequired,
+                  sizingHeader.BytesReturned,
+                  sizingHeader.DroppedEvents);
 
     if (bytesReturned < sizeof(DP_HASH_PROTECT_EVENT_QUERY_HEADER) ||
         sizingHeader.Version != DP_HASH_PROTECT_EVENT_QUERY_VERSION ||
         sizingHeader.BytesRequired < sizeof(DP_HASH_PROTECT_EVENT_QUERY_HEADER)) {
 
         DpPolicySetLastErrorMessage(L"Driver returned an invalid hash protection event snapshot header.");
+        DpPolicyTrace(L"HashProtectEvents invalid sizing header bytes=%lu version=%lu bytesRequired=%lu",
+                      bytesReturned,
+                      sizingHeader.Version,
+                      sizingHeader.BytesRequired);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -2573,6 +2600,8 @@ DpPolicyQueryHashProtectEvents(
                 MAXDWORD / DP_HASH_PROTECT_EVENT_STRING_CHARS) {
 
                 DpPolicySetLastErrorMessage(L"Hash protection event snapshot is too large.");
+                DpPolicyTrace(L"HashProtectEvents sizing-only too large events=%lu",
+                              sizingHeader.EventCount);
                 return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
             }
 
@@ -2580,6 +2609,9 @@ DpPolicyQueryHashProtectEvents(
         }
 
         DpPolicySetLastErrorMessage(L"Success.");
+        DpPolicyTrace(L"HashProtectEvents sizing-only success eventCount=%lu stringCharsRequired=%lu",
+                      EventCount != NULL ? *EventCount : 0,
+                      StringBufferCharsRequired != NULL ? *StringBufferCharsRequired : 0);
         return DP_POLICY_API_SUCCESS;
     }
 
@@ -2592,6 +2624,8 @@ DpPolicyQueryHashProtectEvents(
             MAXDWORD / DP_HASH_PROTECT_EVENT_STRING_CHARS) {
 
             DpPolicySetLastErrorMessage(L"Hash protection event snapshot is too large.");
+            DpPolicyTrace(L"HashProtectEvents too large before alloc events=%lu",
+                          sizingHeader.EventCount);
             return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
         }
 
@@ -2602,6 +2636,8 @@ DpPolicyQueryHashProtectEvents(
         MAXDWORD / DP_HASH_PROTECT_EVENT_STRING_CHARS) {
 
         DpPolicySetLastErrorMessage(L"Hash protection event snapshot is too large.");
+        DpPolicyTrace(L"HashProtectEvents too large before capacity check events=%lu",
+                      sizingHeader.EventCount);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -2609,6 +2645,11 @@ DpPolicyQueryHashProtectEvents(
         StringBufferChars < sizingHeader.EventCount * DP_HASH_PROTECT_EVENT_STRING_CHARS) {
 
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        DpPolicyTrace(L"HashProtectEvents buffer too small before drain capacity=%lu neededEvents=%lu stringChars=%lu neededStringChars=%lu",
+                      EventCapacity,
+                      sizingHeader.EventCount,
+                      StringBufferChars,
+                      sizingHeader.EventCount * DP_HASH_PROTECT_EVENT_STRING_CHARS);
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
 
@@ -2616,6 +2657,8 @@ DpPolicyQueryHashProtectEvents(
     queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
     if (queryBuffer == NULL) {
         DpPolicySetLastErrorMessage(L"Out of memory.");
+        DpPolicyTrace(L"HashProtectEvents alloc failed bytesRequired=%lu",
+                      bytesRequired);
         return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
     }
 
@@ -2627,12 +2670,22 @@ DpPolicyQueryHashProtectEvents(
                                           &bytesReturned);
     if (result != DP_POLICY_API_SUCCESS) {
         HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicyTrace(L"HashProtectEvents full send failed result=0x%08lX bytesRequired=%lu last='%s'",
+                      result,
+                      bytesRequired,
+                      gLastErrorMessage);
         return result;
     }
+
+    DpPolicyTrace(L"HashProtectEvents full returned bytes=%lu requested=%lu",
+                  bytesReturned,
+                  bytesRequired);
 
     if (bytesReturned < sizeof(DP_HASH_PROTECT_EVENT_QUERY_HEADER)) {
         HeapFree(GetProcessHeap(), 0, queryBuffer);
         DpPolicySetLastErrorMessage(L"Driver returned an invalid hash protection event snapshot.");
+        DpPolicyTrace(L"HashProtectEvents invalid full header bytes=%lu",
+                      bytesReturned);
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -2644,6 +2697,11 @@ DpPolicyQueryHashProtectEvents(
 
         HeapFree(GetProcessHeap(), 0, queryBuffer);
         DpPolicySetLastErrorMessage(L"Driver returned an unsupported hash protection event snapshot.");
+        DpPolicyTrace(L"HashProtectEvents unsupported snapshot version=%lu eventCount=%lu bytesReturned=%lu entrySize=%Iu",
+                      header->Version,
+                      header->EventCount,
+                      bytesReturned,
+                      sizeof(DP_HASH_PROTECT_EVENT_QUERY_ENTRY));
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
@@ -2665,6 +2723,10 @@ DpPolicyQueryHashProtectEvents(
 
             HeapFree(GetProcessHeap(), 0, queryBuffer);
             DpPolicySetLastErrorMessage(L"Driver returned an invalid hash protection event entry.");
+            DpPolicyTrace(L"HashProtectEvents invalid entry index=%lu targetBytes=%lu processBytes=%lu",
+                          index,
+                          entry[index].TargetLengthBytes,
+                          entry[index].ProcessImageLengthBytes);
             return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
         }
 
@@ -2681,6 +2743,17 @@ DpPolicyQueryHashProtectEvents(
             Events[index].Operation = entry[index].Operation;
             Events[index].Status = entry[index].Status;
             Events[index].DesiredAccess = entry[index].DesiredAccess;
+
+            DpPolicyTrace(L"HashProtectEvents copy index=%lu seq=%I64u pid=%I64u op=%lu status=0x%08lX access=0x%08lX targetBytes=%lu processBytes=%lu stringOffset=%lu",
+                          index,
+                          entry[index].Sequence,
+                          entry[index].ProcessId,
+                          entry[index].Operation,
+                          entry[index].Status,
+                          entry[index].DesiredAccess,
+                          entry[index].TargetLengthBytes,
+                          entry[index].ProcessImageLengthBytes,
+                          copiedStringChars);
 
             Events[index].Target = StringBuffer + copiedStringChars;
             if (targetChars != 0) {
@@ -2702,14 +2775,29 @@ DpPolicyQueryHashProtectEvents(
         *StringBufferCharsRequired = requiredStringChars;
     }
 
+    DpPolicyTrace(L"HashProtectEvents post-copy headerEvents=%lu requiredStringChars=%lu copiedStringChars=%lu eventCapacity=%lu stringChars=%lu",
+                  returnedEventCount,
+                  requiredStringChars,
+                  copiedStringChars,
+                  EventCapacity,
+                  StringBufferChars);
+
     HeapFree(GetProcessHeap(), 0, queryBuffer);
 
     if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        DpPolicyTrace(L"HashProtectEvents buffer too small after copy capacity=%lu eventCount=%lu stringChars=%lu required=%lu",
+                      EventCapacity,
+                      returnedEventCount,
+                      StringBufferChars,
+                      requiredStringChars);
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
 
     DpPolicySetLastErrorMessage(L"Success.");
+    DpPolicyTrace(L"HashProtectEvents success eventCount=%lu stringCharsRequired=%lu",
+                  EventCount != NULL ? *EventCount : 0,
+                  StringBufferCharsRequired != NULL ? *StringBufferCharsRequired : 0);
     return DP_POLICY_API_SUCCESS;
 }
 

@@ -572,6 +572,10 @@ DpProcessPolicyCreateProcessNotify(
         return;
     }
 
+    if (DpHashProtectShouldBlockProcessCreate(Process, ProcessId, CreateInfo)) {
+        return;
+    }
+
     status = DpProcessPolicyCreateEntry(ProcessId,
                                         Process,
                                         CreateInfo->ImageFileName,
