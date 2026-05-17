@@ -866,6 +866,11 @@ namespace DataProtectorWebBridge.Services
                 return false;
             }
 
+            if (!query.includePrivateRemotes && IsPrivateRemote(item))
+            {
+                return false;
+            }
+
             if (!string.IsNullOrWhiteSpace(query.host) &&
                 !string.Equals(query.host, "all", StringComparison.OrdinalIgnoreCase) &&
                 (item.host ?? string.Empty).IndexOf(query.host, StringComparison.OrdinalIgnoreCase) < 0)
@@ -1215,6 +1220,31 @@ namespace DataProtectorWebBridge.Services
             remote = PreferNonEmpty(remote, item.remoteIdentity);
             remote = PreferNonEmpty(remote, item.remoteEndpoint);
             return NormalizeRemoteIdentity(remote);
+        }
+
+        private static bool IsPrivateRemote(NetworkConnectionObservation item)
+        {
+            if (item == null)
+            {
+                return false;
+            }
+
+            return IsPrivateRemote(item.remoteAddress) ||
+                   IsPrivateRemote(item.remoteEndpoint) ||
+                   IsPrivateRemote(item.remoteIdentity) ||
+                   IsPrivateRemote(item.domain);
+        }
+
+        private static bool IsPrivateRemote(string value)
+        {
+            string normalized = NormalizeRemoteIdentity(value);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return false;
+            }
+
+            IPAddress address;
+            return IPAddress.TryParse(normalized, out address) && !IsPublicIpAddress(address);
         }
 
         private static string ExtractPublicRemoteIp(NetworkInsightItem item)
@@ -1842,6 +1872,7 @@ namespace DataProtectorWebBridge.Services
             public string host { get; set; }
             public string eventType { get; set; }
             public string search { get; set; }
+            public bool includePrivateRemotes { get; set; }
         }
 
         public sealed class NetworkInsightResponse

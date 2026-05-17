@@ -280,8 +280,16 @@ namespace DataProtectorWebBridge.Services
                 windowHours = ParseHours(request.QueryString["windowHours"], 24 * 31),
                 host = request.QueryString["host"],
                 eventType = request.QueryString["eventType"],
-                search = request.QueryString["search"]
+                search = request.QueryString["search"],
+                includePrivateRemotes = ParseBoolean(request.QueryString["includePrivateRemotes"])
             };
+        }
+
+        private static bool ParseBoolean(string value)
+        {
+            return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
         }
 
         private static int ParseHours(string value, int fallback)

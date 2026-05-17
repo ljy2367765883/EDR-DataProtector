@@ -19,7 +19,8 @@ const query = reactive<Api.DataProtector.NetworkInsightQuery>({
   eventType: 'all',
   host: 'all',
   limit: 300,
-  search: ''
+  search: '',
+  includePrivateRemotes: false
 });
 
 const baselineOptions = [
@@ -414,6 +415,8 @@ onMounted(refresh);
         <NSelect v-model:value="query.eventType" :options="eventTypeOptions" class="filter-control" />
         <NSelect v-model:value="query.host" :options="hostOptions" class="filter-control" />
         <NInput v-model:value="query.search" clearable placeholder="Remote, process, signer, hash" class="search-control" @keyup.enter="refresh" />
+        <NSwitch v-model:value="query.includePrivateRemotes" />
+        <span class="cell-muted">Show LAN remotes</span>
         <NButton secondary @click="refresh">Apply</NButton>
       </NSpace>
 

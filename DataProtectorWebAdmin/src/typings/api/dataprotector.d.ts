@@ -74,6 +74,7 @@ declare namespace Api {
       host?: string;
       eventType?: NetworkInsightEventType;
       search?: string;
+      includePrivateRemotes?: boolean;
     }
 
     interface NetworkInsightItem {
