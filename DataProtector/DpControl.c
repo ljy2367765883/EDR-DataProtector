@@ -151,6 +151,22 @@ DpControlMessageNotify(
                                            ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandWriteUsbMetadata) {
+        PDP_USB_METADATA_WRITE_MESSAGE request;
+
+        if (message->ValueLengthBytes != sizeof(DP_USB_METADATA_WRITE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_USB_METADATA_WRITE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        request = (PDP_USB_METADATA_WRITE_MESSAGE)message->Data;
+        return DpUsbMetadataWrite(request,
+                                  OutputBuffer,
+                                  OutputBufferLength,
+                                  ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandSetHashProtectPolicy) {
         PDP_HASH_PROTECT_POLICY policy;
 

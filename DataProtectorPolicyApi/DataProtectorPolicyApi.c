@@ -25,6 +25,11 @@
 #define DP_HASH_PROTECT_PROCESS_CHARS 64u
 #define DP_LATERAL_DEFENSE_TARGET_CHARS 512u
 #define DP_LATERAL_DEFENSE_PROCESS_CHARS 64u
+#define DP_USB_METADATA_BYTES 512u
+#define DP_USB_METADATA_PATH_CHARS 128u
+#define DP_USB_METADATA_MESSAGE_VERSION 1u
+#define DP_USB_METADATA_RESULT_VERSION 1u
+#define DP_USB_METADATA_DEFAULT_OFFSET_BYTES (1024ull * 1024ull)
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
 #define DP_NETWORK_CONNECTION_EVENT_STRING_CHARS (DP_NETWORK_EVENT_PROCESS_PATH_CHARS + DP_NETWORK_EVENT_DOMAIN_CHARS + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
@@ -63,7 +68,8 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryHashProtectPolicy = 82,
     DpPolicyCommandQueryLateralDefenseEvents = 90,
     DpPolicyCommandSetLateralDefensePolicy = 91,
-    DpPolicyCommandQueryLateralDefensePolicy = 92
+    DpPolicyCommandQueryLateralDefensePolicy = 92,
+    DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -87,6 +93,25 @@ typedef struct _DP_POLICY_QUERY_ENTRY {
     ULONG ExtensionLengthBytes;
     WCHAR Data[1];
 } DP_POLICY_QUERY_ENTRY, *PDP_POLICY_QUERY_ENTRY;
+
+typedef struct _DP_USB_METADATA_WRITE_MESSAGE {
+    ULONG Version;
+    ULONG MetadataBytes;
+    ULONGLONG OffsetBytes;
+    ULONG PhysicalPathLengthBytes;
+    ULONG Reserved;
+    WCHAR PhysicalPath[DP_USB_METADATA_PATH_CHARS];
+    BYTE Metadata[DP_USB_METADATA_BYTES];
+} DP_USB_METADATA_WRITE_MESSAGE, *PDP_USB_METADATA_WRITE_MESSAGE;
+
+typedef struct _DP_USB_METADATA_WRITE_RESULT {
+    ULONG Version;
+    ULONG Status;
+    ULONG PartitionCount;
+    ULONG Reserved;
+    ULONGLONG OffsetBytes;
+    ULONGLONG DiskSizeBytes;
+} DP_USB_METADATA_WRITE_RESULT, *PDP_USB_METADATA_WRITE_RESULT;
 
 #pragma pack(push, 1)
 typedef struct _DP_NETWORK_RULE_MESSAGE {
@@ -3471,6 +3496,139 @@ DpPolicyQueryDeviceRules(
 
         DpPolicySetLastErrorMessage(L"Output buffer is too small.");
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyNormalizePhysicalDrivePath(
+    _In_z_ LPCWSTR PhysicalDrivePath,
+    _Out_writes_(DP_USB_METADATA_PATH_CHARS) WCHAR *NtPath,
+    _Out_ PULONG NtPathLengthBytes
+    )
+{
+    LPCWSTR source;
+    size_t length;
+    HRESULT hr;
+
+    if (PhysicalDrivePath == NULL ||
+        NtPath == NULL ||
+        NtPathLengthBytes == NULL) {
+
+        DpPolicySetLastErrorMessage(L"USB metadata physical drive path is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    source = PhysicalDrivePath;
+    if (wcsncmp(source, L"\\\\.\\", 4) == 0) {
+        source += 4;
+    }
+
+    if (wcsncmp(source, L"\\??\\", 4) == 0) {
+        source += 4;
+    }
+
+    if (_wcsnicmp(source, L"PhysicalDrive", 13) != 0) {
+        DpPolicySetLastErrorMessage(L"USB metadata path must target a PhysicalDrive device.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    length = wcslen(source);
+    if (length == 13) {
+        DpPolicySetLastErrorMessage(L"USB metadata physical drive number is missing.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (length + 4 >= DP_USB_METADATA_PATH_CHARS) {
+        DpPolicySetLastErrorMessage(L"USB metadata physical drive path is too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    hr = StringCchPrintfW(NtPath,
+                         DP_USB_METADATA_PATH_CHARS,
+                         L"\\??\\%s",
+                         source);
+    if (FAILED(hr)) {
+        DpPolicySetLastErrorMessage(L"USB metadata physical drive path conversion failed.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    *NtPathLengthBytes = (ULONG)(wcslen(NtPath) * sizeof(WCHAR));
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyWriteUsbMetadata(
+    _In_z_ LPCWSTR PhysicalDrivePath,
+    _In_ ULONGLONG RequestedOffsetBytes,
+    _In_reads_bytes_(DP_POLICY_API_USB_METADATA_BYTES) const BYTE *Metadata,
+    _Out_opt_ DP_POLICY_API_USB_METADATA_WRITE_RESULT *Result
+    )
+{
+    DP_USB_METADATA_WRITE_MESSAGE message;
+    DP_USB_METADATA_WRITE_RESULT driverResult;
+    ULONG bytesReturned = 0;
+    ULONG pathLengthBytes = 0;
+    DWORD result;
+    ULONGLONG offset;
+
+    if (Result != NULL) {
+        ZeroMemory(Result, sizeof(*Result));
+    }
+
+    if (Metadata == NULL) {
+        DpPolicySetLastErrorMessage(L"USB metadata buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    result = DpPolicyNormalizePhysicalDrivePath(PhysicalDrivePath,
+                                                message.PhysicalPath,
+                                                &pathLengthBytes);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    offset = RequestedOffsetBytes == 0 ? DP_USB_METADATA_DEFAULT_OFFSET_BYTES : RequestedOffsetBytes;
+    message.Version = DP_USB_METADATA_MESSAGE_VERSION;
+    message.MetadataBytes = DP_USB_METADATA_BYTES;
+    message.OffsetBytes = offset;
+    message.PhysicalPathLengthBytes = pathLengthBytes;
+    CopyMemory(message.Metadata, Metadata, DP_USB_METADATA_BYTES);
+
+    ZeroMemory(&driverResult, sizeof(driverResult));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandWriteUsbMetadata,
+                                          &message,
+                                          sizeof(message),
+                                          &driverResult,
+                                          sizeof(driverResult),
+                                          &bytesReturned);
+    SecureZeroMemory(&message, sizeof(message));
+
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(driverResult) ||
+        driverResult.Version != DP_USB_METADATA_RESULT_VERSION) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid USB metadata write result.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (Result != NULL) {
+        Result->Status = driverResult.Status;
+        Result->PartitionCount = driverResult.PartitionCount;
+        Result->OffsetBytes = driverResult.OffsetBytes;
+        Result->DiskSizeBytes = driverResult.DiskSizeBytes;
+    }
+
+    if (driverResult.Status != 0) {
+        DpPolicySetLastErrorFromCode(driverResult.Status, L"Driver rejected USB raw metadata write");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
     DpPolicySetLastErrorMessage(L"Success.");

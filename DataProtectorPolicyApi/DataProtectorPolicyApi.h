@@ -81,6 +81,8 @@ extern "C" {
 #define DP_POLICY_API_NETWORK_EVENT_FLAG_HTTP3     0x00000004u
 #define DP_POLICY_API_NETWORK_EVENT_FLAG_BLOCKED   0x00000008u
 
+#define DP_POLICY_API_USB_METADATA_BYTES           512u
+
 typedef struct _DP_POLICY_API_RULE {
     DWORD RuleType;
     LPCWSTR Value;
@@ -177,6 +179,13 @@ typedef struct _DP_POLICY_API_LATERAL_DEFENSE_EVENT {
 typedef struct _DP_POLICY_API_LATERAL_DEFENSE_POLICY {
     DWORD Flags;
 } DP_POLICY_API_LATERAL_DEFENSE_POLICY, *PDP_POLICY_API_LATERAL_DEFENSE_POLICY;
+
+typedef struct _DP_POLICY_API_USB_METADATA_WRITE_RESULT {
+    DWORD Status;
+    DWORD PartitionCount;
+    ULONGLONG OffsetBytes;
+    ULONGLONG DiskSizeBytes;
+} DP_POLICY_API_USB_METADATA_WRITE_RESULT, *PDP_POLICY_API_USB_METADATA_WRITE_RESULT;
 
 DP_POLICY_API
 DWORD
@@ -433,6 +442,15 @@ DpPolicyQueryDeviceRules(
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
     _In_ DWORD stringBufferChars,
     _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyWriteUsbMetadata(
+    _In_z_ LPCWSTR physicalDrivePath,
+    _In_ ULONGLONG requestedOffsetBytes,
+    _In_reads_bytes_(DP_POLICY_API_USB_METADATA_BYTES) const BYTE *metadata,
+    _Out_opt_ DP_POLICY_API_USB_METADATA_WRITE_RESULT *result
     );
 
 DP_POLICY_API

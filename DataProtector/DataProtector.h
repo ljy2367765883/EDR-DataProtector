@@ -43,6 +43,7 @@ Abstract:
 #define DP_TAG_DEVICE_RULE     'rDpD'
 #define DP_TAG_HASH_PROTECT    'hHpD'
 #define DP_TAG_LATERAL_DEFENSE 'lLpD'
+#define DP_TAG_USB_METADATA    'mUpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
@@ -68,6 +69,16 @@ Abstract:
 #define DP_LATERAL_DEFENSE_MAX_EVENTS 512
 #define DP_LATERAL_DEFENSE_TARGET_CHARS 512
 #define DP_LATERAL_DEFENSE_PROCESS_CHARS 64
+#define DP_USB_METADATA_BYTES 512
+#define DP_USB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
+#define DP_USB_METADATA_DEFAULT_OFFSET_BYTES (1024ull * 1024ull)
+#define DP_USB_PUBLIC_TOOL_BYTES (5ull * 1024ull * 1024ull)
+#define DP_USB_DATA_OFFSET_BYTES (DP_USB_METADATA_RESERVED_BYTES + DP_USB_PUBLIC_TOOL_BYTES)
+#define DP_USB_METADATA_PATH_CHARS 128
+#define DP_USB_METADATA_MESSAGE_VERSION 1
+#define DP_USB_METADATA_RESULT_VERSION 1
+#define DP_USB_METADATA_MAGIC_V2 0x32535544u
+#define DP_USB_METADATA_MAGIC_V1 0x31535544u
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
 #define DP_PROTECTION_MAGIC 0x32465044u
@@ -256,7 +267,8 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryHashProtectPolicy = 82,
     DpPolicyCommandQueryLateralDefenseEvents = 90,
     DpPolicyCommandSetLateralDefensePolicy = 91,
-    DpPolicyCommandQueryLateralDefensePolicy = 92
+    DpPolicyCommandQueryLateralDefensePolicy = 92,
+    DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -286,6 +298,25 @@ typedef struct _DP_POLICY_QUERY_ENTRY {
 
 #define DP_POLICY_QUERY_VERSION 1
 #define DP_POLICY_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_POLICY_QUERY_ENTRY, Data)
+
+typedef struct _DP_USB_METADATA_WRITE_MESSAGE {
+    ULONG Version;
+    ULONG MetadataBytes;
+    ULONGLONG OffsetBytes;
+    ULONG PhysicalPathLengthBytes;
+    ULONG Reserved;
+    WCHAR PhysicalPath[DP_USB_METADATA_PATH_CHARS];
+    UCHAR Metadata[DP_USB_METADATA_BYTES];
+} DP_USB_METADATA_WRITE_MESSAGE, *PDP_USB_METADATA_WRITE_MESSAGE;
+
+typedef struct _DP_USB_METADATA_WRITE_RESULT {
+    ULONG Version;
+    ULONG Status;
+    ULONG PartitionCount;
+    ULONG Reserved;
+    ULONGLONG OffsetBytes;
+    ULONGLONG DiskSizeBytes;
+} DP_USB_METADATA_WRITE_RESULT, *PDP_USB_METADATA_WRITE_RESULT;
 
 typedef enum _DP_NETWORK_RULE_KIND {
     DpNetworkRuleIp = 1,
@@ -803,6 +834,14 @@ DpControlInitialize(
 VOID
 DpControlUninitialize(
     VOID
+    );
+
+NTSTATUS
+DpUsbMetadataWrite(
+    _In_ const DP_USB_METADATA_WRITE_MESSAGE *Request,
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
     );
 
 NTSTATUS

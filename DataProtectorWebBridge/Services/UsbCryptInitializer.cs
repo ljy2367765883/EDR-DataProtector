@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -6,17 +7,22 @@ using System.Management;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
+using DataProtectorWebBridge.Native;
 
 namespace DataProtectorWebBridge.Services
 {
     internal sealed class UsbCryptInitializer
     {
         private const int MetadataBytes = 512;
-        private const long MetadataOffsetBytes = 64L * 1024L;
+        private const long MetadataReservedBytes = 2L * 1024L * 1024L;
+        private const long MetadataOffsetBytes = 1L * 1024L * 1024L;
+        private const long PublicToolAreaBytes = 5L * 1024L * 1024L;
+        private const long DataOffsetBytes = MetadataReservedBytes + PublicToolAreaBytes;
         private const int MetadataDeviceIdBytes = 128;
         private const int MetadataVersionBytes = 64;
         private const int MetadataSha256Bytes = 64;
-        private const int MetadataReservedBytes = 92;
+        private const int MetadataReservedFieldBytes = 92;
         private const int PasswordSaltBytes = 16;
         private const int PasswordVerifierBytes = 32;
         private const int ManifestKeyBytes = 64;
@@ -44,10 +50,10 @@ namespace DataProtectorWebBridge.Services
             }
 
             PhysicalDiskTarget disk = ResolvePhysicalDiskTarget(targetRoot);
-            ValidateMetadataGap(disk, normalized.publicToolAreaBytes);
 
             if (!normalized.confirmed)
             {
+                ValidateUsbCryptInitializationPlan(disk, normalized.publicToolAreaBytes);
                 return BuildDryRun(normalized, target, targetRoot, disk);
             }
 
@@ -66,14 +72,17 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 UsbRuntimePackage runtimePackage = DownloadAndExtractRuntimePackage(normalized, serverBaseUri, extractionRoot);
+                targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes);
+                disk = ResolvePhysicalDiskTarget(targetRoot);
+                ValidateUsbCryptLayout(disk, normalized.publicToolAreaBytes);
                 PreparePublicToolArea(targetRoot, runtimePackage);
 
                 long dataLength = normalized.dataLengthBytes > 0
                     ? normalized.dataLengthBytes
-                    : Math.Max(0, disk.diskSizeBytes - normalized.publicToolAreaBytes);
+                    : Math.Max(0, disk.diskSizeBytes - DataOffsetBytes);
 
                 byte[] metadata = BuildRawMetadata(normalized, target, key, dataLength);
-                WriteRawMetadata(disk.physicalDrivePath, metadata);
+                DataProtectorPolicyNative.NativeUsbMetadataWriteResult writeResult = WriteRawMetadataThroughDriver(disk.physicalDrivePath, metadata);
 
                 return new UsbCryptInitializationResult
                 {
@@ -81,17 +90,17 @@ namespace DataProtectorWebBridge.Services
                     driveLetter = target.driveLetter,
                     volumeGuid = target.volumeGuid,
                     publicToolAreaBytes = normalized.publicToolAreaBytes,
-                    dataOffsetBytes = normalized.publicToolAreaBytes,
+                    dataOffsetBytes = DataOffsetBytes,
                     dataLengthBytes = dataLength,
-                    metadataOffsetBytes = MetadataOffsetBytes,
-                    metadataLocation = disk.physicalDrivePath + "@" + MetadataOffsetBytes,
+                    metadataOffsetBytes = (long)writeResult.OffsetBytes,
+                    metadataLocation = disk.physicalDrivePath + "@" + writeResult.OffsetBytes,
                     toolPath = Path.Combine(targetRoot, ToolFileName),
                     driverPath = Path.Combine(targetRoot, RuntimeDirectoryName),
                     driverPackageVersion = normalized.driverPackageVersion,
                     driverPackageSha256 = normalized.driverPackageSha256,
                     dryRun = false,
                     initialized = true,
-                    message = "USB runtime package was copied and hidden; unlock metadata was written to the raw disk metadata sector."
+                    message = "USB runtime package was copied and hidden; unlock metadata was written by the DataProtector driver into the reserved raw-disk metadata area."
                 };
             }
             finally
@@ -109,7 +118,7 @@ namespace DataProtectorWebBridge.Services
         {
             long dataLength = request.dataLengthBytes > 0
                 ? request.dataLengthBytes
-                : Math.Max(0, disk.diskSizeBytes - request.publicToolAreaBytes);
+                : Math.Max(0, disk.diskSizeBytes - DataOffsetBytes);
 
             return new UsbCryptInitializationResult
             {
@@ -117,7 +126,7 @@ namespace DataProtectorWebBridge.Services
                 driveLetter = target.driveLetter,
                 volumeGuid = target.volumeGuid,
                 publicToolAreaBytes = request.publicToolAreaBytes,
-                dataOffsetBytes = request.publicToolAreaBytes,
+                dataOffsetBytes = DataOffsetBytes,
                 dataLengthBytes = dataLength,
                 metadataOffsetBytes = MetadataOffsetBytes,
                 metadataLocation = disk.physicalDrivePath + "@" + MetadataOffsetBytes,
@@ -127,7 +136,7 @@ namespace DataProtectorWebBridge.Services
                 driverPackageSha256 = request.driverPackageSha256,
                 dryRun = true,
                 initialized = false,
-                message = "USB initialization dry run succeeded. Submit confirmed=true to download the runtime package and write raw disk metadata."
+                message = "USB initialization dry run succeeded. Confirmed initialization will clean and repartition the USB disk as: 0-2 MB raw metadata reserve, 2-7 MB public tool partition, and 7 MB+ encrypted data region."
             };
         }
 
@@ -321,7 +330,7 @@ namespace DataProtectorWebBridge.Services
                     writer.Write((uint)key.Length);
                     writer.Write((uint)KdfIterations);
                     writer.Write((ulong)request.publicToolAreaBytes);
-                    writer.Write((ulong)request.publicToolAreaBytes);
+                    writer.Write((ulong)DataOffsetBytes);
                     writer.Write((ulong)dataLengthBytes);
                     writer.Write(salt);
                     writer.Write(derived.Take(PasswordVerifierBytes).ToArray());
@@ -329,7 +338,7 @@ namespace DataProtectorWebBridge.Services
                     WriteFixedUtf8(writer, target.hardwareId, MetadataDeviceIdBytes);
                     WriteFixedUtf8(writer, request.driverPackageVersion, MetadataVersionBytes);
                     WriteFixedUtf8(writer, request.driverPackageSha256, MetadataSha256Bytes);
-                    writer.Write(new byte[MetadataReservedBytes]);
+                    writer.Write(new byte[MetadataReservedFieldBytes]);
                     writer.Write(0u);
                 }
 
@@ -363,43 +372,196 @@ namespace DataProtectorWebBridge.Services
             writer.Write(buffer);
         }
 
-        private static void WriteRawMetadata(string physicalDrivePath, byte[] metadata)
+        private static DataProtectorPolicyNative.NativeUsbMetadataWriteResult WriteRawMetadataThroughDriver(string physicalDrivePath, byte[] metadata)
         {
             if (metadata == null || metadata.Length != MetadataBytes)
             {
                 throw new InvalidOperationException("USB raw metadata block must be exactly 512 bytes.");
             }
 
-            using (FileStream stream = new FileStream(physicalDrivePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+            DataProtectorPolicyNative.NativeUsbMetadataWriteResult result;
+            uint status = DataProtectorPolicyNative.DpPolicyWriteUsbMetadata(
+                physicalDrivePath,
+                (ulong)MetadataOffsetBytes,
+                metadata,
+                out result);
+            if (status != 0 || result.Status != 0)
             {
-                byte[] existing = new byte[MetadataBytes];
-                stream.Seek(MetadataOffsetBytes, SeekOrigin.Begin);
-                int read = stream.Read(existing, 0, existing.Length);
-                if (read == existing.Length && !IsZeroBlock(existing) && !HasKnownMetadataMagic(existing))
+                throw new InvalidOperationException("DataProtector driver rejected USB raw metadata write: " + FormatNativeError(status != 0 ? status : result.Status));
+            }
+
+            return result;
+        }
+
+        private static string FormatNativeError(uint status)
+        {
+            StringBuilder message = new StringBuilder(512);
+            try
+            {
+                DataProtectorPolicyNative.DpPolicyGetLastErrorMessage(message, (uint)message.Capacity);
+            }
+            catch
+            {
+            }
+
+            string text = message.ToString();
+            return "0x" + status.ToString("X8") + (string.IsNullOrWhiteSpace(text) ? string.Empty : " (" + text + ")");
+        }
+
+        private static string ReinitializeDiskLayout(PhysicalDiskTarget disk, long publicToolAreaBytes)
+        {
+            if (disk == null || string.IsNullOrWhiteSpace(disk.physicalDrivePath))
+            {
+                throw new InvalidOperationException("Physical USB disk is not available for layout initialization.");
+            }
+
+            int diskNumber = ParsePhysicalDriveNumber(disk.physicalDrivePath);
+            string volumeLabel = "DPUSB";
+            string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-" + Guid.NewGuid().ToString("N") + ".txt");
+            string script =
+                "select disk " + diskNumber + Environment.NewLine +
+                "clean" + Environment.NewLine +
+                "convert mbr" + Environment.NewLine +
+                "create partition primary size=5 offset=2048" + Environment.NewLine +
+                "format fs=ntfs quick label=" + volumeLabel + Environment.NewLine +
+                "assign" + Environment.NewLine +
+                "exit" + Environment.NewLine;
+
+            try
+            {
+                File.WriteAllText(scriptPath, script, Encoding.ASCII);
+                RunProcessChecked("diskpart.exe", "/s \"" + scriptPath + "\"", "Secure USB disk layout initialization failed.");
+                Thread.Sleep(1500);
+                return WaitForToolPartition(diskNumber);
+            }
+            finally
+            {
+                try
                 {
-                    throw new InvalidOperationException("USB raw metadata sector is not empty and does not contain DataProtector metadata.");
+                    if (File.Exists(scriptPath))
+                    {
+                        File.Delete(scriptPath);
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static int ParsePhysicalDriveNumber(string physicalDrivePath)
+        {
+            string value = (physicalDrivePath ?? string.Empty).Trim();
+            int index = value.LastIndexOf("PhysicalDrive", StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                throw new InvalidOperationException("Physical drive path is invalid: " + physicalDrivePath);
+            }
+
+            string numberText = value.Substring(index + "PhysicalDrive".Length);
+            int number;
+            if (!int.TryParse(numberText, out number) || number < 0)
+            {
+                throw new InvalidOperationException("Physical drive number is invalid: " + physicalDrivePath);
+            }
+
+            return number;
+        }
+
+        private static void RunProcessChecked(string fileName, string arguments, string failureMessage)
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using (Process process = Process.Start(startInfo))
+            {
+                if (process == null)
+                {
+                    throw new InvalidOperationException(failureMessage + " Process was not started.");
                 }
 
-                stream.Seek(MetadataOffsetBytes, SeekOrigin.Begin);
-                stream.Write(metadata, 0, metadata.Length);
-                stream.Flush(true);
+                string output = process.StandardOutput.ReadToEnd();
+                string error = process.StandardError.ReadToEnd();
+                if (!process.WaitForExit(120000))
+                {
+                    try
+                    {
+                        process.Kill();
+                    }
+                    catch
+                    {
+                    }
+
+                    throw new InvalidOperationException(failureMessage + " diskpart timed out.");
+                }
+
+                if (process.ExitCode != 0)
+                {
+                    throw new InvalidOperationException(failureMessage + " ExitCode=" + process.ExitCode + " " + output + " " + error);
+                }
             }
         }
 
-        private static bool IsZeroBlock(byte[] buffer)
+        private static string WaitForToolPartition(int diskNumber)
         {
-            return buffer.All(value => value == 0);
-        }
-
-        private static bool HasKnownMetadataMagic(byte[] buffer)
-        {
-            if (buffer == null || buffer.Length < sizeof(uint))
+            DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+            while (DateTime.UtcNow < deadline)
             {
-                return false;
+                string root = TryFindToolPartitionRoot(diskNumber);
+                if (!string.IsNullOrWhiteSpace(root))
+                {
+                    return root;
+                }
+
+                Thread.Sleep(1000);
             }
 
-            uint magic = BitConverter.ToUInt32(buffer, 0);
-            return magic == MetadataMagic || magic == 0x31535544u;
+            throw new InvalidOperationException("Secure USB public tool partition was created, but no drive letter became available.");
+        }
+
+        private static string TryFindToolPartitionRoot(int diskNumber)
+        {
+            using (ManagementObjectSearcher partitionSearcher = new ManagementObjectSearcher(
+                "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='\\\\\\\\.\\\\PHYSICALDRIVE" + diskNumber + "'} WHERE AssocClass=Win32_DiskDriveToDiskPartition"))
+            {
+                foreach (ManagementObject partition in partitionSearcher.Get())
+                {
+                    using (partition)
+                    {
+                        long offset = Convert.ToInt64(partition["StartingOffset"] ?? 0);
+                        if (offset != MetadataReservedBytes)
+                        {
+                            continue;
+                        }
+
+                        string partitionDeviceId = Convert.ToString(partition["DeviceID"]);
+                        using (ManagementObjectSearcher logicalSearcher = new ManagementObjectSearcher(
+                            "ASSOCIATORS OF {Win32_DiskPartition.DeviceID='" + EscapeWmiString(partitionDeviceId) + "'} WHERE AssocClass=Win32_LogicalDiskToPartition"))
+                        {
+                            foreach (ManagementObject logical in logicalSearcher.Get())
+                            {
+                                using (logical)
+                                {
+                                    string deviceId = Convert.ToString(logical["DeviceID"]);
+                                    if (!string.IsNullOrWhiteSpace(deviceId))
+                                    {
+                                        return NormalizeDriveRoot(deviceId);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return string.Empty;
         }
 
         private static PhysicalDiskTarget ResolvePhysicalDiskTarget(string driveRoot)
@@ -450,21 +612,44 @@ namespace DataProtectorWebBridge.Services
             throw new InvalidOperationException("Unable to resolve the removable drive to a physical disk.");
         }
 
-        private static void ValidateMetadataGap(PhysicalDiskTarget disk, long publicToolAreaBytes)
+        private static void ValidateUsbCryptLayout(PhysicalDiskTarget disk, long publicToolAreaBytes)
         {
-            if (disk.diskSizeBytes <= MetadataOffsetBytes + MetadataBytes)
+            if (disk.diskSizeBytes <= DataOffsetBytes + MetadataBytes)
             {
-                throw new InvalidOperationException("Target disk is too small for USB raw metadata.");
+                throw new InvalidOperationException("Target disk is too small for the Secure USB layout.");
             }
 
-            if (disk.firstPartitionOffsetBytes <= MetadataOffsetBytes + MetadataBytes)
+            if (disk.firstPartitionOffsetBytes < MetadataReservedBytes)
             {
-                throw new InvalidOperationException("Target disk partition starts before the reserved metadata sector; initialization was stopped to avoid corrupting the file system.");
+                throw new InvalidOperationException("Target disk partition starts before the 2 MB reserved metadata area. Reinitialize the USB disk layout before enabling Secure USB.");
             }
 
-            if (publicToolAreaBytes < 5L * 1024L * 1024L)
+            if (disk.firstPartitionOffsetBytes != MetadataReservedBytes)
             {
-                throw new InvalidOperationException("Public tool area must be at least 5 MB.");
+                throw new InvalidOperationException("Secure USB requires the public tool partition to start exactly at 2 MB. Reinitialize the USB disk layout from the Agent before copying runtime files.");
+            }
+
+            if (publicToolAreaBytes != PublicToolAreaBytes)
+            {
+                throw new InvalidOperationException("Secure USB public tool area must be exactly 5 MB.");
+            }
+        }
+
+        private static void ValidateUsbCryptInitializationPlan(PhysicalDiskTarget disk, long publicToolAreaBytes)
+        {
+            if (disk == null || string.IsNullOrWhiteSpace(disk.physicalDrivePath))
+            {
+                throw new InvalidOperationException("Physical USB disk is not available for Secure USB initialization.");
+            }
+
+            if (disk.diskSizeBytes <= DataOffsetBytes + MetadataBytes)
+            {
+                throw new InvalidOperationException("Target disk is too small for the Secure USB layout.");
+            }
+
+            if (publicToolAreaBytes != PublicToolAreaBytes)
+            {
+                throw new InvalidOperationException("Secure USB public tool area must be exactly 5 MB.");
             }
         }
 
@@ -522,10 +707,10 @@ namespace DataProtectorWebBridge.Services
                 throw new InvalidOperationException("USB crypt runtime package metadata is required.");
             }
 
-            long toolArea = request.publicToolAreaBytes <= 0 ? 5L * 1024L * 1024L : request.publicToolAreaBytes;
-            if (toolArea < 5L * 1024L * 1024L)
+            long toolArea = request.publicToolAreaBytes <= 0 ? PublicToolAreaBytes : request.publicToolAreaBytes;
+            if (toolArea != PublicToolAreaBytes)
             {
-                toolArea = 5L * 1024L * 1024L;
+                throw new InvalidOperationException("Secure USB public tool area must be exactly 5 MB.");
             }
 
             return new UsbCryptInitializationRequest

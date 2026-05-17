@@ -12,6 +12,7 @@
 #include <wchar.h>
 
 #define DPUSB_DOS_NAME L"\\\\.\\DataProtectorUsbCrypt"
+#define DPUSB_NT_DEVICE_NAME L"\\Device\\DataProtectorUsbCrypt"
 #define DPUSB_SERVICE_NAME L"DataProtectorUsbCrypt"
 #define DPUSB_DRIVER_FILE_NAME L"DataProtectorUsbCrypt.sys"
 #define DPUSB_APP_NAME L"DataProtector Secure USB"
@@ -19,7 +20,10 @@
 #define DPUSB_UNLOCK_METADATA_MAGIC 0x32535544UL
 #define DPUSB_UNLOCK_METADATA_VERSION 2
 #define DPUSB_UNLOCK_METADATA_BYTES 512
-#define DPUSB_UNLOCK_METADATA_OFFSET_BYTES (64ull * 1024ull)
+#define DPUSB_RAW_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
+#define DPUSB_UNLOCK_METADATA_OFFSET_BYTES (1024ull * 1024ull)
+#define DPUSB_PUBLIC_TOOL_BYTES (5ull * 1024ull * 1024ull)
+#define DPUSB_DATA_OFFSET_BYTES (DPUSB_RAW_METADATA_RESERVED_BYTES + DPUSB_PUBLIC_TOOL_BYTES)
 #define DPUSB_UNLOCK_METADATA_DEVICE_ID_BYTES 128
 #define DPUSB_UNLOCK_METADATA_PACKAGE_VERSION_BYTES 64
 #define DPUSB_UNLOCK_METADATA_PACKAGE_SHA256_BYTES 64
@@ -49,6 +53,7 @@ typedef struct _DPUSB_OPEN_SESSION {
     ULONGLONG DataOffsetBytes;
     ULONGLONG DataLengthBytes;
     ULONG KeyLength;
+    WCHAR PhysicalDrivePath[128];
     UCHAR Key[DPUSB_MAX_KEY_BYTES];
     WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
 } DPUSB_OPEN_SESSION;
@@ -60,6 +65,7 @@ typedef struct _DPUSB_STATUS {
     ULONGLONG ToolAreaBytes;
     ULONGLONG DataOffsetBytes;
     ULONGLONG DataLengthBytes;
+    WCHAR PhysicalDrivePath[128];
     WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
 } DPUSB_STATUS;
 
@@ -86,12 +92,19 @@ C_ASSERT(sizeof(DPUSB_UNLOCK_MANIFEST) == DPUSB_UNLOCK_METADATA_BYTES);
 
 typedef struct _DPUSB_UNLOCK_SECRET {
     WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
+    WCHAR PhysicalDrivePath[128];
     BYTE Key[DPUSB_MAX_KEY_BYTES];
     DWORD KeyLength;
     ULONGLONG ToolAreaBytes;
     ULONGLONG DataOffsetBytes;
     ULONGLONG DataLengthBytes;
 } DPUSB_UNLOCK_SECRET;
+
+typedef struct _DPUSB_PRIVATE_MOUNT {
+    WCHAR Letter;
+    WCHAR DosName[8];
+    WCHAR Path[8];
+} DPUSB_PRIVATE_MOUNT;
 
 typedef struct _DPUSB_UI_STATE {
     HWND Window;
@@ -146,6 +159,9 @@ static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win3
 static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
 static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Error);
 static BOOL IsProcessElevated(void);
+static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
+static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
+static void UnmountAllPrivateWorkspaces(void);
 
 static void PrintUsage(void)
 {
@@ -307,7 +323,10 @@ static int QueryStatus(void)
 static int Lock(void)
 {
     DWORD error = ERROR_SUCCESS;
+    DPUSB_PRIVATE_MOUNT mount;
 
+    ZeroMemory(&mount, sizeof(mount));
+    UnmountAllPrivateWorkspaces();
     if (!CloseSessionData(&error)) {
         SetLastError(error);
         return PrintLastError(L"Close session");
@@ -320,6 +339,7 @@ static int Lock(void)
 static int UnlockPassword(int argc, wchar_t **argv)
 {
     DPUSB_UNLOCK_SECRET secret;
+    DPUSB_PRIVATE_MOUNT mount;
     wchar_t deployedPath[MAX_PATH];
     DWORD error = ERROR_SUCCESS;
 
@@ -329,6 +349,7 @@ static int UnlockPassword(int argc, wchar_t **argv)
     }
 
     ZeroMemory(&secret, sizeof(secret));
+    ZeroMemory(&mount, sizeof(mount));
     if (!UnlockSecretFromPassword(argv[2], &secret, &error)) {
         SetLastError(error);
         if (error == ERROR_ACCESS_DENIED) {
@@ -356,8 +377,15 @@ static int UnlockPassword(int argc, wchar_t **argv)
         return PrintLastError(L"Open session");
     }
 
+    if (!MountPrivateWorkspace(&mount, &error)) {
+        CloseSessionData(NULL);
+        SecureZeroMemory(&secret, sizeof(secret));
+        SetLastError(error);
+        return PrintLastError(L"Mount private workspace");
+    }
+
     SecureZeroMemory(&secret, sizeof(secret));
-    wprintf(L"USB crypt session opened from raw metadata.\n");
+    wprintf(L"USB crypt session opened from raw metadata. Private workspace: %s\n", mount.Path);
     return 0;
 }
 
@@ -874,6 +902,86 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, DW
     return TRUE;
 }
 
+static BOOL DriveLetterIsAvailable(WCHAR letter)
+{
+    WCHAR root[4];
+
+    swprintf_s(root, sizeof(root) / sizeof(root[0]), L"%c:\\", letter);
+    return GetDriveTypeW(root) == DRIVE_NO_ROOT_DIR;
+}
+
+static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+{
+    WCHAR letter;
+    WCHAR dosName[8];
+    WCHAR path[8];
+
+    if (mount == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    ZeroMemory(mount, sizeof(*mount));
+    UnmountAllPrivateWorkspaces();
+    for (letter = L'Z'; letter >= L'M'; letter--) {
+        if (!DriveLetterIsAvailable(letter)) {
+            continue;
+        }
+
+        swprintf_s(dosName, sizeof(dosName) / sizeof(dosName[0]), L"%c:", letter);
+        swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
+        DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, dosName, DPUSB_NT_DEVICE_NAME);
+        if (DefineDosDeviceW(DDD_RAW_TARGET_PATH, dosName, DPUSB_NT_DEVICE_NAME)) {
+            mount->Letter = letter;
+            wcsncpy_s(mount->DosName, sizeof(mount->DosName) / sizeof(mount->DosName[0]), dosName, _TRUNCATE);
+            wcsncpy_s(mount->Path, sizeof(mount->Path) / sizeof(mount->Path[0]), path, _TRUNCATE);
+            SHChangeNotify(SHCNE_DRIVEADD, SHCNF_PATH, mount->Path, NULL);
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_NO_MORE_ITEMS;
+    }
+    return FALSE;
+}
+
+static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount)
+{
+    if (mount == NULL || mount->DosName[0] == L'\0') {
+        return;
+    }
+
+    DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, mount->DosName, DPUSB_NT_DEVICE_NAME);
+    SHChangeNotify(SHCNE_DRIVEREMOVED, SHCNF_PATH, mount->Path, NULL);
+}
+
+static void UnmountAllPrivateWorkspaces(void)
+{
+    WCHAR letter;
+    WCHAR dosName[8];
+    WCHAR target[512];
+
+    for (letter = L'A'; letter <= L'Z'; letter++) {
+        swprintf_s(dosName, sizeof(dosName) / sizeof(dosName[0]), L"%c:", letter);
+        ZeroMemory(target, sizeof(target));
+        if (QueryDosDeviceW(dosName, target, sizeof(target) / sizeof(target[0])) == 0) {
+            continue;
+        }
+
+        if (_wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
+            DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, dosName, DPUSB_NT_DEVICE_NAME);
+            swprintf_s(target, sizeof(target) / sizeof(target[0]), L"%c:\\", letter);
+            SHChangeNotify(SHCNE_DRIVEREMOVED, SHCNF_PATH, target, NULL);
+        }
+    }
+}
+
 static DWORD ReadFixedUtf8(const CHAR *source, DWORD sourceBytes, wchar_t *target, DWORD targetChars)
 {
     DWORD length;
@@ -1073,6 +1181,7 @@ static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRE
     DWORD index;
     DWORD error = ERROR_SUCCESS;
     wchar_t deviceId[DPUSB_MAX_DEVICE_ID_CHARS];
+    wchar_t physicalPath[128];
 
     if (secret == NULL) {
         if (win32Error != NULL) {
@@ -1084,6 +1193,14 @@ static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRE
     ZeroMemory(secret, sizeof(*secret));
     ZeroMemory(&manifest, sizeof(manifest));
     ZeroMemory(derived, sizeof(derived));
+    ZeroMemory(physicalPath, sizeof(physicalPath));
+
+    if (!GetPhysicalDriveForVolume(physicalPath, sizeof(physicalPath) / sizeof(physicalPath[0]), &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
 
     if (!ReadUnlockManifest(&manifest, &error)) {
         if (win32Error != NULL) {
@@ -1110,8 +1227,8 @@ static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRE
     }
 
     secret->KeyLength = manifest.KeyLength;
-    secret->ToolAreaBytes = manifest.ToolAreaBytes < DPUSB_MIN_TOOL_BYTES ? DPUSB_MIN_TOOL_BYTES : manifest.ToolAreaBytes;
-    secret->DataOffsetBytes = manifest.DataOffsetBytes < secret->ToolAreaBytes ? secret->ToolAreaBytes : manifest.DataOffsetBytes;
+    secret->ToolAreaBytes = DPUSB_PUBLIC_TOOL_BYTES;
+    secret->DataOffsetBytes = manifest.DataOffsetBytes < DPUSB_DATA_OFFSET_BYTES ? DPUSB_DATA_OFFSET_BYTES : manifest.DataOffsetBytes;
     secret->DataLengthBytes = manifest.DataLengthBytes;
     ZeroMemory(deviceId, sizeof(deviceId));
     if (ReadFixedUtf8(manifest.DeviceId,
@@ -1129,6 +1246,10 @@ static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRE
     wcsncpy_s(secret->DeviceId,
               sizeof(secret->DeviceId) / sizeof(secret->DeviceId[0]),
               deviceId,
+              _TRUNCATE);
+    wcsncpy_s(secret->PhysicalDrivePath,
+              sizeof(secret->PhysicalDrivePath) / sizeof(secret->PhysicalDrivePath[0]),
+              physicalPath,
               _TRUNCATE);
 
     for (index = 0; index < secret->KeyLength; index++) {
@@ -1163,6 +1284,10 @@ static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win3
     request.DataOffsetBytes = secret->DataOffsetBytes;
     request.DataLengthBytes = secret->DataLengthBytes;
     request.KeyLength = secret->KeyLength;
+    wcsncpy_s(request.PhysicalDrivePath,
+              sizeof(request.PhysicalDrivePath) / sizeof(request.PhysicalDrivePath[0]),
+              secret->PhysicalDrivePath,
+              _TRUNCATE);
     CopyMemory(request.Key, secret->Key, secret->KeyLength);
     wcsncpy_s(request.DeviceId,
               sizeof(request.DeviceId) / sizeof(request.DeviceId[0]),
@@ -1319,10 +1444,12 @@ static void RunUnlockFromUi(void)
     wchar_t password[256];
     wchar_t message[256];
     DPUSB_UNLOCK_SECRET secret;
+    DPUSB_PRIVATE_MOUNT mount;
     DWORD error = ERROR_SUCCESS;
 
     ZeroMemory(password, sizeof(password));
     ZeroMemory(&secret, sizeof(secret));
+    ZeroMemory(&mount, sizeof(mount));
     GetWindowTextW(g_Ui.PasswordEdit, password, sizeof(password) / sizeof(password[0]));
 
     AppendLog(L"Validating USB unlock password...");
@@ -1361,8 +1488,18 @@ static void RunUnlockFromUi(void)
         return;
     }
 
+    if (!MountPrivateWorkspace(&mount, &error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace mount failed: %s", message);
+        MessageBoxW(g_Ui.Window, message, DPUSB_APP_NAME, MB_ICONERROR | MB_OK);
+        CloseSessionData(NULL);
+        SecureZeroMemory(&secret, sizeof(secret));
+        UpdateStatusUi();
+        return;
+    }
+
     SecureZeroMemory(&secret, sizeof(secret));
-    AppendLog(L"Secure USB session opened.");
+    AppendLog(L"Secure USB session opened. Private workspace mounted at %s", mount.Path);
     UpdateStatusUi();
 }
 
@@ -1370,8 +1507,11 @@ static void RunLockFromUi(void)
 {
     DWORD error = ERROR_SUCCESS;
     wchar_t message[256];
+    DPUSB_PRIVATE_MOUNT mount;
 
     AppendLog(L"Closing secure USB session...");
+    ZeroMemory(&mount, sizeof(mount));
+    UnmountAllPrivateWorkspaces();
     if (!CloseSessionData(&error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Lock failed: %s", message);
@@ -1419,6 +1559,7 @@ static void ShowProvisioningPlan(void)
     swprintf_s(text,
                sizeof(text) / sizeof(text[0]),
                L"Raw metadata location:\r\n%s @ %I64u\r\n\r\n"
+               L"Disk layout:\r\n0-2 MB raw metadata reserve\r\n2-7 MB public tool partition\r\n7 MB+ encrypted data region\r\n\r\n"
                L"Device: %s\r\nRuntime package: %s\r\nSHA256: %s\r\n\r\n"
                L"The endpoint agent writes unlock information into a reserved raw-disk metadata sector. "
                L"No DataProtector key manifest file is required in the public partition. "

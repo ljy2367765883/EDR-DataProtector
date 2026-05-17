@@ -168,12 +168,16 @@ USB encryption workflow:
    downloads the server-managed runtime package, verifies its SHA256, copies
    DataProtectorUsbTool.exe and driver files to the USB public area, and marks
    driver runtime files as hidden/system.
-5. Unlock key metadata is written to the USB raw disk metadata sector at 64KB,
-   not to an ADS and not to a public DataProtectorUsbUnlock.dat file.
-6. DataProtectorUsbTool.exe is only the public-area unlock loader. It validates
+5. The endpoint agent rebuilds the USB disk layout before initialization:
+   the first 2 MB is raw metadata reserve, the next 5 MB is the public NTFS
+   tool partition, and the remaining media is the encrypted data region.
+6. Unlock key metadata is written by the DataProtector kernel driver to the
+   reserved raw-disk metadata area at 1 MB, not to an ADS and not to a public
+   DataProtectorUsbUnlock.dat file.
+7. DataProtectorUsbTool.exe is only the public-area unlock loader. It validates
    the raw-disk USB metadata with the initialization password before deploying
    or loading the driver. A wrong password never loads the driver.
-7. The public tool exposes only metadata-gated unlock operations: UI unlock,
+8. The public tool exposes only metadata-gated unlock operations: UI unlock,
    unlock-password, status, and lock. Direct driver loading is intentionally not
    exposed by the released tool path.
 
