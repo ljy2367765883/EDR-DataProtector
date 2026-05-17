@@ -486,34 +486,6 @@ static BOOL CombinePath(wchar_t *output, DWORD outputChars, const wchar_t *left,
     return swprintf_s(output, outputChars, L"%s\\%s", left, right) > 0;
 }
 
-static BOOL EnsureDirectoryTree(const wchar_t *path)
-{
-    wchar_t temp[MAX_PATH];
-    wchar_t *cursor;
-
-    if (path == NULL || path[0] == L'\0') {
-        return FALSE;
-    }
-
-    wcsncpy_s(temp, sizeof(temp) / sizeof(temp[0]), path, _TRUNCATE);
-
-    for (cursor = temp; *cursor != L'\0'; cursor++) {
-        if (*cursor == L'\\' && cursor > temp && cursor[-1] != L':') {
-            *cursor = L'\0';
-            if (!CreateDirectoryW(temp, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-                return FALSE;
-            }
-            *cursor = L'\\';
-        }
-    }
-
-    if (!CreateDirectoryW(temp, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
 static BOOL GetModuleDriveRoot(wchar_t *root, DWORD rootChars)
 {
     wchar_t moduleDir[MAX_PATH];
@@ -677,84 +649,6 @@ static BOOL FindPackagedDriver(wchar_t *path, DWORD pathChars)
     return FALSE;
 }
 
-static BOOL GetProgramDataDriverPath(wchar_t *path, DWORD pathChars)
-{
-    wchar_t programData[MAX_PATH];
-    wchar_t targetDir[MAX_PATH];
-
-    if (path == NULL || pathChars == 0) {
-        return FALSE;
-    }
-
-    if (SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, programData) != S_OK) {
-        return FALSE;
-    }
-
-    if (swprintf_s(targetDir,
-                  sizeof(targetDir) / sizeof(targetDir[0]),
-                  L"%s\\DataProtector\\UsbCrypt",
-                  programData) <= 0) {
-        return FALSE;
-    }
-
-    if (!EnsureDirectoryTree(targetDir)) {
-        return FALSE;
-    }
-
-    return swprintf_s(path, pathChars, L"%s\\%s", targetDir, DPUSB_DRIVER_FILE_NAME) > 0;
-}
-
-static BOOL CopyPackagedDriver(wchar_t *deployedPath, DWORD deployedPathChars, DWORD *win32Error)
-{
-    wchar_t source[MAX_PATH];
-    wchar_t target[MAX_PATH];
-    DWORD copyError;
-
-    if (deployedPath == NULL || deployedPathChars == 0) {
-        if (win32Error != NULL) {
-            *win32Error = ERROR_INVALID_PARAMETER;
-        }
-        return FALSE;
-    }
-
-    if (!FindPackagedDriver(source, sizeof(source) / sizeof(source[0]))) {
-        if (win32Error != NULL) {
-            *win32Error = ERROR_FILE_NOT_FOUND;
-        }
-        return FALSE;
-    }
-
-    if (!GetProgramDataDriverPath(target, sizeof(target) / sizeof(target[0]))) {
-        if (win32Error != NULL) {
-            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_PATH_NOT_FOUND;
-        }
-        return FALSE;
-    }
-
-    if (!CopyFileW(source, target, FALSE)) {
-        copyError = GetLastError();
-        if ((copyError == ERROR_ACCESS_DENIED || copyError == ERROR_SHARING_VIOLATION) &&
-            GetFileAttributesW(target) != INVALID_FILE_ATTRIBUTES) {
-            wcsncpy_s(deployedPath, deployedPathChars, target, _TRUNCATE);
-            if (win32Error != NULL) {
-                *win32Error = ERROR_SUCCESS;
-            }
-            return TRUE;
-        }
-
-        if (win32Error != NULL) {
-            *win32Error = copyError;
-        }
-        return FALSE;
-    }
-
-    wcsncpy_s(deployedPath, deployedPathChars, target, _TRUNCATE);
-    if (win32Error != NULL) {
-        *win32Error = ERROR_SUCCESS;
-    }
-    return TRUE;
-}
-
 static BOOL InstallDriverServicePath(const wchar_t *path, DWORD *win32Error)
 {
     SC_HANDLE scm;
@@ -875,9 +769,16 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, DW
 {
     DWORD error = ERROR_SUCCESS;
 
-    if (!CopyPackagedDriver(deployedPath, deployedPathChars, &error)) {
+    if (deployedPath == NULL || deployedPathChars == 0) {
         if (win32Error != NULL) {
-            *win32Error = error;
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (!FindPackagedDriver(deployedPath, deployedPathChars)) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_FILE_NOT_FOUND;
         }
         return FALSE;
     }
@@ -1426,7 +1327,7 @@ static void RunAutoDriverInitialization(void)
         return;
     }
 
-    AppendLog(L"Preparing driver package...");
+    AppendLog(L"Preparing USB package driver...");
     if (!AutoPrepareDriver(g_Ui.DeployedDriverPath, sizeof(g_Ui.DeployedDriverPath) / sizeof(g_Ui.DeployedDriverPath[0]), &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Driver initialization failed: %s", message);
@@ -1435,7 +1336,7 @@ static void RunAutoDriverInitialization(void)
     }
 
     SetTextBuffer(g_Ui.DriverPathText, sizeof(g_Ui.DriverPathText) / sizeof(g_Ui.DriverPathText[0]), g_Ui.DeployedDriverPath);
-    AppendLog(L"Driver installed and started: %s", g_Ui.DeployedDriverPath);
+    AppendLog(L"USB package driver installed and started: %s", g_Ui.DeployedDriverPath);
     UpdateStatusUi();
 }
 
@@ -1798,8 +1699,8 @@ static void DrawUi(HDC dc, HWND hwnd)
     DrawRoundFill(dc, &layout.DriverCard, g_Ui.CardColor, g_Ui.BorderColor, 14);
     DrawCardHeader(dc, &layout.DriverCard, L"Driver Runtime", L"Loaded only after password verification");
     DrawLabelAndValue(dc,
-                      L"DEPLOYED DRIVER",
-                      g_Ui.DriverPathText[0] != L'\0' ? g_Ui.DriverPathText : L"C:\\ProgramData\\DataProtector\\UsbCrypt\\DataProtectorUsbCrypt.sys",
+                      L"USB PACKAGE DRIVER",
+                      g_Ui.DriverPathText[0] != L'\0' ? g_Ui.DriverPathText : L"DataProtectorUsbRuntime\\driver\\DataProtectorUsbCrypt.sys",
                       layout.DriverCard.left + 24,
                       layout.DriverCard.top + 86,
                       RectWidth(&layout.DriverCard) - 48,
@@ -1945,7 +1846,7 @@ static void CreateUi(HWND hwnd)
 
     SetTextBuffer(g_Ui.DriverPathText,
                   sizeof(g_Ui.DriverPathText) / sizeof(g_Ui.DriverPathText[0]),
-                  L"C:\\ProgramData\\DataProtector\\UsbCrypt\\DataProtectorUsbCrypt.sys");
+                  L"DataProtectorUsbRuntime\\driver\\DataProtectorUsbCrypt.sys");
     SetTextBuffer(g_Ui.ServiceStateText, sizeof(g_Ui.ServiceStateText) / sizeof(g_Ui.ServiceStateText[0]), L"Waiting for initialization");
     SetTextBuffer(g_Ui.SessionStateText,
                   sizeof(g_Ui.SessionStateText) / sizeof(g_Ui.SessionStateText[0]),

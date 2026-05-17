@@ -34,6 +34,8 @@ namespace DataProtectorWebBridge.Services
         private const string RuntimeDirectoryName = "DataProtectorUsbRuntime";
         private const string ToolFileName = "DataProtectorUsbTool.exe";
         private const string DriverFileName = "DataProtectorUsbCrypt.sys";
+        private const string DriverInfFileName = "DataProtectorUsbCrypt.inf";
+        private const string DriverCatFileName = "dataprotectorusbcrypt.cat";
         private const string InitializationTraceFileName = "UsbCryptInitTrace.log";
         private static readonly Encoding Utf16NoBom = new UnicodeEncoding(false, false, true);
         private static readonly object TraceSync = new object();
@@ -199,10 +201,21 @@ namespace DataProtectorWebBridge.Services
                 throw new InvalidOperationException("USB crypt runtime package does not contain DataProtectorUsbCrypt.sys.");
             }
 
+            string driverDirectory = Path.GetDirectoryName(driverFile);
+            if (!File.Exists(Path.Combine(driverDirectory, DriverInfFileName)))
+            {
+                throw new InvalidOperationException("USB crypt runtime package does not contain DataProtectorUsbCrypt.inf beside the driver.");
+            }
+
+            if (!File.Exists(Path.Combine(driverDirectory, DriverCatFileName)))
+            {
+                throw new InvalidOperationException("USB crypt runtime package does not contain dataprotectorusbcrypt.cat beside the driver.");
+            }
+
             return new UsbRuntimePackage
             {
                 toolPath = toolPath,
-                driverDirectory = Path.GetDirectoryName(driverFile),
+                driverDirectory = driverDirectory,
                 version = request.driverPackageVersion,
                 sha256 = actualSha256
             };
@@ -233,6 +246,7 @@ namespace DataProtectorWebBridge.Services
             DeleteRuntimeDirectory(runtimeDirectory, targetRoot);
             File.Copy(runtimePackage.toolPath, targetTool, true);
             CopyDirectory(runtimePackage.driverDirectory, targetDriverDirectory);
+            ValidateUsbRuntimeOnPublicArea(targetRoot);
             File.WriteAllText(
                 Path.Combine(runtimeDirectory, "runtime.json"),
                 "{\"version\":\"" + EscapeJson(runtimePackage.version) + "\",\"sha256\":\"" + EscapeJson(runtimePackage.sha256) + "\"}",
@@ -240,6 +254,26 @@ namespace DataProtectorWebBridge.Services
 
             SetHiddenSystem(runtimeDirectory);
             SetHiddenSystemRecursively(runtimeDirectory);
+        }
+
+        private static void ValidateUsbRuntimeOnPublicArea(string targetRoot)
+        {
+            string runtimeDirectory = Path.Combine(targetRoot, RuntimeDirectoryName);
+            string targetDriverDirectory = Path.Combine(runtimeDirectory, "driver");
+            string toolPath = Path.Combine(targetRoot, ToolFileName);
+            string driverPath = Path.Combine(targetDriverDirectory, DriverFileName);
+            string infPath = Path.Combine(targetDriverDirectory, DriverInfFileName);
+            string catPath = Path.Combine(targetDriverDirectory, DriverCatFileName);
+
+            if (!File.Exists(toolPath))
+            {
+                throw new InvalidOperationException("USB public tool area is missing DataProtectorUsbTool.exe after provisioning.");
+            }
+
+            if (!File.Exists(driverPath) || !File.Exists(infPath) || !File.Exists(catPath))
+            {
+                throw new InvalidOperationException("USB public tool area is missing the complete DataProtectorUsbCrypt driver package after provisioning.");
+            }
         }
 
         private static void CopyDirectory(string source, string destination)
