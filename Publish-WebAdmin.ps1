@@ -90,6 +90,9 @@ DataProtector Central Web Admin
 Run the central server on the management machine:
 server\DataProtectorWebBridge.exe server
 
+Optional IP intelligence enrichment:
+setx DATAPROTECTOR_IPINFO_TOKEN "<ipinfo-token>"
+
 Open the web console:
 http://<server-ip>:17643/
 

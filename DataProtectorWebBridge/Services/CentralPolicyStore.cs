@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -11,6 +12,10 @@ namespace DataProtectorWebBridge.Services
     internal sealed class CentralPolicyStore
     {
         private const int DefaultLimit = 200;
+        private const int MaxIpInfoCacheEntries = 10000;
+        private const int MaxIpInfoLookupsPerQuery = 12;
+        private const string IpInfoTokenEnvironmentVariable = "DATAPROTECTOR_IPINFO_TOKEN";
+        private const string LegacyIpInfoTokenEnvironmentVariable = "IPINFO_TOKEN";
         private readonly object syncRoot = new object();
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly string filePath;
@@ -286,8 +291,11 @@ namespace DataProtectorWebBridge.Services
         public NetworkInsightResponse QueryNetworkInsights(NetworkInsightQuery query)
         {
             NetworkInsightQuery normalized = NormalizeNetworkInsightQuery(query);
-            DateTime sinceUtc = DateTime.UtcNow - normalized.window;
-            DateTime baselineUtc = DateTime.UtcNow - normalized.baseline;
+            DateTime nowUtc = DateTime.UtcNow;
+            DateTime sinceUtc = nowUtc - normalized.window;
+            DateTime baselineUtc = nowUtc - normalized.baseline;
+            NetworkInsightItem[] items;
+            Dictionary<string, IpInfoCacheEntry> ipInfoCache;
 
             lock (syncRoot)
             {
@@ -302,7 +310,7 @@ namespace DataProtectorWebBridge.Services
                         .Select(NetworkObservationKey),
                     StringComparer.OrdinalIgnoreCase);
 
-                NetworkInsightItem[] items = current
+                items = current
                     .GroupBy(NetworkObservationKey, StringComparer.OrdinalIgnoreCase)
                     .Select(group => ToNetworkInsightItem(group.ToList(), baselineKeys))
                     .Where(item => item.isNew)
@@ -310,16 +318,37 @@ namespace DataProtectorWebBridge.Services
                     .Take(normalized.limit)
                     .ToArray();
 
-                return new NetworkInsightResponse
-                {
-                    baselineHours = normalized.baseline.TotalHours,
-                    windowHours = normalized.window.TotalHours,
-                    generatedUtc = DateTime.UtcNow.ToString("o"),
-                    total = items.Length,
-                    newTotal = items.Length,
-                    items = items
-                };
+                ipInfoCache = CloneIpInfoCache();
             }
+
+            IpInfoCacheEntry[] resolvedEntries = ResolveMissingIpInfo(items, ipInfoCache, nowUtc);
+            if (resolvedEntries.Length > 0)
+            {
+                lock (syncRoot)
+                {
+                    EnsureIpInfoCache();
+                    foreach (IpInfoCacheEntry entry in resolvedEntries)
+                    {
+                        state.IpInfoCache[entry.ip] = entry;
+                    }
+
+                    TrimIpInfoCache();
+                    Save();
+                    ipInfoCache = CloneIpInfoCache();
+                }
+            }
+
+            AttachIpInfo(items, ipInfoCache, IsIpInfoEnabled());
+
+            return new NetworkInsightResponse
+            {
+                baselineHours = normalized.baseline.TotalHours,
+                windowHours = normalized.window.TotalHours,
+                generatedUtc = DateTime.UtcNow.ToString("o"),
+                total = items.Length,
+                newTotal = items.Length,
+                items = items
+            };
         }
 
         public CentralDeviceDto[] QueryDevices()
@@ -530,6 +559,10 @@ namespace DataProtectorWebBridge.Services
                     {
                         loaded.NetworkConnections = new List<NetworkConnectionObservation>();
                     }
+                    if (loaded != null && loaded.IpInfoCache == null)
+                    {
+                        loaded.IpInfoCache = new Dictionary<string, IpInfoCacheEntry>(StringComparer.OrdinalIgnoreCase);
+                    }
                     return loaded ?? new CentralState();
                 }
                 catch
@@ -545,6 +578,7 @@ namespace DataProtectorWebBridge.Services
             TrimAudit();
             TrimTasks();
             TrimNetworkConnections();
+            TrimIpInfoCache();
             string json = serializer.Serialize(state);
             File.WriteAllText(filePath, json, Encoding.UTF8);
         }
@@ -582,7 +616,21 @@ namespace DataProtectorWebBridge.Services
                 state.NetworkConnections = state.NetworkConnections
                     .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
                     .Take(maxNetworkObservations)
-                    .ToList();
+                .ToList();
+            }
+        }
+
+        private void TrimIpInfoCache()
+        {
+            EnsureIpInfoCache();
+            if (state.IpInfoCache.Count > MaxIpInfoCacheEntries)
+            {
+                state.IpInfoCache = state.IpInfoCache
+                    .Values
+                    .OrderByDescending(item => item.resolvedUtc, StringComparer.OrdinalIgnoreCase)
+                    .Take(MaxIpInfoCacheEntries)
+                    .Where(item => !string.IsNullOrWhiteSpace(item.ip))
+                    .ToDictionary(item => item.ip, item => item, StringComparer.OrdinalIgnoreCase);
             }
         }
 
@@ -804,6 +852,169 @@ namespace DataProtectorWebBridge.Services
             return true;
         }
 
+        private Dictionary<string, IpInfoCacheEntry> CloneIpInfoCache()
+        {
+            EnsureIpInfoCache();
+            return state.IpInfoCache
+                .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value != null)
+                .ToDictionary(pair => pair.Key, pair => CloneIpInfo(pair.Value), StringComparer.OrdinalIgnoreCase);
+        }
+
+        private void EnsureIpInfoCache()
+        {
+            if (state.IpInfoCache == null)
+            {
+                state.IpInfoCache = new Dictionary<string, IpInfoCacheEntry>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        private IpInfoCacheEntry[] ResolveMissingIpInfo(NetworkInsightItem[] items, Dictionary<string, IpInfoCacheEntry> cache, DateTime nowUtc)
+        {
+            string token = GetIpInfoToken();
+            if (string.IsNullOrWhiteSpace(token) || items == null || items.Length == 0)
+            {
+                return new IpInfoCacheEntry[0];
+            }
+
+            HashSet<string> lookupIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (NetworkInsightItem item in items)
+            {
+                string ip = ExtractPublicRemoteIp(item);
+                if (string.IsNullOrWhiteSpace(ip))
+                {
+                    continue;
+                }
+
+                if (TryGetFreshIpInfo(cache, ip, nowUtc, out _))
+                {
+                    continue;
+                }
+
+                lookupIps.Add(ip);
+                if (lookupIps.Count >= MaxIpInfoLookupsPerQuery)
+                {
+                    break;
+                }
+            }
+
+            List<IpInfoCacheEntry> resolved = new List<IpInfoCacheEntry>();
+            foreach (string ip in lookupIps)
+            {
+                resolved.Add(QueryIpInfoLite(ip, token, nowUtc));
+            }
+
+            return resolved.ToArray();
+        }
+
+        private static void AttachIpInfo(NetworkInsightItem[] items, Dictionary<string, IpInfoCacheEntry> cache, bool enrichmentEnabled)
+        {
+            if (items == null || items.Length == 0)
+            {
+                return;
+            }
+
+            foreach (NetworkInsightItem item in items)
+            {
+                string ip = ExtractPublicRemoteIp(item);
+                item.ipInfoEnabled = enrichmentEnabled;
+                item.ipInfoIp = ip;
+                if (string.IsNullOrWhiteSpace(ip))
+                {
+                    item.ipInfoStatus = "not_applicable";
+                    continue;
+                }
+
+                if (!TryGetFreshIpInfo(cache, ip, DateTime.UtcNow, out IpInfoCacheEntry entry))
+                {
+                    item.ipInfoStatus = enrichmentEnabled ? "pending" : "disabled";
+                    continue;
+                }
+
+                item.ipInfoStatus = string.IsNullOrWhiteSpace(entry.error) ? "resolved" : "error";
+                item.asn = entry.asn;
+                item.asName = entry.as_name;
+                item.asDomain = entry.as_domain;
+                item.countryCode = entry.country_code;
+                item.country = entry.country;
+                item.continentCode = entry.continent_code;
+                item.continent = entry.continent;
+            }
+        }
+
+        private static bool TryGetFreshIpInfo(Dictionary<string, IpInfoCacheEntry> cache, string ip, DateTime nowUtc, out IpInfoCacheEntry entry)
+        {
+            entry = null;
+            if (cache == null ||
+                string.IsNullOrWhiteSpace(ip) ||
+                !cache.TryGetValue(ip, out entry) ||
+                entry == null)
+            {
+                return false;
+            }
+
+            DateTime resolvedUtc = ParseUtcOrMin(entry.resolvedUtc);
+            TimeSpan maxAge = string.IsNullOrWhiteSpace(entry.error) ? TimeSpan.FromDays(7) : TimeSpan.FromHours(1);
+            return resolvedUtc != DateTime.MinValue && nowUtc - resolvedUtc <= maxAge;
+        }
+
+        private static IpInfoCacheEntry QueryIpInfoLite(string ip, string token, DateTime nowUtc)
+        {
+            IpInfoCacheEntry entry = new IpInfoCacheEntry
+            {
+                ip = ip,
+                resolvedUtc = nowUtc.ToString("o")
+            };
+
+            try
+            {
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create("https://api.ipinfo.io/lite/" + Uri.EscapeDataString(ip));
+                request.Method = "GET";
+                request.Timeout = 3000;
+                request.ReadWriteTimeout = 3000;
+                request.UserAgent = "DataProtector-Central/1.0";
+                request.Headers["Authorization"] = "Bearer " + token;
+
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                using (Stream responseStream = response.GetResponseStream())
+                using (StreamReader reader = new StreamReader(responseStream ?? Stream.Null, Encoding.UTF8))
+                {
+                    string json = reader.ReadToEnd();
+                    JavaScriptSerializer localSerializer = JsonResponse.CreateSerializer();
+                    IpInfoLiteResponse data = localSerializer.Deserialize<IpInfoLiteResponse>(json) ?? new IpInfoLiteResponse();
+                    entry.asn = data.asn ?? string.Empty;
+                    entry.as_name = data.as_name ?? string.Empty;
+                    entry.as_domain = data.as_domain ?? string.Empty;
+                    entry.country_code = data.country_code ?? string.Empty;
+                    entry.country = data.country ?? string.Empty;
+                    entry.continent_code = data.continent_code ?? string.Empty;
+                    entry.continent = data.continent ?? string.Empty;
+                    entry.error = string.Empty;
+                }
+            }
+            catch (Exception ex)
+            {
+                entry.error = ex.GetType().Name;
+            }
+
+            return entry;
+        }
+
+        private static string GetIpInfoToken()
+        {
+            string token = Environment.GetEnvironmentVariable(IpInfoTokenEnvironmentVariable);
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                token = Environment.GetEnvironmentVariable(LegacyIpInfoTokenEnvironmentVariable);
+            }
+
+            return token ?? string.Empty;
+        }
+
+        private static bool IsIpInfoEnabled()
+        {
+            return !string.IsNullOrWhiteSpace(GetIpInfoToken());
+        }
+
         private static NetworkInsightItem ToNetworkInsightItem(List<NetworkConnectionObservation> items, HashSet<string> baselineKeys)
         {
             NetworkConnectionObservation latest = items
@@ -881,6 +1092,75 @@ namespace DataProtectorWebBridge.Services
             return NormalizeRemoteIdentity(remote);
         }
 
+        private static string ExtractPublicRemoteIp(NetworkInsightItem item)
+        {
+            if (item == null)
+            {
+                return string.Empty;
+            }
+
+            string ip = ExtractPublicIp(item.remoteAddress);
+            if (!string.IsNullOrWhiteSpace(ip)) return ip;
+
+            ip = ExtractPublicIp(item.remoteEndpoint);
+            if (!string.IsNullOrWhiteSpace(ip)) return ip;
+
+            ip = ExtractPublicIp(item.remoteIdentity);
+            if (!string.IsNullOrWhiteSpace(ip)) return ip;
+
+            return ExtractPublicIp(item.domain);
+        }
+
+        private static string ExtractPublicIp(string value)
+        {
+            string normalized = NormalizeRemoteIdentity(value);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return string.Empty;
+            }
+
+            IPAddress address;
+            if (!IPAddress.TryParse(normalized, out address))
+            {
+                return string.Empty;
+            }
+
+            return IsPublicIpAddress(address) ? address.ToString() : string.Empty;
+        }
+
+        private static bool IsPublicIpAddress(IPAddress address)
+        {
+            if (address == null)
+            {
+                return false;
+            }
+
+            byte[] bytes = address.GetAddressBytes();
+            if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                byte first = bytes[0];
+                byte second = bytes[1];
+                if (first == 10) return false;
+                if (first == 127) return false;
+                if (first == 169 && second == 254) return false;
+                if (first == 172 && second >= 16 && second <= 31) return false;
+                if (first == 192 && second == 168) return false;
+                if (first == 0) return false;
+                if (first >= 224) return false;
+                return true;
+            }
+
+            if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+            {
+                if (address.Equals(IPAddress.IPv6Loopback)) return false;
+                if (address.IsIPv6LinkLocal || address.IsIPv6Multicast || address.IsIPv6SiteLocal) return false;
+                if ((bytes[0] & 0xFE) == 0xFC) return false;
+                return true;
+            }
+
+            return false;
+        }
+
         private static string NormalizeIdentityPart(string value)
         {
             return (value ?? string.Empty).Trim().ToLowerInvariant();
@@ -935,6 +1215,28 @@ namespace DataProtectorWebBridge.Services
             }
 
             return ~crc;
+        }
+
+        private static IpInfoCacheEntry CloneIpInfo(IpInfoCacheEntry item)
+        {
+            if (item == null)
+            {
+                return null;
+            }
+
+            return new IpInfoCacheEntry
+            {
+                ip = item.ip,
+                asn = item.asn,
+                as_name = item.as_name,
+                as_domain = item.as_domain,
+                country_code = item.country_code,
+                country = item.country,
+                continent_code = item.continent_code,
+                continent = item.continent,
+                resolvedUtc = item.resolvedUtc,
+                error = item.error
+            };
         }
 
         private static NetworkConnectionObservation CloneNetworkObservation(NetworkConnectionObservation item)
@@ -1391,6 +1693,7 @@ namespace DataProtectorWebBridge.Services
                 Audit = new List<AuditLog.AuditRecord>();
                 Tasks = new List<RemoteTaskState>();
                 NetworkConnections = new List<NetworkConnectionObservation>();
+                IpInfoCache = new Dictionary<string, IpInfoCacheEntry>(StringComparer.OrdinalIgnoreCase);
             }
 
             public long PolicyVersion { get; set; }
@@ -1401,6 +1704,7 @@ namespace DataProtectorWebBridge.Services
             public List<AuditLog.AuditRecord> Audit { get; set; }
             public List<RemoteTaskState> Tasks { get; set; }
             public List<NetworkConnectionObservation> NetworkConnections { get; set; }
+            public Dictionary<string, IpInfoCacheEntry> IpInfoCache { get; set; }
         }
 
         public sealed class NetworkInsightQuery
@@ -1454,6 +1758,16 @@ namespace DataProtectorWebBridge.Services
             public string sha256 { get; set; }
             public string signatureStatus { get; set; }
             public string signer { get; set; }
+            public bool ipInfoEnabled { get; set; }
+            public string ipInfoStatus { get; set; }
+            public string ipInfoIp { get; set; }
+            public string asn { get; set; }
+            public string asName { get; set; }
+            public string asDomain { get; set; }
+            public string countryCode { get; set; }
+            public string country { get; set; }
+            public string continentCode { get; set; }
+            public string continent { get; set; }
         }
 
         private sealed class NetworkConnectionObservation
@@ -1488,6 +1802,32 @@ namespace DataProtectorWebBridge.Services
             public string firstSeenUtc { get; set; }
             public string lastSeenUtc { get; set; }
             public int count { get; set; }
+        }
+
+        private sealed class IpInfoCacheEntry
+        {
+            public string ip { get; set; }
+            public string asn { get; set; }
+            public string as_name { get; set; }
+            public string as_domain { get; set; }
+            public string country_code { get; set; }
+            public string country { get; set; }
+            public string continent_code { get; set; }
+            public string continent { get; set; }
+            public string resolvedUtc { get; set; }
+            public string error { get; set; }
+        }
+
+        private sealed class IpInfoLiteResponse
+        {
+            public string ip { get; set; }
+            public string asn { get; set; }
+            public string as_name { get; set; }
+            public string as_domain { get; set; }
+            public string country_code { get; set; }
+            public string country { get; set; }
+            public string continent_code { get; set; }
+            public string continent { get; set; }
         }
 
         private sealed class CentralDeviceState

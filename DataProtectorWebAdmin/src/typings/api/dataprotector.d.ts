@@ -104,6 +104,16 @@ declare namespace Api {
       sha256: string;
       signatureStatus: string;
       signer: string;
+      ipInfoEnabled: boolean;
+      ipInfoStatus: string;
+      ipInfoIp: string;
+      asn: string;
+      asName: string;
+      asDomain: string;
+      countryCode: string;
+      country: string;
+      continentCode: string;
+      continent: string;
     }
 
     interface NetworkInsightResponse {

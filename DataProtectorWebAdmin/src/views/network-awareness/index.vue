@@ -154,6 +154,19 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
     }
   },
   {
+    title: 'IP Intelligence',
+    key: 'ipInfo',
+    width: 280,
+    render(row) {
+      return (
+        <div class="cell-stack">
+          <div class="cell-strong">{formatIpOwner(row)}</div>
+          <div class="cell-muted">{formatIpLocation(row)}</div>
+        </div>
+      );
+    }
+  },
+  {
     title: 'Signature',
     key: 'signatureStatus',
     width: 240,
@@ -235,6 +248,23 @@ function fileName(path: string) {
 function formatTime(value: string) {
   if (!value) return '-';
   return new Date(value).toLocaleString();
+}
+
+function formatIpOwner(row: Api.DataProtector.NetworkInsightItem) {
+  if (row.ipInfoStatus === 'disabled') return 'IP info disabled';
+  if (row.ipInfoStatus === 'pending') return row.ipInfoIp ? `${row.ipInfoIp} pending` : 'Pending';
+  if (row.ipInfoStatus === 'error') return row.ipInfoIp ? `${row.ipInfoIp} lookup failed` : 'Lookup failed';
+
+  const owner = row.asName || row.asDomain || row.asn;
+  if (!owner) return row.ipInfoIp || '-';
+
+  return row.asn ? `${row.asn} ${owner}` : owner;
+}
+
+function formatIpLocation(row: Api.DataProtector.NetworkInsightItem) {
+  const parts = [row.country || row.countryCode, row.continent || row.continentCode].filter(Boolean);
+  if (parts.length) return parts.join(' / ');
+  return row.asDomain || row.ipInfoStatus || '-';
 }
 
 function rowKey(row: Api.DataProtector.NetworkInsightItem) {
@@ -329,7 +359,7 @@ onMounted(refresh);
         :loading="loading"
         :row-key="rowKey"
         :pagination="{ pageSize: 12 }"
-        :scroll-x="1840"
+        :scroll-x="2120"
         size="small"
       />
     </NCard>
