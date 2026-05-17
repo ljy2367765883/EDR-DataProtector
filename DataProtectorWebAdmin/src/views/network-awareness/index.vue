@@ -274,7 +274,7 @@ onMounted(refresh);
     <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen">
       <NGi>
         <NCard :bordered="false" class="metric-card">
-          <NStatistic label="Observed remotes" :value="stats.total" />
+          <NStatistic label="New connections" :value="stats.total" />
         </NCard>
       </NGi>
       <NGi>

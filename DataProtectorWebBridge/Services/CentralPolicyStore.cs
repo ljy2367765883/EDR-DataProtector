@@ -305,6 +305,7 @@ namespace DataProtectorWebBridge.Services
                 NetworkInsightItem[] items = current
                     .GroupBy(NetworkObservationKey, StringComparer.OrdinalIgnoreCase)
                     .Select(group => ToNetworkInsightItem(group.ToList(), baselineKeys))
+                    .Where(item => item.isNew)
                     .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
                     .Take(normalized.limit)
                     .ToArray();
@@ -315,7 +316,7 @@ namespace DataProtectorWebBridge.Services
                     windowHours = normalized.window.TotalHours,
                     generatedUtc = DateTime.UtcNow.ToString("o"),
                     total = items.Length,
-                    newTotal = items.Count(item => item.isNew),
+                    newTotal = items.Length,
                     items = items
                 };
             }
@@ -668,9 +669,9 @@ namespace DataProtectorWebBridge.Services
                 count = 1
             };
 
-            string key = NetworkObservationKey(observation);
+            string key = NetworkObservationStorageKey(observation);
             NetworkConnectionObservation existing = state.NetworkConnections.FirstOrDefault(item =>
-                string.Equals(NetworkObservationKey(item), key, StringComparison.OrdinalIgnoreCase));
+                string.Equals(NetworkObservationStorageKey(item), key, StringComparison.OrdinalIgnoreCase));
 
             if (existing == null)
             {
@@ -678,10 +679,23 @@ namespace DataProtectorWebBridge.Services
             }
             else
             {
+                existing.host = PreferNonEmpty(observation.host, existing.host);
+                existing.user = PreferNonEmpty(observation.user, existing.user);
+                existing.remoteIdentity = PreferNonEmpty(observation.remoteIdentity, existing.remoteIdentity);
+                existing.remoteAddress = PreferNonEmpty(observation.remoteAddress, existing.remoteAddress);
+                existing.remoteEndpoint = PreferNonEmpty(observation.remoteEndpoint, existing.remoteEndpoint);
+                existing.domain = PreferNonEmpty(observation.domain, existing.domain);
                 existing.lastSeenUtc = observation.lastSeenUtc;
                 existing.count++;
                 existing.processId = observation.processId;
+                existing.direction = PreferNonEmpty(observation.direction, existing.direction);
+                existing.protocolName = PreferNonEmpty(observation.protocolName, existing.protocolName);
                 existing.localEndpoint = observation.localEndpoint;
+                existing.remotePort = observation.remotePort != 0 ? observation.remotePort : existing.remotePort;
+                existing.isDns = existing.isDns || observation.isDns;
+                existing.isQuic = existing.isQuic || observation.isQuic;
+                existing.isHttp3 = existing.isHttp3 || observation.isHttp3;
+                existing.blocked = existing.blocked || observation.blocked;
                 existing.fileExists = observation.fileExists;
                 existing.fileSize = observation.fileSize;
                 existing.fileModifiedUtc = observation.fileModifiedUtc;
@@ -798,7 +812,7 @@ namespace DataProtectorWebBridge.Services
 
             return new NetworkInsightItem
             {
-                key = NetworkObservationKey(latest),
+                key = NetworkObservationFingerprint(latest),
                 isNew = !baselineKeys.Contains(NetworkObservationKey(latest)),
                 firstSeenUtc = items.Min(item => item.firstSeenUtc),
                 lastSeenUtc = latest.lastSeenUtc,
@@ -835,11 +849,92 @@ namespace DataProtectorWebBridge.Services
                 return string.Empty;
             }
 
-            return (item.host ?? string.Empty).ToLowerInvariant() + "|" +
-                   (item.processPath ?? string.Empty).ToLowerInvariant() + "|" +
-                   (item.remoteIdentity ?? string.Empty).ToLowerInvariant() + "|" +
-                   (item.protocolName ?? string.Empty).ToLowerInvariant() + "|" +
-                   item.remotePort.ToString(CultureInfo.InvariantCulture);
+            return NormalizeIdentityPart(item.processPath).Replace('/', '\\') + "|" + NetworkObservationRemoteKey(item);
+        }
+
+        private static string NetworkObservationStorageKey(NetworkConnectionObservation item)
+        {
+            if (item == null)
+            {
+                return string.Empty;
+            }
+
+            string deviceKey = NormalizeIdentityPart(item.deviceId);
+            if (string.IsNullOrWhiteSpace(deviceKey))
+            {
+                deviceKey = NormalizeIdentityPart(item.host);
+            }
+
+            return deviceKey + "|" + NetworkObservationKey(item);
+        }
+
+        private static string NetworkObservationFingerprint(NetworkConnectionObservation item)
+        {
+            return "nwa-" + ComputeCrc32(NetworkObservationKey(item)).ToString("x8", CultureInfo.InvariantCulture);
+        }
+
+        private static string NetworkObservationRemoteKey(NetworkConnectionObservation item)
+        {
+            string remote = PreferNonEmpty(item.domain, item.remoteAddress);
+            remote = PreferNonEmpty(remote, item.remoteIdentity);
+            remote = PreferNonEmpty(remote, item.remoteEndpoint);
+            return NormalizeRemoteIdentity(remote);
+        }
+
+        private static string NormalizeIdentityPart(string value)
+        {
+            return (value ?? string.Empty).Trim().ToLowerInvariant();
+        }
+
+        private static string NormalizeRemoteIdentity(string value)
+        {
+            string remote = NormalizeIdentityPart(value).TrimEnd('.');
+            if (remote.Length == 0)
+            {
+                return remote;
+            }
+
+            if (remote[0] == '[')
+            {
+                int endBracket = remote.IndexOf(']');
+                if (endBracket > 1)
+                {
+                    return remote.Substring(1, endBracket - 1);
+                }
+            }
+
+            int lastColon = remote.LastIndexOf(':');
+            if (lastColon > 0 &&
+                remote.IndexOf(':') == lastColon &&
+                lastColon + 1 < remote.Length &&
+                remote.Substring(lastColon + 1).All(char.IsDigit))
+            {
+                return remote.Substring(0, lastColon);
+            }
+
+            return remote;
+        }
+
+        private static string PreferNonEmpty(string preferred, string fallback)
+        {
+            return string.IsNullOrWhiteSpace(preferred) ? (fallback ?? string.Empty) : preferred;
+        }
+
+        private static uint ComputeCrc32(string value)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);
+            uint crc = 0xFFFFFFFF;
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                crc ^= bytes[i];
+                for (int bit = 0; bit < 8; bit++)
+                {
+                    uint mask = (uint)-(int)(crc & 1);
+                    crc = (crc >> 1) ^ (0xEDB88320 & mask);
+                }
+            }
+
+            return ~crc;
         }
 
         private static NetworkConnectionObservation CloneNetworkObservation(NetworkConnectionObservation item)
