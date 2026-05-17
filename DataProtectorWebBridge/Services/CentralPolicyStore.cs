@@ -16,6 +16,7 @@ namespace DataProtectorWebBridge.Services
         private const int MaxIpInfoLookupsPerQuery = 12;
         private const string IpInfoTokenEnvironmentVariable = "DATAPROTECTOR_IPINFO_TOKEN";
         private const string LegacyIpInfoTokenEnvironmentVariable = "IPINFO_TOKEN";
+        private const string IpInfoTokenFileName = "IpInfoToken.txt";
         private readonly object syncRoot = new object();
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly string filePath;
@@ -1001,13 +1002,35 @@ namespace DataProtectorWebBridge.Services
 
         private static string GetIpInfoToken()
         {
-            string token = Environment.GetEnvironmentVariable(IpInfoTokenEnvironmentVariable);
+            string token = NormalizeSecret(Environment.GetEnvironmentVariable(IpInfoTokenEnvironmentVariable));
             if (string.IsNullOrWhiteSpace(token))
             {
-                token = Environment.GetEnvironmentVariable(LegacyIpInfoTokenEnvironmentVariable);
+                token = NormalizeSecret(Environment.GetEnvironmentVariable(LegacyIpInfoTokenEnvironmentVariable));
+            }
+
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                try
+                {
+                    string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                    string tokenPath = Path.Combine(dataRoot, "DataProtector", IpInfoTokenFileName);
+                    if (File.Exists(tokenPath))
+                    {
+                        token = NormalizeSecret(File.ReadAllText(tokenPath, Encoding.UTF8));
+                    }
+                }
+                catch
+                {
+                    token = string.Empty;
+                }
             }
 
             return token ?? string.Empty;
+        }
+
+        private static string NormalizeSecret(string value)
+        {
+            return (value ?? string.Empty).Trim().Trim('"', '\'');
         }
 
         private static bool IsIpInfoEnabled()

@@ -251,9 +251,10 @@ function formatTime(value: string) {
 }
 
 function formatIpOwner(row: Api.DataProtector.NetworkInsightItem) {
-  if (row.ipInfoStatus === 'disabled') return 'IP info disabled';
+  if (row.ipInfoStatus === 'disabled') return 'Not configured';
   if (row.ipInfoStatus === 'pending') return row.ipInfoIp ? `${row.ipInfoIp} pending` : 'Pending';
   if (row.ipInfoStatus === 'error') return row.ipInfoIp ? `${row.ipInfoIp} lookup failed` : 'Lookup failed';
+  if (row.ipInfoStatus === 'not_applicable') return 'Private or non-IP remote';
 
   const owner = row.asName || row.asDomain || row.asn;
   if (!owner) return row.ipInfoIp || '-';
@@ -262,6 +263,9 @@ function formatIpOwner(row: Api.DataProtector.NetworkInsightItem) {
 }
 
 function formatIpLocation(row: Api.DataProtector.NetworkInsightItem) {
+  if (row.ipInfoStatus === 'disabled') return 'Set DATAPROTECTOR_IPINFO_TOKEN on the server';
+  if (row.ipInfoStatus === 'not_applicable') return row.remoteIdentity || row.remoteEndpoint || '-';
+
   const parts = [row.country || row.countryCode, row.continent || row.continentCode].filter(Boolean);
   if (parts.length) return parts.join(' / ');
   return row.asDomain || row.ipInfoStatus || '-';

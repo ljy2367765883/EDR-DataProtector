@@ -92,6 +92,8 @@ server\DataProtectorWebBridge.exe server
 
 Optional IP intelligence enrichment:
 setx DATAPROTECTOR_IPINFO_TOKEN "<ipinfo-token>"
+or write the token into:
+C:\ProgramData\DataProtector\IpInfoToken.txt
 
 Open the web console:
 http://<server-ip>:17643/
