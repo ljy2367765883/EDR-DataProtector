@@ -83,6 +83,7 @@ static LARGE_INTEGER gDpHashProtectRegistryCookie;
 static BOOLEAN gDpHashProtectRegistryRegistered = FALSE;
 static LIST_ENTRY gDpHashProtectEvents;
 static KSPIN_LOCK gDpHashProtectEventLock;
+static volatile LONG gDpHashProtectPolicyFlags = DP_HASH_PROTECT_DEFAULT_FLAGS;
 static BOOLEAN gDpHashProtectInitialized = FALSE;
 static ULONG gDpHashProtectEventCount = 0;
 static ULONGLONG gDpHashProtectEventSequence = 0;
@@ -99,6 +100,27 @@ SeLocateProcessImageName(
     _Inout_ PEPROCESS Process,
     _Outptr_ PUNICODE_STRING *pImageFileName
     );
+
+static
+ULONG
+DpHashProtectReadPolicyFlags(
+    VOID
+    )
+{
+    return (ULONG)gDpHashProtectPolicyFlags;
+}
+
+static
+BOOLEAN
+DpHashProtectFeatureEnabled(
+    _In_ ULONG FeatureFlag
+    )
+{
+    ULONG flags = DpHashProtectReadPolicyFlags();
+
+    return FlagOn(flags, DP_HASH_PROTECT_FLAG_ENABLED) &&
+           FlagOn(flags, FeatureFlag);
+}
 
 static
 BOOLEAN
@@ -491,6 +513,10 @@ DpHashProtectPreOperationCallback(
 
     UNREFERENCED_PARAMETER(RegistrationContext);
 
+    if (!DpHashProtectFeatureEnabled(DP_HASH_PROTECT_FLAG_LSASS_HANDLES)) {
+        return OB_PREOP_SUCCESS;
+    }
+
     if (OperationInformation == NULL ||
         OperationInformation->Parameters == NULL ||
         OperationInformation->KernelHandle ||
@@ -713,6 +739,10 @@ DpHashProtectRegistryCallback(
 
     UNREFERENCED_PARAMETER(CallbackContext);
 
+    if (!DpHashProtectFeatureEnabled(DP_HASH_PROTECT_FLAG_REGISTRY_HIVES)) {
+        return STATUS_SUCCESS;
+    }
+
     if (Argument1 == NULL || Argument2 == NULL) {
         return STATUS_SUCCESS;
     }
@@ -850,6 +880,8 @@ DpHashProtectInitialize(
 
     InitializeListHead(&gDpHashProtectEvents);
     KeInitializeSpinLock(&gDpHashProtectEventLock);
+    InterlockedExchange((volatile LONG *)&gDpHashProtectPolicyFlags,
+                        (LONG)DP_HASH_PROTECT_DEFAULT_FLAGS);
     gDpHashProtectEventCount = 0;
     gDpHashProtectEventSequence = 0;
     gDpHashProtectDroppedEvents = 0;
@@ -900,6 +932,7 @@ DpHashProtectShouldBlockCreate(
     if (Data == NULL ||
         Data->Iopb == NULL ||
         Data->Iopb->MajorFunction != IRP_MJ_CREATE ||
+        !DpHashProtectFeatureEnabled(DP_HASH_PROTECT_FLAG_CREDENTIAL_FILES) ||
         Data->RequestorMode == KernelMode ||
         KeGetCurrentIrql() != PASSIVE_LEVEL ||
         FltObjects == NULL ||
@@ -945,6 +978,57 @@ DpHashProtectShouldBlockCreate(
     FltReleaseFileNameInformation(nameInfo);
 
     return block;
+}
+
+NTSTATUS
+DpHashProtectSetPolicy(
+    _In_ const DP_HASH_PROTECT_POLICY *Policy
+    )
+{
+    ULONG flags;
+
+    if (Policy == NULL ||
+        Policy->Version != DP_HASH_PROTECT_POLICY_VERSION ||
+        FlagOn(Policy->Flags, ~DP_HASH_PROTECT_ALLOWED_FLAGS)) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    flags = Policy->Flags & DP_HASH_PROTECT_ALLOWED_FLAGS;
+
+    InterlockedExchange((volatile LONG *)&gDpHashProtectPolicyFlags, (LONG)flags);
+
+    DP_HASH_TRACE("policy updated flags=0x%08X\n", flags);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+DpHashProtectQueryPolicy(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    )
+{
+    PDP_HASH_PROTECT_POLICY policy;
+
+    if (ReturnOutputBufferLength == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ReturnOutputBufferLength = sizeof(DP_HASH_PROTECT_POLICY);
+
+    if (OutputBuffer == NULL || OutputBufferLength < sizeof(DP_HASH_PROTECT_POLICY)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    policy = (PDP_HASH_PROTECT_POLICY)OutputBuffer;
+    RtlZeroMemory(policy, sizeof(DP_HASH_PROTECT_POLICY));
+
+    policy->Version = DP_HASH_PROTECT_POLICY_VERSION;
+    policy->Flags = DpHashProtectReadPolicyFlags();
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS

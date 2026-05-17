@@ -153,6 +153,19 @@ declare namespace Api {
 
     interface DeviceRuleRequest extends DeviceRule {}
 
+    interface HashProtectPolicy {
+      enabled: boolean;
+      protectLsass: boolean;
+      protectCredentialFiles: boolean;
+      protectRegistryHives: boolean;
+      flags: number;
+      actor?: string;
+    }
+
+    interface HashProtectPolicyRequest extends Omit<HashProtectPolicy, 'flags'> {
+      flags?: number;
+    }
+
     type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
 
     interface RemovableVolume {

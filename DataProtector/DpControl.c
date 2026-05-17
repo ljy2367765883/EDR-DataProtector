@@ -133,6 +133,25 @@ DpControlMessageNotify(
                                         ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryHashProtectPolicy) {
+        return DpHashProtectQueryPolicy(OutputBuffer,
+                                        OutputBufferLength,
+                                        ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandSetHashProtectPolicy) {
+        PDP_HASH_PROTECT_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_HASH_PROTECT_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_HASH_PROTECT_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_HASH_PROTECT_POLICY)message->Data;
+        return DpHashProtectSetPolicy(policy);
+    }
+
     if (message->Command == DpPolicyCommandAddDeviceRule ||
         message->Command == DpPolicyCommandRemoveDeviceRule) {
 

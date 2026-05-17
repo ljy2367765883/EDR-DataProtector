@@ -55,7 +55,9 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandRemoveDeviceRule = 61,
     DpPolicyCommandClearDeviceRules = 62,
     DpPolicyCommandQueryDeviceRules = 63,
-    DpPolicyCommandQueryHashProtectEvents = 80
+    DpPolicyCommandQueryHashProtectEvents = 80,
+    DpPolicyCommandSetHashProtectPolicy = 81,
+    DpPolicyCommandQueryHashProtectPolicy = 82
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -252,6 +254,11 @@ typedef struct _DP_HASH_PROTECT_EVENT_QUERY_ENTRY {
     WCHAR ProcessImage[DP_HASH_PROTECT_PROCESS_CHARS];
 } DP_HASH_PROTECT_EVENT_QUERY_ENTRY, *PDP_HASH_PROTECT_EVENT_QUERY_ENTRY;
 
+typedef struct _DP_HASH_PROTECT_POLICY_MESSAGE {
+    ULONG Version;
+    ULONG Flags;
+} DP_HASH_PROTECT_POLICY_MESSAGE, *PDP_HASH_PROTECT_POLICY_MESSAGE;
+
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
@@ -262,6 +269,12 @@ typedef struct _DP_HASH_PROTECT_EVENT_QUERY_ENTRY {
 #define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
 #define DP_WEBSHELL_EVENT_QUERY_VERSION 1u
 #define DP_HASH_PROTECT_EVENT_QUERY_VERSION 1u
+#define DP_HASH_PROTECT_POLICY_VERSION 1u
+#define DP_HASH_PROTECT_ALLOWED_FLAGS \
+    (DP_POLICY_API_HASH_PROTECT_FLAG_ENABLED | \
+     DP_POLICY_API_HASH_PROTECT_FLAG_LSASS_HANDLES | \
+     DP_POLICY_API_HASH_PROTECT_FLAG_CREDENTIAL_FILES | \
+     DP_POLICY_API_HASH_PROTECT_FLAG_REGISTRY_HIVES)
 #define DP_DEVICE_RULE_MESSAGE_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
@@ -2696,6 +2709,72 @@ DpPolicyQueryHashProtectEvents(
         return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
     }
 
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicySetHashProtectPolicy(
+    _In_ const DP_POLICY_API_HASH_PROTECT_POLICY *Policy
+    )
+{
+    DP_HASH_PROTECT_POLICY_MESSAGE message;
+
+    if (Policy == NULL ||
+        (Policy->Flags & ~DP_HASH_PROTECT_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Hash protection policy is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_HASH_PROTECT_POLICY_VERSION;
+    message.Flags = Policy->Flags;
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandSetHashProtectPolicy,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryHashProtectPolicy(
+    _Out_ DP_POLICY_API_HASH_PROTECT_POLICY *Policy
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    DP_HASH_PROTECT_POLICY_MESSAGE message;
+
+    if (Policy == NULL) {
+        DpPolicySetLastErrorMessage(L"Hash protection policy output is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(Policy, sizeof(*Policy));
+    ZeroMemory(&message, sizeof(message));
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryHashProtectPolicy,
+                                          NULL,
+                                          0,
+                                          &message,
+                                          sizeof(message),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(message) ||
+        message.Version != DP_HASH_PROTECT_POLICY_VERSION ||
+        (message.Flags & ~DP_HASH_PROTECT_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid hash protection policy.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    Policy->Flags = message.Flags;
     DpPolicySetLastErrorMessage(L"Success.");
     return DP_POLICY_API_SUCCESS;
 }

@@ -52,6 +52,7 @@ namespace DataProtectorWebBridge.Services
                     user = Environment.UserName,
                     auditPath = filePath,
                     policyVersion = state.PolicyVersion,
+                    hashProtectEnabled = QueryHashProtectPolicy().enabled,
                     deviceCount = state.Devices.Count,
                     onlineDeviceCount = state.Devices.Values.Count(IsOnline),
                     pendingTaskCount = state.Tasks.Count(task => task.status == "queued" || task.status == "sent")
@@ -102,6 +103,15 @@ namespace DataProtectorWebBridge.Services
                     .Select(CloneDeviceRule)
                     .OrderBy(rule => rule.deviceId, StringComparer.OrdinalIgnoreCase)
                     .ToArray();
+            }
+        }
+
+        public PolicyBridgeService.HashProtectPolicyDto QueryHashProtectPolicy()
+        {
+            lock (syncRoot)
+            {
+                EnsureHashProtectPolicy();
+                return PolicyBridgeService.CloneHashProtectPolicy(state.HashProtectPolicy);
             }
         }
 
@@ -387,6 +397,36 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("All central device control rules cleared.");
+        }
+
+        public PolicyBridgeService.OperationResult UpdateHashProtectPolicy(PolicyBridgeService.HashProtectPolicyRequest request)
+        {
+            PolicyBridgeService.HashProtectPolicyDto normalized = PolicyBridgeService.NormalizeHashProtectPolicy(request);
+            lock (syncRoot)
+            {
+                EnsureHashProtectPolicy();
+                if (PolicyBridgeService.ToHashProtectFlags(state.HashProtectPolicy) != PolicyBridgeService.ToHashProtectFlags(normalized))
+                {
+                    state.HashProtectPolicy = PolicyBridgeService.CloneHashProtectPolicy(normalized);
+                    state.PolicyVersion++;
+                }
+                else
+                {
+                    state.HashProtectPolicy = PolicyBridgeService.CloneHashProtectPolicy(normalized);
+                }
+
+                AppendAudit(
+                    normalized.actor,
+                    "central.policy.hashprotect.update",
+                    "anti-dump",
+                    PolicyBridgeService.HashProtectPolicySummary(normalized),
+                    true,
+                    "0x00000000",
+                    "Hash dump protection policy stored on central server.");
+                Save();
+            }
+
+            return Success("Hash dump protection policy stored on central server.");
         }
 
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
@@ -737,6 +777,7 @@ namespace DataProtectorWebBridge.Services
                     networkRules = QueryNetworkRules(),
                     webShellRules = QueryWebShellRules(),
                     deviceRules = BuildEffectiveDeviceRules(deviceId),
+                    hashProtectPolicy = QueryHashProtectPolicy(),
                     tasks = assignedTasks
                 };
             }
@@ -783,6 +824,10 @@ namespace DataProtectorWebBridge.Services
                     {
                         loaded.IpInfoCache = new Dictionary<string, IpInfoCacheEntry>(StringComparer.OrdinalIgnoreCase);
                     }
+                    if (loaded != null && loaded.HashProtectPolicy == null)
+                    {
+                        loaded.HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
+                    }
                     return loaded ?? new CentralState();
                 }
                 catch
@@ -818,6 +863,18 @@ namespace DataProtectorWebBridge.Services
                 Status = status ?? "0x00000000",
                 Message = message ?? string.Empty
             });
+        }
+
+        private void EnsureHashProtectPolicy()
+        {
+            if (state.HashProtectPolicy == null)
+            {
+                state.HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
+            }
+            else
+            {
+                state.HashProtectPolicy = PolicyBridgeService.CloneHashProtectPolicy(state.HashProtectPolicy);
+            }
         }
 
         private void TrimAudit()
@@ -2579,6 +2636,7 @@ namespace DataProtectorWebBridge.Services
                 NetworkRules = new List<PolicyBridgeService.NetworkRuleDto>();
                 WebShellRules = new List<PolicyBridgeService.WebShellRuleDto>();
                 DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
+                HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableAuthorizations = new Dictionary<string, RemovableDeviceAuthorizationRule>(StringComparer.OrdinalIgnoreCase);
@@ -2593,6 +2651,7 @@ namespace DataProtectorWebBridge.Services
             public List<PolicyBridgeService.NetworkRuleDto> NetworkRules { get; set; }
             public List<PolicyBridgeService.WebShellRuleDto> WebShellRules { get; set; }
             public List<PolicyBridgeService.DeviceRuleDto> DeviceRules { get; set; }
+            public PolicyBridgeService.HashProtectPolicyDto HashProtectPolicy { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public Dictionary<string, RemovableDeviceState> RemovableDevices { get; set; }
             public Dictionary<string, RemovableDeviceAuthorizationRule> RemovableAuthorizations { get; set; }
@@ -2904,6 +2963,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.NetworkRuleDto[] networkRules { get; set; }
             public PolicyBridgeService.WebShellRuleDto[] webShellRules { get; set; }
             public PolicyBridgeService.DeviceRuleDto[] deviceRules { get; set; }
+            public PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy { get; set; }
             public RemoteTaskDto[] tasks { get; set; }
         }
 

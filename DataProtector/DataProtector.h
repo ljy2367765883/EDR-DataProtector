@@ -230,7 +230,9 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandRemoveDeviceRule = 61,
     DpPolicyCommandClearDeviceRules = 62,
     DpPolicyCommandQueryDeviceRules = 63,
-    DpPolicyCommandQueryHashProtectEvents = 80
+    DpPolicyCommandQueryHashProtectEvents = 80,
+    DpPolicyCommandSetHashProtectPolicy = 81,
+    DpPolicyCommandQueryHashProtectPolicy = 82
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -474,6 +476,23 @@ typedef enum _DP_HASH_PROTECT_OPERATION {
     DpHashProtectOperationCredentialFile = 2,
     DpHashProtectOperationRegistryHive = 3
 } DP_HASH_PROTECT_OPERATION;
+
+#define DP_HASH_PROTECT_POLICY_VERSION 1
+#define DP_HASH_PROTECT_FLAG_ENABLED          0x00000001
+#define DP_HASH_PROTECT_FLAG_LSASS_HANDLES    0x00000002
+#define DP_HASH_PROTECT_FLAG_CREDENTIAL_FILES 0x00000004
+#define DP_HASH_PROTECT_FLAG_REGISTRY_HIVES   0x00000008
+#define DP_HASH_PROTECT_DEFAULT_FLAGS \
+    (DP_HASH_PROTECT_FLAG_ENABLED | \
+     DP_HASH_PROTECT_FLAG_LSASS_HANDLES | \
+     DP_HASH_PROTECT_FLAG_CREDENTIAL_FILES | \
+     DP_HASH_PROTECT_FLAG_REGISTRY_HIVES)
+#define DP_HASH_PROTECT_ALLOWED_FLAGS DP_HASH_PROTECT_DEFAULT_FLAGS
+
+typedef struct _DP_HASH_PROTECT_POLICY {
+    ULONG Version;
+    ULONG Flags;
+} DP_HASH_PROTECT_POLICY, *PDP_HASH_PROTECT_POLICY;
 
 typedef struct _DP_HASH_PROTECT_EVENT_QUERY_HEADER {
     ULONG Version;
@@ -781,6 +800,18 @@ DpHashProtectShouldBlockCreate(
 
 NTSTATUS
 DpHashProtectQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpHashProtectSetPolicy(
+    _In_ const DP_HASH_PROTECT_POLICY *Policy
+    );
+
+NTSTATUS
+DpHashProtectQueryPolicy(
     _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
     _In_ ULONG OutputBufferLength,
     _Out_ PULONG ReturnOutputBufferLength

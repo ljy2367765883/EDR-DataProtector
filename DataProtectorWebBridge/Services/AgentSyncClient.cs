@@ -119,6 +119,7 @@ namespace DataProtectorWebBridge.Services
                     response.networkRules ?? new PolicyBridgeService.NetworkRuleDto[0],
                     response.webShellRules ?? new PolicyBridgeService.WebShellRuleDto[0],
                     response.deviceRules ?? new PolicyBridgeService.DeviceRuleDto[0],
+                    response.hashProtectPolicy ?? PolicyBridgeService.DefaultHashProtectPolicy(),
                     response.policyVersion);
             }
 
@@ -273,6 +274,7 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.NetworkRuleDto[] networkRules,
             PolicyBridgeService.WebShellRuleDto[] webShellRules,
             PolicyBridgeService.DeviceRuleDto[] deviceRules,
+            PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy,
             long policyVersion)
         {
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
@@ -392,9 +394,26 @@ namespace DataProtectorWebBridge.Services
                 }
             }
 
+            PolicyBridgeService.OperationResult hashPolicyResult = policyService.SetHashProtectPolicy(new PolicyBridgeService.HashProtectPolicyRequest
+            {
+                enabled = hashProtectPolicy.enabled,
+                protectLsass = hashProtectPolicy.protectLsass,
+                protectCredentialFiles = hashProtectPolicy.protectCredentialFiles,
+                protectRegistryHives = hashProtectPolicy.protectRegistryHives,
+                actor = "central-agent"
+            });
+
+            if (!hashPolicyResult.succeeded)
+            {
+                lastApplyStatus = hashPolicyResult.statusText;
+                lastApplyMessage = "Cannot apply central hash dump protection policy: " + hashPolicyResult.message;
+                SaveState();
+                return;
+            }
+
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length;
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy);
             SaveState();
         }
 

@@ -180,6 +180,21 @@ export function fetchClearDeviceRules() {
   });
 }
 
+export function fetchHashProtectPolicy() {
+  return request<Api.DataProtector.HashProtectPolicy>({
+    url: '/hashprotect/policy',
+    method: 'get'
+  });
+}
+
+export function fetchUpdateHashProtectPolicy(data: Api.DataProtector.HashProtectPolicyRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/hashprotect/policy',
+    method: 'post',
+    data
+  });
+}
+
 export function fetchRemovableDevices() {
   return request<Api.DataProtector.RemovableDevice[]>({
     url: '/device/removable',

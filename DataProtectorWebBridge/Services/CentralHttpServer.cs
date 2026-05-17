@@ -259,6 +259,21 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/hashprotect/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryHashProtectPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/hashprotect/policy")
+                {
+                    PolicyBridgeService.HashProtectPolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.HashProtectPolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.UpdateHashProtectPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", store.QueryAudit(ParseAuditQuery(context.Request)));

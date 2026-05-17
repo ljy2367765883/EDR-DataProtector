@@ -12,6 +12,7 @@ import {
   fetchClearPolicyRules,
   fetchClearWebShellRules,
   fetchDeviceRules,
+  fetchHashProtectPolicy,
   fetchNetworkRules,
   fetchPolicyRules,
   fetchWebShellRules,
@@ -21,7 +22,8 @@ import {
   fetchRemoveRemovableDeviceAuthorization,
   fetchRemovableDevices,
   fetchAddWebShellRule,
-  fetchRemoveWebShellRule
+  fetchRemoveWebShellRule,
+  fetchUpdateHashProtectPolicy
 } from '@/service/api';
 
 defineOptions({
@@ -33,12 +35,21 @@ const submitting = ref(false);
 const networkSubmitting = ref(false);
 const webShellSubmitting = ref(false);
 const deviceSubmitting = ref(false);
+const hashProtectSubmitting = ref(false);
 const connected = ref(false);
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
 const webShellRules = ref<Api.DataProtector.WebShellRule[]>([]);
 const deviceRules = ref<Api.DataProtector.DeviceRule[]>([]);
 const removableDevices = ref<Api.DataProtector.RemovableDevice[]>([]);
+const hashProtectPolicy = reactive<Api.DataProtector.HashProtectPolicy>({
+  enabled: true,
+  protectLsass: true,
+  protectCredentialFiles: true,
+  protectRegistryHives: true,
+  flags: 0x0000000f,
+  actor: 'web-admin'
+});
 const formRef = ref<FormInst | null>(null);
 const networkFormRef = ref<FormInst | null>(null);
 const webShellFormRef = ref<FormInst | null>(null);
@@ -174,6 +185,45 @@ const deviceGroups = computed(() => ({
   authorizedHardware: removableDevices.value.filter(device => device.status === 'authorized').length,
   blockedHardware: removableDevices.value.filter(device => device.status === 'blocked').length
 }));
+
+const hashProtectGroups = computed(() => {
+  const enabledFeatures = [
+    hashProtectPolicy.protectLsass,
+    hashProtectPolicy.protectCredentialFiles,
+    hashProtectPolicy.protectRegistryHives
+  ].filter(Boolean).length;
+
+  return {
+    mode: hashProtectPolicy.enabled ? 'Enforcing' : 'Disabled',
+    enabledFeatures,
+    protectedAssets: hashProtectPolicy.enabled ? enabledFeatures : 0,
+    flags: `0x${hashProtectPolicy.flags.toString(16).toUpperCase().padStart(8, '0')}`
+  };
+});
+
+const hashProtectAssets = computed(() => [
+  {
+    key: 'lsass',
+    title: 'LSASS process memory',
+    detail: 'Strips VM_READ, DUP_HANDLE and related dangerous process-handle access from untrusted callers.',
+    enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectLsass,
+    icon: 'mdi:memory'
+  },
+  {
+    key: 'credential-files',
+    title: 'Offline credential stores',
+    detail: 'Blocks direct access to SAM, SECURITY, SYSTEM, NTDS.dit, RegBack, Repair and Volume Shadow Copy aliases.',
+    enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectCredentialFiles,
+    icon: 'mdi:file-lock-outline'
+  },
+  {
+    key: 'registry-hives',
+    title: 'Registry hive export paths',
+    detail: 'Blocks hive save, restore and replace operations against HKLM SAM, SECURITY and SYSTEM.',
+    enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectRegistryHives,
+    icon: 'mdi:database-lock-outline'
+  }
+]);
 
 function formatRemovableVolumes(device: Api.DataProtector.RemovableDevice) {
   const volumes = device.volumes?.length
@@ -499,16 +549,51 @@ const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice
   }
 ];
 
+function applyHashProtectPolicy(policy?: Api.DataProtector.HashProtectPolicy) {
+  if (!policy) return;
+
+  hashProtectPolicy.enabled = Boolean(policy.enabled);
+  hashProtectPolicy.protectLsass = Boolean(policy.protectLsass);
+  hashProtectPolicy.protectCredentialFiles = Boolean(policy.protectCredentialFiles);
+  hashProtectPolicy.protectRegistryHives = Boolean(policy.protectRegistryHives);
+  hashProtectPolicy.flags = policy.flags ?? calculateHashProtectFlags();
+  hashProtectPolicy.actor = 'web-admin';
+}
+
+function calculateHashProtectFlags() {
+  let flags = 0;
+  if (hashProtectPolicy.enabled) flags |= 0x00000001;
+  if (hashProtectPolicy.protectLsass) flags |= 0x00000002;
+  if (hashProtectPolicy.protectCredentialFiles) flags |= 0x00000004;
+  if (hashProtectPolicy.protectRegistryHives) flags |= 0x00000008;
+  return flags;
+}
+
+function syncHashProtectFlags() {
+  hashProtectPolicy.flags = calculateHashProtectFlags();
+}
+
+function setHashProtectEnabled(value: boolean) {
+  hashProtectPolicy.enabled = value;
+  syncHashProtectFlags();
+}
+
+function setHashProtectFeature(key: 'protectLsass' | 'protectCredentialFiles' | 'protectRegistryHives', value: boolean) {
+  hashProtectPolicy[key] = value;
+  syncHashProtectFlags();
+}
+
 async function refresh() {
   loading.value = true;
   try {
-    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult, deviceRulesResult, removableDevicesResult] = await Promise.all([
+    const [statusResult, rulesResult, networkRulesResult, webShellRulesResult, deviceRulesResult, removableDevicesResult, hashProtectPolicyResult] = await Promise.all([
       fetchBridgeStatus(),
       fetchPolicyRules(),
       fetchNetworkRules(),
       fetchWebShellRules(),
       fetchDeviceRules(),
-      fetchRemovableDevices()
+      fetchRemovableDevices(),
+      fetchHashProtectPolicy()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
     if (!rulesResult.error) rules.value = rulesResult.data;
@@ -516,6 +601,7 @@ async function refresh() {
     if (!webShellRulesResult.error) webShellRules.value = webShellRulesResult.data;
     if (!deviceRulesResult.error) deviceRules.value = deviceRulesResult.data;
     if (!removableDevicesResult.error) removableDevices.value = removableDevicesResult.data;
+    if (!hashProtectPolicyResult.error) applyHashProtectPolicy(hashProtectPolicyResult.data);
   } finally {
     loading.value = false;
   }
@@ -725,6 +811,27 @@ async function clearDeviceRules() {
       }
     }
   });
+}
+
+async function saveHashProtectPolicy() {
+  syncHashProtectFlags();
+  hashProtectSubmitting.value = true;
+  try {
+    const { error, data } = await fetchUpdateHashProtectPolicy({
+      enabled: hashProtectPolicy.enabled,
+      protectLsass: hashProtectPolicy.protectLsass,
+      protectCredentialFiles: hashProtectPolicy.protectCredentialFiles,
+      protectRegistryHives: hashProtectPolicy.protectRegistryHives,
+      actor: 'web-admin'
+    });
+
+    if (!error && data.succeeded) {
+      window.$message?.success('Anti-dump policy saved to central policy.');
+      await refresh();
+    }
+  } finally {
+    hashProtectSubmitting.value = false;
+  }
 }
 
 async function authorizeRemovableDevice(device: Api.DataProtector.RemovableDevice, allowWrite: boolean) {
@@ -951,6 +1058,110 @@ onMounted(refresh);
                 </NSpace>
               </template>
               <NDataTable :columns="webShellColumns" :data="webShellRules" :loading="loading" :pagination="{ pageSize: 10 }" />
+            </NCard>
+          </NGi>
+        </NGrid>
+      </NTabPane>
+
+      <NTabPane name="hashprotect" tab="Anti-Dump / Hash Protection">
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 m:8">
+            <NCard title="Hash Dump Protection Policy" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NTag :type="hashProtectPolicy.enabled ? 'success' : 'error'" :bordered="false">
+                  {{ hashProtectGroups.mode }}
+                </NTag>
+              </template>
+
+              <NSpace vertical :size="18">
+                <div class="flex items-center justify-between gap-16px rounded-8px bg-gray-50 p-14px dark:bg-dark-3">
+                  <div class="min-w-0">
+                    <div class="text-15px font-700">Protection enforcement</div>
+                    <div class="m-t-4px text-12px text-gray-500">Central policy version controls how agents harden credential dump surfaces.</div>
+                  </div>
+                  <NSwitch :value="hashProtectPolicy.enabled" @update:value="setHashProtectEnabled">
+                    <template #checked>Enabled</template>
+                    <template #unchecked>Disabled</template>
+                  </NSwitch>
+                </div>
+
+                <NGrid :x-gap="12" :y-gap="12" cols="1 m:3">
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">LSASS handles</div>
+                        <NSwitch
+                          :value="hashProtectPolicy.protectLsass"
+                          :disabled="!hashProtectPolicy.enabled"
+                          @update:value="value => setHashProtectFeature('protectLsass', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Blocks untrusted process memory dump handle access.</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">Credential files</div>
+                        <NSwitch
+                          :value="hashProtectPolicy.protectCredentialFiles"
+                          :disabled="!hashProtectPolicy.enabled"
+                          @update:value="value => setHashProtectFeature('protectCredentialFiles', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Blocks SAM, SYSTEM, SECURITY, NTDS and shadow-copy paths.</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">Registry hives</div>
+                        <NSwitch
+                          :value="hashProtectPolicy.protectRegistryHives"
+                          :disabled="!hashProtectPolicy.enabled"
+                          @update:value="value => setHashProtectFeature('protectRegistryHives', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Blocks save, restore and replace against credential hives.</div>
+                    </div>
+                  </NGi>
+                </NGrid>
+
+                <div class="flex flex-wrap items-center justify-between gap-12px">
+                  <NSpace>
+                    <NTag type="info">Features: {{ hashProtectGroups.enabledFeatures }}/3</NTag>
+                    <NTag type="warning">Flags: {{ hashProtectGroups.flags }}</NTag>
+                    <NTag :type="hashProtectPolicy.enabled ? 'success' : 'default'">Assets: {{ hashProtectGroups.protectedAssets }}</NTag>
+                  </NSpace>
+                  <NButton type="primary" :loading="hashProtectSubmitting" @click="saveHashProtectPolicy">
+                    <template #icon><SvgIcon icon="mdi:content-save-shield-outline" /></template>
+                    Save Anti-Dump Policy
+                  </NButton>
+                </div>
+              </NSpace>
+            </NCard>
+          </NGi>
+
+          <NGi span="24 m:16">
+            <NCard title="Protected Surfaces" :bordered="false" class="card-wrapper">
+              <NGrid :x-gap="12" :y-gap="12" cols="1 l:3">
+                <NGi v-for="asset in hashProtectAssets" :key="asset.key">
+                  <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
+                    <div class="flex items-start justify-between gap-12px">
+                      <div class="flex min-w-0 items-center gap-10px">
+                        <SvgIcon :icon="asset.icon" class="text-22px text-primary" />
+                        <div class="min-w-0">
+                          <div class="truncate text-15px font-700">{{ asset.title }}</div>
+                          <div class="m-t-6px text-12px leading-5 text-gray-500">{{ asset.detail }}</div>
+                        </div>
+                      </div>
+                      <NTag :type="asset.enabled ? 'success' : 'default'" :bordered="false">
+                        {{ asset.enabled ? 'Active' : 'Inactive' }}
+                      </NTag>
+                    </div>
+                  </div>
+                </NGi>
+              </NGrid>
             </NCard>
           </NGi>
         </NGrid>
