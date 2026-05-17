@@ -125,6 +125,17 @@ declare namespace Api {
       items: NetworkInsightItem[];
     }
 
+    interface IpInfoConfiguration {
+      enabled: boolean;
+      source: string;
+      maskedToken: string;
+      tokenFilePath: string;
+    }
+
+    interface IpInfoConfigurationRequest {
+      token: string;
+    }
+
     interface WebShellRule {
       directory: string;
       actor?: string;

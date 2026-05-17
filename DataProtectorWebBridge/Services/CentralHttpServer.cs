@@ -126,6 +126,28 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/network/ipinfo/config")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryIpInfoConfiguration());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/network/ipinfo/config")
+                {
+                    CentralPolicyStore.IpInfoConfigurationRequest request =
+                        JsonResponse.Read<CentralPolicyStore.IpInfoConfigurationRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.SaveIpInfoConfiguration(request, context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/network/ipinfo/config")
+                {
+                    PolicyBridgeService.OperationResult result = store.ClearIpInfoConfiguration(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/network/rules")
                 {
                     PolicyBridgeService.NetworkRuleRequest request =

@@ -1,13 +1,17 @@
 <script setup lang="tsx">
 import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import type { DataTableColumns } from 'naive-ui';
-import { NButton, NTag } from 'naive-ui';
+import { NButton, NTag, useMessage } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
-import { fetchDevices, fetchNetworkInsights } from '@/service/api';
+import { fetchClearIpInfoConfig, fetchDevices, fetchIpInfoConfig, fetchNetworkInsights, fetchSaveIpInfoConfig } from '@/service/api';
 
+const message = useMessage();
 const loading = ref(false);
+const savingIpInfo = ref(false);
 const response = ref<Api.DataProtector.NetworkInsightResponse | null>(null);
 const devices = ref<Api.DataProtector.Device[]>([]);
+const ipInfoConfig = ref<Api.DataProtector.IpInfoConfiguration | null>(null);
+const ipInfoToken = ref('');
 
 const query = reactive<Api.DataProtector.NetworkInsightQuery>({
   baselineHours: 24,
@@ -227,15 +231,51 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
 async function refresh() {
   loading.value = true;
   try {
-    const [deviceResult, insightResult] = await Promise.all([
+    const [deviceResult, insightResult, ipInfoResult] = await Promise.all([
       fetchDevices(),
-      fetchNetworkInsights(query)
+      fetchNetworkInsights(query),
+      fetchIpInfoConfig()
     ]);
 
     if (!deviceResult.error) devices.value = deviceResult.data;
     if (!insightResult.error) response.value = insightResult.data;
+    if (!ipInfoResult.error) ipInfoConfig.value = ipInfoResult.data;
   } finally {
     loading.value = false;
+  }
+}
+
+async function saveIpInfoToken() {
+  const token = ipInfoToken.value.trim();
+  if (!token) {
+    message.warning('Token is required');
+    return;
+  }
+
+  savingIpInfo.value = true;
+  try {
+    const result = await fetchSaveIpInfoConfig({ token });
+    if (!result.error) {
+      ipInfoToken.value = '';
+      message.success(result.data.message || 'IP intelligence token saved');
+      await refresh();
+    }
+  } finally {
+    savingIpInfo.value = false;
+  }
+}
+
+async function clearIpInfoToken() {
+  savingIpInfo.value = true;
+  try {
+    const result = await fetchClearIpInfoConfig();
+    if (!result.error) {
+      ipInfoToken.value = '';
+      message.success(result.data.message || 'IP intelligence token cleared');
+      await refresh();
+    }
+  } finally {
+    savingIpInfo.value = false;
   }
 }
 
@@ -341,6 +381,26 @@ onMounted(refresh);
       </NGi>
     </NGrid>
 
+    <NCard title="IP Intelligence" :bordered="false" class="work-panel">
+      <NSpace align="center" wrap>
+        <NTag :type="ipInfoConfig?.enabled ? 'success' : 'warning'" :bordered="false">
+          {{ ipInfoConfig?.enabled ? `Configured by ${ipInfoConfig.source}` : 'Not configured' }}
+        </NTag>
+        <span class="cell-muted mono">{{ ipInfoConfig?.maskedToken || ipInfoConfig?.tokenFilePath || '-' }}</span>
+        <NInput
+          v-model:value="ipInfoToken"
+          type="password"
+          show-password-on="click"
+          clearable
+          placeholder="ipinfo token"
+          class="token-control"
+          @keyup.enter="saveIpInfoToken"
+        />
+        <NButton type="primary" :loading="savingIpInfo" @click="saveIpInfoToken">Save</NButton>
+        <NButton secondary :loading="savingIpInfo" @click="clearIpInfoToken">Clear</NButton>
+      </NSpace>
+    </NCard>
+
     <NCard :bordered="false" class="work-panel">
       <template #header>
         <div class="panel-title">
@@ -403,6 +463,10 @@ onMounted(refresh);
 
 .search-control {
   width: min(360px, 100%);
+}
+
+.token-control {
+  width: min(420px, 100%);
 }
 
 .cell-stack {

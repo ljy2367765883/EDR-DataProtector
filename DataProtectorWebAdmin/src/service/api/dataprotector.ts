@@ -98,6 +98,28 @@ export function fetchNetworkInsights(params: Api.DataProtector.NetworkInsightQue
   });
 }
 
+export function fetchIpInfoConfig() {
+  return request<Api.DataProtector.IpInfoConfiguration>({
+    url: '/network/ipinfo/config',
+    method: 'get'
+  });
+}
+
+export function fetchSaveIpInfoConfig(data: Api.DataProtector.IpInfoConfigurationRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/network/ipinfo/config',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchClearIpInfoConfig() {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/network/ipinfo/config',
+    method: 'delete'
+  });
+}
+
 export function fetchWebShellRules() {
   return request<Api.DataProtector.WebShellRule[]>({
     url: '/webshell/rules',

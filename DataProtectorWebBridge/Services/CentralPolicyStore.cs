@@ -352,6 +352,63 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        public IpInfoConfiguration QueryIpInfoConfiguration()
+        {
+            string token = GetIpInfoToken(out string source);
+            return new IpInfoConfiguration
+            {
+                enabled = !string.IsNullOrWhiteSpace(token),
+                source = source,
+                maskedToken = MaskSecret(token),
+                tokenFilePath = GetIpInfoTokenFilePath()
+            };
+        }
+
+        public PolicyBridgeService.OperationResult SaveIpInfoConfiguration(IpInfoConfigurationRequest request, string actor)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "IP intelligence configuration body is required.");
+            }
+
+            string token = NormalizeSecret(request.token);
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "IPInfo token is required.");
+            }
+
+            lock (syncRoot)
+            {
+                Directory.CreateDirectory(DirectoryPath);
+                File.WriteAllText(GetIpInfoTokenFilePath(), token, Encoding.UTF8);
+                EnsureIpInfoCache();
+                state.IpInfoCache.Clear();
+                AppendAudit(actor, "network.ipinfo.configure", "ipinfo", string.Empty, true, "0x00000000", "IP intelligence token was configured.");
+                Save();
+            }
+
+            return Success("IP intelligence token configured.");
+        }
+
+        public PolicyBridgeService.OperationResult ClearIpInfoConfiguration(string actor)
+        {
+            lock (syncRoot)
+            {
+                string tokenPath = GetIpInfoTokenFilePath();
+                if (File.Exists(tokenPath))
+                {
+                    File.Delete(tokenPath);
+                }
+
+                EnsureIpInfoCache();
+                state.IpInfoCache.Clear();
+                AppendAudit(actor, "network.ipinfo.clear", "ipinfo", string.Empty, true, "0x00000000", "IP intelligence file token and cache were cleared.");
+                Save();
+            }
+
+            return Success("IP intelligence file token and cache cleared.");
+        }
+
         public CentralDeviceDto[] QueryDevices()
         {
             lock (syncRoot)
@@ -1002,21 +1059,44 @@ namespace DataProtectorWebBridge.Services
 
         private static string GetIpInfoToken()
         {
+            string source;
+            return GetIpInfoToken(out source);
+        }
+
+        private static string GetIpInfoToken(out string source)
+        {
+            source = "none";
             string token = NormalizeSecret(Environment.GetEnvironmentVariable(IpInfoTokenEnvironmentVariable));
+            if (!string.IsNullOrWhiteSpace(token))
+            {
+                source = "environment";
+                return token;
+            }
+
+            token = string.Empty;
             if (string.IsNullOrWhiteSpace(token))
             {
                 token = NormalizeSecret(Environment.GetEnvironmentVariable(LegacyIpInfoTokenEnvironmentVariable));
+                if (!string.IsNullOrWhiteSpace(token))
+                {
+                    source = "environment";
+                    return token;
+                }
             }
 
             if (string.IsNullOrWhiteSpace(token))
             {
                 try
                 {
-                    string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                    string tokenPath = Path.Combine(dataRoot, "DataProtector", IpInfoTokenFileName);
+                    string tokenPath = GetIpInfoTokenFilePath();
                     if (File.Exists(tokenPath))
                     {
                         token = NormalizeSecret(File.ReadAllText(tokenPath, Encoding.UTF8));
+                        if (!string.IsNullOrWhiteSpace(token))
+                        {
+                            source = "file";
+                            return token;
+                        }
                     }
                 }
                 catch
@@ -1028,9 +1108,31 @@ namespace DataProtectorWebBridge.Services
             return token ?? string.Empty;
         }
 
+        private static string GetIpInfoTokenFilePath()
+        {
+            string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            return Path.Combine(dataRoot, "DataProtector", IpInfoTokenFileName);
+        }
+
         private static string NormalizeSecret(string value)
         {
             return (value ?? string.Empty).Trim().Trim('"', '\'');
+        }
+
+        private static string MaskSecret(string value)
+        {
+            string token = NormalizeSecret(value);
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return string.Empty;
+            }
+
+            if (token.Length <= 8)
+            {
+                return new string('*', token.Length);
+            }
+
+            return token.Substring(0, 4) + new string('*', Math.Max(4, token.Length - 8)) + token.Substring(token.Length - 4);
         }
 
         private static bool IsIpInfoEnabled()
@@ -1750,6 +1852,19 @@ namespace DataProtectorWebBridge.Services
             public int total { get; set; }
             public int newTotal { get; set; }
             public NetworkInsightItem[] items { get; set; }
+        }
+
+        public sealed class IpInfoConfiguration
+        {
+            public bool enabled { get; set; }
+            public string source { get; set; }
+            public string maskedToken { get; set; }
+            public string tokenFilePath { get; set; }
+        }
+
+        public sealed class IpInfoConfigurationRequest
+        {
+            public string token { get; set; }
         }
 
         public sealed class NetworkInsightItem
