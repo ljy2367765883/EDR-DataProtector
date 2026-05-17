@@ -72,7 +72,7 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 UsbRuntimePackage runtimePackage = DownloadAndExtractRuntimePackage(normalized, serverBaseUri, extractionRoot);
-                targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes);
+                targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes, targetRoot);
                 disk = ResolvePhysicalDiskTarget(targetRoot);
                 ValidateUsbCryptLayout(disk, normalized.publicToolAreaBytes);
                 PreparePublicToolArea(targetRoot, runtimePackage);
@@ -408,7 +408,7 @@ namespace DataProtectorWebBridge.Services
             return "0x" + status.ToString("X8") + (string.IsNullOrWhiteSpace(text) ? string.Empty : " (" + text + ")");
         }
 
-        private static string ReinitializeDiskLayout(PhysicalDiskTarget disk, long publicToolAreaBytes)
+        private static string ReinitializeDiskLayout(PhysicalDiskTarget disk, long publicToolAreaBytes, string currentDriveRoot)
         {
             if (disk == null || string.IsNullOrWhiteSpace(disk.physicalDrivePath))
             {
@@ -417,36 +417,54 @@ namespace DataProtectorWebBridge.Services
 
             int diskNumber = ParsePhysicalDriveNumber(disk.physicalDrivePath);
             string volumeLabel = "DPUSB";
-            string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-" + Guid.NewGuid().ToString("N") + ".txt");
-            string script =
-                "select disk " + diskNumber + Environment.NewLine +
-                "clean" + Environment.NewLine +
-                "convert mbr" + Environment.NewLine +
-                "create partition primary size=5 offset=2048" + Environment.NewLine +
-                "format fs=ntfs quick label=" + volumeLabel + Environment.NewLine +
-                "assign" + Environment.NewLine +
-                "exit" + Environment.NewLine;
+            Exception lastError = null;
 
-            try
-            {
-                File.WriteAllText(scriptPath, script, Encoding.ASCII);
-                RunProcessChecked("diskpart.exe", "/s \"" + scriptPath + "\"", "Secure USB disk layout initialization failed.");
-                Thread.Sleep(1500);
-                return WaitForToolPartition(diskNumber);
-            }
-            finally
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
                 try
                 {
-                    if (File.Exists(scriptPath))
-                    {
-                        File.Delete(scriptPath);
-                    }
+                    BestEffortDismountPublicVolume(currentDriveRoot);
+                    RunDiskPartScript(
+                        diskNumber,
+                        "prepare",
+                        new[]
+                        {
+                            "rescan",
+                            "select disk " + diskNumber,
+                            "online disk noerr",
+                            "attributes disk clear readonly noerr",
+                            "clean"
+                        });
+
+                    WaitForPhysicalDisk(diskNumber, "after clean");
+                    RunDiskPartScript(
+                        diskNumber,
+                        "create-public-tool-partition",
+                        new[]
+                        {
+                            "rescan",
+                            "select disk " + diskNumber,
+                            "online disk noerr",
+                            "attributes disk clear readonly noerr",
+                            "convert mbr",
+                            "create partition primary size=5 offset=2048",
+                            "format fs=ntfs quick unit=512 label=" + volumeLabel,
+                            "assign",
+                            "rescan"
+                        });
+
+                    Thread.Sleep(1500);
+                    return WaitForToolPartition(diskNumber);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    lastError = ex;
+                    RunDiskPartRescanBestEffort();
+                    Thread.Sleep(1500 * attempt);
                 }
             }
+
+            throw new InvalidOperationException("Secure USB disk layout initialization failed after 3 attempts. Last error: " + (lastError == null ? "unknown" : lastError.Message), lastError);
         }
 
         private static int ParsePhysicalDriveNumber(string physicalDrivePath)
@@ -468,7 +486,7 @@ namespace DataProtectorWebBridge.Services
             return number;
         }
 
-        private static void RunProcessChecked(string fileName, string arguments, string failureMessage)
+        private static string RunProcessChecked(string fileName, string arguments, string failureMessage)
         {
             ProcessStartInfo startInfo = new ProcessStartInfo
             {
@@ -506,7 +524,114 @@ namespace DataProtectorWebBridge.Services
                 {
                     throw new InvalidOperationException(failureMessage + " ExitCode=" + process.ExitCode + " " + output + " " + error);
                 }
+
+                return output + error;
             }
+        }
+
+        private static void RunDiskPartScript(int diskNumber, string stage, string[] commands)
+        {
+            string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-" + stage + "-" + Guid.NewGuid().ToString("N") + ".txt");
+            string script = string.Join(Environment.NewLine, commands) + Environment.NewLine + "exit" + Environment.NewLine;
+            try
+            {
+                File.WriteAllText(scriptPath, script, Encoding.ASCII);
+                RunProcessChecked(
+                    "diskpart.exe",
+                    "/s \"" + scriptPath + "\"",
+                    "Secure USB disk layout initialization failed at stage '" + stage + "' for disk " + diskNumber + ". Script: " + script.Replace(Environment.NewLine, " | "));
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(scriptPath))
+                    {
+                        File.Delete(scriptPath);
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static void RunDiskPartRescanBestEffort()
+        {
+            string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-rescan-" + Guid.NewGuid().ToString("N") + ".txt");
+            try
+            {
+                File.WriteAllText(scriptPath, "rescan" + Environment.NewLine + "exit" + Environment.NewLine, Encoding.ASCII);
+                RunProcessChecked("diskpart.exe", "/s \"" + scriptPath + "\"", "DiskPart rescan failed.");
+            }
+            catch
+            {
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(scriptPath))
+                    {
+                        File.Delete(scriptPath);
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static void BestEffortDismountPublicVolume(string currentDriveRoot)
+        {
+            string root = NormalizeDriveRoot(currentDriveRoot);
+            if (string.IsNullOrWhiteSpace(root) || root.Length < 3 || root[1] != ':')
+            {
+                return;
+            }
+
+            try
+            {
+                RunProcessChecked("mountvol.exe", "\"" + root + "\" /p", "Secure USB public volume dismount failed.");
+            }
+            catch
+            {
+            }
+
+            Thread.Sleep(500);
+        }
+
+        private static void WaitForPhysicalDisk(int diskNumber, string stage)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (PhysicalDiskExists(diskNumber))
+                {
+                    return;
+                }
+
+                Thread.Sleep(500);
+            }
+
+            throw new InvalidOperationException("Physical disk " + diskNumber + " did not become available " + stage + ".");
+        }
+
+        private static bool PhysicalDiskExists(int diskNumber)
+        {
+            using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                "SELECT DeviceID FROM Win32_DiskDrive WHERE Index=" + diskNumber))
+            {
+                foreach (ManagementObject disk in searcher.Get())
+                {
+                    using (disk)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static string WaitForToolPartition(int diskNumber)
