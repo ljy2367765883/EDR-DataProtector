@@ -702,17 +702,30 @@ DpNetFilterQueueConnectionEvent(
     InsertTailList(&gDpNetworkConnectionEvents, &entry->Link);
     gDpNetworkConnectionEventCount++;
 
-    while (gDpNetworkConnectionEventCount > DP_NETWORK_MAX_CONNECTION_EVENTS &&
-           !IsListEmpty(&gDpNetworkConnectionEvents)) {
+    if (gDpNetworkConnectionEventCount > DP_NETWORK_MAX_CONNECTION_EVENTS) {
+        LIST_ENTRY trimList;
 
-        PLIST_ENTRY oldLink = RemoveHeadList(&gDpNetworkConnectionEvents);
-        PDP_NETWORK_CONNECTION_EVENT_ENTRY oldEvent =
-            CONTAINING_RECORD(oldLink, DP_NETWORK_CONNECTION_EVENT_ENTRY, Link);
-        gDpNetworkConnectionEventCount--;
-        gDpNetworkConnectionDroppedEvents++;
+        InitializeListHead(&trimList);
+
+        while (gDpNetworkConnectionEventCount > DP_NETWORK_MAX_CONNECTION_EVENTS &&
+               !IsListEmpty(&gDpNetworkConnectionEvents)) {
+
+            PLIST_ENTRY oldLink = RemoveHeadList(&gDpNetworkConnectionEvents);
+            InsertTailList(&trimList, oldLink);
+            gDpNetworkConnectionEventCount--;
+            gDpNetworkConnectionDroppedEvents++;
+        }
+
         KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
-        DpNetFilterFreeConnectionEvent(oldEvent);
-        KeAcquireSpinLock(&gDpNetworkConnectionEventLock, &oldIrql);
+
+        while (!IsListEmpty(&trimList)) {
+            PLIST_ENTRY oldLink = RemoveHeadList(&trimList);
+            PDP_NETWORK_CONNECTION_EVENT_ENTRY oldEvent =
+                CONTAINING_RECORD(oldLink, DP_NETWORK_CONNECTION_EVENT_ENTRY, Link);
+            DpNetFilterFreeConnectionEvent(oldEvent);
+        }
+
+        return;
     }
 
     KeReleaseSpinLock(&gDpNetworkConnectionEventLock, oldIrql);
@@ -770,14 +783,27 @@ DpNetFilterQueueSmtpEvent(
     InsertTailList(&gDpSmtpEvents, &entry->Link);
     gDpSmtpEventCount++;
 
-    while (gDpSmtpEventCount > DP_POLICY_MAX_SMTP_EVENTS && !IsListEmpty(&gDpSmtpEvents)) {
-        PLIST_ENTRY oldLink = RemoveHeadList(&gDpSmtpEvents);
-        PDP_SMTP_EVENT_ENTRY oldEvent = CONTAINING_RECORD(oldLink, DP_SMTP_EVENT_ENTRY, Link);
-        gDpSmtpEventCount--;
-        gDpSmtpDroppedEvents++;
+    if (gDpSmtpEventCount > DP_POLICY_MAX_SMTP_EVENTS) {
+        LIST_ENTRY trimList;
+
+        InitializeListHead(&trimList);
+
+        while (gDpSmtpEventCount > DP_POLICY_MAX_SMTP_EVENTS && !IsListEmpty(&gDpSmtpEvents)) {
+            PLIST_ENTRY oldLink = RemoveHeadList(&gDpSmtpEvents);
+            InsertTailList(&trimList, oldLink);
+            gDpSmtpEventCount--;
+            gDpSmtpDroppedEvents++;
+        }
+
         KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);
-        DpNetFilterFreeSmtpEvent(oldEvent);
-        KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
+
+        while (!IsListEmpty(&trimList)) {
+            PLIST_ENTRY oldLink = RemoveHeadList(&trimList);
+            PDP_SMTP_EVENT_ENTRY oldEvent = CONTAINING_RECORD(oldLink, DP_SMTP_EVENT_ENTRY, Link);
+            DpNetFilterFreeSmtpEvent(oldEvent);
+        }
+
+        return;
     }
 
     KeReleaseSpinLock(&gDpSmtpEventLock, oldIrql);

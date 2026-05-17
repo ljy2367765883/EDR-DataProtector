@@ -73,6 +73,7 @@ namespace DataProtectorWebBridge.Services
         {
             object rawStatus = policyService.GetStatus();
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
+            PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
             if (auditRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s).");
@@ -91,6 +92,7 @@ namespace DataProtectorWebBridge.Services
                 LastApplyStatus = lastApplyStatus,
                 LastApplyMessage = lastApplyMessage,
                 Audit = auditRecords,
+                NetworkConnections = networkConnections,
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = false
             };
@@ -122,7 +124,7 @@ namespace DataProtectorWebBridge.Services
             {
                 FlushTaskResults();
             }
-            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ".");
+            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ", network " + networkConnections.Length + ".");
         }
 
         private void ExecuteTasks(CentralPolicyStore.RemoteTaskDto[] tasks)
@@ -139,6 +141,7 @@ namespace DataProtectorWebBridge.Services
         {
             object rawStatus = policyService.GetStatus();
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
+            PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
             if (auditRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s) during task result flush.");
@@ -157,6 +160,7 @@ namespace DataProtectorWebBridge.Services
                 LastApplyStatus = lastApplyStatus,
                 LastApplyMessage = lastApplyMessage,
                 Audit = auditRecords,
+                NetworkConnections = networkConnections,
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = true
             };
@@ -168,22 +172,41 @@ namespace DataProtectorWebBridge.Services
         private AuditLog.AuditRecord[] DrainLocalAuditRecords()
         {
             heartbeatIndex++;
-            bool drainNetworkConnections = heartbeatIndex % 2 == 0;
-            AuditLog.AuditRecord[] networkConnectionRecords = drainNetworkConnections
-                ? DrainAuditSource("network-connection", policyService.DrainNetworkConnectionAuditRecords)
-                : new AuditLog.AuditRecord[0];
             AuditLog.AuditRecord[] smtpRecords = DrainAuditSource("smtp", policyService.DrainSmtpAuditRecords);
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
-            if (networkConnectionRecords.Length > 0 || smtpRecords.Length > 0 || webShellRecords.Length > 0)
+            if (smtpRecords.Length > 0 || webShellRecords.Length > 0)
             {
-                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: network=" + networkConnectionRecords.Length + ", smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ".");
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(networkConnectionRecords.Length + smtpRecords.Length + webShellRecords.Length);
-            records.AddRange(networkConnectionRecords);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
             return records.ToArray();
+        }
+
+        private PolicyBridgeService.NetworkConnectionEventDto[] DrainNetworkConnectionsIfDue()
+        {
+            if (heartbeatIndex % 2 != 0)
+            {
+                return new PolicyBridgeService.NetworkConnectionEventDto[0];
+            }
+
+            try
+            {
+                PolicyBridgeService.NetworkConnectionEventDto[] events = policyService.QueryNetworkConnectionEvents();
+                if (events.Length > 0)
+                {
+                    Console.WriteLine(DateTime.Now.ToString("s") + " Network awareness drained " + events.Length + " event(s).");
+                }
+
+                return events;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " network awareness drain failed: " + ex.Message);
+                return new PolicyBridgeService.NetworkConnectionEventDto[0];
+            }
         }
 
         private AuditLog.AuditRecord[] DrainAuditSource(string source, Func<AuditLog.AuditRecord[]> drain)

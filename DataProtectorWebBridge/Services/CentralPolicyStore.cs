@@ -437,27 +437,47 @@ namespace DataProtectorWebBridge.Services
                     }
                 }
 
+                if (request.NetworkConnections != null)
+                {
+                    foreach (PolicyBridgeService.NetworkConnectionEventDto item in request.NetworkConnections)
+                    {
+                        TryIngestNetworkObservation(deviceId, device, item, DateTime.UtcNow.ToString("o"), string.Empty, string.Empty);
+                    }
+
+                    if (request.NetworkConnections.Length > 0)
+                    {
+                        Console.WriteLine(DateTime.Now.ToString("s") + " Central received " + request.NetworkConnections.Length + " network awareness event(s) from " + device.Machine + " (" + device.DeviceId + ").");
+                    }
+                }
+
                 if (request.Audit != null)
                 {
+                    int acceptedAuditCount = 0;
                     foreach (AuditLog.AuditRecord record in request.Audit)
                     {
-                AuditLog.AuditRecord normalized = CloneAudit(record);
-                normalized.Host = string.IsNullOrWhiteSpace(normalized.Host)
-                    ? device.Machine
-                    : normalized.Host;
-                normalized.Actor = string.IsNullOrWhiteSpace(normalized.Actor)
-                    ? device.Machine
-                    : normalized.Actor;
+                        AuditLog.AuditRecord normalized = CloneAudit(record);
+                        normalized.Host = string.IsNullOrWhiteSpace(normalized.Host)
+                            ? device.Machine
+                            : normalized.Host;
+                        normalized.Actor = string.IsNullOrWhiteSpace(normalized.Actor)
+                            ? device.Machine
+                            : normalized.Actor;
                         normalized.Target = string.IsNullOrWhiteSpace(normalized.Target)
                             ? device.DeviceId
                             : normalized.Target;
+
+                        if (TryIngestNetworkObservation(deviceId, device, normalized))
+                        {
+                            continue;
+                        }
+
                         state.Audit.Add(normalized);
-                        TryIngestNetworkObservation(deviceId, device, normalized);
+                        acceptedAuditCount++;
                     }
 
-                    if (request.Audit.Length > 0)
+                    if (acceptedAuditCount > 0)
                     {
-                        Console.WriteLine(DateTime.Now.ToString("s") + " Central received " + request.Audit.Length + " audit event(s) from " + device.Machine + " (" + device.DeviceId + ").");
+                        Console.WriteLine(DateTime.Now.ToString("s") + " Central received " + acceptedAuditCount + " audit event(s) from " + device.Machine + " (" + device.DeviceId + ").");
                     }
                 }
 
@@ -565,26 +585,65 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private void TryIngestNetworkObservation(string deviceId, CentralDeviceState device, AuditLog.AuditRecord record)
+        private bool TryIngestNetworkObservation(string deviceId, CentralDeviceState device, AuditLog.AuditRecord record)
         {
             if (record == null ||
                 string.IsNullOrWhiteSpace(record.Action) ||
                 !record.Action.StartsWith("network.connection.", StringComparison.OrdinalIgnoreCase))
             {
-                return;
+                return false;
             }
 
             PolicyBridgeService.NetworkConnectionEventDto details = TryDeserializeNetworkConnectionDetails(record.Message);
+            return TryIngestNetworkObservation(deviceId,
+                                               device,
+                                               details,
+                                               record.TimestampUtc,
+                                               record.Target,
+                                               record.Extension);
+        }
+
+        private bool TryIngestNetworkObservation(
+            string deviceId,
+            CentralDeviceState device,
+            PolicyBridgeService.NetworkConnectionEventDto details,
+            string timestampUtc,
+            string fallbackRemoteIdentity,
+            string fallbackProcessPath)
+        {
+            if (details == null)
+            {
+                return false;
+            }
+
+            string remoteIdentity = string.IsNullOrWhiteSpace(details.remoteIdentity)
+                ? fallbackRemoteIdentity
+                : details.remoteIdentity;
+            string processPath = string.IsNullOrWhiteSpace(details.processPath)
+                ? fallbackProcessPath
+                : details.processPath;
+            string observedUtc = string.IsNullOrWhiteSpace(timestampUtc)
+                ? DateTime.UtcNow.ToString("o")
+                : timestampUtc;
+
+            if (string.IsNullOrWhiteSpace(remoteIdentity) &&
+                string.IsNullOrWhiteSpace(details.remoteEndpoint) &&
+                string.IsNullOrWhiteSpace(details.remoteAddress) &&
+                string.IsNullOrWhiteSpace(details.domain))
+            {
+                return false;
+            }
+
             NetworkConnectionObservation observation = new NetworkConnectionObservation
             {
                 deviceId = deviceId,
-                host = device == null ? record.Host : device.Machine,
+                host = device == null ? string.Empty : device.Machine,
                 user = device == null ? string.Empty : device.User,
-                remoteIdentity = string.IsNullOrWhiteSpace(details.remoteIdentity) ? record.Target : details.remoteIdentity,
+                remoteIdentity = remoteIdentity,
                 remoteAddress = details.remoteAddress ?? string.Empty,
                 remoteEndpoint = details.remoteEndpoint ?? string.Empty,
                 domain = details.domain ?? string.Empty,
-                processPath = string.IsNullOrWhiteSpace(details.processPath) ? record.Extension : details.processPath,
+                processPath = processPath,
                 processId = details.processId,
                 direction = details.direction ?? string.Empty,
                 protocolName = details.protocolName ?? string.Empty,
@@ -604,8 +663,8 @@ namespace DataProtectorWebBridge.Services
                 sha256 = details.sha256 ?? string.Empty,
                 signatureStatus = details.signatureStatus ?? string.Empty,
                 signer = details.signer ?? string.Empty,
-                firstSeenUtc = record.TimestampUtc,
-                lastSeenUtc = record.TimestampUtc,
+                firstSeenUtc = observedUtc,
+                lastSeenUtc = observedUtc,
                 count = 1
             };
 
@@ -636,6 +695,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             TrimNetworkConnections();
+            return true;
         }
 
         private PolicyBridgeService.NetworkConnectionEventDto TryDeserializeNetworkConnectionDetails(string message)
@@ -1381,6 +1441,7 @@ namespace DataProtectorWebBridge.Services
             public string LastApplyStatus { get; set; }
             public string LastApplyMessage { get; set; }
             public AuditLog.AuditRecord[] Audit { get; set; }
+            public PolicyBridgeService.NetworkConnectionEventDto[] NetworkConnections { get; set; }
             public RemoteTaskResult[] TaskResults { get; set; }
             public bool ResultOnly { get; set; }
         }

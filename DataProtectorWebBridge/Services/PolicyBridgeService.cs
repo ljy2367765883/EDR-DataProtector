@@ -640,37 +640,8 @@ namespace DataProtectorWebBridge.Services
         public AuditLog.AuditRecord[] DrainSecurityAuditRecords()
         {
             List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
-            records.AddRange(TryDrainSecurityAuditSource("network-connection", DrainNetworkConnectionAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("smtp", DrainSmtpAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("webshell", DrainWebShellAuditRecords));
-            return records.ToArray();
-        }
-
-        public AuditLog.AuditRecord[] DrainNetworkConnectionAuditRecords()
-        {
-            NetworkConnectionEventDto[] events = QueryNetworkConnectionEvents();
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
-
-            foreach (NetworkConnectionEventDto item in events)
-            {
-                string message = "Network connection observed: " + item.direction + " " + item.protocolName + " " + item.remoteEndpoint + " by " + item.processPath + ".";
-                AuditLog.AuditRecord record = new AuditLog.AuditRecord
-                {
-                    TimestampUtc = DateTime.UtcNow.ToString("o"),
-                    Host = Environment.MachineName,
-                    Actor = "network-sensor",
-                    Action = item.isHttp3 ? "network.connection.http3" : "network.connection.observed",
-                    Target = item.remoteIdentity,
-                    Extension = item.processPath,
-                    Succeeded = !item.blocked,
-                    Status = item.blocked ? "0xC0000022" : "0x00000000",
-                    Message = JsonResponse.CreateSerializer().Serialize(item)
-                };
-
-                records.Add(record);
-                TryAppendAudit(record);
-            }
-
             return records.ToArray();
         }
 
