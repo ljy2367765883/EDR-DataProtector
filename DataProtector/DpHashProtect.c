@@ -890,10 +890,12 @@ DpHashProtectInitialize(
     obStatus = DpHashProtectRegisterObCallback();
     registryStatus = DpHashProtectRegisterRegistryCallback(DriverObject);
 
-    if (!NT_SUCCESS(obStatus) && !NT_SUCCESS(registryStatus)) {
-        DP_HASH_TRACE("hash protection running degraded ob=0x%08X registry=0x%08X\n",
+    if (!NT_SUCCESS(obStatus) || !NT_SUCCESS(registryStatus)) {
+        DP_HASH_TRACE("hash protection initialization failed ob=0x%08X registry=0x%08X\n",
                       obStatus,
                       registryStatus);
+        DpHashProtectUninitialize();
+        return !NT_SUCCESS(obStatus) ? obStatus : registryStatus;
     }
 
     return STATUS_SUCCESS;
