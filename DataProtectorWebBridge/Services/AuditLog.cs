@@ -46,6 +46,13 @@ namespace DataProtectorWebBridge.Services
                 return "webshell";
             }
 
+            if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("hashprotect.", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".hashdump.", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "hashdump";
+            }
+
             if (action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase) ||
                 action.EndsWith(".smtp", StringComparison.OrdinalIgnoreCase))
             {
@@ -105,6 +112,7 @@ namespace DataProtectorWebBridge.Services
             string status = record == null || record.Status == null ? string.Empty : record.Status;
 
             if (action.StartsWith("webshell.danger", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("hashdump.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.IndexOf(".blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 status.Equals("0xC0000022", StringComparison.OrdinalIgnoreCase))
             {
@@ -147,6 +155,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
             {
                 return "observed";

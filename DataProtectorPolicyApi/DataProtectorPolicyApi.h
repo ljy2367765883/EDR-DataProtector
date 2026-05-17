@@ -49,6 +49,10 @@ extern "C" {
 #define DP_POLICY_API_WEBSHELL_SAMPLE_BYTES      100u
 #define DP_POLICY_API_DEVICE_ID_CHARS            260u
 
+#define DP_POLICY_API_HASH_OPERATION_LSASS_HANDLE     1u
+#define DP_POLICY_API_HASH_OPERATION_CREDENTIAL_FILE  2u
+#define DP_POLICY_API_HASH_OPERATION_REGISTRY_HIVE    3u
+
 #define DP_POLICY_API_NETWORK_EVENT_FLAG_DNS       0x00000001u
 #define DP_POLICY_API_NETWORK_EVENT_FLAG_QUIC      0x00000002u
 #define DP_POLICY_API_NETWORK_EVENT_FLAG_HTTP3     0x00000004u
@@ -121,6 +125,16 @@ typedef struct _DP_POLICY_API_WEBSHELL_EVENT {
     LPCWSTR Extension;
     BYTE Sample[DP_POLICY_API_WEBSHELL_SAMPLE_BYTES];
 } DP_POLICY_API_WEBSHELL_EVENT, *PDP_POLICY_API_WEBSHELL_EVENT;
+
+typedef struct _DP_POLICY_API_HASH_PROTECT_EVENT {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    DWORD Operation;
+    DWORD Status;
+    DWORD DesiredAccess;
+    LPCWSTR Target;
+    LPCWSTR ProcessImage;
+} DP_POLICY_API_HASH_PROTECT_EVENT, *PDP_POLICY_API_HASH_PROTECT_EVENT;
 
 DP_POLICY_API
 DWORD
@@ -299,6 +313,17 @@ DP_POLICY_API
 DWORD
 DpPolicyQueryWebShellEvents(
     _Out_writes_opt_(eventCapacity) DP_POLICY_API_WEBSHELL_EVENT *events,
+    _In_ DWORD eventCapacity,
+    _Out_opt_ DWORD *eventCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryHashProtectEvents(
+    _Out_writes_opt_(eventCapacity) DP_POLICY_API_HASH_PROTECT_EVENT *events,
     _In_ DWORD eventCapacity,
     _Out_opt_ DWORD *eventCount,
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,

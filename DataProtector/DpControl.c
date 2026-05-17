@@ -127,6 +127,12 @@ DpControlMessageNotify(
                                          ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryHashProtectEvents) {
+        return DpHashProtectQueryEvents(OutputBuffer,
+                                        OutputBufferLength,
+                                        ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandAddDeviceRule ||
         message->Command == DpPolicyCommandRemoveDeviceRule) {
 

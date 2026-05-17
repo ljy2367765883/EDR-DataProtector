@@ -246,7 +246,7 @@ declare namespace Api {
       Message: string;
     }
 
-    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'remote' | 'agent' | 'system';
+    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'hashdump' | 'remote' | 'agent' | 'system';
     type AuditResult = 'all' | 'success' | 'failed';
     type AuditSeverity = 'all' | 'critical' | 'warning' | 'info' | 'operational';
     type AuditDisposition = 'all' | 'blocked' | 'observed' | 'completed' | 'failed';

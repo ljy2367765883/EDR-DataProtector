@@ -180,14 +180,16 @@ namespace DataProtectorWebBridge.Services
             heartbeatIndex++;
             AuditLog.AuditRecord[] smtpRecords = DrainAuditSource("smtp", policyService.DrainSmtpAuditRecords);
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
-            if (smtpRecords.Length > 0 || webShellRecords.Length > 0)
+            AuditLog.AuditRecord[] hashProtectRecords = DrainAuditSource("hashprotect", policyService.DrainHashProtectAuditRecords);
+            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0)
             {
-                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ".");
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
+            records.AddRange(hashProtectRecords);
             return records.ToArray();
         }
 

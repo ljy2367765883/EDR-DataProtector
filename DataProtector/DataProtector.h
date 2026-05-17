@@ -37,6 +37,7 @@ Abstract:
 #define DP_TAG_WEBSHELL_EVENT  'eWpD'
 #define DP_TAG_WEBSHELL_BUFFER 'bWpD'
 #define DP_TAG_DEVICE_RULE     'rDpD'
+#define DP_TAG_HASH_PROTECT    'hHpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
@@ -56,6 +57,9 @@ Abstract:
 #define DP_DEVICE_MAX_RULES 256
 #define DP_DEVICE_MAX_ID_CHARS 260
 #define DP_DEVICE_MAX_ID_BYTES (DP_DEVICE_MAX_ID_CHARS * sizeof(WCHAR))
+#define DP_HASH_PROTECT_MAX_EVENTS 256
+#define DP_HASH_PROTECT_TARGET_CHARS 512
+#define DP_HASH_PROTECT_PROCESS_CHARS 64
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_PORT_NAME      L"\\DataProtectorPolicyPort"
 #define DP_PROTECTION_MAGIC 0x32465044u
@@ -82,6 +86,12 @@ Abstract:
 // DbgPrintEx while diagnosing policy, event queue, and reporting paths.
 //
 #define DP_ENABLE_WEBSHELL_OPERATION_TRACE 1
+
+//
+// Targeted hash-dump protection diagnostics. Emits only registration failures
+// and blocked credential-dump attempts.
+//
+#define DP_ENABLE_HASH_PROTECT_TRACE 1
 
 //
 // Cached transparent encryption keeps plaintext in the system file cache.
@@ -219,7 +229,8 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandAddDeviceRule = 60,
     DpPolicyCommandRemoveDeviceRule = 61,
     DpPolicyCommandClearDeviceRules = 62,
-    DpPolicyCommandQueryDeviceRules = 63
+    DpPolicyCommandQueryDeviceRules = 63,
+    DpPolicyCommandQueryHashProtectEvents = 80
 } DP_POLICY_COMMAND;
 
 typedef struct _DP_POLICY_MESSAGE {
@@ -457,6 +468,34 @@ typedef struct _DP_DEVICE_RULE_QUERY_ENTRY {
 #define DP_DEVICE_RULE_MESSAGE_VERSION 1
 #define DP_DEVICE_RULE_QUERY_VERSION 1
 #define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
+
+typedef enum _DP_HASH_PROTECT_OPERATION {
+    DpHashProtectOperationLsassHandle = 1,
+    DpHashProtectOperationCredentialFile = 2,
+    DpHashProtectOperationRegistryHive = 3
+} DP_HASH_PROTECT_OPERATION;
+
+typedef struct _DP_HASH_PROTECT_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_HASH_PROTECT_EVENT_QUERY_HEADER, *PDP_HASH_PROTECT_EVENT_QUERY_HEADER;
+
+typedef struct _DP_HASH_PROTECT_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONG Operation;
+    ULONG Status;
+    ULONG DesiredAccess;
+    ULONG TargetLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    WCHAR Target[DP_HASH_PROTECT_TARGET_CHARS];
+    WCHAR ProcessImage[DP_HASH_PROTECT_PROCESS_CHARS];
+} DP_HASH_PROTECT_EVENT_QUERY_ENTRY, *PDP_HASH_PROTECT_EVENT_QUERY_ENTRY;
+
+#define DP_HASH_PROTECT_EVENT_QUERY_VERSION 1
 
 EXTERN_C_START
 
@@ -697,6 +736,16 @@ DpDeviceControlUninitialize(
     );
 
 NTSTATUS
+DpHashProtectInitialize(
+    _In_ PDRIVER_OBJECT DriverObject
+    );
+
+VOID
+DpHashProtectUninitialize(
+    VOID
+    );
+
+NTSTATUS
 DpDeviceControlAddRule(
     _In_ const DP_DEVICE_RULE_MESSAGE *Rule
     );
@@ -722,6 +771,19 @@ BOOLEAN
 DpDeviceControlShouldBlockCreate(
     _In_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpHashProtectShouldBlockCreate(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+NTSTATUS
+DpHashProtectQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
     );
 
 BOOLEAN

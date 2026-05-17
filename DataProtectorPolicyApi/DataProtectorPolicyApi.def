@@ -27,6 +27,7 @@ EXPORTS
     DpPolicyClearWebShellRules
     DpPolicyQueryWebShellRules
     DpPolicyQueryWebShellEvents
+    DpPolicyQueryHashProtectEvents
     DpPolicyAddDeviceRule
     DpPolicyRemoveDeviceRule
     DpPolicyClearDeviceRules

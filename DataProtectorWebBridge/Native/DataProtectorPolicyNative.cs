@@ -105,6 +105,15 @@ namespace DataProtectorWebBridge.Native
             out uint stringBufferCharsRequired);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryHashProtectEvents(
+            [Out] NativeHashProtectEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyAddDeviceRule(ref NativeDeviceRule rule);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -206,6 +215,18 @@ namespace DataProtectorWebBridge.Native
             public IntPtr Extension;
 
             public SampleBuffer Sample;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeHashProtectEvent
+        {
+            public ulong Sequence;
+            public ulong ProcessId;
+            public uint Operation;
+            public uint Status;
+            public uint DesiredAccess;
+            public IntPtr Target;
+            public IntPtr ProcessImage;
         }
 
         [StructLayout(LayoutKind.Sequential, Size = 100)]

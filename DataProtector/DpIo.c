@@ -1685,6 +1685,12 @@ DpPreCreate(
         return FLT_PREOP_COMPLETE;
     }
 
+    if (DpHashProtectShouldBlockCreate(Data, FltObjects)) {
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
+
     status = DpShadowPreCreate(Data, FltObjects, &createContext);
     if (status == STATUS_REPARSE) {
         DP_TRACE_PPTX_DATA("PreCreateShadowReparse",

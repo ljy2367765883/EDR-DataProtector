@@ -40,6 +40,9 @@ namespace DataProtectorWebBridge.Services
         private const uint WebShellOperationWrite = 2;
         private const uint WebShellOperationRename = 3;
         private const uint WebShellOperationCleanup = 4;
+        private const uint HashOperationLsassHandle = 1;
+        private const uint HashOperationCredentialFile = 2;
+        private const uint HashOperationRegistryHive = 3;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -637,6 +640,75 @@ namespace DataProtectorWebBridge.Services
             throw new BridgeException(BufferTooSmallStatus, "The driver WebShell event queue changed while querying. Please retry.");
         }
 
+        public HashProtectEventDto[] QueryHashProtectEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryHashProtectEvents(
+                    new DataProtectorPolicyNative.NativeHashProtectEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeHashProtectEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeHashProtectEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryHashProtectEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<HashProtectEventDto> events = new List<HashProtectEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertHashProtectEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver hash protection event queue changed while querying. Please retry.");
+        }
+
         public NetworkConnectionEventDto[] QueryNetworkConnectionEvents()
         {
             uint status = SuccessStatus;
@@ -746,6 +818,7 @@ namespace DataProtectorWebBridge.Services
             List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
             records.AddRange(TryDrainSecurityAuditSource("smtp", DrainSmtpAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("webshell", DrainWebShellAuditRecords));
+            records.AddRange(TryDrainSecurityAuditSource("hashprotect", DrainHashProtectAuditRecords));
             return records.ToArray();
         }
 
@@ -771,6 +844,39 @@ namespace DataProtectorWebBridge.Services
                     Succeeded = allowed,
                     Status = "0x" + status.ToString("X8"),
                     Message = message + " Sample: " + item.sample
+                };
+
+                records.Add(record);
+                TryAppendAudit(record);
+            }
+
+            return records.ToArray();
+        }
+
+        public AuditLog.AuditRecord[] DrainHashProtectAuditRecords()
+        {
+            HashProtectEventDto[] events = QueryHashProtectEvents();
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+
+            foreach (HashProtectEventDto item in events)
+            {
+                string message = "Credential hash dump attempt blocked: " + item.operation + " by PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+                if (!string.IsNullOrWhiteSpace(item.processImage))
+                {
+                    message += " Process: " + item.processImage + ".";
+                }
+
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
+                    Actor = "hash-protect-sensor",
+                    Action = "hashdump.blocked." + item.operation,
+                    Target = item.target,
+                    Extension = item.processImage,
+                    Succeeded = false,
+                    Status = item.statusText,
+                    Message = message + " DesiredAccess: 0x" + item.desiredAccess.ToString("X8", CultureInfo.InvariantCulture) + "."
                 };
 
                 records.Add(record);
@@ -1075,6 +1181,21 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static HashProtectEventDto ConvertHashProtectEvent(DataProtectorPolicyNative.NativeHashProtectEvent nativeEvent)
+        {
+            return new HashProtectEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                processId = nativeEvent.ProcessId,
+                operation = FromHashProtectOperation(nativeEvent.Operation),
+                status = nativeEvent.Status,
+                statusText = "0x" + nativeEvent.Status.ToString("X8", CultureInfo.InvariantCulture),
+                desiredAccess = nativeEvent.DesiredAccess,
+                target = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Target) ?? string.Empty),
+                processImage = Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty
+            };
+        }
+
         private static unsafe string DecodeWebShellSample(DataProtectorPolicyNative.SampleBuffer sample, int length)
         {
             if (length <= 0)
@@ -1243,6 +1364,14 @@ namespace DataProtectorWebBridge.Services
             if (operation == WebShellOperationRename) return "rename";
             if (operation == WebShellOperationCleanup) return "cleanup";
             return "write";
+        }
+
+        private static string FromHashProtectOperation(uint operation)
+        {
+            if (operation == HashOperationLsassHandle) return "lsass-handle";
+            if (operation == HashOperationCredentialFile) return "credential-file";
+            if (operation == HashOperationRegistryHive) return "registry-hive";
+            return "unknown";
         }
 
         private static void ParseAddress(string value, out uint address, out uint mask)
@@ -1640,6 +1769,18 @@ namespace DataProtectorWebBridge.Services
             public string path { get; set; }
             public string extension { get; set; }
             public string sample { get; set; }
+        }
+
+        public sealed class HashProtectEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong processId { get; set; }
+            public string operation { get; set; }
+            public uint status { get; set; }
+            public string statusText { get; set; }
+            public uint desiredAccess { get; set; }
+            public string target { get; set; }
+            public string processImage { get; set; }
         }
 
         public sealed class OperationResult
