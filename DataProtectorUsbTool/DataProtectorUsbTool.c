@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <strsafe.h>
 #include <wchar.h>
 
 #define DPUSB_DOS_NAME L"\\\\.\\DataProtectorUsbCrypt"
@@ -214,6 +215,14 @@ static void FormatErrorMessage(DWORD error, wchar_t *buffer, DWORD bufferChars)
         buffer[written - 1] = L'\0';
         written--;
     }
+}
+
+static BOOL IsExpectedDriverNotLoadedError(DWORD error)
+{
+    return error == ERROR_FILE_NOT_FOUND ||
+           error == ERROR_PATH_NOT_FOUND ||
+           error == ERROR_BAD_PATHNAME ||
+           error == ERROR_INVALID_NAME;
 }
 
 static int PrintLastError(const wchar_t *action)
@@ -649,15 +658,93 @@ static BOOL FindPackagedDriver(wchar_t *path, DWORD pathChars)
     return FALSE;
 }
 
+static BOOL BuildKernelDriverServicePath(const wchar_t *driverPath, wchar_t *servicePath, DWORD servicePathChars)
+{
+    wchar_t normalized[MAX_PATH];
+    wchar_t driveName[3];
+    wchar_t deviceName[512];
+    const wchar_t *path;
+    size_t deviceNameLength;
+
+    if (driverPath == NULL || driverPath[0] == L'\0' || servicePath == NULL || servicePathChars == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (GetFullPathNameW(driverPath, sizeof(normalized) / sizeof(normalized[0]), normalized, NULL) == 0) {
+        return FALSE;
+    }
+
+    path = normalized;
+    if (wcsncmp(path, L"\\\\?\\", 4) == 0) {
+        path += 4;
+    } else if (wcsncmp(path, L"\\\\.\\", 4) == 0) {
+        path += 4;
+    }
+
+    if (wcsncmp(path, L"\\Device\\", 8) == 0 ||
+        wcsncmp(path, L"\\??\\", 4) == 0 ||
+        _wcsnicmp(path, L"\\SystemRoot\\", 12) == 0) {
+
+        wcsncpy_s(servicePath, servicePathChars, path, _TRUNCATE);
+        return servicePath[0] != L'\0';
+    }
+
+    if (path[0] != L'\0' && path[1] == L':' && path[2] == L'\\') {
+        driveName[0] = path[0];
+        driveName[1] = L':';
+        driveName[2] = L'\0';
+        ZeroMemory(deviceName, sizeof(deviceName));
+        if (QueryDosDeviceW(driveName, deviceName, sizeof(deviceName) / sizeof(deviceName[0])) == 0) {
+            return FALSE;
+        }
+
+        deviceNameLength = wcslen(deviceName);
+        if (deviceNameLength == 0 || path[2] != L'\\') {
+            SetLastError(ERROR_PATH_NOT_FOUND);
+            return FALSE;
+        }
+
+        if (StringCchPrintfW(servicePath,
+                             servicePathChars,
+                             L"%s%s",
+                             deviceName,
+                             path + 2) == S_OK) {
+            return TRUE;
+        }
+
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    SetLastError(ERROR_PATH_NOT_FOUND);
+    return FALSE;
+}
+
 static BOOL InstallDriverServicePath(const wchar_t *path, DWORD *win32Error)
 {
     SC_HANDLE scm;
     SC_HANDLE service;
     BOOL ok = TRUE;
+    wchar_t servicePath[MAX_PATH + 8];
 
     if (path == NULL || path[0] == L'\0') {
         if (win32Error != NULL) {
             *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    if (!BuildKernelDriverServicePath(path, servicePath, sizeof(servicePath) / sizeof(servicePath[0]))) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_PATH_NOT_FOUND;
         }
         return FALSE;
     }
@@ -677,7 +764,7 @@ static BOOL InstallDriverServicePath(const wchar_t *path, DWORD *win32Error)
                              SERVICE_KERNEL_DRIVER,
                              SERVICE_DEMAND_START,
                              SERVICE_ERROR_NORMAL,
-                             path,
+                             servicePath,
                              NULL,
                              NULL,
                              NULL,
@@ -692,7 +779,7 @@ static BOOL InstallDriverServicePath(const wchar_t *path, DWORD *win32Error)
                                   SERVICE_KERNEL_DRIVER,
                                   SERVICE_DEMAND_START,
                                   SERVICE_ERROR_NORMAL,
-                                  path,
+                                  servicePath,
                                   NULL,
                                   NULL,
                                   NULL,
@@ -722,6 +809,27 @@ static BOOL InstallDriverServicePath(const wchar_t *path, DWORD *win32Error)
         *win32Error = ERROR_SUCCESS;
     }
     return ok;
+}
+
+static void StopAndDeleteDriverService(void)
+{
+    SC_HANDLE scm;
+    SC_HANDLE service;
+    SERVICE_STATUS status;
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) {
+        return;
+    }
+
+    service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
+    if (service != NULL) {
+        (VOID)ControlService(service, SERVICE_CONTROL_STOP, &status);
+        (VOID)DeleteService(service);
+        CloseServiceHandle(service);
+    }
+
+    CloseServiceHandle(scm);
 }
 
 static BOOL StartDriverService(DWORD *win32Error)
@@ -791,6 +899,23 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, DW
     }
 
     if (!StartDriverService(&error)) {
+        if (IsExpectedDriverNotLoadedError(error)) {
+            StopAndDeleteDriverService();
+            if (!InstallDriverServicePath(deployedPath, &error) ||
+                !StartDriverService(&error)) {
+
+                if (win32Error != NULL) {
+                    *win32Error = error;
+                }
+                return FALSE;
+            }
+
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+
         if (win32Error != NULL) {
             *win32Error = error;
         }
@@ -1292,14 +1417,22 @@ static void UpdateStatusUi(void)
     } else {
         g_Ui.DriverReady = FALSE;
         g_Ui.SessionOpen = FALSE;
-        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         SetTextBuffer(g_Ui.DriverBadgeText, sizeof(g_Ui.DriverBadgeText) / sizeof(g_Ui.DriverBadgeText[0]), L"Driver Offline");
         SetTextBuffer(g_Ui.SessionBadgeText, sizeof(g_Ui.SessionBadgeText) / sizeof(g_Ui.SessionBadgeText[0]), L"Session Locked");
-        swprintf_s(detail, sizeof(detail) / sizeof(detail[0]), L"Not responding: %s", message);
+
+        if (IsExpectedDriverNotLoadedError(error)) {
+            swprintf_s(detail,
+                       sizeof(detail) / sizeof(detail[0]),
+                       L"Waiting for password verification. The USB driver will be loaded from this USB package only after Unlock is pressed.");
+        } else {
+            FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+            swprintf_s(detail, sizeof(detail) / sizeof(detail[0]), L"Not responding: %s", message);
+        }
+
         SetTextBuffer(g_Ui.ServiceStateText, sizeof(g_Ui.ServiceStateText) / sizeof(g_Ui.ServiceStateText[0]), detail);
         SetTextBuffer(g_Ui.SessionStateText,
                       sizeof(g_Ui.SessionStateText) / sizeof(g_Ui.SessionStateText[0]),
-                      L"Initialize the driver before unlocking protected media.");
+                      L"Enter the initialization password and press Unlock. A wrong password will not load the driver.");
     }
 
     InvalidateRect(g_Ui.Window, NULL, TRUE);
