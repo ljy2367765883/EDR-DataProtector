@@ -19,6 +19,7 @@ const query = reactive<Api.DataProtector.NetworkInsightQuery>({
   baselineHours: 24,
   windowHours: 24 * 31,
   eventType: 'all',
+  newness: 'new',
   host: 'all',
   page: 1,
   pageSize: 30,
@@ -64,6 +65,12 @@ const eventTypeOptions = computed(() => [
   { label: $t('dataprotector.networkAwareness.eventTypes.quic'), value: 'quic' },
   { label: $t('dataprotector.networkAwareness.eventTypes.http3'), value: 'http3' },
   { label: $t('dataprotector.networkAwareness.eventTypes.blocked'), value: 'blocked' }
+]);
+
+const newnessOptions = computed(() => [
+  { label: $t('dataprotector.networkAwareness.newnessFilters.newOnly'), value: 'new' },
+  { label: $t('dataprotector.networkAwareness.newnessFilters.existingOnly'), value: 'existing' },
+  { label: $t('dataprotector.networkAwareness.newnessFilters.all'), value: 'all' }
 ]);
 
 const hostOptions = computed(() => [
@@ -392,7 +399,7 @@ onMounted(refresh);
     <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen">
       <NGi>
         <NCard :bordered="false" class="metric-card">
-          <NStatistic :label="$t('dataprotector.networkAwareness.newConnections')" :value="stats.total" />
+          <NStatistic :label="$t('dataprotector.networkAwareness.filteredConnections')" :value="stats.total" />
         </NCard>
       </NGi>
       <NGi>
@@ -465,6 +472,7 @@ onMounted(refresh);
 
       <NSpace align="center" wrap class="filters">
         <NSelect v-model:value="query.baselineHours" :options="baselineOptions" class="filter-control" />
+        <NSelect v-model:value="query.newness" :options="newnessOptions" class="filter-control" />
         <NSelect v-model:value="query.eventType" :options="eventTypeOptions" class="filter-control" />
         <NSelect v-model:value="query.host" :options="hostOptions" class="filter-control" />
         <NInput

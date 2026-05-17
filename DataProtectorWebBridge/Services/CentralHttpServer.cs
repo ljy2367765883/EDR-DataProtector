@@ -403,6 +403,7 @@ namespace DataProtectorWebBridge.Services
                 windowHours = ParseHours(request.QueryString["windowHours"], 24 * 31),
                 host = request.QueryString["host"],
                 eventType = request.QueryString["eventType"],
+                newness = request.QueryString["newness"],
                 search = request.QueryString["search"],
                 includePrivateRemotes = ParseBoolean(request.QueryString["includePrivateRemotes"])
             };

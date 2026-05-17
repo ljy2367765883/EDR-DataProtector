@@ -66,6 +66,7 @@ declare namespace Api {
     }
 
     type NetworkInsightEventType = 'all' | 'connection' | 'dns' | 'quic' | 'http3' | 'blocked';
+    type NetworkInsightNewness = 'new' | 'existing' | 'all';
 
     interface NetworkInsightQuery {
       baselineHours?: number;
@@ -75,6 +76,7 @@ declare namespace Api {
       pageSize?: number;
       host?: string;
       eventType?: NetworkInsightEventType;
+      newness?: NetworkInsightNewness;
       search?: string;
       includePrivateRemotes?: boolean;
     }

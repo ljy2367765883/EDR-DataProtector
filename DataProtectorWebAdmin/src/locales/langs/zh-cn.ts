@@ -454,6 +454,7 @@ const local: App.I18n.Schema = {
     networkAwareness: {
       title: '网络感知',
       newConnections: '新增连接',
+      filteredConnections: '过滤后连接',
       newSinceBaseline: '相对基线新增',
       http3Candidates: 'HTTP/3 候选',
       unsignedProcesses: '未签名进程',
@@ -484,6 +485,11 @@ const local: App.I18n.Schema = {
         quic: 'QUIC',
         http3: 'HTTP/3',
         blocked: '已阻止'
+      },
+      newnessFilters: {
+        all: '全部连接',
+        newOnly: '仅新增',
+        existingOnly: '仅已存在'
       },
       baselines: {
         hours5: '5 小时',

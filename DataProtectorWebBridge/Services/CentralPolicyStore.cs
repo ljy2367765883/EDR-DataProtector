@@ -612,7 +612,7 @@ namespace DataProtectorWebBridge.Services
                 allItems = current
                     .GroupBy(NetworkObservationKey, StringComparer.OrdinalIgnoreCase)
                     .Select(group => ToNetworkInsightItem(group.ToList(), firstSeenByKey, baselineUtc))
-                    .Where(item => item.isNew)
+                    .Where(item => IsNetworkNewnessMatch(item, normalized.newness))
                     .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
                     .ToArray();
 
@@ -1504,6 +1504,7 @@ namespace DataProtectorWebBridge.Services
             normalized.windowHours = ClampHours(normalized.windowHours <= 0 ? normalized.baselineHours : normalized.windowHours, 1, 24 * 31);
             normalized.host = normalized.host ?? string.Empty;
             normalized.eventType = normalized.eventType ?? "all";
+            normalized.newness = NormalizeNetworkInsightNewness(normalized.newness);
             normalized.search = normalized.search ?? string.Empty;
             normalized.baseline = TimeSpan.FromHours(normalized.baselineHours);
             normalized.window = TimeSpan.FromHours(normalized.windowHours);
@@ -1679,6 +1680,43 @@ namespace DataProtectorWebBridge.Services
             }
 
             return true;
+        }
+
+        private static string NormalizeNetworkInsightNewness(string value)
+        {
+            if (string.Equals(value, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                return "all";
+            }
+
+            if (string.Equals(value, "existing", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "known", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "old", StringComparison.OrdinalIgnoreCase))
+            {
+                return "existing";
+            }
+
+            return "new";
+        }
+
+        private static bool IsNetworkNewnessMatch(NetworkInsightItem item, string newness)
+        {
+            if (item == null)
+            {
+                return false;
+            }
+
+            if (string.Equals(newness, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(newness, "existing", StringComparison.OrdinalIgnoreCase))
+            {
+                return !item.isNew;
+            }
+
+            return item.isNew;
         }
 
         private Dictionary<string, IpInfoCacheEntry> CloneIpInfoCache()
@@ -2981,6 +3019,7 @@ namespace DataProtectorWebBridge.Services
             public int pageSize { get; set; }
             public string host { get; set; }
             public string eventType { get; set; }
+            public string newness { get; set; }
             public string search { get; set; }
             public bool includePrivateRemotes { get; set; }
         }

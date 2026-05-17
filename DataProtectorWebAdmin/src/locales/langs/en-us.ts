@@ -458,6 +458,7 @@ const local: App.I18n.Schema = {
     networkAwareness: {
       title: 'Network Awareness',
       newConnections: 'New connections',
+      filteredConnections: 'Filtered connections',
       newSinceBaseline: 'New since baseline',
       http3Candidates: 'HTTP/3 candidates',
       unsignedProcesses: 'Unsigned processes',
@@ -488,6 +489,11 @@ const local: App.I18n.Schema = {
         quic: 'QUIC',
         http3: 'HTTP/3',
         blocked: 'Blocked'
+      },
+      newnessFilters: {
+        all: 'All connections',
+        newOnly: 'New only',
+        existingOnly: 'Existing only'
       },
       baselines: {
         hours5: '5 hours',
