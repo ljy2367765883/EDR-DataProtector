@@ -1,0 +1,52 @@
+;;;
+;;; DataProtectorUsbCrypt
+;;;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+DriverVer   = 05/17/2026,1.0.0.0
+CatalogFile = DataProtectorUsbCrypt.cat
+
+[DestinationDirs]
+DefaultDestDir = 12
+DriverFiles    = 12
+
+[DefaultInstall]
+OptionDesc = %ServiceDescription%
+CopyFiles  = DriverFiles
+
+[DefaultInstall.Services]
+AddService = %ServiceName%,,ServiceInstall
+
+[DefaultUninstall]
+DelFiles = DriverFiles
+
+[DefaultUninstall.Services]
+DelService = %ServiceName%,0x200
+
+[ServiceInstall]
+DisplayName   = %ServiceName%
+Description   = %ServiceDescription%
+ServiceBinary = %12%\%DriverName%.sys
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+
+[DriverFiles]
+%DriverName%.sys
+
+[SourceDisksFiles]
+DataProtectorUsbCrypt.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskId1%,,,
+
+[Strings]
+ManufacturerName   = "DataProtector"
+ServiceDescription = "DataProtector removable media block encryption driver"
+ServiceName        = "DataProtectorUsbCrypt"
+DriverName         = "DataProtectorUsbCrypt"
+DiskId1            = "DataProtector USB Crypt Installation Disk"

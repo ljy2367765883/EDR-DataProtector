@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{e90f2c56-2c65-463c-9a7b-f4eea3bb51ee}</UniqueIdentifier>
+      <Extensions>c;cpp;cxx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{fb7d370a-fc6d-477f-8643-55b2dc0967f2}</UniqueIdentifier>
+      <Extensions>h;hpp;hxx</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{70f3c0d5-999e-40e8-8e21-7d9896bcbfc1}</UniqueIdentifier>
+      <Extensions>rc;inf</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="DataProtectorUsbCrypt.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DpUsbCrypto.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="DataProtectorUsbCrypt.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="DataProtectorUsbCrypt.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+    <Inf Include="DataProtectorUsbCrypt.inf">
+      <Filter>Resource Files</Filter>
+    </Inf>
+  </ItemGroup>
+</Project>

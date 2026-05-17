@@ -26,6 +26,9 @@ $webDist = Join-Path $webRoot "dist"
 $bridgeOutput = Join-Path $root "DataProtectorWebBridge\bin\$Platform\$Configuration"
 $driverPackage = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector"
 $driverCertificate = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector.cer"
+$usbCryptDriverPackage = Join-Path $root "DataProtectorUsbCrypt\$Platform\$Configuration\DataProtectorUsbCrypt"
+$usbCryptDriverCertificate = Join-Path $root "DataProtectorUsbCrypt\$Platform\$Configuration\DataProtectorUsbCrypt.cer"
+$usbToolOutput = Join-Path $root "DataProtectorUsbTool\$Platform\$Configuration\DataProtectorUsbTool.exe"
 
 Push-Location $root
 try {
@@ -34,6 +37,14 @@ try {
         /p:Platform=$Platform
 
     & $msBuild ".\DataProtectorPolicyApi\DataProtectorPolicyApi.vcxproj" `
+        /p:Configuration=$Configuration `
+        /p:Platform=$Platform
+
+    & $msBuild ".\DataProtectorUsbCrypt\DataProtectorUsbCrypt.vcxproj" `
+        /p:Configuration=$Configuration `
+        /p:Platform=$Platform
+
+    & $msBuild ".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj" `
         /p:Configuration=$Configuration `
         /p:Platform=$Platform
 
@@ -62,6 +73,14 @@ try {
         throw "Driver package output was not found: $driverPackage"
     }
 
+    if (-not (Test-Path -LiteralPath $usbCryptDriverPackage)) {
+        throw "USB crypt driver package output was not found: $usbCryptDriverPackage"
+    }
+
+    if (-not (Test-Path -LiteralPath $usbToolOutput)) {
+        throw "USB crypt tool output was not found: $usbToolOutput"
+    }
+
     if (Test-Path -LiteralPath $OutputDirectory) {
         $resolvedOutput = (Resolve-Path -LiteralPath $OutputDirectory).Path
         $resolvedRoot = (Resolve-Path -LiteralPath $root).Path
@@ -75,8 +94,10 @@ try {
     $serverPublish = Join-Path $OutputDirectory "server"
     $agentPublish = Join-Path $OutputDirectory "agent"
     $agentDriverPublish = Join-Path $agentPublish "driver"
+    $agentUsbDriverPublish = Join-Path $agentPublish "usbcrypt-driver"
+    $agentUsbToolPublish = Join-Path $agentPublish "usb-tool"
     $staticOutput = Join-Path $serverPublish "web"
-    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish | Out-Null
+    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish, $agentUsbDriverPublish, $agentUsbToolPublish | Out-Null
 
     Copy-Item -Path (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
 
@@ -98,6 +119,13 @@ try {
     if (Test-Path -LiteralPath $driverCertificate) {
         Copy-Item -LiteralPath $driverCertificate -Destination $agentDriverPublish -Force
     }
+
+    Copy-Item -Path (Join-Path $usbCryptDriverPackage "*") -Destination $agentUsbDriverPublish -Recurse -Force
+    if (Test-Path -LiteralPath $usbCryptDriverCertificate) {
+        Copy-Item -LiteralPath $usbCryptDriverCertificate -Destination $agentUsbDriverPublish -Force
+    }
+
+    Copy-Item -LiteralPath $usbToolOutput -Destination $agentUsbToolPublish -Force
 
     $notes = @"
 DataProtector Central Web Admin
@@ -121,6 +149,22 @@ Endpoint driver package:
 agent\driver\DataProtector.inf
 agent\driver\DataProtector.sys
 agent\driver\dataprotector.cat
+
+USB encryption package:
+agent\usbcrypt-driver\DataProtectorUsbCrypt.inf
+agent\usbcrypt-driver\DataProtectorUsbCrypt.sys
+agent\usbcrypt-driver\dataprotectorusbcrypt.cat
+agent\usb-tool\DataProtectorUsbTool.exe
+
+USB encryption workflow:
+1. Configure USB encryption policy in the web console.
+2. Authorize the removable-device hardware code before unlocking protected media.
+3. On a client, use DataProtectorUsbTool.exe install-driver/start-driver.
+4. Provisioning is intentionally explicit; the agent never formats removable disks
+   from a heartbeat. Use DataProtectorUsbTool.exe init-plan to view the required
+   destructive initialization plan before wiring a production provisioning flow.
+5. Unlock opens the driver session using the central key reference supplied to the
+   operator or provisioning workflow.
 
 Central state:
 C:\ProgramData\DataProtector\CentralState.json

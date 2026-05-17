@@ -203,6 +203,18 @@ declare namespace Api {
       flags?: number;
     }
 
+    interface UsbCryptPolicy {
+      enabled: boolean;
+      algorithm: 'rc4';
+      publicToolAreaBytes: number;
+      allowClientProvisioning: boolean;
+      requireHardwareAuthorization: boolean;
+      keyMaterialId: string;
+      actor?: string;
+    }
+
+    interface UsbCryptPolicyRequest extends UsbCryptPolicy {}
+
     type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
 
     interface RemovableVolume {

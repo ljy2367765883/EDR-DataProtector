@@ -852,6 +852,21 @@ const local: App.I18n.Schema = {
           rawDetail: '允许普通原始卷读取，仅拒绝与敏感 Hive 和 NTDS 文件范围重叠的字节区间。'
         }
       },
+      usbcrypt: {
+        title: 'U 盘加密策略',
+        enforcement: '透明 U 盘加密',
+        enforcementDesc: '控制下发到终端 Agent 的可移动介质块加密工作流。',
+        algorithm: '算法',
+        publicAreaMb: '公开工具区 (MB)',
+        toolArea: '{size} MB 公开区',
+        keyMaterial: '密钥材料 ID',
+        keyPlaceholder: 'central-key-id 或 wrapped-key 引用',
+        requireAuthorization: '解锁前要求硬件授权',
+        allowProvisioning: '允许客户端初始化工具',
+        provisioning: '初始化',
+        save: '保存 U 盘加密策略',
+        saved: 'U 盘加密策略已保存到中央策略。'
+      },
       device: {
         discovered: '发现的可移动设备',
         addTitle: '添加可移动存储规则',

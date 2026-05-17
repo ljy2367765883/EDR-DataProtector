@@ -856,6 +856,21 @@ const local: App.I18n.Schema = {
           rawDetail: 'Allows raw volume reads except when the byte range overlaps sensitive hive and NTDS file extents.'
         }
       },
+      usbcrypt: {
+        title: 'USB Encryption Policy',
+        enforcement: 'Transparent USB encryption',
+        enforcementDesc: 'Controls the removable-media block encryption workflow distributed to endpoint agents.',
+        algorithm: 'Algorithm',
+        publicAreaMb: 'Public tool area (MB)',
+        toolArea: '{size} MB public area',
+        keyMaterial: 'Key material id',
+        keyPlaceholder: 'central-key-id or wrapped-key reference',
+        requireAuthorization: 'Require hardware authorization before unlock',
+        allowProvisioning: 'Allow client-side provisioning tool',
+        provisioning: 'Provisioning',
+        save: 'Save USB Encryption',
+        saved: 'USB encryption policy saved to central policy.'
+      },
       device: {
         discovered: 'Discovered Removable Devices',
         addTitle: 'Add Removable Storage Rule',

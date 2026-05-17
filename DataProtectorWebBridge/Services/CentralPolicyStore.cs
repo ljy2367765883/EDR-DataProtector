@@ -54,6 +54,7 @@ namespace DataProtectorWebBridge.Services
                     policyVersion = state.PolicyVersion,
                     hashProtectEnabled = QueryHashProtectPolicy().enabled,
                     lateralDefenseEnabled = QueryLateralDefensePolicy().enabled,
+                    usbCryptEnabled = QueryUsbCryptPolicy().enabled,
                     deviceCount = state.Devices.Count,
                     onlineDeviceCount = state.Devices.Values.Count(IsOnline),
                     pendingTaskCount = state.Tasks.Count(task => task.status == "queued" || task.status == "sent")
@@ -122,6 +123,15 @@ namespace DataProtectorWebBridge.Services
             {
                 EnsureLateralDefensePolicy();
                 return PolicyBridgeService.CloneLateralDefensePolicy(state.LateralDefensePolicy);
+            }
+        }
+
+        public PolicyBridgeService.UsbCryptPolicyDto QueryUsbCryptPolicy()
+        {
+            lock (syncRoot)
+            {
+                EnsureUsbCryptPolicy();
+                return PolicyBridgeService.CloneUsbCryptPolicy(state.UsbCryptPolicy);
             }
         }
 
@@ -530,6 +540,36 @@ namespace DataProtectorWebBridge.Services
             return Success("IPC and SMB lateral movement defense policy stored on central server.");
         }
 
+        public PolicyBridgeService.OperationResult UpdateUsbCryptPolicy(PolicyBridgeService.UsbCryptPolicyRequest request)
+        {
+            PolicyBridgeService.UsbCryptPolicyDto normalized = PolicyBridgeService.NormalizeUsbCryptPolicy(request);
+            lock (syncRoot)
+            {
+                EnsureUsbCryptPolicy();
+                if (!SameUsbCryptPolicy(state.UsbCryptPolicy, normalized))
+                {
+                    state.UsbCryptPolicy = PolicyBridgeService.CloneUsbCryptPolicy(normalized);
+                    state.PolicyVersion++;
+                }
+                else
+                {
+                    state.UsbCryptPolicy = PolicyBridgeService.CloneUsbCryptPolicy(normalized);
+                }
+
+                AppendAudit(
+                    normalized.actor,
+                    "central.policy.usbcrypt.update",
+                    "usb-removable-media",
+                    PolicyBridgeService.UsbCryptPolicySummary(normalized),
+                    true,
+                    "0x00000000",
+                    "USB encryption policy stored on central server.");
+                Save();
+            }
+
+            return Success("USB encryption policy stored on central server.");
+        }
+
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
         {
             return QueryAudit(new AuditLog.AuditQueryOptions { Limit = limit }).items;
@@ -926,6 +966,7 @@ namespace DataProtectorWebBridge.Services
                     deviceRules = BuildEffectiveDeviceRules(deviceId),
                     hashProtectPolicy = QueryHashProtectPolicy(),
                     lateralDefensePolicy = QueryLateralDefensePolicy(),
+                    usbCryptPolicy = QueryUsbCryptPolicy(),
                     tasks = assignedTasks
                 };
             }
@@ -979,6 +1020,10 @@ namespace DataProtectorWebBridge.Services
                     if (loaded != null && loaded.LateralDefensePolicy == null)
                     {
                         loaded.LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
+                    }
+                    if (loaded != null && loaded.UsbCryptPolicy == null)
+                    {
+                        loaded.UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
                     }
                     return loaded ?? new CentralState();
                 }
@@ -1038,6 +1083,18 @@ namespace DataProtectorWebBridge.Services
             else
             {
                 state.LateralDefensePolicy = PolicyBridgeService.CloneLateralDefensePolicy(state.LateralDefensePolicy);
+            }
+        }
+
+        private void EnsureUsbCryptPolicy()
+        {
+            if (state.UsbCryptPolicy == null)
+            {
+                state.UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
+            }
+            else
+            {
+                state.UsbCryptPolicy = PolicyBridgeService.CloneUsbCryptPolicy(state.UsbCryptPolicy);
             }
         }
 
@@ -2865,6 +2922,18 @@ namespace DataProtectorWebBridge.Services
             return string.Equals(rule.deviceId, request.deviceId, StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool SameUsbCryptPolicy(PolicyBridgeService.UsbCryptPolicyDto rule, PolicyBridgeService.UsbCryptPolicyDto request)
+        {
+            PolicyBridgeService.UsbCryptPolicyDto left = PolicyBridgeService.CloneUsbCryptPolicy(rule);
+            PolicyBridgeService.UsbCryptPolicyDto right = PolicyBridgeService.CloneUsbCryptPolicy(request);
+            return left.enabled == right.enabled &&
+                   string.Equals(left.algorithm, right.algorithm, StringComparison.OrdinalIgnoreCase) &&
+                   left.publicToolAreaBytes == right.publicToolAreaBytes &&
+                   left.allowClientProvisioning == right.allowClientProvisioning &&
+                   left.requireHardwareAuthorization == right.requireHardwareAuthorization &&
+                   string.Equals(left.keyMaterialId, right.keyMaterialId, StringComparison.OrdinalIgnoreCase);
+        }
+
         private void EnsureDeviceAuthorizationState()
         {
             if (state.RemovableDevices == null)
@@ -2983,6 +3052,7 @@ namespace DataProtectorWebBridge.Services
                 DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
                 HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
                 LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
+                UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableAuthorizations = new Dictionary<string, RemovableDeviceAuthorizationRule>(StringComparer.OrdinalIgnoreCase);
@@ -2999,6 +3069,7 @@ namespace DataProtectorWebBridge.Services
             public List<PolicyBridgeService.DeviceRuleDto> DeviceRules { get; set; }
             public PolicyBridgeService.HashProtectPolicyDto HashProtectPolicy { get; set; }
             public PolicyBridgeService.LateralDefensePolicyDto LateralDefensePolicy { get; set; }
+            public PolicyBridgeService.UsbCryptPolicyDto UsbCryptPolicy { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public Dictionary<string, RemovableDeviceState> RemovableDevices { get; set; }
             public Dictionary<string, RemovableDeviceAuthorizationRule> RemovableAuthorizations { get; set; }
@@ -3347,6 +3418,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.DeviceRuleDto[] deviceRules { get; set; }
             public PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy { get; set; }
             public PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy { get; set; }
+            public PolicyBridgeService.UsbCryptPolicyDto usbCryptPolicy { get; set; }
             public RemoteTaskDto[] tasks { get; set; }
         }
 

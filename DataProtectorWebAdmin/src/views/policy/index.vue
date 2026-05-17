@@ -26,7 +26,9 @@ import {
   fetchAddWebShellRule,
   fetchRemoveWebShellRule,
   fetchUpdateHashProtectPolicy,
-  fetchUpdateLateralDefensePolicy
+  fetchUpdateLateralDefensePolicy,
+  fetchUpdateUsbCryptPolicy,
+  fetchUsbCryptPolicy
 } from '@/service/api';
 import { $t } from '@/locales';
 
@@ -41,6 +43,7 @@ const webShellSubmitting = ref(false);
 const deviceSubmitting = ref(false);
 const hashProtectSubmitting = ref(false);
 const lateralDefenseSubmitting = ref(false);
+const usbCryptSubmitting = ref(false);
 const connected = ref(false);
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
@@ -63,6 +66,15 @@ const lateralDefensePolicy = reactive<Api.DataProtector.LateralDefensePolicy>({
   blockIpcServiceCreation: true,
   blockRemoteAdminTools: true,
   flags: 0x0000001f,
+  actor: 'web-admin'
+});
+const usbCryptPolicy = reactive<Api.DataProtector.UsbCryptPolicy>({
+  enabled: false,
+  algorithm: 'rc4',
+  publicToolAreaBytes: 5 * 1024 * 1024,
+  allowClientProvisioning: false,
+  requireHardwareAuthorization: true,
+  keyMaterialId: '',
   actor: 'web-admin'
 });
 const formRef = ref<FormInst | null>(null);
@@ -266,6 +278,13 @@ const lateralDefenseGroups = computed(() => {
     flags: `0x${lateralDefensePolicy.flags.toString(16).toUpperCase().padStart(8, '0')}`
   };
 });
+
+const usbCryptGroups = computed(() => ({
+  mode: usbCryptPolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
+  algorithm: usbCryptPolicy.algorithm.toUpperCase(),
+  toolAreaMb: Math.round(usbCryptPolicy.publicToolAreaBytes / 1024 / 1024),
+  provisioning: usbCryptPolicy.allowClientProvisioning ? $t('dataprotector.common.enabled') : $t('dataprotector.common.disabled')
+}));
 
 const lateralDefenseControls = computed(() => [
   {
@@ -711,6 +730,18 @@ function setLateralDefenseFeature(
   syncLateralDefenseFlags();
 }
 
+function applyUsbCryptPolicy(policy?: Api.DataProtector.UsbCryptPolicy) {
+  if (!policy) return;
+
+  usbCryptPolicy.enabled = Boolean(policy.enabled);
+  usbCryptPolicy.algorithm = 'rc4';
+  usbCryptPolicy.publicToolAreaBytes = policy.publicToolAreaBytes || 5 * 1024 * 1024;
+  usbCryptPolicy.allowClientProvisioning = Boolean(policy.allowClientProvisioning);
+  usbCryptPolicy.requireHardwareAuthorization = policy.requireHardwareAuthorization !== false;
+  usbCryptPolicy.keyMaterialId = policy.keyMaterialId || '';
+  usbCryptPolicy.actor = 'web-admin';
+}
+
 async function refresh() {
   loading.value = true;
   try {
@@ -722,7 +753,8 @@ async function refresh() {
       deviceRulesResult,
       removableDevicesResult,
       hashProtectPolicyResult,
-      lateralDefensePolicyResult
+      lateralDefensePolicyResult,
+      usbCryptPolicyResult
     ] = await Promise.all([
       fetchBridgeStatus(),
       fetchPolicyRules(),
@@ -731,7 +763,8 @@ async function refresh() {
       fetchDeviceRules(),
       fetchRemovableDevices(),
       fetchHashProtectPolicy(),
-      fetchLateralDefensePolicy()
+      fetchLateralDefensePolicy(),
+      fetchUsbCryptPolicy()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
     if (!rulesResult.error) rules.value = rulesResult.data;
@@ -741,6 +774,7 @@ async function refresh() {
     if (!removableDevicesResult.error) removableDevices.value = removableDevicesResult.data;
     if (!hashProtectPolicyResult.error) applyHashProtectPolicy(hashProtectPolicyResult.data);
     if (!lateralDefensePolicyResult.error) applyLateralDefensePolicy(lateralDefensePolicyResult.data);
+    if (!usbCryptPolicyResult.error) applyUsbCryptPolicy(usbCryptPolicyResult.data);
   } finally {
     loading.value = false;
   }
@@ -993,6 +1027,28 @@ async function saveLateralDefensePolicy() {
     }
   } finally {
     lateralDefenseSubmitting.value = false;
+  }
+}
+
+async function saveUsbCryptPolicy() {
+  usbCryptSubmitting.value = true;
+  try {
+    const { error, data } = await fetchUpdateUsbCryptPolicy({
+      enabled: usbCryptPolicy.enabled,
+      algorithm: 'rc4',
+      publicToolAreaBytes: usbCryptPolicy.publicToolAreaBytes,
+      allowClientProvisioning: usbCryptPolicy.allowClientProvisioning,
+      requireHardwareAuthorization: usbCryptPolicy.requireHardwareAuthorization,
+      keyMaterialId: usbCryptPolicy.keyMaterialId,
+      actor: 'web-admin'
+    });
+
+    if (!error && data.succeeded) {
+      window.$message?.success($t('dataprotector.policy.usbcrypt.saved'));
+      await refresh();
+    }
+  } finally {
+    usbCryptSubmitting.value = false;
   }
 }
 
@@ -1492,6 +1548,82 @@ onMounted(refresh);
 
       <NTabPane name="device" :tab="$t('dataprotector.policy.tabs.device')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24">
+            <NCard :title="$t('dataprotector.policy.usbcrypt.title')" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NSpace>
+                  <NTag :type="usbCryptPolicy.enabled ? 'success' : 'default'" :bordered="false">
+                    {{ usbCryptGroups.mode }}
+                  </NTag>
+                  <NTag type="info" :bordered="false">{{ usbCryptGroups.algorithm }}</NTag>
+                  <NTag type="warning" :bordered="false">
+                    {{ $t('dataprotector.policy.usbcrypt.toolArea', { size: usbCryptGroups.toolAreaMb }) }}
+                  </NTag>
+                </NSpace>
+              </template>
+
+              <NGrid :x-gap="16" :y-gap="12" cols="1 m:2 xl:4">
+                <NGi>
+                  <div class="h-full rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                    <div class="flex items-center justify-between gap-12px">
+                      <div class="min-w-0">
+                        <div class="text-14px font-700">{{ $t('dataprotector.policy.usbcrypt.enforcement') }}</div>
+                        <div class="m-t-4px text-12px text-gray-500">{{ $t('dataprotector.policy.usbcrypt.enforcementDesc') }}</div>
+                      </div>
+                      <NSwitch v-model:value="usbCryptPolicy.enabled">
+                        <template #checked>{{ $t('dataprotector.common.enabled') }}</template>
+                        <template #unchecked>{{ $t('dataprotector.common.disabled') }}</template>
+                      </NSwitch>
+                    </div>
+                  </div>
+                </NGi>
+                <NGi>
+                  <NFormItem :label="$t('dataprotector.policy.usbcrypt.keyMaterial')">
+                    <NInput
+                      v-model:value="usbCryptPolicy.keyMaterialId"
+                      clearable
+                      :placeholder="$t('dataprotector.policy.usbcrypt.keyPlaceholder')"
+                    />
+                  </NFormItem>
+                </NGi>
+                <NGi>
+                  <NFormItem :label="$t('dataprotector.policy.usbcrypt.publicAreaMb')">
+                    <NInputNumber
+                      :value="Math.round(usbCryptPolicy.publicToolAreaBytes / 1024 / 1024)"
+                      :min="5"
+                      :max="128"
+                      class="w-full"
+                      @update:value="value => (usbCryptPolicy.publicToolAreaBytes = Math.max(5, value || 5) * 1024 * 1024)"
+                    />
+                  </NFormItem>
+                </NGi>
+                <NGi>
+                  <NSpace vertical :size="10">
+                    <NCheckbox v-model:checked="usbCryptPolicy.requireHardwareAuthorization">
+                      {{ $t('dataprotector.policy.usbcrypt.requireAuthorization') }}
+                    </NCheckbox>
+                    <NCheckbox v-model:checked="usbCryptPolicy.allowClientProvisioning">
+                      {{ $t('dataprotector.policy.usbcrypt.allowProvisioning') }}
+                    </NCheckbox>
+                  </NSpace>
+                </NGi>
+              </NGrid>
+
+              <div class="m-t-12px flex flex-wrap items-center justify-between gap-12px">
+                <NSpace>
+                  <NTag type="info">{{ $t('dataprotector.policy.usbcrypt.algorithm') }}: RC4</NTag>
+                  <NTag :type="usbCryptPolicy.allowClientProvisioning ? 'warning' : 'default'">
+                    {{ $t('dataprotector.policy.usbcrypt.provisioning') }}: {{ usbCryptGroups.provisioning }}
+                  </NTag>
+                </NSpace>
+                <NButton type="primary" :loading="usbCryptSubmitting" @click="saveUsbCryptPolicy">
+                  <template #icon><SvgIcon icon="mdi:usb-flash-drive-outline" /></template>
+                  {{ $t('dataprotector.policy.usbcrypt.save') }}
+                </NButton>
+              </div>
+            </NCard>
+          </NGi>
+
           <NGi span="24">
             <NCard :title="$t('dataprotector.policy.device.discovered')" :bordered="false" class="card-wrapper">
               <template #header-extra>

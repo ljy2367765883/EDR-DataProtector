@@ -307,6 +307,21 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/usbcrypt/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryUsbCryptPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/usbcrypt/policy")
+                {
+                    PolicyBridgeService.UsbCryptPolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.UsbCryptPolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.UpdateUsbCryptPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", store.QueryAudit(ParseAuditQuery(context.Request)));

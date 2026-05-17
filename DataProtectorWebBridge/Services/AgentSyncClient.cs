@@ -21,6 +21,7 @@ namespace DataProtectorWebBridge.Services
         private readonly RemoteTaskExecutor taskExecutor = new RemoteTaskExecutor();
         private readonly RemovableDeviceInventory removableDeviceInventory = new RemovableDeviceInventory();
         private readonly List<CentralPolicyStore.RemoteTaskResult> pendingTaskResults = new List<CentralPolicyStore.RemoteTaskResult>();
+        private readonly string usbCryptPolicyPath;
         private string deviceId;
         private long appliedPolicyVersion;
         private string lastApplyStatus = "0x00000000";
@@ -41,6 +42,7 @@ namespace DataProtectorWebBridge.Services
             string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             string directory = Path.Combine(dataRoot, "DataProtector");
             statePath = Path.Combine(directory, "AgentState.json");
+            usbCryptPolicyPath = Path.Combine(directory, "UsbCryptPolicy.json");
             Directory.CreateDirectory(directory);
             LoadState();
         }
@@ -121,6 +123,7 @@ namespace DataProtectorWebBridge.Services
                     response.deviceRules ?? new PolicyBridgeService.DeviceRuleDto[0],
                     response.hashProtectPolicy ?? PolicyBridgeService.DefaultHashProtectPolicy(),
                     response.lateralDefensePolicy ?? PolicyBridgeService.DefaultLateralDefensePolicy(),
+                    response.usbCryptPolicy ?? PolicyBridgeService.DefaultUsbCryptPolicy(),
                     response.policyVersion);
             }
 
@@ -279,6 +282,7 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.DeviceRuleDto[] deviceRules,
             PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy,
             PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy,
+            PolicyBridgeService.UsbCryptPolicyDto usbCryptPolicy,
             long policyVersion)
         {
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
@@ -434,10 +438,19 @@ namespace DataProtectorWebBridge.Services
                 return;
             }
 
+            PersistUsbCryptPolicy(usbCryptPolicy);
+
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy);
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy);
             SaveState();
+        }
+
+        private void PersistUsbCryptPolicy(PolicyBridgeService.UsbCryptPolicyDto policy)
+        {
+            PolicyBridgeService.UsbCryptPolicyDto normalized = PolicyBridgeService.CloneUsbCryptPolicy(policy);
+            File.WriteAllText(usbCryptPolicyPath, serializer.Serialize(normalized), Encoding.UTF8);
+            Console.WriteLine(DateTime.Now.ToString("s") + " USB crypt policy saved: " + usbCryptPolicyPath + " (" + PolicyBridgeService.UsbCryptPolicySummary(normalized) + ").");
         }
 
         private TResponse Post<TRequest, TResponse>(Uri uri, TRequest request)

@@ -1587,6 +1587,82 @@ namespace DataProtectorWebBridge.Services
                 normalized.flags);
         }
 
+        internal static UsbCryptPolicyDto DefaultUsbCryptPolicy()
+        {
+            return new UsbCryptPolicyDto
+            {
+                enabled = false,
+                algorithm = "rc4",
+                publicToolAreaBytes = 5 * 1024 * 1024,
+                allowClientProvisioning = false,
+                requireHardwareAuthorization = true,
+                keyMaterialId = string.Empty,
+                actor = string.Empty
+            };
+        }
+
+        internal static UsbCryptPolicyDto CloneUsbCryptPolicy(UsbCryptPolicyDto policy)
+        {
+            UsbCryptPolicyDto source = policy ?? DefaultUsbCryptPolicy();
+            return new UsbCryptPolicyDto
+            {
+                enabled = source.enabled,
+                algorithm = string.IsNullOrWhiteSpace(source.algorithm) ? "rc4" : source.algorithm,
+                publicToolAreaBytes = source.publicToolAreaBytes <= 0 ? 5 * 1024 * 1024 : source.publicToolAreaBytes,
+                allowClientProvisioning = source.allowClientProvisioning,
+                requireHardwareAuthorization = source.requireHardwareAuthorization,
+                keyMaterialId = source.keyMaterialId ?? string.Empty,
+                actor = source.actor ?? string.Empty
+            };
+        }
+
+        internal static UsbCryptPolicyDto NormalizeUsbCryptPolicy(UsbCryptPolicyRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(1, "USB encryption policy body is required.");
+            }
+
+            string algorithm = string.IsNullOrWhiteSpace(request.algorithm)
+                ? "rc4"
+                : request.algorithm.Trim().ToLowerInvariant();
+            if (!string.Equals(algorithm, "rc4", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new BridgeException(1, "Only RC4 is supported by this USB encryption policy version.");
+            }
+
+            long toolArea = request.publicToolAreaBytes <= 0 ? 5 * 1024 * 1024 : request.publicToolAreaBytes;
+            if (toolArea < 5 * 1024 * 1024)
+            {
+                toolArea = 5 * 1024 * 1024;
+            }
+
+            return new UsbCryptPolicyDto
+            {
+                enabled = request.enabled,
+                algorithm = algorithm,
+                publicToolAreaBytes = toolArea,
+                allowClientProvisioning = request.allowClientProvisioning,
+                requireHardwareAuthorization = request.requireHardwareAuthorization,
+                keyMaterialId = (request.keyMaterialId ?? string.Empty).Trim(),
+                actor = request.actor
+            };
+        }
+
+        internal static string UsbCryptPolicySummary(UsbCryptPolicyDto policy)
+        {
+            UsbCryptPolicyDto normalized = CloneUsbCryptPolicy(policy);
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "enabled={0};algorithm={1};toolArea={2};clientProvisioning={3};hardwareAuthorization={4};key={5}",
+                normalized.enabled,
+                normalized.algorithm,
+                normalized.publicToolAreaBytes,
+                normalized.allowClientProvisioning,
+                normalized.requireHardwareAuthorization,
+                string.IsNullOrWhiteSpace(normalized.keyMaterialId) ? "(none)" : normalized.keyMaterialId);
+        }
+
         private static unsafe string DecodeWebShellSample(DataProtectorPolicyNative.SampleBuffer sample, int length)
         {
             if (length <= 0)
@@ -2230,6 +2306,21 @@ namespace DataProtectorWebBridge.Services
         public sealed class LateralDefensePolicyDto : LateralDefensePolicyRequest
         {
             public uint flags { get; set; }
+        }
+
+        public class UsbCryptPolicyRequest
+        {
+            public bool enabled { get; set; }
+            public string algorithm { get; set; }
+            public long publicToolAreaBytes { get; set; }
+            public bool allowClientProvisioning { get; set; }
+            public bool requireHardwareAuthorization { get; set; }
+            public string keyMaterialId { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class UsbCryptPolicyDto : UsbCryptPolicyRequest
+        {
         }
 
         public sealed class OperationResult
