@@ -16,9 +16,20 @@ namespace DataProtectorWebBridge.Services
     {
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly object terminalSync = new object();
+        private readonly Uri serverBaseUri;
+        private readonly UsbCryptInitializer usbCryptInitializer = new UsbCryptInitializer();
         private Process terminalProcess;
         private StringBuilder terminalBuffer = new StringBuilder();
         private int terminalSequence;
+
+        public RemoteTaskExecutor()
+        {
+        }
+
+        public RemoteTaskExecutor(Uri serverBaseUri)
+        {
+            this.serverBaseUri = serverBaseUri;
+        }
 
         public CentralPolicyStore.RemoteTaskResult Execute(CentralPolicyStore.RemoteTaskDto task)
         {
@@ -83,6 +94,9 @@ namespace DataProtectorWebBridge.Services
                         output = password.Output;
                         exitCode = password.ExitCode;
                         break;
+                    case "usbcrypt.initialize":
+                        output = serializer.Serialize(InitializeUsbCrypt(task.argumentsJson));
+                        break;
                     default:
                         throw new InvalidOperationException("Unsupported remote task kind: " + kind);
                 }
@@ -118,6 +132,14 @@ namespace DataProtectorWebBridge.Services
 
             Dictionary<string, object> args = serializer.Deserialize<Dictionary<string, object>>(json);
             return args ?? new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private UsbCryptInitializer.UsbCryptInitializationResult InitializeUsbCrypt(string json)
+        {
+            UsbCryptInitializer.UsbCryptInitializationRequest request = string.IsNullOrWhiteSpace(json)
+                ? null
+                : serializer.Deserialize<UsbCryptInitializer.UsbCryptInitializationRequest>(json);
+            return usbCryptInitializer.Initialize(request, AppDomain.CurrentDomain.BaseDirectory, serverBaseUri);
         }
 
         private object[] QueryInstalledApps()

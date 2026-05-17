@@ -13,6 +13,7 @@ import {
   fetchClearWebShellRules,
   fetchDeviceRules,
   fetchHashProtectPolicy,
+  fetchInitializeUsbCrypt,
   fetchLateralDefensePolicy,
   fetchNetworkRules,
   fetchPolicyRules,
@@ -27,6 +28,8 @@ import {
   fetchRemoveWebShellRule,
   fetchUpdateHashProtectPolicy,
   fetchUpdateLateralDefensePolicy,
+  fetchUploadUsbCryptDriverPackage,
+  fetchUsbCryptDriverPackage,
   fetchUpdateUsbCryptPolicy,
   fetchUsbCryptPolicy
 } from '@/service/api';
@@ -41,15 +44,27 @@ const submitting = ref(false);
 const networkSubmitting = ref(false);
 const webShellSubmitting = ref(false);
 const deviceSubmitting = ref(false);
+const usbCryptInitSubmitting = ref(false);
 const hashProtectSubmitting = ref(false);
 const lateralDefenseSubmitting = ref(false);
 const usbCryptSubmitting = ref(false);
+const usbCryptPackageUploading = ref(false);
 const connected = ref(false);
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
 const webShellRules = ref<Api.DataProtector.WebShellRule[]>([]);
 const deviceRules = ref<Api.DataProtector.DeviceRule[]>([]);
 const removableDevices = ref<Api.DataProtector.RemovableDevice[]>([]);
+const usbCryptDriverPackage = ref<Api.DataProtector.UsbCryptDriverPackageInfo>({
+  configured: false,
+  version: '',
+  fileName: '',
+  sha256: '',
+  sizeBytes: 0,
+  uploadedUtc: '',
+  uploadedBy: '',
+  downloadPath: ''
+});
 const hashProtectPolicy = reactive<Api.DataProtector.HashProtectPolicy>({
   enabled: true,
   protectLsass: true,
@@ -113,6 +128,20 @@ const deviceForm = reactive<Api.DataProtector.DeviceRuleRequest>({
   allowInsert: true,
   allowWrite: false,
   actor: 'web-admin'
+});
+
+const usbCryptInitForm = reactive({
+  show: false,
+  device: null as Api.DataProtector.RemovableDevice | null,
+  password: '',
+  confirmPassword: '',
+  confirmed: false
+});
+
+const usbCryptPackageForm = reactive({
+  version: '',
+  fileName: '',
+  base64Package: ''
 });
 
 const formRules = computed<FormRules>(() => ({
@@ -283,8 +312,19 @@ const usbCryptGroups = computed(() => ({
   mode: usbCryptPolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
   algorithm: usbCryptPolicy.algorithm.toUpperCase(),
   toolAreaMb: Math.round(usbCryptPolicy.publicToolAreaBytes / 1024 / 1024),
-  provisioning: usbCryptPolicy.allowClientProvisioning ? $t('dataprotector.common.enabled') : $t('dataprotector.common.disabled')
+  provisioning: usbCryptPolicy.allowClientProvisioning ? $t('dataprotector.common.enabled') : $t('dataprotector.common.disabled'),
+  runtimeReady: usbCryptDriverPackage.value.configured ? $t('dataprotector.policy.usbcrypt.packageReady') : $t('dataprotector.policy.usbcrypt.packageMissing')
 }));
+
+const usbCryptInitReady = computed(() => {
+  return (
+    Boolean(usbCryptInitForm.device?.deviceId) &&
+    usbCryptDriverPackage.value.configured &&
+    usbCryptInitForm.password.length >= 8 &&
+    usbCryptInitForm.password === usbCryptInitForm.confirmPassword &&
+    usbCryptInitForm.confirmed
+  );
+});
 
 const lateralDefenseControls = computed(() => [
   {
@@ -316,6 +356,25 @@ const lateralDefenseControls = computed(() => [
     icon: 'mdi:console-network-outline'
   }
 ]);
+
+function formatBytes(value: number) {
+  if (!value) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatDateTime(value: string) {
+  if (!value) return '-';
+  const time = new Date(value);
+  return Number.isNaN(time.getTime()) ? value : time.toLocaleString();
+}
 
 function formatRemovableVolumes(device: Api.DataProtector.RemovableDevice) {
   const volumes = device.volumes?.length
@@ -609,12 +668,17 @@ const removableDeviceColumns = computed<DataTableColumns<Api.DataProtector.Remov
   {
     title: $t('dataprotector.common.action'),
     key: 'actions',
-    width: 360,
+    width: 520,
     render(row) {
       return h(
         'div',
         { class: 'flex flex-wrap gap-8px' },
         [
+          h(
+            NButton,
+            { size: 'small', type: 'primary', secondary: true, disabled: row.status !== 'authorized' || !row.online, onClick: () => openUsbCryptInitialization(row) },
+            { default: () => $t('dataprotector.policy.usbcrypt.initialize') }
+          ),
           h(
             NButton,
             { size: 'small', type: 'success', secondary: true, onClick: () => authorizeRemovableDevice(row, true) },
@@ -754,7 +818,8 @@ async function refresh() {
       removableDevicesResult,
       hashProtectPolicyResult,
       lateralDefensePolicyResult,
-      usbCryptPolicyResult
+      usbCryptPolicyResult,
+      usbCryptPackageResult
     ] = await Promise.all([
       fetchBridgeStatus(),
       fetchPolicyRules(),
@@ -764,7 +829,8 @@ async function refresh() {
       fetchRemovableDevices(),
       fetchHashProtectPolicy(),
       fetchLateralDefensePolicy(),
-      fetchUsbCryptPolicy()
+      fetchUsbCryptPolicy(),
+      fetchUsbCryptDriverPackage()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
     if (!rulesResult.error) rules.value = rulesResult.data;
@@ -775,6 +841,7 @@ async function refresh() {
     if (!hashProtectPolicyResult.error) applyHashProtectPolicy(hashProtectPolicyResult.data);
     if (!lateralDefensePolicyResult.error) applyLateralDefensePolicy(lateralDefensePolicyResult.data);
     if (!usbCryptPolicyResult.error) applyUsbCryptPolicy(usbCryptPolicyResult.data);
+    if (!usbCryptPackageResult.error) usbCryptDriverPackage.value = usbCryptPackageResult.data;
   } finally {
     loading.value = false;
   }
@@ -1052,6 +1119,54 @@ async function saveUsbCryptPolicy() {
   }
 }
 
+function fileToBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const value = String(reader.result || '');
+      const comma = value.indexOf(',');
+      resolve(comma >= 0 ? value.slice(comma + 1) : value);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleUsbCryptPackageUpload(options: { file: { file?: File; name?: string }; onFinish?: () => void; onError?: () => void }) {
+  const file = options.file.file;
+  if (!file) {
+    options.onError?.();
+    return;
+  }
+
+  usbCryptPackageUploading.value = true;
+  try {
+    const base64Package = await fileToBase64(file);
+    const version = usbCryptPackageForm.version.trim() || new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+    const { error, data } = await fetchUploadUsbCryptDriverPackage({
+      version,
+      fileName: file.name,
+      base64Package
+    });
+
+    if (!error && data?.succeeded) {
+      window.$message?.success($t('dataprotector.policy.usbcrypt.packageUploaded'));
+      usbCryptPackageForm.version = '';
+      usbCryptPackageForm.fileName = file.name;
+      await refresh();
+      options.onFinish?.();
+      return;
+    }
+
+    options.onError?.();
+  } catch (error) {
+    window.$message?.error(error instanceof Error ? error.message : String(error));
+    options.onError?.();
+  } finally {
+    usbCryptPackageUploading.value = false;
+  }
+}
+
 async function authorizeRemovableDevice(device: Api.DataProtector.RemovableDevice, allowWrite: boolean) {
   deviceSubmitting.value = true;
   try {
@@ -1122,11 +1237,109 @@ async function deleteRemovableDevice(device: Api.DataProtector.RemovableDevice) 
   });
 }
 
+function openUsbCryptInitialization(device: Api.DataProtector.RemovableDevice) {
+  usbCryptInitForm.device = device;
+  usbCryptInitForm.password = '';
+  usbCryptInitForm.confirmPassword = '';
+  usbCryptInitForm.confirmed = false;
+  usbCryptInitForm.show = true;
+}
+
+async function submitUsbCryptInitialization() {
+  const device = usbCryptInitForm.device;
+  if (!device) return;
+
+  if (!usbCryptInitReady.value) {
+    window.$message?.warning($t('dataprotector.policy.usbcrypt.passwordMismatch'));
+    return;
+  }
+
+  usbCryptInitSubmitting.value = true;
+  try {
+    const { error } = await fetchInitializeUsbCrypt({
+      deviceId: device.deviceId,
+      hardwareId: device.hardwareId,
+      password: usbCryptInitForm.password,
+      publicToolAreaBytes: usbCryptPolicy.publicToolAreaBytes,
+      dataLengthBytes: 0,
+      confirmed: true,
+      actor: 'web-admin'
+    });
+
+    if (!error) {
+      window.$message?.success($t('dataprotector.policy.usbcrypt.initializeQueued'));
+      usbCryptInitForm.show = false;
+      usbCryptInitForm.password = '';
+      usbCryptInitForm.confirmPassword = '';
+      usbCryptInitForm.confirmed = false;
+      await refresh();
+    }
+  } finally {
+    usbCryptInitSubmitting.value = false;
+  }
+}
+
 onMounted(refresh);
 </script>
 
 <template>
   <NSpace vertical :size="16">
+    <NModal
+      v-model:show="usbCryptInitForm.show"
+      preset="card"
+      :title="$t('dataprotector.policy.usbcrypt.initializeTitle')"
+      class="max-w-620px"
+      :bordered="false"
+    >
+      <NSpace vertical :size="14">
+        <NAlert type="warning" :bordered="false">
+          {{ $t('dataprotector.policy.usbcrypt.initializeWarning') }}
+        </NAlert>
+        <NAlert v-if="!usbCryptDriverPackage.configured" type="error" :bordered="false">
+          {{ $t('dataprotector.policy.usbcrypt.packageRequired') }}
+        </NAlert>
+        <NDescriptions :column="1" bordered size="small">
+          <NDescriptionsItem :label="$t('dataprotector.policy.device.hardwareCode')">
+            {{ usbCryptInitForm.device?.hardwareId || '-' }}
+          </NDescriptionsItem>
+          <NDescriptionsItem :label="$t('dataprotector.policy.device.device')">
+            {{ usbCryptInitForm.device?.model || usbCryptInitForm.device?.volumeLabel || '-' }}
+          </NDescriptionsItem>
+          <NDescriptionsItem :label="$t('dataprotector.policy.device.volumes')">
+            {{ usbCryptInitForm.device ? formatRemovableVolumes(usbCryptInitForm.device).driveLetters : '-' }}
+          </NDescriptionsItem>
+        </NDescriptions>
+        <NForm label-placement="top">
+          <NFormItem :label="$t('dataprotector.policy.usbcrypt.initializePassword')">
+            <NInput
+              v-model:value="usbCryptInitForm.password"
+              type="password"
+              show-password-on="click"
+              :placeholder="$t('dataprotector.policy.usbcrypt.initializePasswordPlaceholder')"
+            />
+          </NFormItem>
+          <NFormItem :label="$t('dataprotector.policy.usbcrypt.confirmPassword')">
+            <NInput
+              v-model:value="usbCryptInitForm.confirmPassword"
+              type="password"
+              show-password-on="click"
+              :placeholder="$t('dataprotector.policy.usbcrypt.confirmPasswordPlaceholder')"
+            />
+          </NFormItem>
+          <NCheckbox v-model:checked="usbCryptInitForm.confirmed">
+            {{ $t('dataprotector.policy.usbcrypt.confirmInitialize') }}
+          </NCheckbox>
+        </NForm>
+        <div class="flex justify-end gap-12px">
+          <NButton @click="usbCryptInitForm.show = false">{{ $t('dataprotector.common.cancel') }}</NButton>
+          <NButton type="primary" :loading="usbCryptInitSubmitting" :disabled="!usbCryptInitReady" @click="submitUsbCryptInitialization">
+            <template #icon><SvgIcon icon="mdi:lock-reset" /></template>
+            {{ $t('dataprotector.policy.usbcrypt.initialize') }}
+          </NButton>
+        </div>
+      </NSpace>
+    </NModal>
+
     <NCard :bordered="false" class="card-wrapper">
       <div class="flex flex-wrap items-center justify-between gap-16px">
         <div>
@@ -1549,7 +1762,7 @@ onMounted(refresh);
       <NTabPane name="device" :tab="$t('dataprotector.policy.tabs.device')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24">
-            <NCard :title="$t('dataprotector.policy.usbcrypt.title')" :bordered="false" class="card-wrapper">
+          <NCard :title="$t('dataprotector.policy.usbcrypt.title')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NSpace>
                   <NTag :type="usbCryptPolicy.enabled ? 'success' : 'default'" :bordered="false">
@@ -1558,6 +1771,9 @@ onMounted(refresh);
                   <NTag type="info" :bordered="false">{{ usbCryptGroups.algorithm }}</NTag>
                   <NTag type="warning" :bordered="false">
                     {{ $t('dataprotector.policy.usbcrypt.toolArea', { size: usbCryptGroups.toolAreaMb }) }}
+                  </NTag>
+                  <NTag :type="usbCryptDriverPackage.configured ? 'success' : 'error'" :bordered="false">
+                    {{ usbCryptGroups.runtimeReady }}
                   </NTag>
                 </NSpace>
               </template>
@@ -1609,6 +1825,49 @@ onMounted(refresh);
                 </NGi>
               </NGrid>
 
+              <div class="m-t-14px rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                <div class="flex flex-wrap items-center justify-between gap-12px">
+                  <div class="min-w-0">
+                    <div class="text-14px font-700">{{ $t('dataprotector.policy.usbcrypt.packageTitle') }}</div>
+                    <div class="m-t-4px text-12px text-gray-500">
+                      {{ $t('dataprotector.policy.usbcrypt.packageDesc') }}
+                    </div>
+                  </div>
+                  <NSpace align="center">
+                    <NInput
+                      v-model:value="usbCryptPackageForm.version"
+                      class="w-180px"
+                      clearable
+                      :placeholder="$t('dataprotector.policy.usbcrypt.packageVersionPlaceholder')"
+                    />
+                    <NUpload
+                      :show-file-list="false"
+                      accept=".zip,application/zip"
+                      :custom-request="handleUsbCryptPackageUpload"
+                    >
+                      <NButton type="primary" secondary :loading="usbCryptPackageUploading">
+                        <template #icon><SvgIcon icon="mdi:package-up" /></template>
+                        {{ $t('dataprotector.policy.usbcrypt.packageUpload') }}
+                      </NButton>
+                    </NUpload>
+                  </NSpace>
+                </div>
+                <NDescriptions class="m-t-12px" :column="4" bordered size="small">
+                  <NDescriptionsItem :label="$t('dataprotector.policy.usbcrypt.packageVersion')">
+                    {{ usbCryptDriverPackage.version || '-' }}
+                  </NDescriptionsItem>
+                  <NDescriptionsItem :label="$t('dataprotector.policy.usbcrypt.packageSize')">
+                    {{ formatBytes(usbCryptDriverPackage.sizeBytes) }}
+                  </NDescriptionsItem>
+                  <NDescriptionsItem :label="$t('dataprotector.policy.usbcrypt.packageUploadedAt')">
+                    {{ formatDateTime(usbCryptDriverPackage.uploadedUtc) }}
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="SHA256">
+                    <span class="break-all text-12px">{{ usbCryptDriverPackage.sha256 || '-' }}</span>
+                  </NDescriptionsItem>
+                </NDescriptions>
+              </div>
+
               <div class="m-t-12px flex flex-wrap items-center justify-between gap-12px">
                 <NSpace>
                   <NTag type="info">{{ $t('dataprotector.policy.usbcrypt.algorithm') }}: RC4</NTag>
@@ -1638,7 +1897,7 @@ onMounted(refresh);
                 :data="removableDevices"
                 :loading="loading || deviceSubmitting"
                 :pagination="{ pageSize: 8 }"
-                :scroll-x="1540"
+                :scroll-x="1720"
               />
             </NCard>
           </NGi>

@@ -322,6 +322,35 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/usbcrypt/driver-package")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryUsbCryptDriverPackage());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/usbcrypt/driver-package")
+                {
+                    CentralPolicyStore.UsbCryptDriverPackageUploadRequest request =
+                        JsonResponse.Read<CentralPolicyStore.UsbCryptDriverPackageUploadRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.SaveUsbCryptDriverPackage(request, context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/usbcrypt/driver-package/download")
+                {
+                    ServeUsbCryptDriverPackage(context.Response);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/usbcrypt/initialize")
+                {
+                    CentralPolicyStore.UsbCryptInitializationTaskRequest request =
+                        JsonResponse.Read<CentralPolicyStore.UsbCryptInitializationTaskRequest>(context.Request.InputStream);
+                    JsonResponse.Write(context.Response, "0000", "USB encryption initialization task queued.", store.CreateUsbCryptInitializationTask(request));
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", store.QueryAudit(ParseAuditQuery(context.Request)));
@@ -387,6 +416,25 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Math.Max(1, Math.Min(limit, 1000));
+        }
+
+        private void ServeUsbCryptDriverPackage(HttpListenerResponse response)
+        {
+            string packagePath = store.GetUsbCryptPackagePath();
+            if (!System.IO.File.Exists(packagePath))
+            {
+                JsonResponse.WriteError(response, HttpStatusCode.NotFound, "USB crypt runtime package has not been uploaded.");
+                return;
+            }
+
+            byte[] bytes = System.IO.File.ReadAllBytes(packagePath);
+            response.StatusCode = (int)HttpStatusCode.OK;
+            response.ContentType = "application/zip";
+            response.ContentLength64 = bytes.Length;
+            response.Headers["Access-Control-Allow-Origin"] = "*";
+            response.Headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS";
+            response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+            response.OutputStream.Write(bytes, 0, bytes.Length);
         }
 
         private static AuditLog.AuditQueryOptions ParseAuditQuery(HttpListenerRequest request)

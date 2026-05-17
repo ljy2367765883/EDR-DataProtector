@@ -18,7 +18,7 @@ namespace DataProtectorWebBridge.Services
         private readonly PolicyBridgeService policyService;
         private readonly string statePath;
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
-        private readonly RemoteTaskExecutor taskExecutor = new RemoteTaskExecutor();
+        private readonly RemoteTaskExecutor taskExecutor;
         private readonly RemovableDeviceInventory removableDeviceInventory = new RemovableDeviceInventory();
         private readonly List<CentralPolicyStore.RemoteTaskResult> pendingTaskResults = new List<CentralPolicyStore.RemoteTaskResult>();
         private readonly string usbCryptPolicyPath;
@@ -38,6 +38,7 @@ namespace DataProtectorWebBridge.Services
             this.interval = interval <= TimeSpan.Zero ? TimeSpan.FromSeconds(15) : interval;
             this.policyService = policyService ?? throw new ArgumentNullException("policyService");
             serverSyncUri = BuildSyncUri(serverBaseUrl);
+            taskExecutor = new RemoteTaskExecutor(BuildServerBaseUri(serverBaseUrl));
 
             string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             string directory = Path.Combine(dataRoot, "DataProtector");
@@ -529,13 +530,18 @@ namespace DataProtectorWebBridge.Services
 
         private static Uri BuildSyncUri(string serverBaseUrl)
         {
+            return new Uri(BuildServerBaseUri(serverBaseUrl), "api/agent/sync");
+        }
+
+        private static Uri BuildServerBaseUri(string serverBaseUrl)
+        {
             string value = serverBaseUrl.Trim();
             if (!value.EndsWith("/", StringComparison.Ordinal))
             {
                 value += "/";
             }
 
-            return new Uri(new Uri(value), "api/agent/sync");
+            return new Uri(value);
         }
 
         private static bool GetBool(object instance, string name)

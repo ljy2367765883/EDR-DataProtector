@@ -94,10 +94,9 @@ try {
     $serverPublish = Join-Path $OutputDirectory "server"
     $agentPublish = Join-Path $OutputDirectory "agent"
     $agentDriverPublish = Join-Path $agentPublish "driver"
-    $agentUsbDriverPublish = Join-Path $agentPublish "usbcrypt-driver"
-    $agentUsbToolPublish = Join-Path $agentPublish "usb-tool"
     $staticOutput = Join-Path $serverPublish "web"
-    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish, $agentUsbDriverPublish, $agentUsbToolPublish | Out-Null
+    $serverUsbRuntimePublish = Join-Path $serverPublish "usbcrypt-runtime"
+    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish, $serverUsbRuntimePublish | Out-Null
 
     Copy-Item -Path (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
 
@@ -120,12 +119,16 @@ try {
         Copy-Item -LiteralPath $driverCertificate -Destination $agentDriverPublish -Force
     }
 
-    Copy-Item -Path (Join-Path $usbCryptDriverPackage "*") -Destination $agentUsbDriverPublish -Recurse -Force
+    $runtimeStaging = Join-Path $env:TEMP ("DataProtectorUsbRuntime-" + [guid]::NewGuid().ToString("N"))
+    $runtimeDriverStaging = Join-Path $runtimeStaging "driver"
+    New-Item -ItemType Directory -Force -Path $runtimeDriverStaging | Out-Null
+    Copy-Item -LiteralPath $usbToolOutput -Destination $runtimeStaging -Force
+    Copy-Item -Path (Join-Path $usbCryptDriverPackage "*") -Destination $runtimeDriverStaging -Recurse -Force
     if (Test-Path -LiteralPath $usbCryptDriverCertificate) {
-        Copy-Item -LiteralPath $usbCryptDriverCertificate -Destination $agentUsbDriverPublish -Force
+        Copy-Item -LiteralPath $usbCryptDriverCertificate -Destination $runtimeDriverStaging -Force
     }
-
-    Copy-Item -LiteralPath $usbToolOutput -Destination $agentUsbToolPublish -Force
+    Compress-Archive -Path (Join-Path $runtimeStaging "*") -DestinationPath (Join-Path $serverUsbRuntimePublish "DataProtectorUsbRuntime.zip") -Force
+    Remove-Item -LiteralPath $runtimeStaging -Recurse -Force
 
     $notes = @"
 DataProtector Central Web Admin
@@ -150,21 +153,29 @@ agent\driver\DataProtector.inf
 agent\driver\DataProtector.sys
 agent\driver\dataprotector.cat
 
-USB encryption package:
-agent\usbcrypt-driver\DataProtectorUsbCrypt.inf
-agent\usbcrypt-driver\DataProtectorUsbCrypt.sys
-agent\usbcrypt-driver\dataprotectorusbcrypt.cat
-agent\usb-tool\DataProtectorUsbTool.exe
+USB encryption runtime package:
+server\usbcrypt-runtime\DataProtectorUsbRuntime.zip
 
 USB encryption workflow:
-1. Configure USB encryption policy in the web console.
-2. Authorize the removable-device hardware code before unlocking protected media.
-3. On a client, use DataProtectorUsbTool.exe install-driver/start-driver.
-4. Provisioning is intentionally explicit; the agent never formats removable disks
-   from a heartbeat. Use DataProtectorUsbTool.exe init-plan to view the required
-   destructive initialization plan before wiring a production provisioning flow.
-5. Unlock opens the driver session using the central key reference supplied to the
-   operator or provisioning workflow.
+1. The web console discovers removable devices reported by endpoint agents.
+2. Upload server\usbcrypt-runtime\DataProtectorUsbRuntime.zip in the web
+   console USB encryption package panel. The server stores the package under
+   C:\ProgramData\DataProtector\UsbCryptPackages and versions it by metadata.
+3. Operators authorize a device and start USB encryption initialization from
+   the web console. The initialization password is delivered as a one-shot
+   task secret and is not persisted in the central state file.
+4. The endpoint agent owns initialization: it validates the hardware id,
+   downloads the server-managed runtime package, verifies its SHA256, copies
+   DataProtectorUsbTool.exe and driver files to the USB public area, and marks
+   driver runtime files as hidden/system.
+5. Unlock key metadata is written to the USB raw disk metadata sector at 64KB,
+   not to an ADS and not to a public DataProtectorUsbUnlock.dat file.
+6. DataProtectorUsbTool.exe is only the public-area unlock loader. It validates
+   the raw-disk USB metadata with the initialization password before deploying
+   or loading the driver. A wrong password never loads the driver.
+7. The public tool exposes only metadata-gated unlock operations: UI unlock,
+   unlock-password, status, and lock. Direct driver loading is intentionally not
+   exposed by the released tool path.
 
 Central state:
 C:\ProgramData\DataProtector\CentralState.json

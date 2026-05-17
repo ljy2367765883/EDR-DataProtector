@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -17,9 +18,12 @@ namespace DataProtectorWebBridge.Services
         private const string IpInfoTokenEnvironmentVariable = "DATAPROTECTOR_IPINFO_TOKEN";
         private const string LegacyIpInfoTokenEnvironmentVariable = "IPINFO_TOKEN";
         private const string IpInfoTokenFileName = "IpInfoToken.txt";
+        private const string UsbCryptPackageDirectoryName = "UsbCryptPackages";
+        private const string UsbCryptPackageFileName = "current.zip";
         private readonly object syncRoot = new object();
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly string filePath;
+        private readonly Dictionary<string, string> volatileTaskArguments = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private CentralState state;
 
         public CentralPolicyStore()
@@ -133,6 +137,70 @@ namespace DataProtectorWebBridge.Services
                 EnsureUsbCryptPolicy();
                 return PolicyBridgeService.CloneUsbCryptPolicy(state.UsbCryptPolicy);
             }
+        }
+
+        public UsbCryptDriverPackageInfo QueryUsbCryptDriverPackage()
+        {
+            lock (syncRoot)
+            {
+                EnsureUsbCryptDriverPackage();
+                return CloneUsbCryptDriverPackage(state.UsbCryptDriverPackage);
+            }
+        }
+
+        public PolicyBridgeService.OperationResult SaveUsbCryptDriverPackage(UsbCryptDriverPackageUploadRequest request, string actor)
+        {
+            UsbCryptDriverPackageUploadRequest normalized = NormalizeUsbCryptDriverPackageUpload(request);
+            byte[] packageBytes;
+            try
+            {
+                packageBytes = Convert.FromBase64String(normalized.base64Package);
+            }
+            catch
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB crypt runtime package must be a valid base64 zip payload.");
+            }
+
+            if (packageBytes.Length <= 0)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB crypt runtime package is empty.");
+            }
+
+            if (packageBytes.Length > 64 * 1024 * 1024)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB crypt runtime package exceeds the 64 MB server limit.");
+            }
+
+            ValidateUsbCryptPackageBytes(packageBytes);
+            string sha256 = ComputeSha256Hex(packageBytes);
+            string packagePath = GetUsbCryptPackagePath();
+            Directory.CreateDirectory(Path.GetDirectoryName(packagePath));
+            File.WriteAllBytes(packagePath, packageBytes);
+
+            lock (syncRoot)
+            {
+                state.UsbCryptDriverPackage = new UsbCryptDriverPackageInfo
+                {
+                    configured = true,
+                    version = normalized.version,
+                    fileName = string.IsNullOrWhiteSpace(normalized.fileName) ? UsbCryptPackageFileName : normalized.fileName,
+                    sha256 = sha256,
+                    sizeBytes = packageBytes.Length,
+                    uploadedUtc = DateTime.UtcNow.ToString("o"),
+                    uploadedBy = string.IsNullOrWhiteSpace(actor) ? Environment.UserName : actor,
+                    downloadPath = "/api/usbcrypt/driver-package/download"
+                };
+
+                AppendAudit(actor, "central.usbcrypt.driver.upload", state.UsbCryptDriverPackage.version, "usb-runtime-package", true, "0x00000000", "USB crypt runtime package uploaded.");
+                Save();
+            }
+
+            return Success("USB crypt runtime package uploaded.");
+        }
+
+        public string GetUsbCryptPackagePath()
+        {
+            return Path.Combine(DirectoryPath, UsbCryptPackageDirectoryName, UsbCryptPackageFileName);
         }
 
         public RemovableDeviceDto[] QueryRemovableDevices()
@@ -808,6 +876,11 @@ namespace DataProtectorWebBridge.Services
                 throw new PolicyBridgeService.BridgeException(1, "Task kind is required.");
             }
 
+            if (string.Equals(kind, "usbcrypt.initialize", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB encryption initialization must use the dedicated /api/usbcrypt/initialize endpoint.");
+            }
+
             lock (syncRoot)
             {
                 if (!state.Devices.ContainsKey(deviceId))
@@ -830,6 +903,64 @@ namespace DataProtectorWebBridge.Services
 
                 state.Tasks.Add(task);
                 AppendAudit(task.actor, "remote.task.create." + task.kind, task.deviceId, string.Empty, true, "0x00000000", "Remote task queued: " + task.taskId);
+                Save();
+                return CloneTask(task);
+            }
+        }
+
+        public RemoteTaskDto CreateUsbCryptInitializationTask(UsbCryptInitializationTaskRequest request)
+        {
+            UsbCryptInitializationTaskRequest normalized = NormalizeUsbCryptInitializationTaskRequest(request);
+            lock (syncRoot)
+            {
+                if (!state.Devices.ContainsKey(normalized.deviceId))
+                {
+                    throw new PolicyBridgeService.BridgeException(1, "Target agent is not registered.");
+                }
+
+                EnsureDeviceAuthorizationState();
+                RemovableDeviceState removable;
+                if (!state.RemovableDevices.TryGetValue(normalized.hardwareId, out removable) || !IsRemovableDeviceOnline(removable))
+                {
+                    throw new PolicyBridgeService.BridgeException(1, "Target removable device is not online.");
+                }
+
+                RemovableDeviceAuthorizationRule authorization = ResolveRemovableAuthorization(normalized.hardwareId);
+                if (authorization == null || !string.Equals(authorization.status, "authorized", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new PolicyBridgeService.BridgeException(1, "Target removable device must be authorized before USB encryption initialization.");
+                }
+
+                UsbCryptDriverPackageInfo package = GetCurrentUsbCryptPackageForTask();
+                string argumentsJson = serializer.Serialize(new
+                {
+                    hardwareId = normalized.hardwareId,
+                    password = normalized.password,
+                    publicToolAreaBytes = normalized.publicToolAreaBytes,
+                    dataLengthBytes = normalized.dataLengthBytes,
+                    confirmed = normalized.confirmed,
+                    driverPackageVersion = package.version,
+                    driverPackageSha256 = package.sha256,
+                    driverPackageDownloadPath = package.downloadPath
+                });
+
+                RemoteTaskState task = new RemoteTaskState
+                {
+                    taskId = Guid.NewGuid().ToString("N"),
+                    deviceId = normalized.deviceId,
+                    kind = "usbcrypt.initialize",
+                    argumentsJson = argumentsJson,
+                    actor = string.IsNullOrWhiteSpace(normalized.actor) ? Environment.UserName : normalized.actor,
+                    status = "queued",
+                    createdUtc = DateTime.UtcNow.ToString("o"),
+                    output = string.Empty,
+                    error = string.Empty
+                };
+
+                task.argumentsJson = RedactUsbCryptInitializationArgs(argumentsJson);
+                volatileTaskArguments[task.taskId] = argumentsJson;
+                state.Tasks.Add(task);
+                AppendAudit(task.actor, "usbcrypt.initialize.queued", normalized.hardwareId, "usb-removable-media", true, "0x00000000", normalized.confirmed ? "USB encryption initialization task queued." : "USB encryption initialization dry run queued.");
                 Save();
                 return CloneTask(task);
             }
@@ -1025,6 +1156,10 @@ namespace DataProtectorWebBridge.Services
                     {
                         loaded.UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
                     }
+                    if (loaded != null && loaded.UsbCryptDriverPackage == null)
+                    {
+                        loaded.UsbCryptDriverPackage = new UsbCryptDriverPackageInfo();
+                    }
                     return loaded ?? new CentralState();
                 }
                 catch
@@ -1095,6 +1230,19 @@ namespace DataProtectorWebBridge.Services
             else
             {
                 state.UsbCryptPolicy = PolicyBridgeService.CloneUsbCryptPolicy(state.UsbCryptPolicy);
+            }
+        }
+
+        private void EnsureUsbCryptDriverPackage()
+        {
+            if (state.UsbCryptDriverPackage == null)
+            {
+                state.UsbCryptDriverPackage = new UsbCryptDriverPackageInfo();
+            }
+
+            if (File.Exists(GetUsbCryptPackagePath()) && string.IsNullOrWhiteSpace(state.UsbCryptDriverPackage.downloadPath))
+            {
+                state.UsbCryptDriverPackage.downloadPath = "/api/usbcrypt/driver-package/download";
             }
         }
 
@@ -2001,6 +2149,43 @@ namespace DataProtectorWebBridge.Services
             return token.Substring(0, 4) + new string('*', Math.Max(4, token.Length - 8)) + token.Substring(token.Length - 4);
         }
 
+        private static string ComputeSha256Hex(byte[] bytes)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                return BitConverter.ToString(sha256.ComputeHash(bytes ?? new byte[0])).Replace("-", string.Empty).ToLowerInvariant();
+            }
+        }
+
+        private static void ValidateUsbCryptPackageBytes(byte[] packageBytes)
+        {
+            bool hasTool = false;
+            bool hasDriver = false;
+
+            try
+            {
+                using (MemoryStream memory = new MemoryStream(packageBytes))
+                using (System.IO.Compression.ZipArchive archive = new System.IO.Compression.ZipArchive(memory, System.IO.Compression.ZipArchiveMode.Read))
+                {
+                    foreach (System.IO.Compression.ZipArchiveEntry entry in archive.Entries)
+                    {
+                        string name = Path.GetFileName(entry.FullName ?? string.Empty);
+                        hasTool = hasTool || string.Equals(name, "DataProtectorUsbTool.exe", StringComparison.OrdinalIgnoreCase);
+                        hasDriver = hasDriver || string.Equals(name, "DataProtectorUsbCrypt.sys", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+            }
+            catch
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB crypt runtime package must be a valid zip archive.");
+            }
+
+            if (!hasTool || !hasDriver)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB crypt runtime package must contain DataProtectorUsbTool.exe and DataProtectorUsbCrypt.sys.");
+            }
+        }
+
         private static bool IsIpInfoEnabled()
         {
             return !string.IsNullOrWhiteSpace(GetIpInfoToken());
@@ -2378,9 +2563,33 @@ namespace DataProtectorWebBridge.Services
                 .OrderBy(task => task.createdUtc, StringComparer.OrdinalIgnoreCase)
                 .Take(5))
             {
+                string secretArguments = null;
+                if (IsOneShotSecretTask(task.kind) &&
+                    !volatileTaskArguments.TryGetValue(task.taskId, out secretArguments))
+                {
+                    task.status = "failed";
+                    task.completedUtc = now.ToString("o");
+                    task.succeeded = false;
+                    task.exitCode = 1;
+                    task.output = string.Empty;
+                    task.error = "One-shot task secret is no longer available. Queue the initialization again.";
+                    AppendAudit(deviceId, "remote.task.secret.expired." + task.kind, task.taskId, string.Empty, false, "0x00000001", task.error);
+                    continue;
+                }
+
                 task.status = "sent";
                 task.sentUtc = now.ToString("o");
-                tasks.Add(CloneTask(task));
+                if (IsOneShotSecretTask(task.kind))
+                {
+                    RemoteTaskDto dto = CloneTask(task);
+                    dto.argumentsJson = secretArguments;
+                    volatileTaskArguments.Remove(task.taskId);
+                    tasks.Add(dto);
+                }
+                else
+                {
+                    tasks.Add(CloneTask(task));
+                }
             }
 
             return tasks.ToArray();
@@ -2417,8 +2626,14 @@ namespace DataProtectorWebBridge.Services
         {
             DateTime sent;
             return task.status == "sent"
+                && !IsOneShotSecretTask(task.kind)
                 && DateTime.TryParse(task.sentUtc, out sent)
                 && now - sent.ToUniversalTime() > TimeSpan.FromMinutes(5);
+        }
+
+        private static bool IsOneShotSecretTask(string kind)
+        {
+            return string.Equals(kind, "usbcrypt.initialize", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void RedactSensitiveTaskArgs(RemoteTaskState task)
@@ -2426,6 +2641,40 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(task.kind, "user.changePassword", StringComparison.OrdinalIgnoreCase))
             {
                 task.argumentsJson = "{\"username\":\"redacted\",\"newPassword\":\"redacted\"}";
+            }
+
+            if (string.Equals(task.kind, "usbcrypt.initialize", StringComparison.OrdinalIgnoreCase))
+            {
+                task.argumentsJson = RedactUsbCryptInitializationArgs(task.argumentsJson);
+            }
+        }
+
+        private static string RedactUsbCryptInitializationArgs(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return "{}";
+            }
+
+            try
+            {
+                JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+                Dictionary<string, object> args = serializer.Deserialize<Dictionary<string, object>>(json);
+                if (args == null)
+                {
+                    return "{}";
+                }
+
+                if (args.ContainsKey("password"))
+                {
+                    args["password"] = "redacted";
+                }
+
+                return serializer.Serialize(args);
+            }
+            catch
+            {
+                return "{\"password\":\"redacted\"}";
             }
         }
 
@@ -2912,6 +3161,22 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static UsbCryptDriverPackageInfo CloneUsbCryptDriverPackage(UsbCryptDriverPackageInfo package)
+        {
+            UsbCryptDriverPackageInfo source = package ?? new UsbCryptDriverPackageInfo();
+            return new UsbCryptDriverPackageInfo
+            {
+                configured = source.configured,
+                version = source.version ?? string.Empty,
+                fileName = source.fileName ?? string.Empty,
+                sha256 = source.sha256 ?? string.Empty,
+                sizeBytes = source.sizeBytes,
+                uploadedUtc = source.uploadedUtc ?? string.Empty,
+                uploadedBy = source.uploadedBy ?? string.Empty,
+                downloadPath = string.IsNullOrWhiteSpace(source.downloadPath) ? "/api/usbcrypt/driver-package/download" : source.downloadPath
+            };
+        }
+
         private static bool SameWebShellRule(PolicyBridgeService.WebShellRuleDto rule, PolicyBridgeService.WebShellRuleDto request)
         {
             return string.Equals(rule.directory, request.directory, StringComparison.OrdinalIgnoreCase);
@@ -2932,6 +3197,90 @@ namespace DataProtectorWebBridge.Services
                    left.allowClientProvisioning == right.allowClientProvisioning &&
                    left.requireHardwareAuthorization == right.requireHardwareAuthorization &&
                    string.Equals(left.keyMaterialId, right.keyMaterialId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static UsbCryptInitializationTaskRequest NormalizeUsbCryptInitializationTaskRequest(UsbCryptInitializationTaskRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB initialization request body is required.");
+            }
+
+            string deviceId = NormalizeDeviceText(request.deviceId);
+            string hardwareId = NormalizeHardwareId(request.hardwareId);
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Target agent device id is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(hardwareId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB hardware id is required.");
+            }
+
+            if (string.IsNullOrEmpty(request.password) || request.password.Length < 8)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Initialization password must contain at least 8 characters.");
+            }
+
+            long publicToolAreaBytes = request.publicToolAreaBytes <= 0 ? 5L * 1024L * 1024L : request.publicToolAreaBytes;
+            if (publicToolAreaBytes < 5L * 1024L * 1024L)
+            {
+                publicToolAreaBytes = 5L * 1024L * 1024L;
+            }
+
+            return new UsbCryptInitializationTaskRequest
+            {
+                deviceId = deviceId,
+                hardwareId = hardwareId,
+                password = request.password,
+                publicToolAreaBytes = publicToolAreaBytes,
+                dataLengthBytes = Math.Max(0, request.dataLengthBytes),
+                confirmed = request.confirmed,
+                actor = request.actor
+            };
+        }
+
+        private UsbCryptDriverPackageInfo GetCurrentUsbCryptPackageForTask()
+        {
+            EnsureUsbCryptDriverPackage();
+            if (state.UsbCryptDriverPackage == null ||
+                !state.UsbCryptDriverPackage.configured ||
+                string.IsNullOrWhiteSpace(state.UsbCryptDriverPackage.sha256) ||
+                !File.Exists(GetUsbCryptPackagePath()))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Upload a USB crypt runtime package before initializing USB encryption.");
+            }
+
+            UsbCryptDriverPackageInfo package = CloneUsbCryptDriverPackage(state.UsbCryptDriverPackage);
+            package.downloadPath = "/api/usbcrypt/driver-package/download";
+            return package;
+        }
+
+        private static UsbCryptDriverPackageUploadRequest NormalizeUsbCryptDriverPackageUpload(UsbCryptDriverPackageUploadRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB crypt runtime package upload body is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.base64Package))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "USB crypt runtime package payload is required.");
+            }
+
+            string version = NormalizeDeviceText(request.version);
+            if (string.IsNullOrWhiteSpace(version))
+            {
+                version = DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+            }
+
+            return new UsbCryptDriverPackageUploadRequest
+            {
+                version = version,
+                fileName = NormalizeDeviceText(request.fileName),
+                base64Package = request.base64Package.Trim()
+            };
         }
 
         private void EnsureDeviceAuthorizationState()
@@ -3053,6 +3402,7 @@ namespace DataProtectorWebBridge.Services
                 HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
                 LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
                 UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
+                UsbCryptDriverPackage = new UsbCryptDriverPackageInfo();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableAuthorizations = new Dictionary<string, RemovableDeviceAuthorizationRule>(StringComparer.OrdinalIgnoreCase);
@@ -3070,6 +3420,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.HashProtectPolicyDto HashProtectPolicy { get; set; }
             public PolicyBridgeService.LateralDefensePolicyDto LateralDefensePolicy { get; set; }
             public PolicyBridgeService.UsbCryptPolicyDto UsbCryptPolicy { get; set; }
+            public UsbCryptDriverPackageInfo UsbCryptDriverPackage { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public Dictionary<string, RemovableDeviceState> RemovableDevices { get; set; }
             public Dictionary<string, RemovableDeviceAuthorizationRule> RemovableAuthorizations { get; set; }
@@ -3136,6 +3487,25 @@ namespace DataProtectorWebBridge.Services
         public sealed class IpInfoConfigurationRequest
         {
             public string token { get; set; }
+        }
+
+        public sealed class UsbCryptDriverPackageInfo
+        {
+            public bool configured { get; set; }
+            public string version { get; set; }
+            public string fileName { get; set; }
+            public string sha256 { get; set; }
+            public long sizeBytes { get; set; }
+            public string uploadedUtc { get; set; }
+            public string uploadedBy { get; set; }
+            public string downloadPath { get; set; }
+        }
+
+        public sealed class UsbCryptDriverPackageUploadRequest
+        {
+            public string version { get; set; }
+            public string fileName { get; set; }
+            public string base64Package { get; set; }
         }
 
         public sealed class NetworkInsightItem
@@ -3385,6 +3755,20 @@ namespace DataProtectorWebBridge.Services
         {
             public string hardwareId { get; set; }
             public string actor { get; set; }
+        }
+
+        public sealed class UsbCryptInitializationTaskRequest
+        {
+            public string deviceId { get; set; }
+            public string hardwareId { get; set; }
+            public string password { get; set; }
+            public long publicToolAreaBytes { get; set; }
+            public long dataLengthBytes { get; set; }
+            public bool confirmed { get; set; }
+            public string actor { get; set; }
+            public string driverPackageVersion { get; set; }
+            public string driverPackageSha256 { get; set; }
+            public string driverPackageDownloadPath { get; set; }
         }
 
         public sealed class AgentSyncRequest

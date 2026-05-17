@@ -233,6 +233,29 @@ export function fetchUpdateUsbCryptPolicy(data: Api.DataProtector.UsbCryptPolicy
   });
 }
 
+export function fetchUsbCryptDriverPackage() {
+  return request<Api.DataProtector.UsbCryptDriverPackageInfo>({
+    url: '/usbcrypt/driver-package',
+    method: 'get'
+  });
+}
+
+export function fetchUploadUsbCryptDriverPackage(data: Api.DataProtector.UsbCryptDriverPackageUploadRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/usbcrypt/driver-package',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchInitializeUsbCrypt(data: Api.DataProtector.UsbCryptInitializationRequest) {
+  return request<Api.DataProtector.RemoteTask>({
+    url: '/usbcrypt/initialize',
+    method: 'post',
+    data
+  });
+}
+
 export function fetchRemovableDevices() {
   return request<Api.DataProtector.RemovableDevice[]>({
     url: '/device/removable',

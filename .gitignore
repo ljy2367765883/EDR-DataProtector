@@ -16,6 +16,8 @@ Release/
 publish/
 
 # Driver/package generated files
+*.aps
+RC[0-9A-Fa-f]*
 *.pdb
 *.ilk
 *.idb

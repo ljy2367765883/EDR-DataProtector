@@ -215,6 +215,33 @@ declare namespace Api {
 
     interface UsbCryptPolicyRequest extends UsbCryptPolicy {}
 
+    interface UsbCryptDriverPackageInfo {
+      configured: boolean;
+      version: string;
+      fileName: string;
+      sha256: string;
+      sizeBytes: number;
+      uploadedUtc: string;
+      uploadedBy: string;
+      downloadPath: string;
+    }
+
+    interface UsbCryptDriverPackageUploadRequest {
+      version: string;
+      fileName: string;
+      base64Package: string;
+    }
+
+    interface UsbCryptInitializationRequest {
+      deviceId: string;
+      hardwareId: string;
+      password: string;
+      publicToolAreaBytes: number;
+      dataLengthBytes?: number;
+      confirmed: boolean;
+      actor?: string;
+    }
+
     type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
 
     interface RemovableVolume {
