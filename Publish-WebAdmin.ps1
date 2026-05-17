@@ -13,6 +13,24 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $msBuild = "D:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"
 
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Description failed with exit code $LASTEXITCODE."
+    }
+}
+
 if (-not (Test-Path -LiteralPath $msBuild)) {
     throw "VS2019 MSBuild was not found at: $msBuild"
 }
@@ -32,30 +50,16 @@ $usbToolOutput = Join-Path $root "DataProtectorUsbTool\$Platform\$Configuration\
 
 Push-Location $root
 try {
-    & $msBuild ".\DataProtector\DataProtector.vcxproj" `
-        /p:Configuration=$Configuration `
-        /p:Platform=$Platform
-
-    & $msBuild ".\DataProtectorPolicyApi\DataProtectorPolicyApi.vcxproj" `
-        /p:Configuration=$Configuration `
-        /p:Platform=$Platform
-
-    & $msBuild ".\DataProtectorUsbCrypt\DataProtectorUsbCrypt.vcxproj" `
-        /p:Configuration=$Configuration `
-        /p:Platform=$Platform
-
-    & $msBuild ".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj" `
-        /p:Configuration=$Configuration `
-        /p:Platform=$Platform
-
-    & $msBuild ".\DataProtectorWebBridge\DataProtectorWebBridge.csproj" `
-        /p:Configuration=$Configuration `
-        /p:Platform=$Platform
+    Invoke-Checked $msBuild @(".\DataProtector\DataProtector.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtector driver build"
+    Invoke-Checked $msBuild @(".\DataProtectorPolicyApi\DataProtectorPolicyApi.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorPolicyApi build"
+    Invoke-Checked $msBuild @(".\DataProtectorUsbCrypt\DataProtectorUsbCrypt.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbCrypt driver build"
+    Invoke-Checked $msBuild @(".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbTool build"
+    Invoke-Checked $msBuild @(".\DataProtectorWebBridge\DataProtectorWebBridge.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorWebBridge build"
 
     Push-Location $webRoot
     try {
-        & pnpm install --frozen-lockfile
-        & pnpm build
+        Invoke-Checked "pnpm" @("install", "--frozen-lockfile") "Web dependency restore"
+        Invoke-Checked "pnpm" @("build") "Web build"
     }
     finally {
         Pop-Location
