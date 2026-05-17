@@ -13,9 +13,25 @@ namespace DataProtectorWebBridge.Services
         public CentralPolicyStore.RemovableDeviceObservation[] Snapshot()
         {
             List<CentralPolicyStore.RemovableDeviceObservation> devices = new List<CentralPolicyStore.RemovableDeviceObservation>();
+            HashSet<string> seenDrives = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
+                foreach (UsbLogicalDisk logicalDisk in QueryUsbLogicalDisks())
+                {
+                    string driveName = NormalizeDriveName(logicalDisk.DriveName);
+                    if (string.IsNullOrWhiteSpace(driveName) || !seenDrives.Add(driveName))
+                    {
+                        continue;
+                    }
+
+                    CentralPolicyStore.RemovableDeviceObservation observation = BuildObservation(driveName, logicalDisk.Metadata);
+                    if (observation != null)
+                    {
+                        devices.Add(observation);
+                    }
+                }
+
                 foreach (DriveInfo drive in DriveInfo.GetDrives())
                 {
                     if (drive.DriveType != DriveType.Removable)
@@ -23,7 +39,13 @@ namespace DataProtectorWebBridge.Services
                         continue;
                     }
 
-                    CentralPolicyStore.RemovableDeviceObservation observation = BuildObservation(drive);
+                    string driveName = NormalizeDriveName(drive.Name);
+                    if (string.IsNullOrWhiteSpace(driveName) || !seenDrives.Add(driveName))
+                    {
+                        continue;
+                    }
+
+                    CentralPolicyStore.RemovableDeviceObservation observation = BuildObservation(drive, null);
                     if (observation != null)
                     {
                         devices.Add(observation);
@@ -38,10 +60,28 @@ namespace DataProtectorWebBridge.Services
             return devices.ToArray();
         }
 
+        private static CentralPolicyStore.RemovableDeviceObservation BuildObservation(string driveName, DiskMetadata metadata)
+        {
+            try
+            {
+                string root = driveName.EndsWith("\\", StringComparison.Ordinal) ? driveName : driveName + "\\";
+                return BuildObservation(new DriveInfo(root), metadata);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static CentralPolicyStore.RemovableDeviceObservation BuildObservation(DriveInfo drive)
         {
+            return BuildObservation(drive, null);
+        }
+
+        private static CentralPolicyStore.RemovableDeviceObservation BuildObservation(DriveInfo drive, DiskMetadata metadataOverride)
+        {
             string driveName = NormalizeDriveName(drive.Name);
-            DiskMetadata metadata = QueryDiskMetadata(driveName);
+            DiskMetadata metadata = metadataOverride ?? QueryDiskMetadata(driveName);
             string volumeGuid = QueryVolumeGuid(driveName);
             string volumeLabel = string.Empty;
             string fileSystem = string.Empty;
@@ -84,6 +124,77 @@ namespace DataProtectorWebBridge.Services
                 mediaType = metadata.MediaType,
                 lastSeenUtc = DateTime.UtcNow.ToString("o")
             };
+        }
+
+        private static IEnumerable<UsbLogicalDisk> QueryUsbLogicalDisks()
+        {
+            List<UsbLogicalDisk> disks = new List<UsbLogicalDisk>();
+
+            try
+            {
+                using (ManagementObjectSearcher diskSearcher = new ManagementObjectSearcher("SELECT * FROM Win32_DiskDrive"))
+                {
+                    foreach (ManagementObject disk in diskSearcher.Get())
+                    {
+                        using (disk)
+                        {
+                            if (!IsUsbOrRemovableDisk(disk))
+                            {
+                                continue;
+                            }
+
+                            string diskDeviceId = Convert.ToString(disk["DeviceID"]);
+                            if (string.IsNullOrWhiteSpace(diskDeviceId))
+                            {
+                                continue;
+                            }
+
+                            DiskMetadata metadata = DiskMetadataFromDisk(disk);
+                            using (ManagementObjectSearcher partitionSearcher = new ManagementObjectSearcher(
+                                "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='" + EscapeWmiString(diskDeviceId) + "'} WHERE AssocClass=Win32_DiskDriveToDiskPartition"))
+                            {
+                                foreach (ManagementObject partition in partitionSearcher.Get())
+                                {
+                                    using (partition)
+                                    {
+                                        string partitionDeviceId = Convert.ToString(partition["DeviceID"]);
+                                        if (string.IsNullOrWhiteSpace(partitionDeviceId))
+                                        {
+                                            continue;
+                                        }
+
+                                        using (ManagementObjectSearcher logicalSearcher = new ManagementObjectSearcher(
+                                            "ASSOCIATORS OF {Win32_DiskPartition.DeviceID='" + EscapeWmiString(partitionDeviceId) + "'} WHERE AssocClass=Win32_LogicalDiskToPartition"))
+                                        {
+                                            foreach (ManagementObject logicalDisk in logicalSearcher.Get())
+                                            {
+                                                using (logicalDisk)
+                                                {
+                                                    string driveName = Convert.ToString(logicalDisk["DeviceID"]);
+                                                    if (!string.IsNullOrWhiteSpace(driveName))
+                                                    {
+                                                        disks.Add(new UsbLogicalDisk
+                                                        {
+                                                            DriveName = driveName,
+                                                            Metadata = metadata
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                return disks;
+            }
+
+            return disks;
         }
 
         private static string QueryVolumeGuid(string driveName)
@@ -132,11 +243,7 @@ namespace DataProtectorWebBridge.Services
                                 {
                                     using (disk)
                                     {
-                                        metadata.Model = Clean(Convert.ToString(disk["Model"]));
-                                        metadata.SerialNumber = Clean(Convert.ToString(disk["SerialNumber"]));
-                                        metadata.PnpDeviceId = Clean(Convert.ToString(disk["PNPDeviceID"]));
-                                        metadata.InterfaceType = Clean(Convert.ToString(disk["InterfaceType"]));
-                                        metadata.MediaType = Clean(Convert.ToString(disk["MediaType"]));
+                                        metadata = DiskMetadataFromDisk(disk);
                                         return metadata;
                                     }
                                 }
@@ -151,6 +258,36 @@ namespace DataProtectorWebBridge.Services
             }
 
             return metadata;
+        }
+
+        private static DiskMetadata DiskMetadataFromDisk(ManagementBaseObject disk)
+        {
+            if (disk == null)
+            {
+                return new DiskMetadata();
+            }
+
+            return new DiskMetadata
+            {
+                Model = Clean(Convert.ToString(disk["Model"])),
+                SerialNumber = Clean(Convert.ToString(disk["SerialNumber"])),
+                PnpDeviceId = Clean(Convert.ToString(disk["PNPDeviceID"])),
+                InterfaceType = Clean(Convert.ToString(disk["InterfaceType"])),
+                MediaType = Clean(Convert.ToString(disk["MediaType"]))
+            };
+        }
+
+        private static bool IsUsbOrRemovableDisk(ManagementBaseObject disk)
+        {
+            string interfaceType = Clean(Convert.ToString(disk["InterfaceType"]));
+            string pnpDeviceId = Clean(Convert.ToString(disk["PNPDeviceID"]));
+            string mediaType = Clean(Convert.ToString(disk["MediaType"]));
+
+            return string.Equals(interfaceType, "USB", StringComparison.OrdinalIgnoreCase) ||
+                   pnpDeviceId.StartsWith("USB", StringComparison.OrdinalIgnoreCase) ||
+                   pnpDeviceId.IndexOf("USBSTOR", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   mediaType.IndexOf("removable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   mediaType.IndexOf("flash", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string ComputeHardwareId(string identity)
@@ -234,6 +371,12 @@ namespace DataProtectorWebBridge.Services
             public string PnpDeviceId { get; set; }
             public string InterfaceType { get; set; }
             public string MediaType { get; set; }
+        }
+
+        private sealed class UsbLogicalDisk
+        {
+            public string DriveName { get; set; }
+            public DiskMetadata Metadata { get; set; }
         }
 
         [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]

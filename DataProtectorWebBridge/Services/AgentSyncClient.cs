@@ -128,7 +128,7 @@ namespace DataProtectorWebBridge.Services
             {
                 FlushTaskResults();
             }
-            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ", network " + networkConnections.Length + ".");
+            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ", network " + networkConnections.Length + ", removable volumes " + removableDevices.Length + ".");
         }
 
         private void ExecuteTasks(CentralPolicyStore.RemoteTaskDto[] tasks)
