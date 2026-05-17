@@ -3,6 +3,8 @@ import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NTag, type DataTableColumns } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
 import { fetchAuditEvents, fetchDevices } from '@/service/api';
+import { $t } from '@/locales';
+import { useAppStore } from '@/store/modules/app';
 
 defineOptions({
   name: 'Audit'
@@ -35,6 +37,7 @@ interface HostSummary {
 }
 
 const loading = ref(false);
+const appStore = useAppStore();
 const events = ref<Api.DataProtector.AuditRecord[]>([]);
 const devices = ref<Api.DataProtector.Device[]>([]);
 const activeCategory = ref<AuditCategory>('all');
@@ -48,50 +51,50 @@ const filters = reactive({
   search: ''
 });
 
-const categoryOptions: CategoryOption[] = [
-  { label: 'All events', value: 'all', icon: 'mdi:format-list-bulleted', tagType: 'default' },
-  { label: 'Policy', value: 'policy', icon: 'mdi:shield-key-outline', tagType: 'info' },
-  { label: 'Network defense', value: 'network', icon: 'mdi:lan-connect', tagType: 'warning' },
-  { label: 'SMTP audit', value: 'smtp', icon: 'mdi:email-fast-outline', tagType: 'success' },
-  { label: 'WebShell', value: 'webshell', icon: 'mdi:webhook', tagType: 'error' },
-  { label: 'Hash dump', value: 'hashdump', icon: 'mdi:account-lock-outline', tagType: 'error' },
-  { label: 'Lateral movement', value: 'lateral', icon: 'mdi:lan-disconnect', tagType: 'error' },
-  { label: 'Remote ops', value: 'remote', icon: 'mdi:remote-desktop', tagType: 'info' },
-  { label: 'Agent sync', value: 'agent', icon: 'mdi:desktop-classic', tagType: 'success' },
-  { label: 'System', value: 'system', icon: 'mdi:cog-outline', tagType: 'default' }
-];
+const categoryOptions = computed<CategoryOption[]>(() => [
+  { label: $t('dataprotector.audit.allEvents'), value: 'all', icon: 'mdi:format-list-bulleted', tagType: 'default' },
+  { label: $t('dataprotector.audit.policy'), value: 'policy', icon: 'mdi:shield-key-outline', tagType: 'info' },
+  { label: $t('dataprotector.audit.networkDefense'), value: 'network', icon: 'mdi:lan-connect', tagType: 'warning' },
+  { label: $t('dataprotector.audit.smtpAudit'), value: 'smtp', icon: 'mdi:email-fast-outline', tagType: 'success' },
+  { label: $t('dataprotector.audit.webshell'), value: 'webshell', icon: 'mdi:webhook', tagType: 'error' },
+  { label: $t('dataprotector.audit.hashdump'), value: 'hashdump', icon: 'mdi:account-lock-outline', tagType: 'error' },
+  { label: $t('dataprotector.audit.lateral'), value: 'lateral', icon: 'mdi:lan-disconnect', tagType: 'error' },
+  { label: $t('dataprotector.audit.remoteOps'), value: 'remote', icon: 'mdi:remote-desktop', tagType: 'info' },
+  { label: $t('dataprotector.audit.agentSync'), value: 'agent', icon: 'mdi:desktop-classic', tagType: 'success' },
+  { label: $t('dataprotector.audit.system'), value: 'system', icon: 'mdi:cog-outline', tagType: 'default' }
+]);
 
-const severityOptions = [
-  { label: 'All severity', value: 'all' },
-  { label: 'Critical', value: 'critical' },
-  { label: 'Warning', value: 'warning' },
-  { label: 'Info', value: 'info' },
-  { label: 'Operational', value: 'operational' }
-];
+const severityOptions = computed(() => [
+  { label: $t('dataprotector.audit.allSeverity'), value: 'all' },
+  { label: $t('dataprotector.audit.critical'), value: 'critical' },
+  { label: $t('dataprotector.audit.warning'), value: 'warning' },
+  { label: $t('dataprotector.audit.info'), value: 'info' },
+  { label: $t('dataprotector.audit.operational'), value: 'operational' }
+]);
 
-const dispositionOptions = [
-  { label: 'All disposition', value: 'all' },
-  { label: 'Blocked', value: 'blocked' },
-  { label: 'Observed', value: 'observed' },
-  { label: 'Completed', value: 'completed' },
-  { label: 'Failed', value: 'failed' }
-];
+const dispositionOptions = computed(() => [
+  { label: $t('dataprotector.audit.allDisposition'), value: 'all' },
+  { label: $t('dataprotector.common.blocked'), value: 'blocked' },
+  { label: $t('dataprotector.audit.observed'), value: 'observed' },
+  { label: $t('dataprotector.common.completed'), value: 'completed' },
+  { label: $t('dataprotector.common.failed'), value: 'failed' }
+]);
 
-const limitOptions = [
-  { label: 'Last 200', value: 200 },
-  { label: 'Last 500', value: 500 },
-  { label: 'Last 1000', value: 1000 }
-];
+const limitOptions = computed(() => [
+  { label: $t('dataprotector.audit.limits.last200'), value: 200 },
+  { label: $t('dataprotector.audit.limits.last500'), value: 500 },
+  { label: $t('dataprotector.audit.limits.last1000'), value: 1000 }
+]);
 
-const categoryMap = computed(() => new Map(categoryOptions.map(item => [item.value, item])));
-const categorySelectOptions = computed(() => categoryOptions.map(item => ({ label: item.label, value: item.value })));
+const categoryMap = computed(() => new Map(categoryOptions.value.map(item => [item.value, item])));
+const categorySelectOptions = computed(() => categoryOptions.value.map(item => ({ label: item.label, value: item.value })));
 
 const criticalCount = computed(() => events.value.filter(item => resolveSeverity(item) === 'critical').length);
 const warningCount = computed(() => events.value.filter(item => resolveSeverity(item) === 'warning').length);
 const blockedCount = computed(() => events.value.filter(item => resolveDisposition(item) === 'blocked').length);
 
 const categorySummaries = computed<AuditSummary[]>(() =>
-  categoryOptions
+  categoryOptions.value
     .filter(item => item.value !== 'all')
     .map(item => {
       const items = events.value.filter(record => classifyAudit(record) === item.value);
@@ -123,7 +126,7 @@ const onlineHostnames = computed(() =>
 );
 
 const hostOptions = computed(() => {
-  return [{ label: 'All online agents', value: 'all' }, ...onlineHostnames.value.map(host => ({ label: host, value: host }))];
+  return [{ label: $t('dataprotector.audit.allOnlineAgents'), value: 'all' }, ...onlineHostnames.value.map(host => ({ label: host, value: host }))];
 });
 
 const hostSummaries = computed(() => {
@@ -178,14 +181,14 @@ const hostRiskChartData = computed(() =>
 const { domRef: trendChartRef, updateOptions: updateTrendChart } = useEcharts(() => ({
   color: ['#d03050', '#f0a020', '#2080f0'],
   tooltip: { trigger: 'axis' },
-  legend: { top: 0, data: ['Critical', 'Warning', 'Total'] },
+  legend: { top: 0, data: [$t('dataprotector.audit.critical'), $t('dataprotector.audit.warning'), $t('dataprotector.audit.total')] },
   grid: { left: 36, right: 18, top: 44, bottom: 28 },
   xAxis: { type: 'category', boundaryGap: false, data: [] as string[] },
   yAxis: { type: 'value', minInterval: 1 },
   series: [
-    { name: 'Critical', type: 'line', smooth: true, data: [] as number[] },
-    { name: 'Warning', type: 'line', smooth: true, data: [] as number[] },
-    { name: 'Total', type: 'line', smooth: true, data: [] as number[] }
+    { name: $t('dataprotector.audit.critical'), type: 'line', smooth: true, data: [] as number[] },
+    { name: $t('dataprotector.audit.warning'), type: 'line', smooth: true, data: [] as number[] },
+    { name: $t('dataprotector.audit.total'), type: 'line', smooth: true, data: [] as number[] }
   ]
 }));
 
@@ -195,7 +198,7 @@ const { domRef: categoryChartRef, updateOptions: updateCategoryChart } = useEcha
   legend: { bottom: 0, left: 'center' },
   series: [
     {
-      name: 'Event type',
+      name: $t('dataprotector.audit.eventType'),
       type: 'pie',
       radius: ['46%', '72%'],
       avoidLabelOverlap: true,
@@ -208,22 +211,22 @@ const { domRef: categoryChartRef, updateOptions: updateCategoryChart } = useEcha
 const { domRef: hostRiskChartRef, updateOptions: updateHostRiskChart } = useEcharts(() => ({
   color: ['#d03050', '#f0a020', '#7c3aed'],
   tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-  legend: { top: 0, data: ['Critical', 'Warning', 'Blocked'] },
+  legend: { top: 0, data: [$t('dataprotector.audit.critical'), $t('dataprotector.audit.warning'), $t('dataprotector.common.blocked')] },
   grid: { left: 90, right: 18, top: 44, bottom: 28 },
   xAxis: { type: 'value', minInterval: 1 },
   yAxis: { type: 'category', data: [] as string[] },
   series: [
-    { name: 'Critical', type: 'bar', stack: 'risk', data: [] as number[] },
-    { name: 'Warning', type: 'bar', stack: 'risk', data: [] as number[] },
-    { name: 'Blocked', type: 'bar', stack: 'risk', data: [] as number[] }
+    { name: $t('dataprotector.audit.critical'), type: 'bar', stack: 'risk', data: [] as number[] },
+    { name: $t('dataprotector.audit.warning'), type: 'bar', stack: 'risk', data: [] as number[] },
+    { name: $t('dataprotector.common.blocked'), type: 'bar', stack: 'risk', data: [] as number[] }
   ]
 }));
 
-const hostColumns: DataTableColumns<HostSummary> = [
-  { title: 'Host', key: 'host', minWidth: 180, ellipsis: { tooltip: true } },
-  { title: 'Events', key: 'total', width: 90, sorter: (a, b) => a.total - b.total },
+const hostColumns = computed<DataTableColumns<HostSummary>>(() => [
+  { title: $t('dataprotector.audit.columns.host'), key: 'host', minWidth: 180, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.audit.columns.events'), key: 'total', width: 90, sorter: (a, b) => a.total - b.total },
   {
-    title: 'Critical',
+    title: $t('dataprotector.audit.critical'),
     key: 'critical',
     width: 100,
     sorter: (a, b) => a.critical - b.critical,
@@ -232,7 +235,7 @@ const hostColumns: DataTableColumns<HostSummary> = [
     }
   },
   {
-    title: 'Warning',
+    title: $t('dataprotector.audit.warning'),
     key: 'warning',
     width: 100,
     sorter: (a, b) => a.warning - b.warning,
@@ -241,7 +244,7 @@ const hostColumns: DataTableColumns<HostSummary> = [
     }
   },
   {
-    title: 'Blocked',
+    title: $t('dataprotector.common.blocked'),
     key: 'blocked',
     width: 100,
     sorter: (a, b) => a.blocked - b.blocked,
@@ -249,11 +252,11 @@ const hostColumns: DataTableColumns<HostSummary> = [
       return h(NTag, { type: row.blocked ? 'error' : 'default', bordered: false }, { default: () => row.blocked });
     }
   }
-];
+]);
 
-const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
+const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => [
   {
-    title: 'Time',
+    title: $t('dataprotector.audit.columns.time'),
     key: 'TimestampUtc',
     width: 190,
     sorter: (a, b) => new Date(a.TimestampUtc).getTime() - new Date(b.TimestampUtc).getTime(),
@@ -262,7 +265,7 @@ const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
     }
   },
   {
-    title: 'Type',
+    title: $t('dataprotector.audit.columns.type'),
     key: 'category',
     width: 150,
     render(row) {
@@ -279,7 +282,7 @@ const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
     }
   },
   {
-    title: 'Host',
+    title: $t('dataprotector.audit.columns.host'),
     key: 'Host',
     width: 160,
     ellipsis: { tooltip: true },
@@ -288,7 +291,7 @@ const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
     }
   },
   {
-    title: 'Severity',
+    title: $t('dataprotector.audit.severity'),
     key: 'severity',
     width: 120,
     render(row) {
@@ -301,7 +304,7 @@ const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
     }
   },
   {
-    title: 'Disposition',
+    title: $t('dataprotector.audit.disposition'),
     key: 'disposition',
     width: 130,
     render(row) {
@@ -313,11 +316,11 @@ const columns: DataTableColumns<Api.DataProtector.AuditRecord> = [
       );
     }
   },
-  { title: 'Action', key: 'Action', width: 240, ellipsis: { tooltip: true } },
-  { title: 'Target', key: 'Target', minWidth: 260, ellipsis: { tooltip: true } },
-  { title: 'Status', key: 'Status', width: 130 },
-  { title: 'Message', key: 'Message', minWidth: 320, ellipsis: { tooltip: true } }
-];
+  { title: $t('dataprotector.audit.columns.action'), key: 'Action', width: 240, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.audit.columns.target'), key: 'Target', minWidth: 260, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.audit.columns.status'), key: 'Status', width: 130 },
+  { title: $t('dataprotector.audit.columns.message'), key: 'Message', minWidth: 320, ellipsis: { tooltip: true } }
+]);
 
 function resolveSvgIcon(icon: string) {
   return () => h('span', { class: 'inline-flex text-16px' }, [h('i', { class: 'iconify', 'data-icon': icon })]);
@@ -395,10 +398,10 @@ function resolveDisposition(record: Api.DataProtector.AuditRecord): Exclude<Audi
 
 function severityLabel(severity: Exclude<AuditSeverity, 'all'>) {
   const labels = {
-    critical: 'Critical',
-    warning: 'Warning',
-    info: 'Info',
-    operational: 'Operational'
+    critical: $t('dataprotector.audit.critical'),
+    warning: $t('dataprotector.audit.warning'),
+    info: $t('dataprotector.audit.info'),
+    operational: $t('dataprotector.audit.operational')
   };
 
   return labels[severity];
@@ -406,10 +409,10 @@ function severityLabel(severity: Exclude<AuditSeverity, 'all'>) {
 
 function dispositionLabel(disposition: Exclude<AuditDisposition, 'all'>) {
   const labels = {
-    blocked: 'Blocked',
-    observed: 'Observed',
-    completed: 'Completed',
-    failed: 'Failed'
+    blocked: $t('dataprotector.common.blocked'),
+    observed: $t('dataprotector.audit.observed'),
+    completed: $t('dataprotector.common.completed'),
+    failed: $t('dataprotector.common.failed')
   };
 
   return labels[disposition];
@@ -450,23 +453,38 @@ function buildTrendBuckets(records: Api.DataProtector.AuditRecord[]) {
 
 function updateCharts() {
   updateTrendChart(opts => {
+    const critical = $t('dataprotector.audit.critical');
+    const warning = $t('dataprotector.audit.warning');
+    const total = $t('dataprotector.audit.total');
+    opts.legend.data = [critical, warning, total];
     opts.xAxis.data = trendBuckets.value.map(item => item.label);
+    opts.series[0].name = critical;
     opts.series[0].data = trendBuckets.value.map(item => item.critical);
+    opts.series[1].name = warning;
     opts.series[1].data = trendBuckets.value.map(item => item.warning);
+    opts.series[2].name = total;
     opts.series[2].data = trendBuckets.value.map(item => item.total);
     return opts;
   });
 
   updateCategoryChart(opts => {
-    opts.series[0].data = categoryChartData.value.length ? categoryChartData.value : [{ name: 'No events', value: 0 }];
+    opts.series[0].name = $t('dataprotector.audit.eventType');
+    opts.series[0].data = categoryChartData.value.length ? categoryChartData.value : [{ name: $t('dataprotector.audit.noEvents'), value: 0 }];
     return opts;
   });
 
   updateHostRiskChart(opts => {
+    const critical = $t('dataprotector.audit.critical');
+    const warning = $t('dataprotector.audit.warning');
+    const blocked = $t('dataprotector.common.blocked');
     const items = [...hostRiskChartData.value].reverse();
+    opts.legend.data = [critical, warning, blocked];
     opts.yAxis.data = items.map(item => item.name);
+    opts.series[0].name = critical;
     opts.series[0].data = items.map(item => item.critical);
+    opts.series[1].name = warning;
     opts.series[1].data = items.map(item => item.warning);
+    opts.series[2].name = blocked;
     opts.series[2].data = items.map(item => item.blocked);
     return opts;
   });
@@ -510,7 +528,7 @@ function resetFilters() {
   refresh();
 }
 
-watch([events, activeCategory], updateCharts, { deep: true });
+watch([events, activeCategory, () => appStore.locale], updateCharts, { deep: true });
 
 onMounted(refresh);
 </script>
@@ -520,14 +538,14 @@ onMounted(refresh);
     <NCard :bordered="false" class="card-wrapper">
       <div class="flex flex-wrap items-center justify-between gap-16px">
         <div>
-          <h1 class="m-0 text-24px font-700">Audit Center</h1>
+          <h1 class="m-0 text-24px font-700">{{ $t('dataprotector.audit.title') }}</h1>
         </div>
         <NSpace align="center">
           <NSelect v-model:value="filters.limit" :options="limitOptions" class="w-130px" />
-          <NButton secondary @click="resetFilters">Reset</NButton>
+          <NButton secondary @click="resetFilters">{{ $t('dataprotector.common.reset') }}</NButton>
           <NButton type="primary" :loading="loading" @click="refresh">
             <template #icon><SvgIcon icon="mdi:refresh" /></template>
-            Refresh
+            {{ $t('dataprotector.common.refresh') }}
           </NButton>
         </NSpace>
       </div>
@@ -536,36 +554,41 @@ onMounted(refresh);
     <NCard :bordered="false" class="card-wrapper">
       <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
         <NGi span="24 m:6">
-          <NFormItem label="Event type" :show-feedback="false">
+          <NFormItem :label="$t('dataprotector.audit.eventType')" :show-feedback="false">
             <NSelect v-model:value="activeCategory" :options="categorySelectOptions" />
           </NFormItem>
         </NGi>
         <NGi span="24 m:6">
-          <NFormItem label="Host" :show-feedback="false">
+          <NFormItem :label="$t('dataprotector.audit.host')" :show-feedback="false">
             <NSelect v-model:value="filters.host" :options="hostOptions" filterable />
           </NFormItem>
         </NGi>
         <NGi span="24 m:5">
-          <NFormItem label="Severity" :show-feedback="false">
+          <NFormItem :label="$t('dataprotector.audit.severity')" :show-feedback="false">
             <NSelect v-model:value="filters.severity" :options="severityOptions" />
           </NFormItem>
         </NGi>
         <NGi span="24 m:7">
-          <NFormItem label="Disposition" :show-feedback="false">
+          <NFormItem :label="$t('dataprotector.audit.disposition')" :show-feedback="false">
             <NSelect v-model:value="filters.disposition" :options="dispositionOptions" />
           </NFormItem>
         </NGi>
         <NGi span="24 m:12">
-          <NFormItem label="Time range" :show-feedback="false">
+          <NFormItem :label="$t('dataprotector.audit.timeRange')" :show-feedback="false">
             <NDatePicker v-model:value="timeRange" type="datetimerange" clearable class="w-full" />
           </NFormItem>
         </NGi>
         <NGi span="24">
           <NInputGroup>
-            <NInput v-model:value="filters.search" clearable placeholder="Search action, host, target, status, or message" @keyup.enter="refresh" />
+            <NInput
+              v-model:value="filters.search"
+              clearable
+              :placeholder="$t('dataprotector.audit.searchPlaceholder')"
+              @keyup.enter="refresh"
+            />
             <NButton type="primary" ghost @click="refresh">
               <template #icon><SvgIcon icon="mdi:magnify" /></template>
-              Search
+              {{ $t('dataprotector.common.search') }}
             </NButton>
           </NInputGroup>
         </NGi>
@@ -575,40 +598,40 @@ onMounted(refresh);
     <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
-          <NStatistic label="Loaded events" :value="events.length" />
+          <NStatistic :label="$t('dataprotector.audit.loadedEvents')" :value="events.length" />
         </NCard>
       </NGi>
       <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
-          <NStatistic label="Critical events" :value="criticalCount" />
+          <NStatistic :label="$t('dataprotector.audit.criticalEvents')" :value="criticalCount" />
         </NCard>
       </NGi>
       <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
-          <NStatistic label="Warning events" :value="warningCount" />
+          <NStatistic :label="$t('dataprotector.audit.warningEvents')" :value="warningCount" />
         </NCard>
       </NGi>
       <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
-          <NStatistic label="Blocked actions" :value="blockedCount" />
+          <NStatistic :label="$t('dataprotector.audit.blockedActions')" :value="blockedCount" />
         </NCard>
       </NGi>
     </NGrid>
 
     <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGi span="24 l:12">
-        <NCard title="Security Trend" :bordered="false" class="card-wrapper">
+        <NCard :title="$t('dataprotector.audit.securityTrend')" :bordered="false" class="card-wrapper">
           <div ref="trendChartRef" class="h-320px overflow-hidden"></div>
         </NCard>
       </NGi>
       <NGi span="24 l:12">
-        <NCard title="Event Type Distribution" :bordered="false" class="card-wrapper">
+        <NCard :title="$t('dataprotector.audit.eventTypeDistribution')" :bordered="false" class="card-wrapper">
           <div ref="categoryChartRef" class="h-320px overflow-hidden"></div>
         </NCard>
       </NGi>
     </NGrid>
 
-    <NCard title="Host Analytics" :bordered="false" class="card-wrapper">
+    <NCard :title="$t('dataprotector.audit.hostAnalytics')" :bordered="false" class="card-wrapper">
       <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
         <NGi span="24 l:13">
           <div ref="hostRiskChartRef" class="h-300px overflow-hidden"></div>
@@ -625,7 +648,7 @@ onMounted(refresh);
       </NGrid>
     </NCard>
 
-    <NCard title="Event Classification" :bordered="false" class="card-wrapper">
+    <NCard :title="$t('dataprotector.audit.eventClassification')" :bordered="false" class="card-wrapper">
       <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
         <NGi v-for="item in categorySummaries" :key="item.category" span="24 s:12 m:8 l:6">
           <div
@@ -635,7 +658,9 @@ onMounted(refresh);
           >
             <div class="flex items-center justify-between">
               <span class="font-600">{{ item.label }}</span>
-              <NTag v-if="item.critical" type="error" size="small" :bordered="false">{{ item.critical }} critical</NTag>
+              <NTag v-if="item.critical" type="error" size="small" :bordered="false">
+                {{ $t('dataprotector.audit.criticalCount', { count: item.critical }) }}
+              </NTag>
             </div>
             <div class="m-t-8px text-24px font-700">{{ item.count }}</div>
           </div>
@@ -643,7 +668,7 @@ onMounted(refresh);
       </NGrid>
     </NCard>
 
-    <NCard title="Audit Events" :bordered="false" class="card-wrapper">
+    <NCard :title="$t('dataprotector.audit.auditEvents')" :bordered="false" class="card-wrapper">
       <NSpace vertical :size="12">
         <NTabs v-model:value="activeCategory" type="line" animated>
           <NTabPane

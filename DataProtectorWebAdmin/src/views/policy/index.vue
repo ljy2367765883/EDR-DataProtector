@@ -27,6 +27,7 @@ import {
   fetchUpdateHashProtectPolicy,
   fetchUpdateLateralDefensePolicy
 } from '@/service/api';
+import { $t } from '@/locales';
 
 defineOptions({
   name: 'Policy'
@@ -101,22 +102,22 @@ const deviceForm = reactive<Api.DataProtector.DeviceRuleRequest>({
   actor: 'web-admin'
 });
 
-const formRules: FormRules = {
-  kind: { required: true, message: 'Rule kind is required', trigger: 'change' },
-  value: { required: true, message: 'Rule value is required', trigger: 'input' },
-  extension: { required: true, message: 'Extension is required', trigger: 'input' }
-};
+const formRules = computed<FormRules>(() => ({
+  kind: { required: true, message: $t('dataprotector.policy.validation.ruleKind'), trigger: 'change' },
+  value: { required: true, message: $t('dataprotector.policy.validation.ruleValue'), trigger: 'input' },
+  extension: { required: true, message: $t('dataprotector.policy.validation.extension'), trigger: 'input' }
+}));
 
-const networkFormRules: FormRules = {
-  kind: { required: true, message: 'Rule kind is required', trigger: 'change' },
-  action: { required: true, message: 'Action is required', trigger: 'change' },
-  protocol: { required: true, message: 'Protocol is required', trigger: 'change' },
-  direction: { required: true, message: 'Direction is required', trigger: 'change' },
+const networkFormRules = computed<FormRules>(() => ({
+  kind: { required: true, message: $t('dataprotector.policy.validation.ruleKind'), trigger: 'change' },
+  action: { required: true, message: $t('dataprotector.policy.validation.action'), trigger: 'change' },
+  protocol: { required: true, message: $t('dataprotector.policy.validation.protocol'), trigger: 'change' },
+  direction: { required: true, message: $t('dataprotector.policy.validation.direction'), trigger: 'change' },
   domain: {
     trigger: 'input',
     validator() {
       if (networkForm.kind !== 'domain') return true;
-      return networkForm.domain.trim().length > 0 ? true : new Error('Domain is required');
+      return networkForm.domain.trim().length > 0 ? true : new Error($t('dataprotector.policy.validation.domain'));
     }
   },
   remoteAddress: {
@@ -124,53 +125,56 @@ const networkFormRules: FormRules = {
     validator() {
       if (networkForm.kind !== 'ip') return true;
       if (networkForm.protocol === 'icmp') return true;
-      return networkForm.remoteAddress.trim().length > 0 ? true : new Error('Remote address is required');
+      return networkForm.remoteAddress.trim().length > 0 ? true : new Error($t('dataprotector.policy.validation.remoteAddress'));
     }
   }
-};
+}));
 
-const webShellFormRules: FormRules = {
-  directory: { required: true, message: 'Protected web directory is required', trigger: 'input' }
-};
+const webShellFormRules = computed<FormRules>(() => ({
+  directory: { required: true, message: $t('dataprotector.policy.validation.protectedDirectory'), trigger: 'input' }
+}));
 
-const deviceFormRules: FormRules = {
-  deviceId: { required: true, message: 'Device identifier is required', trigger: 'input' }
-};
+const deviceFormRules = computed<FormRules>(() => ({
+  deviceId: { required: true, message: $t('dataprotector.policy.validation.deviceId'), trigger: 'input' }
+}));
 
-const kindOptions = [
-  { label: 'Process name', value: 'processName' },
-  { label: 'Process directory', value: 'processDirectory' },
-  { label: 'Excluded directory', value: 'excludedDirectory' }
-];
+const kindOptions = computed(() => [
+  { label: $t('dataprotector.policy.file.processName'), value: 'processName' },
+  { label: $t('dataprotector.policy.file.processDirectory'), value: 'processDirectory' },
+  { label: $t('dataprotector.policy.file.excludedDirectory'), value: 'excludedDirectory' }
+]);
 
-const kindLabel: Record<Api.DataProtector.RuleKind, string> = {
-  processName: 'Process name',
-  processDirectory: 'Process directory',
-  excludedDirectory: 'Excluded directory'
-};
+function ruleKindLabel(kind: Api.DataProtector.RuleKind) {
+  const labels: Record<Api.DataProtector.RuleKind, string> = {
+    processName: $t('dataprotector.policy.file.processName'),
+    processDirectory: $t('dataprotector.policy.file.processDirectory'),
+    excludedDirectory: $t('dataprotector.policy.file.excludedDirectory')
+  };
+  return labels[kind] || kind;
+}
 
-const networkKindOptions = [
-  { label: 'Domain', value: 'domain' },
-  { label: 'IPv4 / CIDR', value: 'ip' }
-];
+const networkKindOptions = computed(() => [
+  { label: $t('dataprotector.policy.network.domain'), value: 'domain' },
+  { label: $t('dataprotector.policy.network.remoteIp'), value: 'ip' }
+]);
 
-const networkActionOptions = [
-  { label: 'Block', value: 'block' },
-  { label: 'Allow', value: 'allow' }
-];
+const networkActionOptions = computed(() => [
+  { label: $t('dataprotector.common.block'), value: 'block' },
+  { label: $t('dataprotector.policy.network.allow'), value: 'allow' }
+]);
 
-const networkProtocolOptions = [
-  { label: 'Any', value: 'any' },
+const networkProtocolOptions = computed(() => [
+  { label: $t('dataprotector.policy.network.any'), value: 'any' },
   { label: 'ICMP', value: 'icmp' },
   { label: 'TCP', value: 'tcp' },
   { label: 'UDP', value: 'udp' }
-];
+]);
 
-const networkDirectionOptions = [
-  { label: 'Outbound', value: 'outbound' },
-  { label: 'Inbound', value: 'inbound' },
-  { label: 'Both', value: 'both' }
-];
+const networkDirectionOptions = computed(() => [
+  { label: $t('dataprotector.policy.network.outbound'), value: 'outbound' },
+  { label: $t('dataprotector.policy.network.inbound'), value: 'inbound' },
+  { label: $t('dataprotector.policy.network.both'), value: 'both' }
+]);
 
 const ruleGroups = computed(() => ({
   processName: rules.value.filter(rule => rule.kind === 'processName').length,
@@ -208,7 +212,7 @@ const hashProtectGroups = computed(() => {
   ].filter(Boolean).length;
 
   return {
-    mode: hashProtectPolicy.enabled ? 'Enforcing' : 'Disabled',
+    mode: hashProtectPolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
     enabledFeatures,
     protectedAssets: hashProtectPolicy.enabled ? enabledFeatures : 0,
     flags: `0x${hashProtectPolicy.flags.toString(16).toUpperCase().padStart(8, '0')}`
@@ -218,29 +222,29 @@ const hashProtectGroups = computed(() => {
 const hashProtectAssets = computed(() => [
   {
     key: 'lsass',
-    title: 'LSASS process memory',
-    detail: 'Strips VM_READ, DUP_HANDLE and related dangerous process-handle access from untrusted callers.',
+    title: $t('dataprotector.policy.hashprotect.assetsList.lsassTitle'),
+    detail: $t('dataprotector.policy.hashprotect.assetsList.lsassDetail'),
     enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectLsass,
     icon: 'mdi:memory'
   },
   {
     key: 'credential-files',
-    title: 'Offline credential stores',
-    detail: 'Blocks direct access to SAM, SECURITY, SYSTEM, NTDS.dit, RegBack, Repair and Volume Shadow Copy aliases.',
+    title: $t('dataprotector.policy.hashprotect.assetsList.filesTitle'),
+    detail: $t('dataprotector.policy.hashprotect.assetsList.filesDetail'),
     enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectCredentialFiles,
     icon: 'mdi:file-lock-outline'
   },
   {
     key: 'registry-hives',
-    title: 'Registry hive export paths',
-    detail: 'Blocks hive save, restore and replace operations against HKLM SAM, SECURITY and SYSTEM.',
+    title: $t('dataprotector.policy.hashprotect.assetsList.registryTitle'),
+    detail: $t('dataprotector.policy.hashprotect.assetsList.registryDetail'),
     enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectRegistryHives,
     icon: 'mdi:database-lock-outline'
   },
   {
     key: 'raw-extents',
-    title: 'Raw disk sensitive extents',
-    detail: 'Allows raw volume reads except when the byte range overlaps sensitive hive and NTDS file extents.',
+    title: $t('dataprotector.policy.hashprotect.assetsList.rawTitle'),
+    detail: $t('dataprotector.policy.hashprotect.assetsList.rawDetail'),
     enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectRawExtents,
     icon: 'mdi:harddisk'
   }
@@ -255,7 +259,7 @@ const lateralDefenseGroups = computed(() => {
   ].filter(Boolean).length;
 
   return {
-    mode: lateralDefensePolicy.enabled ? 'Enforcing' : 'Disabled',
+    mode: lateralDefensePolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
     enabledFeatures,
     activeControls: lateralDefensePolicy.enabled ? enabledFeatures : 0,
     flags: `0x${lateralDefensePolicy.flags.toString(16).toUpperCase().padStart(8, '0')}`
@@ -265,29 +269,29 @@ const lateralDefenseGroups = computed(() => {
 const lateralDefenseControls = computed(() => [
   {
     key: 'smb-executable',
-    title: 'SMB executable staging',
-    detail: 'Blocks remote-origin writes, creates and renames that land executable payloads through SMB shares.',
+    title: $t('dataprotector.policy.lateral.smbStaging'),
+    detail: $t('dataprotector.policy.lateral.smbStagingDesc'),
     enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockSmbExecutableCopy,
     icon: 'mdi:file-alert-outline'
   },
   {
     key: 'ipc-tasks',
-    title: 'IPC task scheduler',
-    detail: 'Blocks named-pipe access used by AT and Task Scheduler RPC lateral movement.',
+    title: $t('dataprotector.policy.lateral.ipcTaskScheduler'),
+    detail: $t('dataprotector.policy.lateral.ipcTaskSchedulerDesc'),
     enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockIpcScheduledTasks,
     icon: 'mdi:calendar-lock-outline'
   },
   {
     key: 'ipc-services',
-    title: 'IPC service control',
-    detail: 'Blocks Service Control Manager named-pipe abuse for remote service creation and execution.',
+    title: $t('dataprotector.policy.lateral.ipcServiceControl'),
+    detail: $t('dataprotector.policy.lateral.ipcServiceControlDesc'),
     enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockIpcServiceCreation,
     icon: 'mdi:cog-stop-outline'
   },
   {
     key: 'remote-admin-tools',
-    title: 'Remote admin tool launch',
-    detail: 'Blocks schtasks, at, sc, wmic and PowerShell remoting launch patterns before execution.',
+    title: $t('dataprotector.policy.lateral.remoteAdminLaunch'),
+    detail: $t('dataprotector.policy.lateral.remoteAdminLaunchDesc'),
     enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockRemoteAdminTools,
     icon: 'mdi:console-network-outline'
   }
@@ -324,18 +328,18 @@ function formatRemovableVolumes(device: Api.DataProtector.RemovableDevice) {
   };
 }
 
-const columns: DataTableColumns<Api.DataProtector.PolicyRule> = [
+const columns = computed<DataTableColumns<Api.DataProtector.PolicyRule>>(() => [
   {
-    title: 'Kind',
+    title: $t('dataprotector.policy.file.kind'),
     key: 'kind',
     width: 180,
     render(row) {
       const type = row.kind === 'excludedDirectory' ? 'warning' : 'info';
-      return h(NTag, { type, bordered: false }, { default: () => kindLabel[row.kind] });
+      return h(NTag, { type, bordered: false }, { default: () => ruleKindLabel(row.kind) });
     }
   },
   {
-    title: 'Extension',
+    title: $t('dataprotector.policy.file.extension'),
     key: 'extension',
     width: 120,
     render(row) {
@@ -343,12 +347,12 @@ const columns: DataTableColumns<Api.DataProtector.PolicyRule> = [
     }
   },
   {
-    title: 'Value',
+    title: $t('dataprotector.policy.file.value'),
     key: 'value',
     ellipsis: { tooltip: true }
   },
   {
-    title: 'Action',
+    title: $t('dataprotector.common.action'),
     key: 'actions',
     width: 120,
     render(row) {
@@ -360,15 +364,15 @@ const columns: DataTableColumns<Api.DataProtector.PolicyRule> = [
           secondary: true,
           onClick: () => removeRule(row)
         },
-        { default: () => 'Remove' }
+        { default: () => $t('dataprotector.common.remove') }
       );
     }
   }
-];
+]);
 
-const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
+const networkColumns = computed<DataTableColumns<Api.DataProtector.NetworkRule>>(() => [
   {
-    title: 'Action',
+    title: $t('dataprotector.policy.network.action'),
     key: 'action',
     width: 110,
     render(row) {
@@ -380,7 +384,7 @@ const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
     }
   },
   {
-    title: 'Kind',
+    title: $t('dataprotector.policy.network.kind'),
     key: 'kind',
     width: 120,
     render(row) {
@@ -388,7 +392,7 @@ const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
     }
   },
   {
-    title: 'Target',
+    title: $t('dataprotector.policy.network.target'),
     key: 'displayTarget',
     ellipsis: { tooltip: true },
     render(row) {
@@ -396,7 +400,7 @@ const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
     }
   },
   {
-    title: 'Protocol',
+    title: $t('dataprotector.policy.network.protocol'),
     key: 'protocol',
     width: 110,
     render(row) {
@@ -404,12 +408,12 @@ const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
     }
   },
   {
-    title: 'Direction',
+    title: $t('dataprotector.policy.network.direction'),
     key: 'direction',
     width: 120
   },
   {
-    title: 'Port',
+    title: $t('dataprotector.policy.network.port'),
     key: 'remotePort',
     width: 100,
     render(row) {
@@ -417,12 +421,12 @@ const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
     }
   },
   {
-    title: 'Rule ID',
+    title: $t('dataprotector.policy.network.ruleId'),
     key: 'ruleId',
     width: 130
   },
   {
-    title: 'Action',
+    title: $t('dataprotector.common.action'),
     key: 'actions',
     width: 120,
     render(row) {
@@ -434,28 +438,28 @@ const networkColumns: DataTableColumns<Api.DataProtector.NetworkRule> = [
           secondary: true,
           onClick: () => removeNetworkRule(row)
         },
-        { default: () => 'Remove' }
+        { default: () => $t('dataprotector.common.remove') }
       );
     }
   }
-];
+]);
 
-const webShellColumns: DataTableColumns<Api.DataProtector.WebShellRule> = [
+const webShellColumns = computed<DataTableColumns<Api.DataProtector.WebShellRule>>(() => [
   {
-    title: 'Protected web directory',
+    title: $t('dataprotector.policy.webshell.protectedDirectory'),
     key: 'directory',
     ellipsis: { tooltip: true }
   },
   {
-    title: 'Detection',
+    title: $t('dataprotector.policy.webshell.detection'),
     key: 'detection',
     width: 170,
     render() {
-      return h(NTag, { type: 'warning', bordered: false }, { default: () => 'Web scripts' });
+      return h(NTag, { type: 'warning', bordered: false }, { default: () => $t('dataprotector.policy.webshell.webScripts') });
     }
   },
   {
-    title: 'Action',
+    title: $t('dataprotector.common.action'),
     key: 'actions',
     width: 120,
     render(row) {
@@ -467,47 +471,47 @@ const webShellColumns: DataTableColumns<Api.DataProtector.WebShellRule> = [
           secondary: true,
           onClick: () => removeWebShellRule(row)
         },
-        { default: () => 'Remove' }
+        { default: () => $t('dataprotector.common.remove') }
       );
     }
   }
-];
+]);
 
-const deviceColumns: DataTableColumns<Api.DataProtector.DeviceRule> = [
+const deviceColumns = computed<DataTableColumns<Api.DataProtector.DeviceRule>>(() => [
   {
-    title: 'Device identifier',
+    title: $t('dataprotector.policy.device.deviceId'),
     key: 'deviceId',
     ellipsis: { tooltip: true },
     render(row) {
-      return row.deviceId === '*' ? 'All removable storage' : row.deviceId;
+      return row.deviceId === '*' ? $t('dataprotector.policy.device.allStorage') : row.deviceId;
     }
   },
   {
-    title: 'Access',
+    title: $t('dataprotector.policy.device.access'),
     key: 'allowInsert',
     width: 150,
     render(row) {
       return h(
         NTag,
         { type: row.allowInsert ? 'success' : 'error', bordered: false },
-        { default: () => (row.allowInsert ? 'Allowed' : 'Blocked') }
+        { default: () => (row.allowInsert ? $t('dataprotector.policy.device.allowed') : $t('dataprotector.common.blocked')) }
       );
     }
   },
   {
-    title: 'Write',
+    title: $t('dataprotector.policy.device.write'),
     key: 'allowWrite',
     width: 150,
     render(row) {
       return h(
         NTag,
         { type: row.allowWrite ? 'success' : 'warning', bordered: false },
-        { default: () => (row.allowWrite ? 'Writable' : 'Read-only') }
+        { default: () => (row.allowWrite ? $t('dataprotector.common.writable') : $t('dataprotector.common.readOnly')) }
       );
     }
   },
   {
-    title: 'Action',
+    title: $t('dataprotector.common.action'),
     key: 'actions',
     width: 120,
     render(row) {
@@ -519,27 +523,27 @@ const deviceColumns: DataTableColumns<Api.DataProtector.DeviceRule> = [
           secondary: true,
           onClick: () => removeDeviceRule(row)
         },
-        { default: () => 'Remove' }
+        { default: () => $t('dataprotector.common.remove') }
       );
     }
   }
-];
+]);
 
-const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice> = [
+const removableDeviceColumns = computed<DataTableColumns<Api.DataProtector.RemovableDevice>>(() => [
   {
-    title: 'Device',
+    title: $t('dataprotector.policy.device.device'),
     key: 'model',
     minWidth: 260,
     render(row) {
       const volumeInfo = formatRemovableVolumes(row);
       return h('div', { class: 'min-w-0' }, [
-        h('div', { class: 'truncate text-14px font-600' }, row.model || row.volumeLabel || 'Removable storage'),
-        h('div', { class: 'truncate text-12px text-gray-500' }, `${volumeInfo.driveLetters} (${volumeInfo.count} volume${volumeInfo.count > 1 ? 's' : ''})`)
+        h('div', { class: 'truncate text-14px font-600' }, row.model || row.volumeLabel || $t('dataprotector.policy.device.removableStorage')),
+        h('div', { class: 'truncate text-12px text-gray-500' }, `${volumeInfo.driveLetters} (${$t('dataprotector.policy.device.volumeCount', { count: volumeInfo.count })})`)
       ]);
     }
   },
   {
-    title: 'Host',
+    title: $t('dataprotector.policy.device.host'),
     key: 'host',
     width: 170,
     render(row) {
@@ -550,7 +554,7 @@ const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice
     }
   },
   {
-    title: 'Volumes',
+    title: $t('dataprotector.policy.device.volumes'),
     key: 'volumes',
     minWidth: 280,
     ellipsis: { tooltip: true },
@@ -559,31 +563,31 @@ const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice
     }
   },
   {
-    title: 'Hardware code',
+    title: $t('dataprotector.policy.device.hardwareCode'),
     key: 'hardwareId',
     minWidth: 260,
     ellipsis: { tooltip: true }
   },
   {
-    title: 'Status',
+    title: $t('dataprotector.policy.device.status'),
     key: 'status',
     width: 130,
     render(row) {
       const type = row.status === 'authorized' ? 'success' : row.status === 'blocked' ? 'error' : 'warning';
-      const label = row.status === 'authorized' && !row.allowWrite ? 'Read-only' : row.status;
+      const label = row.status === 'authorized' && !row.allowWrite ? $t('dataprotector.common.readOnly') : deviceStatusLabel(row.status);
       return h(NTag, { type, bordered: false }, { default: () => label });
     }
   },
   {
-    title: 'Seen',
+    title: $t('dataprotector.policy.device.seen'),
     key: 'lastSeenUtc',
     width: 120,
     render(row) {
-      return h(NTag, { type: row.online ? 'success' : 'default', bordered: false }, { default: () => (row.online ? 'Online' : 'Offline') });
+      return h(NTag, { type: row.online ? 'success' : 'default', bordered: false }, { default: () => (row.online ? $t('dataprotector.common.online') : $t('dataprotector.common.offline')) });
     }
   },
   {
-    title: 'Action',
+    title: $t('dataprotector.common.action'),
     key: 'actions',
     width: 290,
     render(row) {
@@ -594,28 +598,34 @@ const removableDeviceColumns: DataTableColumns<Api.DataProtector.RemovableDevice
           h(
             NButton,
             { size: 'small', type: 'success', secondary: true, onClick: () => authorizeRemovableDevice(row, true) },
-            { default: () => 'Authorize' }
+            { default: () => $t('dataprotector.common.authorize') }
           ),
           h(
             NButton,
             { size: 'small', type: 'warning', secondary: true, onClick: () => authorizeRemovableDevice(row, false) },
-            { default: () => 'Read-only' }
+            { default: () => $t('dataprotector.common.readOnly') }
           ),
           h(
             NButton,
             { size: 'small', type: 'error', secondary: true, onClick: () => blockRemovableDevice(row) },
-            { default: () => 'Block' }
+            { default: () => $t('dataprotector.common.block') }
           ),
           h(
             NButton,
             { size: 'small', secondary: true, onClick: () => removeRemovableAuthorization(row) },
-            { default: () => 'Reset' }
+            { default: () => $t('dataprotector.common.reset') }
           )
         ]
       );
     }
   }
-];
+]);
+
+function deviceStatusLabel(status: string) {
+  if (status === 'authorized') return $t('dataprotector.policy.device.authorized');
+  if (status === 'blocked') return $t('dataprotector.policy.device.blocked');
+  return $t('dataprotector.policy.device.pending');
+}
 
 function applyHashProtectPolicy(policy?: Api.DataProtector.HashProtectPolicy) {
   if (!policy) return;
@@ -736,7 +746,7 @@ async function addRule() {
   try {
     const { error, data } = await fetchAddPolicyRule({ ...form });
     if (!error && data.succeeded) {
-      window.$message?.success('Rule added to central policy.');
+      window.$message?.success($t('dataprotector.policy.file.added'));
       form.value = '';
       await refresh();
     }
@@ -760,7 +770,7 @@ async function addNetworkRule() {
     };
     const { error, data } = await fetchAddNetworkRule(payload);
     if (!error && data.succeeded) {
-      window.$message?.success('Network rule added to central policy.');
+      window.$message?.success($t('dataprotector.policy.network.added'));
       networkForm.domain = '';
       networkForm.remoteAddress = '';
       await refresh();
@@ -788,7 +798,7 @@ async function addBlockPingRule() {
     };
     const { error, data } = await fetchAddNetworkRule(payload);
     if (!error && data.succeeded) {
-      window.$message?.success('Inbound ping blocking rule added to central policy.');
+      window.$message?.success($t('dataprotector.policy.network.pingAdded'));
       await refresh();
     }
   } finally {
@@ -799,7 +809,7 @@ async function addBlockPingRule() {
 async function removeRule(rule: Api.DataProtector.PolicyRule) {
   const { error, data } = await fetchRemovePolicyRule({ ...rule, actor: 'web-admin' });
   if (!error && data.succeeded) {
-    window.$message?.success('Rule removed from central policy.');
+    window.$message?.success($t('dataprotector.policy.file.removed'));
     await refresh();
   }
 }
@@ -807,21 +817,21 @@ async function removeRule(rule: Api.DataProtector.PolicyRule) {
 async function removeNetworkRule(rule: Api.DataProtector.NetworkRule) {
   const { error, data } = await fetchRemoveNetworkRule({ ruleId: rule.ruleId, actor: 'web-admin' });
   if (!error && data.succeeded) {
-    window.$message?.success('Network rule removed from central policy.');
+    window.$message?.success($t('dataprotector.policy.network.removed'));
     await refresh();
   }
 }
 
 async function clearRules() {
   window.$dialog?.warning({
-    title: 'Clear all rules',
-    content: 'This removes all trusted process and excluded directory rules from the central policy.',
-    positiveText: 'Clear',
-    negativeText: 'Cancel',
+    title: $t('dataprotector.policy.file.clearTitle'),
+    content: $t('dataprotector.policy.file.clearContent'),
+    positiveText: $t('dataprotector.common.clear'),
+    negativeText: $t('dataprotector.common.cancel'),
     onPositiveClick: async () => {
       const { error, data } = await fetchClearPolicyRules();
       if (!error && data.succeeded) {
-        window.$message?.success('Central policy cleared.');
+        window.$message?.success($t('dataprotector.policy.file.clearSuccess'));
         await refresh();
       }
     }
@@ -830,14 +840,14 @@ async function clearRules() {
 
 async function clearNetworkRules() {
   window.$dialog?.warning({
-    title: 'Clear network rules',
-    content: 'This removes all central network defense rules. Agents will clear local WFP rules on next sync.',
-    positiveText: 'Clear',
-    negativeText: 'Cancel',
+    title: $t('dataprotector.policy.network.clearTitle'),
+    content: $t('dataprotector.policy.network.clearContent'),
+    positiveText: $t('dataprotector.common.clear'),
+    negativeText: $t('dataprotector.common.cancel'),
     onPositiveClick: async () => {
       const { error, data } = await fetchClearNetworkRules();
       if (!error && data.succeeded) {
-        window.$message?.success('Central network policy cleared.');
+        window.$message?.success($t('dataprotector.policy.network.clearSuccess'));
         await refresh();
       }
     }
@@ -853,7 +863,7 @@ async function addWebShellRule() {
       actor: 'web-admin'
     });
     if (!error && data.succeeded) {
-      window.$message?.success('WebShell protected directory added to central policy.');
+      window.$message?.success($t('dataprotector.policy.webshell.added'));
       webShellForm.directory = '';
       await refresh();
     }
@@ -865,21 +875,21 @@ async function addWebShellRule() {
 async function removeWebShellRule(rule: Api.DataProtector.WebShellRule) {
   const { error, data } = await fetchRemoveWebShellRule({ directory: rule.directory, actor: 'web-admin' });
   if (!error && data.succeeded) {
-    window.$message?.success('WebShell protected directory removed from central policy.');
+    window.$message?.success($t('dataprotector.policy.webshell.removed'));
     await refresh();
   }
 }
 
 async function clearWebShellRules() {
   window.$dialog?.warning({
-    title: 'Clear WebShell rules',
-    content: 'This removes all protected web directories from the central policy.',
-    positiveText: 'Clear',
-    negativeText: 'Cancel',
+    title: $t('dataprotector.policy.webshell.clearTitle'),
+    content: $t('dataprotector.policy.webshell.clearContent'),
+    positiveText: $t('dataprotector.common.clear'),
+    negativeText: $t('dataprotector.common.cancel'),
     onPositiveClick: async () => {
       const { error, data } = await fetchClearWebShellRules();
       if (!error && data.succeeded) {
-        window.$message?.success('Central WebShell policy cleared.');
+        window.$message?.success($t('dataprotector.policy.webshell.clearSuccess'));
         await refresh();
       }
     }
@@ -904,7 +914,7 @@ async function addDeviceRule() {
       actor: 'web-admin'
     });
     if (!error && data.succeeded) {
-      window.$message?.success('Device control rule added to central policy.');
+      window.$message?.success($t('dataprotector.policy.device.added'));
       await refresh();
     }
   } finally {
@@ -915,21 +925,21 @@ async function addDeviceRule() {
 async function removeDeviceRule(rule: Api.DataProtector.DeviceRule) {
   const { error, data } = await fetchRemoveDeviceRule({ ...rule, actor: 'web-admin' });
   if (!error && data.succeeded) {
-    window.$message?.success('Device control rule removed from central policy.');
+    window.$message?.success($t('dataprotector.policy.device.removed'));
     await refresh();
   }
 }
 
 async function clearDeviceRules() {
   window.$dialog?.warning({
-    title: 'Clear device control rules',
-    content: 'This removes all removable storage access and write policies from the central policy.',
-    positiveText: 'Clear',
-    negativeText: 'Cancel',
+    title: $t('dataprotector.policy.device.clearTitle'),
+    content: $t('dataprotector.policy.device.clearContent'),
+    positiveText: $t('dataprotector.common.clear'),
+    negativeText: $t('dataprotector.common.cancel'),
     onPositiveClick: async () => {
       const { error, data } = await fetchClearDeviceRules();
       if (!error && data.succeeded) {
-        window.$message?.success('Central device control policy cleared.');
+        window.$message?.success($t('dataprotector.policy.device.clearSuccess'));
         await refresh();
       }
     }
@@ -950,7 +960,7 @@ async function saveHashProtectPolicy() {
     });
 
     if (!error && data.succeeded) {
-      window.$message?.success('Anti-dump policy saved to central policy.');
+      window.$message?.success($t('dataprotector.policy.hashprotect.saved'));
       await refresh();
     }
   } finally {
@@ -972,7 +982,7 @@ async function saveLateralDefensePolicy() {
     });
 
     if (!error && data.succeeded) {
-      window.$message?.success('Lateral movement defense policy saved to central policy.');
+      window.$message?.success($t('dataprotector.policy.lateral.saved'));
       await refresh();
     }
   } finally {
@@ -991,7 +1001,9 @@ async function authorizeRemovableDevice(device: Api.DataProtector.RemovableDevic
       actor: 'web-admin'
     });
     if (!error && data.succeeded) {
-      window.$message?.success(allowWrite ? 'Removable device authorized.' : 'Removable device authorized as read-only.');
+      window.$message?.success(
+        allowWrite ? $t('dataprotector.policy.device.authorizedWritable') : $t('dataprotector.policy.device.authorizedReadonly')
+      );
       await refresh();
     }
   } finally {
@@ -1010,7 +1022,7 @@ async function blockRemovableDevice(device: Api.DataProtector.RemovableDevice) {
       actor: 'web-admin'
     });
     if (!error && data.succeeded) {
-      window.$message?.success('Removable device blocked.');
+      window.$message?.success($t('dataprotector.policy.device.blockedDevice'));
       await refresh();
     }
   } finally {
@@ -1024,7 +1036,7 @@ async function removeRemovableAuthorization(device: Api.DataProtector.RemovableD
     actor: 'web-admin'
   });
   if (!error && data.succeeded) {
-    window.$message?.success('Removable device authorization reset.');
+    window.$message?.success($t('dataprotector.policy.device.authorizationRemoved'));
     await refresh();
   }
 }
@@ -1037,34 +1049,36 @@ onMounted(refresh);
     <NCard :bordered="false" class="card-wrapper">
       <div class="flex flex-wrap items-center justify-between gap-16px">
         <div>
-          <h1 class="m-0 text-24px font-700">Policy Management</h1>
+          <h1 class="m-0 text-24px font-700">{{ $t('dataprotector.policy.title') }}</h1>
           <p class="m-t-8px text-14px text-gray-500">
-            Extension-bound central policy distributed to all registered DataProtector agents.
+            {{ $t('dataprotector.policy.subtitle') }}
           </p>
         </div>
         <NSpace>
-          <NTag :type="connected ? 'success' : 'error'">{{ connected ? 'Central server online' : 'Server offline' }}</NTag>
+          <NTag :type="connected ? 'success' : 'error'">
+            {{ connected ? $t('dataprotector.policy.centralOnline') : $t('dataprotector.policy.serverOffline') }}
+          </NTag>
           <NButton :loading="loading" @click="refresh">
             <template #icon><SvgIcon icon="mdi:refresh" /></template>
-            Refresh
+            {{ $t('dataprotector.common.refresh') }}
           </NButton>
         </NSpace>
       </div>
     </NCard>
 
     <NTabs type="line" animated>
-      <NTabPane name="file" tab="File Policy">
+      <NTabPane name="file" :tab="$t('dataprotector.policy.tabs.file')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24 m:8">
-            <NCard title="Add File Rule" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.file.addTitle')" :bordered="false" class="card-wrapper">
               <NForm ref="formRef" :model="form" :rules="formRules" label-placement="top">
-                <NFormItem label="Rule kind" path="kind">
+                <NFormItem :label="$t('dataprotector.policy.file.ruleKind')" path="kind">
                   <NSelect v-model:value="form.kind" :options="kindOptions" />
                 </NFormItem>
-                <NFormItem label="Extension" path="extension">
+                <NFormItem :label="$t('dataprotector.policy.file.extension')" path="extension">
                   <NInput v-model:value="form.extension" placeholder=".dpf" />
                 </NFormItem>
-                <NFormItem label="Rule value" path="value">
+                <NFormItem :label="$t('dataprotector.policy.file.ruleValue')" path="value">
                   <NInput
                     v-model:value="form.value"
                     :placeholder="form.kind === 'processName' ? 'notepad.exe' : 'C:\\Program Files\\WPS Office\\'"
@@ -1072,20 +1086,20 @@ onMounted(refresh);
                 </NFormItem>
                 <NButton block type="primary" :loading="submitting" @click="addRule">
                   <template #icon><SvgIcon icon="mdi:plus" /></template>
-                  Add to Central Policy
+                  {{ $t('dataprotector.policy.file.addButton') }}
                 </NButton>
               </NForm>
             </NCard>
           </NGi>
 
           <NGi span="24 m:16">
-            <NCard title="Central File Rule Inventory" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.file.inventory')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NSpace>
-                  <NTag type="info">Process: {{ ruleGroups.processName }}</NTag>
-                  <NTag type="info">Directory: {{ ruleGroups.processDirectory }}</NTag>
-                  <NTag type="warning">Excluded: {{ ruleGroups.excludedDirectory }}</NTag>
-                  <NButton size="small" type="error" secondary @click="clearRules">Clear</NButton>
+                  <NTag type="info">{{ $t('dataprotector.policy.file.process') }}: {{ ruleGroups.processName }}</NTag>
+                  <NTag type="info">{{ $t('dataprotector.policy.file.directory') }}: {{ ruleGroups.processDirectory }}</NTag>
+                  <NTag type="warning">{{ $t('dataprotector.policy.file.excluded') }}: {{ ruleGroups.excludedDirectory }}</NTag>
+                  <NButton size="small" type="error" secondary @click="clearRules">{{ $t('dataprotector.common.clear') }}</NButton>
                 </NSpace>
               </template>
               <NDataTable :columns="columns" :data="rules" :loading="loading" :pagination="{ pageSize: 10 }" />
@@ -1094,82 +1108,86 @@ onMounted(refresh);
         </NGrid>
       </NTabPane>
 
-      <NTabPane name="network" tab="Network Defense">
+      <NTabPane name="network" :tab="$t('dataprotector.policy.tabs.network')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24">
-            <NCard title="Quick Network Actions" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.network.quickActions')" :bordered="false" class="card-wrapper">
               <div class="flex flex-wrap items-center justify-between gap-16px">
                 <NSpace :size="12" align="center">
-                  <NTag type="error" :bordered="false">Inbound ICMP</NTag>
-                  <NTag type="warning" :bordered="false">Endpoint hardening</NTag>
+                  <NTag type="error" :bordered="false">{{ $t('dataprotector.policy.network.inboundIcmp') }}</NTag>
+                  <NTag type="warning" :bordered="false">{{ $t('dataprotector.policy.network.hardening') }}</NTag>
                 </NSpace>
                 <NButton type="warning" :loading="networkSubmitting" @click="addBlockPingRule">
                   <template #icon><SvgIcon icon="mdi:lan-disconnect" /></template>
-                  Disable Inbound Ping
+                  {{ $t('dataprotector.policy.network.disablePing') }}
                 </NButton>
               </div>
             </NCard>
           </NGi>
 
           <NGi span="24 m:8">
-            <NCard title="Add Network Rule" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.network.addTitle')" :bordered="false" class="card-wrapper">
               <NForm ref="networkFormRef" :model="networkForm" :rules="networkFormRules" label-placement="top">
-                <NFormItem label="Rule kind" path="kind">
+                <NFormItem :label="$t('dataprotector.policy.network.kind')" path="kind">
                   <NSelect v-model:value="networkForm.kind" :options="networkKindOptions" />
                 </NFormItem>
-                <NFormItem label="Action" path="action">
+                <NFormItem :label="$t('dataprotector.policy.network.action')" path="action">
                   <NSelect v-model:value="networkForm.action" :options="networkActionOptions" />
                 </NFormItem>
-                <NFormItem v-if="networkForm.kind === 'domain'" label="Domain" path="domain">
+                <NFormItem v-if="networkForm.kind === 'domain'" :label="$t('dataprotector.policy.network.domain')" path="domain">
                   <NInput v-model:value="networkForm.domain" placeholder="*.example.com" />
                 </NFormItem>
-                <NFormItem v-else label="Remote IPv4 / CIDR" path="remoteAddress">
+                <NFormItem v-else :label="$t('dataprotector.policy.network.remoteIp')" path="remoteAddress">
                   <NInput
                     v-model:value="networkForm.remoteAddress"
-                    :placeholder="networkForm.protocol === 'icmp' ? '* for all ping targets' : '203.0.113.10 or 203.0.113.0/24'"
+                    :placeholder="
+                      networkForm.protocol === 'icmp'
+                        ? $t('dataprotector.policy.network.allPingTargets')
+                        : $t('dataprotector.policy.network.cidrPlaceholder')
+                    "
                   />
                 </NFormItem>
                 <NGrid :x-gap="12" :y-gap="0" cols="2">
                   <NGi>
-                    <NFormItem label="Protocol" path="protocol">
+                    <NFormItem :label="$t('dataprotector.policy.network.protocol')" path="protocol">
                       <NSelect v-model:value="networkForm.protocol" :options="networkProtocolOptions" />
                     </NFormItem>
                   </NGi>
                   <NGi>
-                    <NFormItem label="Direction" path="direction">
+                    <NFormItem :label="$t('dataprotector.policy.network.direction')" path="direction">
                       <NSelect v-model:value="networkForm.direction" :options="networkDirectionOptions" />
                     </NFormItem>
                   </NGi>
                 </NGrid>
                 <NGrid :x-gap="12" :y-gap="0" cols="2">
                   <NGi>
-                    <NFormItem label="Local port">
+                    <NFormItem :label="$t('dataprotector.policy.network.localPort')">
                       <NInputNumber v-model:value="networkForm.localPort" :min="0" :max="65535" class="w-full" />
                     </NFormItem>
                   </NGi>
                   <NGi>
-                    <NFormItem label="Remote port">
+                    <NFormItem :label="$t('dataprotector.policy.network.remotePort')">
                       <NInputNumber v-model:value="networkForm.remotePort" :min="0" :max="65535" class="w-full" />
                     </NFormItem>
                   </NGi>
                 </NGrid>
                 <NButton block type="primary" :loading="networkSubmitting" @click="addNetworkRule">
                   <template #icon><SvgIcon icon="mdi:shield-plus-outline" /></template>
-                  Add Network Rule
+                  {{ $t('dataprotector.policy.network.addButton') }}
                 </NButton>
               </NForm>
             </NCard>
           </NGi>
 
           <NGi span="24 m:16">
-            <NCard title="Central Network Rule Inventory" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.network.inventory')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NSpace>
-                  <NTag type="info">Domains: {{ networkGroups.domain }}</NTag>
-                  <NTag type="warning">IP: {{ networkGroups.ip }}</NTag>
+                  <NTag type="info">{{ $t('dataprotector.policy.network.domains') }}: {{ networkGroups.domain }}</NTag>
+                  <NTag type="warning">{{ $t('dataprotector.policy.network.ip') }}: {{ networkGroups.ip }}</NTag>
                   <NTag type="error">ICMP: {{ networkGroups.icmp }}</NTag>
-                  <NTag type="error">Blocked: {{ networkGroups.blocked }}</NTag>
-                  <NButton size="small" type="error" secondary @click="clearNetworkRules">Clear</NButton>
+                  <NTag type="error">{{ $t('dataprotector.common.blocked') }}: {{ networkGroups.blocked }}</NTag>
+                  <NButton size="small" type="error" secondary @click="clearNetworkRules">{{ $t('dataprotector.common.clear') }}</NButton>
                 </NSpace>
               </template>
               <NDataTable :columns="networkColumns" :data="networkRules" :loading="loading" :pagination="{ pageSize: 10 }" />
@@ -1178,10 +1196,10 @@ onMounted(refresh);
         </NGrid>
       </NTabPane>
 
-      <NTabPane name="lateral" tab="IPC / SMB Defense">
+      <NTabPane name="lateral" :tab="$t('dataprotector.policy.tabs.lateral')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24 m:8">
-            <NCard title="Lateral Movement Defense Policy" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.lateral.title')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NTag :type="lateralDefensePolicy.enabled ? 'success' : 'error'" :bordered="false">
                   {{ lateralDefenseGroups.mode }}
@@ -1191,12 +1209,12 @@ onMounted(refresh);
               <NSpace vertical :size="18">
                 <div class="flex items-center justify-between gap-16px rounded-8px bg-gray-50 p-14px dark:bg-dark-3">
                   <div class="min-w-0">
-                    <div class="text-15px font-700">Protection enforcement</div>
-                    <div class="m-t-4px text-12px text-gray-500">Central policy controls SMB executable staging and IPC remote execution surfaces.</div>
+                    <div class="text-15px font-700">{{ $t('dataprotector.policy.lateral.enforcement') }}</div>
+                    <div class="m-t-4px text-12px text-gray-500">{{ $t('dataprotector.policy.lateral.enforcementDesc') }}</div>
                   </div>
                   <NSwitch :value="lateralDefensePolicy.enabled" @update:value="setLateralDefenseEnabled">
-                    <template #checked>Enabled</template>
-                    <template #unchecked>Disabled</template>
+                    <template #checked>{{ $t('dataprotector.common.enabled') }}</template>
+                    <template #unchecked>{{ $t('dataprotector.common.disabled') }}</template>
                   </NSwitch>
                 </div>
 
@@ -1204,66 +1222,68 @@ onMounted(refresh);
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">SMB executable copy</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.lateral.smbCopy') }}</div>
                         <NSwitch
                           :value="lateralDefensePolicy.blockSmbExecutableCopy"
                           :disabled="!lateralDefensePolicy.enabled"
                           @update:value="value => setLateralDefenseFeature('blockSmbExecutableCopy', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Blocks executable payload creation, write and rename on remote-origin SMB file operations.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.lateral.smbCopyDesc') }}</div>
                     </div>
                   </NGi>
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">IPC scheduled tasks</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.lateral.ipcTasks') }}</div>
                         <NSwitch
                           :value="lateralDefensePolicy.blockIpcScheduledTasks"
                           :disabled="!lateralDefensePolicy.enabled"
                           @update:value="value => setLateralDefenseFeature('blockIpcScheduledTasks', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Blocks remote Task Scheduler named-pipe access and matching command-line launch patterns.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.lateral.ipcTasksDesc') }}</div>
                     </div>
                   </NGi>
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">IPC service creation</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.lateral.ipcServices') }}</div>
                         <NSwitch
                           :value="lateralDefensePolicy.blockIpcServiceCreation"
                           :disabled="!lateralDefensePolicy.enabled"
                           @update:value="value => setLateralDefenseFeature('blockIpcServiceCreation', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Blocks Service Control Manager named-pipe abuse and remote service command patterns.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.lateral.ipcServicesDesc') }}</div>
                     </div>
                   </NGi>
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">Remote admin tools</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.lateral.remoteTools') }}</div>
                         <NSwitch
                           :value="lateralDefensePolicy.blockRemoteAdminTools"
                           :disabled="!lateralDefensePolicy.enabled"
                           @update:value="value => setLateralDefenseFeature('blockRemoteAdminTools', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Blocks schtasks, at, sc, wmic and PowerShell remoting process creation before execution.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.lateral.remoteToolsDesc') }}</div>
                     </div>
                   </NGi>
                 </NGrid>
 
                 <div class="flex flex-wrap items-center justify-between gap-12px">
                   <NSpace>
-                    <NTag type="info">Controls: {{ lateralDefenseGroups.enabledFeatures }}/4</NTag>
-                    <NTag type="warning">Flags: {{ lateralDefenseGroups.flags }}</NTag>
-                    <NTag :type="lateralDefensePolicy.enabled ? 'success' : 'default'">Active: {{ lateralDefenseGroups.activeControls }}</NTag>
+                    <NTag type="info">{{ $t('dataprotector.policy.lateral.controls', { count: lateralDefenseGroups.enabledFeatures }) }}</NTag>
+                    <NTag type="warning">{{ $t('dataprotector.policy.lateral.flags', { flags: lateralDefenseGroups.flags }) }}</NTag>
+                    <NTag :type="lateralDefensePolicy.enabled ? 'success' : 'default'">
+                      {{ $t('dataprotector.policy.lateral.active', { count: lateralDefenseGroups.activeControls }) }}
+                    </NTag>
                   </NSpace>
                   <NButton type="primary" :loading="lateralDefenseSubmitting" @click="saveLateralDefensePolicy">
                     <template #icon><SvgIcon icon="mdi:content-save-cog-outline" /></template>
-                    Save Lateral Defense
+                    {{ $t('dataprotector.policy.lateral.save') }}
                   </NButton>
                 </div>
               </NSpace>
@@ -1271,7 +1291,7 @@ onMounted(refresh);
           </NGi>
 
           <NGi span="24 m:16">
-            <NCard title="Protected Lateral Movement Surfaces" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.lateral.surfaces')" :bordered="false" class="card-wrapper">
               <NGrid :x-gap="12" :y-gap="12" cols="1 l:2 xl:4">
                 <NGi v-for="control in lateralDefenseControls" :key="control.key">
                   <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
@@ -1284,7 +1304,7 @@ onMounted(refresh);
                         </div>
                       </div>
                       <NTag :type="control.enabled ? 'success' : 'default'" :bordered="false">
-                        {{ control.enabled ? 'Active' : 'Inactive' }}
+                        {{ control.enabled ? $t('dataprotector.common.active') : $t('dataprotector.common.inactiveState') }}
                       </NTag>
                     </div>
                   </div>
@@ -1295,29 +1315,29 @@ onMounted(refresh);
         </NGrid>
       </NTabPane>
 
-      <NTabPane name="webshell" tab="WebShell Defense">
+      <NTabPane name="webshell" :tab="$t('dataprotector.policy.tabs.webshell')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24 m:8">
-            <NCard title="Add Protected Web Directory" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.webshell.addTitle')" :bordered="false" class="card-wrapper">
               <NForm ref="webShellFormRef" :model="webShellForm" :rules="webShellFormRules" label-placement="top">
-                <NFormItem label="Web root directory" path="directory">
+                <NFormItem :label="$t('dataprotector.policy.webshell.webRoot')" path="directory">
                   <NInput v-model:value="webShellForm.directory" placeholder="C:\\inetpub\\wwwroot" />
                 </NFormItem>
                 <NButton block type="primary" :loading="webShellSubmitting" @click="addWebShellRule">
                   <template #icon><SvgIcon icon="mdi:shield-bug-outline" /></template>
-                  Add WebShell Defense Rule
+                  {{ $t('dataprotector.policy.webshell.addButton') }}
                 </NButton>
               </NForm>
             </NCard>
           </NGi>
 
           <NGi span="24 m:16">
-            <NCard title="Protected Web Directory Inventory" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.webshell.inventory')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NSpace>
-                  <NTag type="warning">Directories: {{ webShellGroups.directories }}</NTag>
-                  <NTag type="error">Danger blocks enabled</NTag>
-                  <NButton size="small" type="error" secondary @click="clearWebShellRules">Clear</NButton>
+                  <NTag type="warning">{{ $t('dataprotector.policy.webshell.directories') }}: {{ webShellGroups.directories }}</NTag>
+                  <NTag type="error">{{ $t('dataprotector.policy.webshell.dangerEnabled') }}</NTag>
+                  <NButton size="small" type="error" secondary @click="clearWebShellRules">{{ $t('dataprotector.common.clear') }}</NButton>
                 </NSpace>
               </template>
               <NDataTable :columns="webShellColumns" :data="webShellRules" :loading="loading" :pagination="{ pageSize: 10 }" />
@@ -1326,10 +1346,10 @@ onMounted(refresh);
         </NGrid>
       </NTabPane>
 
-      <NTabPane name="hashprotect" tab="Anti-Dump / Hash Protection">
+      <NTabPane name="hashprotect" :tab="$t('dataprotector.policy.tabs.hashprotect')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24 m:8">
-            <NCard title="Hash Dump Protection Policy" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.hashprotect.title')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NTag :type="hashProtectPolicy.enabled ? 'success' : 'error'" :bordered="false">
                   {{ hashProtectGroups.mode }}
@@ -1339,12 +1359,12 @@ onMounted(refresh);
               <NSpace vertical :size="18">
                 <div class="flex items-center justify-between gap-16px rounded-8px bg-gray-50 p-14px dark:bg-dark-3">
                   <div class="min-w-0">
-                    <div class="text-15px font-700">Protection enforcement</div>
-                    <div class="m-t-4px text-12px text-gray-500">Central policy version controls how agents harden credential dump surfaces.</div>
+                    <div class="text-15px font-700">{{ $t('dataprotector.policy.hashprotect.enforcement') }}</div>
+                    <div class="m-t-4px text-12px text-gray-500">{{ $t('dataprotector.policy.hashprotect.enforcementDesc') }}</div>
                   </div>
                   <NSwitch :value="hashProtectPolicy.enabled" @update:value="setHashProtectEnabled">
-                    <template #checked>Enabled</template>
-                    <template #unchecked>Disabled</template>
+                    <template #checked>{{ $t('dataprotector.common.enabled') }}</template>
+                    <template #unchecked>{{ $t('dataprotector.common.disabled') }}</template>
                   </NSwitch>
                 </div>
 
@@ -1352,66 +1372,68 @@ onMounted(refresh);
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">LSASS handles</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.hashprotect.lsass') }}</div>
                         <NSwitch
                           :value="hashProtectPolicy.protectLsass"
                           :disabled="!hashProtectPolicy.enabled"
                           @update:value="value => setHashProtectFeature('protectLsass', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Blocks untrusted process memory dump handle access.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.hashprotect.lsassDesc') }}</div>
                     </div>
                   </NGi>
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">Credential files</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.hashprotect.credentialFiles') }}</div>
                         <NSwitch
                           :value="hashProtectPolicy.protectCredentialFiles"
                           :disabled="!hashProtectPolicy.enabled"
                           @update:value="value => setHashProtectFeature('protectCredentialFiles', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Blocks SAM, SYSTEM, SECURITY, NTDS and shadow-copy paths.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.hashprotect.credentialFilesDesc') }}</div>
                     </div>
                   </NGi>
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">Registry hives</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.hashprotect.registryHives') }}</div>
                         <NSwitch
                           :value="hashProtectPolicy.protectRegistryHives"
                           :disabled="!hashProtectPolicy.enabled"
                           @update:value="value => setHashProtectFeature('protectRegistryHives', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Blocks save, restore and replace against credential hives.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.hashprotect.registryHivesDesc') }}</div>
                     </div>
                   </NGi>
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
-                        <div class="font-700">Raw extents</div>
+                        <div class="font-700">{{ $t('dataprotector.policy.hashprotect.rawExtents') }}</div>
                         <NSwitch
                           :value="hashProtectPolicy.protectRawExtents"
                           :disabled="!hashProtectPolicy.enabled"
                           @update:value="value => setHashProtectFeature('protectRawExtents', value)"
                         />
                       </div>
-                      <div class="m-t-6px text-12px text-gray-500">Denies only raw reads that overlap credential file disk ranges.</div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.hashprotect.rawExtentsDesc') }}</div>
                     </div>
                   </NGi>
                 </NGrid>
 
                 <div class="flex flex-wrap items-center justify-between gap-12px">
                   <NSpace>
-                    <NTag type="info">Features: {{ hashProtectGroups.enabledFeatures }}/4</NTag>
-                    <NTag type="warning">Flags: {{ hashProtectGroups.flags }}</NTag>
-                    <NTag :type="hashProtectPolicy.enabled ? 'success' : 'default'">Assets: {{ hashProtectGroups.protectedAssets }}</NTag>
+                    <NTag type="info">{{ $t('dataprotector.policy.hashprotect.features', { count: hashProtectGroups.enabledFeatures }) }}</NTag>
+                    <NTag type="warning">{{ $t('dataprotector.policy.lateral.flags', { flags: hashProtectGroups.flags }) }}</NTag>
+                    <NTag :type="hashProtectPolicy.enabled ? 'success' : 'default'">
+                      {{ $t('dataprotector.policy.hashprotect.assets', { count: hashProtectGroups.protectedAssets }) }}
+                    </NTag>
                   </NSpace>
                   <NButton type="primary" :loading="hashProtectSubmitting" @click="saveHashProtectPolicy">
                     <template #icon><SvgIcon icon="mdi:content-save-shield-outline" /></template>
-                    Save Anti-Dump Policy
+                    {{ $t('dataprotector.policy.hashprotect.save') }}
                   </NButton>
                 </div>
               </NSpace>
@@ -1419,7 +1441,7 @@ onMounted(refresh);
           </NGi>
 
           <NGi span="24 m:16">
-            <NCard title="Protected Surfaces" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.hashprotect.surfaces')" :bordered="false" class="card-wrapper">
               <NGrid :x-gap="12" :y-gap="12" cols="1 l:2 xl:4">
                 <NGi v-for="asset in hashProtectAssets" :key="asset.key">
                   <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
@@ -1432,7 +1454,7 @@ onMounted(refresh);
                         </div>
                       </div>
                       <NTag :type="asset.enabled ? 'success' : 'default'" :bordered="false">
-                        {{ asset.enabled ? 'Active' : 'Inactive' }}
+                        {{ asset.enabled ? $t('dataprotector.common.active') : $t('dataprotector.common.inactiveState') }}
                       </NTag>
                     </div>
                   </div>
@@ -1443,15 +1465,15 @@ onMounted(refresh);
         </NGrid>
       </NTabPane>
 
-      <NTabPane name="device" tab="Device Control">
+      <NTabPane name="device" :tab="$t('dataprotector.policy.tabs.device')">
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24">
-            <NCard title="Discovered Removable Devices" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.device.discovered')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NSpace>
-                  <NTag type="warning">Pending: {{ deviceGroups.pendingHardware }}</NTag>
-                  <NTag type="success">Authorized: {{ deviceGroups.authorizedHardware }}</NTag>
-                  <NTag type="error">Blocked: {{ deviceGroups.blockedHardware }}</NTag>
+                  <NTag type="warning">{{ $t('dataprotector.policy.device.pending') }}: {{ deviceGroups.pendingHardware }}</NTag>
+                  <NTag type="success">{{ $t('dataprotector.policy.device.authorized') }}: {{ deviceGroups.authorizedHardware }}</NTag>
+                  <NTag type="error">{{ $t('dataprotector.policy.device.blocked') }}: {{ deviceGroups.blockedHardware }}</NTag>
                 </NSpace>
               </template>
               <NDataTable
@@ -1465,40 +1487,40 @@ onMounted(refresh);
           </NGi>
 
           <NGi span="24 m:8">
-            <NCard title="Add Removable Storage Rule" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.device.addTitle')" :bordered="false" class="card-wrapper">
               <NForm ref="deviceFormRef" :model="deviceForm" :rules="deviceFormRules" label-placement="top">
-                <NFormItem label="Device identifier" path="deviceId">
+                <NFormItem :label="$t('dataprotector.policy.device.deviceId')" path="deviceId">
                   <NInput v-model:value="deviceForm.deviceId" placeholder="* or \\?\\Volume{...}" />
                 </NFormItem>
-                <NFormItem label="Insertion access">
+                <NFormItem :label="$t('dataprotector.policy.device.insertionAccess')">
                   <NSwitch :value="deviceForm.allowInsert" @update:value="setDeviceInsert">
-                    <template #checked>Allowed</template>
-                    <template #unchecked>Blocked</template>
+                    <template #checked>{{ $t('dataprotector.policy.device.allowed') }}</template>
+                    <template #unchecked>{{ $t('dataprotector.common.blocked') }}</template>
                   </NSwitch>
                 </NFormItem>
-                <NFormItem label="Write access">
+                <NFormItem :label="$t('dataprotector.policy.device.writeAccess')">
                   <NSwitch v-model:value="deviceForm.allowWrite" :disabled="!deviceForm.allowInsert">
-                    <template #checked>Writable</template>
-                    <template #unchecked>Read-only</template>
+                    <template #checked>{{ $t('dataprotector.common.writable') }}</template>
+                    <template #unchecked>{{ $t('dataprotector.common.readOnly') }}</template>
                   </NSwitch>
                 </NFormItem>
                 <NButton block type="primary" :loading="deviceSubmitting" @click="addDeviceRule">
                   <template #icon><SvgIcon icon="mdi:usb-flash-drive-outline" /></template>
-                  Add Device Control Rule
+                  {{ $t('dataprotector.policy.device.addButton') }}
                 </NButton>
               </NForm>
             </NCard>
           </NGi>
 
           <NGi span="24 m:16">
-            <NCard title="Central Device Control Inventory" :bordered="false" class="card-wrapper">
+            <NCard :title="$t('dataprotector.policy.device.inventory')" :bordered="false" class="card-wrapper">
               <template #header-extra>
                 <NSpace>
-                  <NTag type="info">Rules: {{ deviceGroups.total }}</NTag>
-                  <NTag type="error">Blocked: {{ deviceGroups.blockedInsert }}</NTag>
-                  <NTag type="warning">Read-only: {{ deviceGroups.readOnly }}</NTag>
-                  <NTag type="success">Writable: {{ deviceGroups.writable }}</NTag>
-                  <NButton size="small" type="error" secondary @click="clearDeviceRules">Clear</NButton>
+                  <NTag type="info">{{ $t('dataprotector.policy.device.rules') }}: {{ deviceGroups.total }}</NTag>
+                  <NTag type="error">{{ $t('dataprotector.common.blocked') }}: {{ deviceGroups.blockedInsert }}</NTag>
+                  <NTag type="warning">{{ $t('dataprotector.common.readOnly') }}: {{ deviceGroups.readOnly }}</NTag>
+                  <NTag type="success">{{ $t('dataprotector.common.writable') }}: {{ deviceGroups.writable }}</NTag>
+                  <NButton size="small" type="error" secondary @click="clearDeviceRules">{{ $t('dataprotector.common.clear') }}</NButton>
                 </NSpace>
               </template>
               <NDataTable :columns="deviceColumns" :data="deviceRules" :loading="loading" :pagination="{ pageSize: 10 }" />

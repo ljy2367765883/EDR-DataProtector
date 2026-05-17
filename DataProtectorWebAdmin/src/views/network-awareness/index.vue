@@ -4,6 +4,7 @@ import type { DataTableColumns } from 'naive-ui';
 import { NButton, NTag, useMessage } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
 import { fetchClearIpInfoConfig, fetchDevices, fetchIpInfoConfig, fetchNetworkInsights, fetchSaveIpInfoConfig } from '@/service/api';
+import { $t } from '@/locales';
 
 const message = useMessage();
 const loading = ref(false);
@@ -23,27 +24,27 @@ const query = reactive<Api.DataProtector.NetworkInsightQuery>({
   includePrivateRemotes: false
 });
 
-const baselineOptions = [
-  { label: '5 hours', value: 5 },
-  { label: '1 day', value: 24 },
-  { label: '3 days', value: 72 },
-  { label: '7 days', value: 168 },
-  { label: '1 month', value: 24 * 31 }
-];
+const baselineOptions = computed(() => [
+  { label: $t('dataprotector.networkAwareness.baselines.hours5'), value: 5 },
+  { label: $t('dataprotector.networkAwareness.baselines.day1'), value: 24 },
+  { label: $t('dataprotector.networkAwareness.baselines.days3'), value: 72 },
+  { label: $t('dataprotector.networkAwareness.baselines.days7'), value: 168 },
+  { label: $t('dataprotector.networkAwareness.baselines.month1'), value: 24 * 31 }
+]);
 
-const eventTypeOptions = [
-  { label: 'All', value: 'all' },
-  { label: 'Connection', value: 'connection' },
-  { label: 'DNS', value: 'dns' },
-  { label: 'QUIC', value: 'quic' },
-  { label: 'HTTP/3', value: 'http3' },
-  { label: 'Blocked', value: 'blocked' }
-];
+const eventTypeOptions = computed(() => [
+  { label: $t('dataprotector.networkAwareness.eventTypes.all'), value: 'all' },
+  { label: $t('dataprotector.networkAwareness.eventTypes.connection'), value: 'connection' },
+  { label: $t('dataprotector.networkAwareness.eventTypes.dns'), value: 'dns' },
+  { label: $t('dataprotector.networkAwareness.eventTypes.quic'), value: 'quic' },
+  { label: $t('dataprotector.networkAwareness.eventTypes.http3'), value: 'http3' },
+  { label: $t('dataprotector.networkAwareness.eventTypes.blocked'), value: 'blocked' }
+]);
 
 const hostOptions = computed(() => [
-  { label: 'All hosts', value: 'all' },
+  { label: $t('dataprotector.networkAwareness.allHosts'), value: 'all' },
   ...devices.value.map(device => ({
-    label: `${device.machine || device.deviceId}${device.online ? ' online' : ''}`,
+    label: `${device.machine || device.deviceId}${device.online ? ` ${$t('dataprotector.common.online')}` : ''}`,
     value: device.machine || device.deviceId
   }))
 ]);
@@ -78,27 +79,33 @@ const trendRows = computed(() => {
 
 const protocolRows = computed(() => {
   const values = [
-    { name: 'Connection', value: items.value.filter(item => !item.isDns && !item.isQuic && !item.blocked).length },
-    { name: 'DNS', value: items.value.filter(item => item.isDns).length },
-    { name: 'QUIC', value: items.value.filter(item => item.isQuic && !item.isHttp3).length },
-    { name: 'HTTP/3', value: items.value.filter(item => item.isHttp3).length },
-    { name: 'Blocked', value: items.value.filter(item => item.blocked).length }
+    { name: $t('dataprotector.networkAwareness.eventTypes.connection'), value: items.value.filter(item => !item.isDns && !item.isQuic && !item.blocked).length },
+    { name: $t('dataprotector.networkAwareness.eventTypes.dns'), value: items.value.filter(item => item.isDns).length },
+    { name: $t('dataprotector.networkAwareness.eventTypes.quic'), value: items.value.filter(item => item.isQuic && !item.isHttp3).length },
+    { name: $t('dataprotector.networkAwareness.eventTypes.http3'), value: items.value.filter(item => item.isHttp3).length },
+    { name: $t('dataprotector.networkAwareness.eventTypes.blocked'), value: items.value.filter(item => item.blocked).length }
   ];
 
   return values.filter(item => item.value > 0);
 });
 
+const trendChartLabels = computed(() => ({
+  observed: $t('dataprotector.networkAwareness.charts.observed'),
+  new: $t('dataprotector.networkAwareness.charts.new'),
+  quic: $t('dataprotector.networkAwareness.charts.quic')
+}));
+
 const { domRef: trendChartRef, updateOptions: updateTrendChart } = useEcharts(() => ({
   color: ['#2080f0', '#d03050', '#18a058'],
   tooltip: { trigger: 'axis' },
-  legend: { top: 0, data: ['Observed', 'New', 'QUIC'] },
+  legend: { top: 0, data: [$t('dataprotector.networkAwareness.charts.observed'), $t('dataprotector.networkAwareness.charts.new'), $t('dataprotector.networkAwareness.charts.quic')] },
   grid: { left: 40, right: 18, top: 44, bottom: 28 },
   xAxis: { type: 'category', boundaryGap: false, data: [] as string[] },
   yAxis: { type: 'value', minInterval: 1 },
   series: [
-    { name: 'Observed', type: 'line', smooth: true, data: [] as number[] },
-    { name: 'New', type: 'line', smooth: true, data: [] as number[] },
-    { name: 'QUIC', type: 'line', smooth: true, data: [] as number[] }
+    { name: $t('dataprotector.networkAwareness.charts.observed'), type: 'line', smooth: true, data: [] as number[] },
+    { name: $t('dataprotector.networkAwareness.charts.new'), type: 'line', smooth: true, data: [] as number[] },
+    { name: $t('dataprotector.networkAwareness.charts.quic'), type: 'line', smooth: true, data: [] as number[] }
   ]
 }));
 
@@ -108,7 +115,7 @@ const { domRef: protocolChartRef, updateOptions: updateProtocolChart } = useEcha
   legend: { bottom: 0, left: 'center' },
   series: [
     {
-      name: 'Event type',
+      name: $t('dataprotector.networkAwareness.charts.eventType'),
       type: 'pie',
       radius: ['48%', '72%'],
       label: { formatter: '{b}: {c}' },
@@ -117,9 +124,9 @@ const { domRef: protocolChartRef, updateOptions: updateProtocolChart } = useEcha
   ]
 }));
 
-const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
+const columns = computed<DataTableColumns<Api.DataProtector.NetworkInsightItem>>(() => [
   {
-    title: 'Remote',
+    title: $t('dataprotector.networkAwareness.columns.remote'),
     key: 'remoteIdentity',
     width: 280,
     render(row) {
@@ -132,7 +139,7 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
     }
   },
   {
-    title: 'Process',
+    title: $t('dataprotector.networkAwareness.columns.process'),
     key: 'processPath',
     width: 380,
     render(row) {
@@ -145,21 +152,21 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
     }
   },
   {
-    title: 'Type',
+    title: $t('dataprotector.networkAwareness.columns.type'),
     key: 'type',
     width: 190,
     render(row) {
       const tags = [];
-      if (row.isNew) tags.push(<NTag type="error" bordered={false}>New</NTag>);
+      if (row.isNew) tags.push(<NTag type="error" bordered={false}>{$t('dataprotector.networkAwareness.charts.new')}</NTag>);
       if (row.isHttp3) tags.push(<NTag type="info" bordered={false}>HTTP/3</NTag>);
       else if (row.isQuic) tags.push(<NTag type="success" bordered={false}>QUIC</NTag>);
       if (row.isDns) tags.push(<NTag type="warning" bordered={false}>DNS</NTag>);
-      if (row.blocked) tags.push(<NTag type="error" bordered={false}>Blocked</NTag>);
-      return <div class="tag-row">{tags.length ? tags : <NTag bordered={false}>Observed</NTag>}</div>;
+      if (row.blocked) tags.push(<NTag type="error" bordered={false}>{$t('dataprotector.common.blocked')}</NTag>);
+      return <div class="tag-row">{tags.length ? tags : <NTag bordered={false}>{$t('dataprotector.networkAwareness.charts.observed')}</NTag>}</div>;
     }
   },
   {
-    title: 'IP Intelligence',
+    title: $t('dataprotector.networkAwareness.columns.ipInfo'),
     key: 'ipInfo',
     width: 280,
     render(row) {
@@ -172,21 +179,21 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
     }
   },
   {
-    title: 'Signature',
+    title: $t('dataprotector.networkAwareness.columns.signature'),
     key: 'signatureStatus',
     width: 240,
     render(row) {
       const type = row.signatureStatus === 'signed' ? 'success' : row.signatureStatus === 'unsigned' ? 'error' : 'default';
       return (
         <div class="cell-stack">
-          <NTag type={type} bordered={false}>{row.signatureStatus || 'unknown'}</NTag>
+          <NTag type={type} bordered={false}>{row.signatureStatus || $t('dataprotector.networkAwareness.columns.unknown')}</NTag>
           <div class="cell-muted">{row.signer || row.companyName || '-'}</div>
         </div>
       );
     }
   },
   {
-    title: 'File',
+    title: $t('dataprotector.networkAwareness.columns.file'),
     key: 'fileDescription',
     width: 300,
     render(row) {
@@ -199,7 +206,7 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
     }
   },
   {
-    title: 'Hash',
+    title: $t('dataprotector.networkAwareness.columns.hash'),
     key: 'sha256',
     width: 260,
     render(row) {
@@ -207,7 +214,7 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
     }
   },
   {
-    title: 'Host',
+    title: $t('dataprotector.networkAwareness.columns.host'),
     key: 'hosts',
     width: 180,
     render(row) {
@@ -215,19 +222,19 @@ const columns: DataTableColumns<Api.DataProtector.NetworkInsightItem> = [
     }
   },
   {
-    title: 'Seen',
+    title: $t('dataprotector.networkAwareness.columns.seen'),
     key: 'lastSeenUtc',
     width: 210,
     render(row) {
       return (
         <div class="cell-stack">
           <div>{formatTime(row.lastSeenUtc)}</div>
-          <div class="cell-muted">count {row.count}</div>
+          <div class="cell-muted">{$t('dataprotector.networkAwareness.columns.count', { count: row.count })}</div>
         </div>
       );
     }
   }
-];
+]);
 
 async function refresh() {
   loading.value = true;
@@ -249,7 +256,7 @@ async function refresh() {
 async function saveIpInfoToken() {
   const token = ipInfoToken.value.trim();
   if (!token) {
-    message.warning('Token is required');
+    message.warning($t('dataprotector.networkAwareness.tokenRequired'));
     return;
   }
 
@@ -258,7 +265,7 @@ async function saveIpInfoToken() {
     const result = await fetchSaveIpInfoConfig({ token });
     if (!result.error) {
       ipInfoToken.value = '';
-      message.success(result.data.message || 'IP intelligence token saved');
+      message.success(result.data.message || $t('dataprotector.networkAwareness.tokenSaved'));
       await refresh();
     }
   } finally {
@@ -272,7 +279,7 @@ async function clearIpInfoToken() {
     const result = await fetchClearIpInfoConfig();
     if (!result.error) {
       ipInfoToken.value = '';
-      message.success(result.data.message || 'IP intelligence token cleared');
+      message.success(result.data.message || $t('dataprotector.networkAwareness.tokenCleared'));
       await refresh();
     }
   } finally {
@@ -292,10 +299,10 @@ function formatTime(value: string) {
 }
 
 function formatIpOwner(row: Api.DataProtector.NetworkInsightItem) {
-  if (row.ipInfoStatus === 'disabled') return 'Not configured';
-  if (row.ipInfoStatus === 'pending') return row.ipInfoIp ? `${row.ipInfoIp} pending` : 'Pending';
-  if (row.ipInfoStatus === 'error') return row.ipInfoIp ? `${row.ipInfoIp} lookup failed` : 'Lookup failed';
-  if (row.ipInfoStatus === 'not_applicable') return 'Private or non-IP remote';
+  if (row.ipInfoStatus === 'disabled') return $t('dataprotector.networkAwareness.notConfigured');
+  if (row.ipInfoStatus === 'pending') return row.ipInfoIp ? `${row.ipInfoIp} ${$t('dataprotector.networkAwareness.pending')}` : $t('dataprotector.networkAwareness.pending');
+  if (row.ipInfoStatus === 'error') return row.ipInfoIp ? `${row.ipInfoIp} ${$t('dataprotector.networkAwareness.lookupFailed')}` : $t('dataprotector.networkAwareness.lookupFailed');
+  if (row.ipInfoStatus === 'not_applicable') return $t('dataprotector.networkAwareness.privateRemote');
 
   const owner = row.asName || row.asDomain || row.asn;
   if (!owner) return row.ipInfoIp || '-';
@@ -304,7 +311,7 @@ function formatIpOwner(row: Api.DataProtector.NetworkInsightItem) {
 }
 
 function formatIpLocation(row: Api.DataProtector.NetworkInsightItem) {
-  if (row.ipInfoStatus === 'disabled') return 'Set DATAPROTECTOR_IPINFO_TOKEN on the server';
+  if (row.ipInfoStatus === 'disabled') return $t('dataprotector.networkAwareness.setTokenHint');
   if (row.ipInfoStatus === 'not_applicable') return row.remoteIdentity || row.remoteEndpoint || '-';
 
   const parts = [row.country || row.countryCode, row.continent || row.continentCode].filter(Boolean);
@@ -317,12 +324,16 @@ function rowKey(row: Api.DataProtector.NetworkInsightItem) {
 }
 
 watch(
-  trendRows,
-  rows => {
+  [trendRows, trendChartLabels],
+  ([rows, labels]) => {
     updateTrendChart(opts => {
+      opts.legend.data = [labels.observed, labels.new, labels.quic];
       opts.xAxis.data = rows.map(item => item.label);
+      opts.series[0].name = labels.observed;
       opts.series[0].data = rows.map(item => item.total);
+      opts.series[1].name = labels.new;
       opts.series[1].data = rows.map(item => item.fresh);
+      opts.series[2].name = labels.quic;
       opts.series[2].data = rows.map(item => item.quic);
       return opts;
     });
@@ -334,6 +345,7 @@ watch(
   protocolRows,
   rows => {
     updateProtocolChart(opts => {
+      opts.series[0].name = $t('dataprotector.networkAwareness.charts.eventType');
       opts.series[0].data = rows;
       return opts;
     });
@@ -349,43 +361,47 @@ onMounted(refresh);
     <NGrid :cols="4" :x-gap="16" :y-gap="16" responsive="screen">
       <NGi>
         <NCard :bordered="false" class="metric-card">
-          <NStatistic label="New connections" :value="stats.total" />
+          <NStatistic :label="$t('dataprotector.networkAwareness.newConnections')" :value="stats.total" />
         </NCard>
       </NGi>
       <NGi>
         <NCard :bordered="false" class="metric-card">
-          <NStatistic label="New since baseline" :value="stats.fresh" />
+          <NStatistic :label="$t('dataprotector.networkAwareness.newSinceBaseline')" :value="stats.fresh" />
         </NCard>
       </NGi>
       <NGi>
         <NCard :bordered="false" class="metric-card">
-          <NStatistic label="HTTP/3 candidates" :value="stats.http3" />
+          <NStatistic :label="$t('dataprotector.networkAwareness.http3Candidates')" :value="stats.http3" />
         </NCard>
       </NGi>
       <NGi>
         <NCard :bordered="false" class="metric-card">
-          <NStatistic label="Unsigned processes" :value="stats.unsigned" />
+          <NStatistic :label="$t('dataprotector.networkAwareness.unsignedProcesses')" :value="stats.unsigned" />
         </NCard>
       </NGi>
     </NGrid>
 
     <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGi span="24 l:16">
-        <NCard title="Connection Trend" :bordered="false" class="work-panel">
+        <NCard :title="$t('dataprotector.networkAwareness.connectionTrend')" :bordered="false" class="work-panel">
           <div ref="trendChartRef" class="chart"></div>
         </NCard>
       </NGi>
       <NGi span="24 l:8">
-        <NCard title="Event Distribution" :bordered="false" class="work-panel">
+        <NCard :title="$t('dataprotector.networkAwareness.eventDistribution')" :bordered="false" class="work-panel">
           <div ref="protocolChartRef" class="chart"></div>
         </NCard>
       </NGi>
     </NGrid>
 
-    <NCard title="IP Intelligence" :bordered="false" class="work-panel">
+    <NCard :title="$t('dataprotector.networkAwareness.ipIntelligence')" :bordered="false" class="work-panel">
       <NSpace align="center" wrap>
         <NTag :type="ipInfoConfig?.enabled ? 'success' : 'warning'" :bordered="false">
-          {{ ipInfoConfig?.enabled ? `Configured by ${ipInfoConfig.source}` : 'Not configured' }}
+          {{
+            ipInfoConfig?.enabled
+              ? $t('dataprotector.networkAwareness.configuredBy', { source: ipInfoConfig.source })
+              : $t('dataprotector.networkAwareness.notConfigured')
+          }}
         </NTag>
         <span class="cell-muted mono">{{ ipInfoConfig?.maskedToken || ipInfoConfig?.tokenFilePath || '-' }}</span>
         <NInput
@@ -393,20 +409,26 @@ onMounted(refresh);
           type="password"
           show-password-on="click"
           clearable
-          placeholder="ipinfo token"
+          :placeholder="$t('dataprotector.networkAwareness.tokenPlaceholder')"
           class="token-control"
           @keyup.enter="saveIpInfoToken"
         />
-        <NButton type="primary" :loading="savingIpInfo" @click="saveIpInfoToken">Save</NButton>
-        <NButton secondary :loading="savingIpInfo" @click="clearIpInfoToken">Clear</NButton>
+        <NButton type="primary" :loading="savingIpInfo" @click="saveIpInfoToken">
+          {{ $t('dataprotector.networkAwareness.saveToken') }}
+        </NButton>
+        <NButton secondary :loading="savingIpInfo" @click="clearIpInfoToken">
+          {{ $t('dataprotector.networkAwareness.clearToken') }}
+        </NButton>
       </NSpace>
     </NCard>
 
     <NCard :bordered="false" class="work-panel">
       <template #header>
         <div class="panel-title">
-          <span>Network Awareness</span>
-          <NButton type="primary" :loading="loading" @click="refresh">Refresh</NButton>
+          <span>{{ $t('dataprotector.networkAwareness.title') }}</span>
+          <NButton type="primary" :loading="loading" @click="refresh">
+            {{ $t('dataprotector.common.refresh') }}
+          </NButton>
         </div>
       </template>
 
@@ -414,10 +436,16 @@ onMounted(refresh);
         <NSelect v-model:value="query.baselineHours" :options="baselineOptions" class="filter-control" />
         <NSelect v-model:value="query.eventType" :options="eventTypeOptions" class="filter-control" />
         <NSelect v-model:value="query.host" :options="hostOptions" class="filter-control" />
-        <NInput v-model:value="query.search" clearable placeholder="Remote, process, signer, hash" class="search-control" @keyup.enter="refresh" />
+        <NInput
+          v-model:value="query.search"
+          clearable
+          :placeholder="$t('dataprotector.networkAwareness.searchPlaceholder')"
+          class="search-control"
+          @keyup.enter="refresh"
+        />
         <NSwitch v-model:value="query.includePrivateRemotes" />
-        <span class="cell-muted">Show LAN remotes</span>
-        <NButton secondary @click="refresh">Apply</NButton>
+        <span class="cell-muted">{{ $t('dataprotector.networkAwareness.showLanRemotes') }}</span>
+        <NButton secondary @click="refresh">{{ $t('dataprotector.common.apply') }}</NButton>
       </NSpace>
 
       <NDataTable

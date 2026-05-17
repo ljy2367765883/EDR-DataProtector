@@ -586,6 +586,7 @@ declare namespace App {
           unFixed: string;
         };
       };
+      dataprotector: Record<string, any>;
     };
 
     type GetI18nKey<T extends Record<string, unknown>, K extends keyof T = keyof T> = K extends string

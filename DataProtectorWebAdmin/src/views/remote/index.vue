@@ -3,6 +3,7 @@ import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref } from
 import { Icon } from '@iconify/vue';
 import { NButton, NTag, type DataTableColumns } from 'naive-ui';
 import { fetchCreateRemoteTask, fetchDevices, fetchRemoteTasks } from '@/service/api';
+import { $t } from '@/locales';
 
 defineOptions({
   name: 'RemoteOps'
@@ -118,31 +119,31 @@ const filteredProcesses = computed(() => {
 
 const fileMenuOptions = computed(() => [
   {
-    label: 'Open',
+    label: $t('dataprotector.common.open'),
     key: 'open',
     disabled: !fileContext.row?.isDirectory
   },
   {
-    label: 'Rename',
+    label: $t('dataprotector.common.rename'),
     key: 'rename'
   },
   {
-    label: 'Delete',
+    label: $t('dataprotector.common.delete'),
     key: 'delete'
   }
 ]);
 
 const processMenuOptions = computed(() => [
   {
-    label: 'Terminate',
+    label: $t('dataprotector.remote.processes.terminate'),
     key: 'terminate',
     disabled: !processContext.row
   }
 ]);
 
-const fileColumns: DataTableColumns<FileItem> = [
+const fileColumns = computed<DataTableColumns<FileItem>>(() => [
   {
-    title: 'Name',
+    title: $t('dataprotector.remote.columns.name'),
     key: 'name',
     minWidth: 260,
     ellipsis: { tooltip: true },
@@ -157,15 +158,15 @@ const fileColumns: DataTableColumns<FileItem> = [
     }
   },
   {
-    title: 'Type',
+    title: $t('dataprotector.remote.columns.type'),
     key: 'isDirectory',
     width: 110,
     render(row) {
-      return row.isDirectory ? 'Folder' : 'File';
+      return row.isDirectory ? $t('dataprotector.remote.columns.folder') : $t('dataprotector.remote.columns.file');
     }
   },
   {
-    title: 'Size',
+    title: $t('dataprotector.remote.columns.size'),
     key: 'size',
     width: 130,
     render(row) {
@@ -173,19 +174,19 @@ const fileColumns: DataTableColumns<FileItem> = [
     }
   },
   {
-    title: 'Modified',
+    title: $t('dataprotector.remote.columns.modified'),
     key: 'lastWriteUtc',
     width: 190,
     render(row) {
       return formatTime(row.lastWriteUtc);
     }
   }
-];
+]);
 
-const processColumns: DataTableColumns<ProcessItem> = [
+const processColumns = computed<DataTableColumns<ProcessItem>>(() => [
   { title: 'PID', key: 'pid', width: 100, sorter: 'default' },
   {
-    title: 'Process',
+    title: $t('dataprotector.remote.columns.process'),
     key: 'name',
     minWidth: 220,
     sorter: 'default',
@@ -197,7 +198,7 @@ const processColumns: DataTableColumns<ProcessItem> = [
     }
   },
   {
-    title: 'Memory',
+    title: $t('dataprotector.remote.columns.memory'),
     key: 'memoryBytes',
     width: 130,
     sorter: (a, b) => a.memoryBytes - b.memoryBytes,
@@ -206,33 +207,33 @@ const processColumns: DataTableColumns<ProcessItem> = [
     }
   },
   {
-    title: 'Started',
+    title: $t('dataprotector.remote.columns.started'),
     key: 'startTimeUtc',
     width: 190,
     render(row) {
       return formatTime(row.startTimeUtc);
     }
   },
-  { title: 'Path', key: 'path', minWidth: 360, ellipsis: { tooltip: true } },
-];
+  { title: $t('dataprotector.remote.columns.path'), key: 'path', minWidth: 360, ellipsis: { tooltip: true } }
+]);
 
-const startupColumns: DataTableColumns<StartupItem> = [
-  { title: 'Location', key: 'location', width: 180 },
-  { title: 'Name', key: 'name', width: 220, ellipsis: { tooltip: true } },
-  { title: 'Command', key: 'command', minWidth: 520, ellipsis: { tooltip: true } },
+const startupColumns = computed<DataTableColumns<StartupItem>>(() => [
+  { title: $t('dataprotector.remote.columns.location'), key: 'location', width: 180 },
+  { title: $t('dataprotector.remote.columns.name'), key: 'name', width: 220, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.remote.columns.command'), key: 'command', minWidth: 520, ellipsis: { tooltip: true } },
   {
-    title: 'State',
+    title: $t('dataprotector.remote.columns.state'),
     key: 'enabled',
     width: 110,
     render(row) {
       return h(
         NTag,
         { type: row.enabled ? 'success' : 'default', bordered: false },
-        { default: () => (row.enabled ? 'Enabled' : 'Disabled') }
+        { default: () => (row.enabled ? $t('dataprotector.common.enabled') : $t('dataprotector.common.disabled')) }
       );
     }
   }
-];
+]);
 
 async function refreshDevices() {
   loadingDevices.value = true;
@@ -415,7 +416,7 @@ async function submitRename() {
       newName: renameName.value
     });
     renameVisible.value = false;
-    pushActivity(`Renamed ${renameTarget.value.name}`);
+    pushActivity($t('dataprotector.remote.activity.renamed', { name: renameTarget.value.name }));
     await openPath(currentPath.value);
   } finally {
     panelLoading.value = false;
@@ -424,15 +425,15 @@ async function submitRename() {
 
 function confirmDelete(row: FileItem) {
   window.$dialog?.warning({
-    title: 'Delete remote item',
-    content: `Delete ${row.path}?`,
-    positiveText: 'Delete',
-    negativeText: 'Cancel',
+    title: $t('dataprotector.remote.files.deleteTitle'),
+    content: $t('dataprotector.remote.files.deleteContent', { path: row.path }),
+    positiveText: $t('dataprotector.common.delete'),
+    negativeText: $t('dataprotector.common.cancel'),
     onPositiveClick: async () => {
       panelLoading.value = true;
       try {
         await runRemoteTask('file.delete', { path: row.path });
-        pushActivity(`Deleted ${row.name}`);
+        pushActivity($t('dataprotector.remote.activity.deleted', { name: row.name }));
         await openPath(currentPath.value);
       } finally {
         panelLoading.value = false;
@@ -453,15 +454,19 @@ async function loadProcesses() {
 
 function confirmKillProcess(row: ProcessItem) {
   window.$dialog?.warning({
-    title: 'Terminate process',
-    content: `Terminate ${row.name} (${row.pid}) on ${selectedDevice.value?.machine || selectedDeviceId.value}?`,
-    positiveText: 'Terminate',
-    negativeText: 'Cancel',
+    title: $t('dataprotector.remote.processes.terminateTitle'),
+    content: $t('dataprotector.remote.processes.terminateContent', {
+      name: row.name,
+      pid: row.pid,
+      target: selectedDevice.value?.machine || selectedDeviceId.value
+    }),
+    positiveText: $t('dataprotector.remote.processes.terminate'),
+    negativeText: $t('dataprotector.common.cancel'),
     onPositiveClick: async () => {
       panelLoading.value = true;
       try {
         await runRemoteTask('process.kill', { pid: row.pid });
-        pushActivity(`Terminated ${row.name} (${row.pid})`);
+        pushActivity($t('dataprotector.remote.activity.terminated', { name: row.name, pid: row.pid }));
         await loadProcesses();
       } finally {
         panelLoading.value = false;
@@ -592,7 +597,7 @@ async function captureScreenshot() {
     screenshotError.value = '';
     screenshotSrc.value = normalizePngDataUrl(task.output);
     if (!screenshotSrc.value) {
-      screenshotError.value = 'The endpoint returned an invalid or truncated screenshot payload.';
+      screenshotError.value = $t('dataprotector.remote.desktop.invalidScreenshot');
       window.$message?.error(screenshotError.value);
     }
   } finally {
@@ -607,8 +612,8 @@ async function changePassword() {
       username: accountForm.username,
       newPassword: accountForm.newPassword
     });
-    pushActivity(`Password changed for ${accountForm.username}`);
-    window.$message?.success('Password change task completed.');
+    pushActivity($t('dataprotector.remote.activity.passwordChanged', { username: accountForm.username }));
+    window.$message?.success($t('dataprotector.remote.accounts.passwordChanged'));
   } finally {
     panelLoading.value = false;
   }
@@ -618,7 +623,7 @@ async function lockScreen() {
   panelLoading.value = true;
   try {
     await runRemoteTask('session.lock', {});
-    pushActivity('Remote workstation lock requested');
+    pushActivity($t('dataprotector.remote.activity.lockRequested'));
   } finally {
     panelLoading.value = false;
   }
@@ -626,7 +631,7 @@ async function lockScreen() {
 
 async function runRemoteTask(kind: string, args: Record<string, unknown>, logActivity = true) {
   if (!selectedDevice.value) {
-    throw new Error('Select an endpoint first.');
+    throw new Error($t('dataprotector.remote.errors.selectEndpoint'));
   }
 
   const createResult = await fetchCreateRemoteTask({
@@ -637,12 +642,12 @@ async function runRemoteTask(kind: string, args: Record<string, unknown>, logAct
   });
 
   if (createResult.error) {
-    throw new Error('Unable to queue remote operation.');
+    throw new Error($t('dataprotector.remote.errors.queueFailed'));
   }
 
   const taskId = createResult.data.taskId;
   if (logActivity) {
-    pushActivity(`Queued ${operationLabel(kind)}`);
+    pushActivity($t('dataprotector.remote.activity.queued', { operation: operationLabel(kind) }));
   }
 
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -656,16 +661,16 @@ async function runRemoteTask(kind: string, args: Record<string, unknown>, logAct
     if (task.status === 'completed' || task.status === 'failed') {
       if (task.status === 'completed' && task.succeeded) {
         if (logActivity) {
-          pushActivity(`Completed ${operationLabel(kind)}`);
+          pushActivity($t('dataprotector.remote.activity.completed', { operation: operationLabel(kind) }));
         }
         return task;
       }
 
-      throw new Error(task.error || task.output || `${operationLabel(kind)} failed.`);
+      throw new Error(task.error || task.output || $t('dataprotector.remote.errors.operationFailed', { operation: operationLabel(kind) }));
     }
   }
 
-  throw new Error(`${operationLabel(kind)} timed out waiting for the endpoint.`);
+  throw new Error($t('dataprotector.remote.errors.timeout', { operation: operationLabel(kind) }));
 }
 
 function parseJson<T>(value: string | undefined, fallback: T): T {
@@ -697,22 +702,22 @@ function pushActivity(message: string) {
 
 function operationLabel(kind: string) {
   const labels: Record<string, string> = {
-    'file.drives': 'drive inventory',
-    'file.list': 'directory listing',
-    'file.delete': 'file deletion',
-    'file.rename': 'file rename',
-    'process.list': 'process inventory',
-    'process.kill': 'process termination',
-    'inventory.installedApps': 'application inventory',
-    'inventory.startupItems': 'startup inventory',
-    'cmd.run': 'remote command',
-    'terminal.start': 'terminal start',
-    'terminal.input': 'terminal input',
-    'terminal.read': 'terminal output read',
-    'terminal.stop': 'terminal stop',
-    'desktop.screenshot': 'desktop screenshot',
-    'session.lock': 'screen lock',
-    'user.changePassword': 'password change'
+    'file.drives': $t('dataprotector.remote.operations.file.drives'),
+    'file.list': $t('dataprotector.remote.operations.file.list'),
+    'file.delete': $t('dataprotector.remote.operations.file.delete'),
+    'file.rename': $t('dataprotector.remote.operations.file.rename'),
+    'process.list': $t('dataprotector.remote.operations.process.list'),
+    'process.kill': $t('dataprotector.remote.operations.process.kill'),
+    'inventory.installedApps': $t('dataprotector.remote.operations.inventory.installedApps'),
+    'inventory.startupItems': $t('dataprotector.remote.operations.inventory.startupItems'),
+    'cmd.run': $t('dataprotector.remote.operations.cmd.run'),
+    'terminal.start': $t('dataprotector.remote.operations.terminal.start'),
+    'terminal.input': $t('dataprotector.remote.operations.terminal.input'),
+    'terminal.read': $t('dataprotector.remote.operations.terminal.read'),
+    'terminal.stop': $t('dataprotector.remote.operations.terminal.stop'),
+    'desktop.screenshot': $t('dataprotector.remote.operations.desktop.screenshot'),
+    'session.lock': $t('dataprotector.remote.operations.session.lock'),
+    'user.changePassword': $t('dataprotector.remote.operations.user.changePassword')
   };
   return labels[kind] || kind;
 }
@@ -761,8 +766,8 @@ onBeforeUnmount(() => {
     <aside class="endpoint-pane">
       <div class="pane-header">
         <div>
-          <div class="eyebrow">Endpoints</div>
-          <h2>Clients</h2>
+          <div class="eyebrow">{{ $t('dataprotector.remote.endpoints') }}</div>
+          <h2>{{ $t('dataprotector.remote.clients') }}</h2>
         </div>
         <NButton quaternary circle :loading="loadingDevices" @click="refreshDevices">
           <template #icon><SvgIcon icon="mdi:refresh" /></template>
@@ -770,8 +775,8 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="endpoint-summary">
-        <NTag type="success" :bordered="false">{{ onlineDevices }} online</NTag>
-        <span>{{ devices.length }} registered</span>
+        <NTag type="success" :bordered="false">{{ $t('dataprotector.remote.online', { count: onlineDevices }) }}</NTag>
+        <span>{{ $t('dataprotector.remote.registered', { count: devices.length }) }}</span>
       </div>
 
       <div class="endpoint-list">
@@ -788,11 +793,11 @@ onBeforeUnmount(() => {
           </div>
           <div class="endpoint-meta">
             <div class="endpoint-name">{{ device.machine || device.deviceId }}</div>
-            <div class="endpoint-sub">{{ device.user || '-' }} / {{ device.driverStatus || 'driver unknown' }}</div>
+            <div class="endpoint-sub">{{ device.user || '-' }} / {{ device.driverStatus || $t('dataprotector.remote.driverUnknown') }}</div>
           </div>
           <span class="status-dot" :class="{ online: device.online }"></span>
         </button>
-        <NEmpty v-if="!devices.length" description="No registered endpoints" />
+        <NEmpty v-if="!devices.length" :description="$t('dataprotector.remote.noRegisteredEndpoints')" />
       </div>
     </aside>
 
@@ -800,21 +805,21 @@ onBeforeUnmount(() => {
       <NCard :bordered="false" class="selected-device-card">
         <div class="selected-device">
           <div>
-            <div class="eyebrow">Remote Management</div>
-            <h1>{{ selectedDevice?.machine || 'Select an endpoint' }}</h1>
+            <div class="eyebrow">{{ $t('dataprotector.remote.remoteManagement') }}</div>
+            <h1>{{ selectedDevice?.machine || $t('dataprotector.remote.selectEndpoint') }}</h1>
             <p v-if="selectedDevice">
               {{ selectedDevice.user || '-' }} / agent {{ selectedDevice.agentVersion || '-' }} /
-              {{ selectedDevice.online ? 'online' : 'offline' }}
+              {{ selectedDevice.online ? $t('dataprotector.remote.status.online') : $t('dataprotector.remote.status.offline') }}
             </p>
           </div>
           <NSpace>
             <NButton secondary :disabled="!selectedDevice" @click="lockScreen">
               <template #icon><SvgIcon icon="mdi:lock" /></template>
-              Lock
+              {{ $t('dataprotector.common.lock') }}
             </NButton>
             <NButton type="primary" :disabled="!selectedDevice" :loading="panelLoading" @click="refreshActivePanel">
               <template #icon><SvgIcon icon="mdi:refresh" /></template>
-              Refresh Panel
+              {{ $t('dataprotector.common.refreshPanel') }}
             </NButton>
           </NSpace>
         </div>
@@ -822,13 +827,13 @@ onBeforeUnmount(() => {
 
       <NCard :bordered="false" class="module-card">
         <NTabs :value="activeTab" type="line" animated @update:value="handleTabChange">
-          <NTab name="files">File Manager</NTab>
-          <NTab name="processes">Process Manager</NTab>
-          <NTab name="apps">Applications</NTab>
-          <NTab name="startup">Startup</NTab>
-          <NTab name="shell">Command</NTab>
-          <NTab name="desktop">Desktop</NTab>
-          <NTab name="accounts">Accounts</NTab>
+          <NTab name="files">{{ $t('dataprotector.remote.tabs.files') }}</NTab>
+          <NTab name="processes">{{ $t('dataprotector.remote.tabs.processes') }}</NTab>
+          <NTab name="apps">{{ $t('dataprotector.remote.tabs.apps') }}</NTab>
+          <NTab name="startup">{{ $t('dataprotector.remote.tabs.startup') }}</NTab>
+          <NTab name="shell">{{ $t('dataprotector.remote.tabs.shell') }}</NTab>
+          <NTab name="desktop">{{ $t('dataprotector.remote.tabs.desktop') }}</NTab>
+          <NTab name="accounts">{{ $t('dataprotector.remote.tabs.accounts') }}</NTab>
         </NTabs>
 
         <div class="module-body" :class="{ loading: panelLoading }">
@@ -838,15 +843,15 @@ onBeforeUnmount(() => {
                 <NButton secondary :disabled="!currentPath" @click="goUp">
                   <template #icon><SvgIcon icon="mdi:arrow-up" /></template>
                 </NButton>
-                <NInput v-model:value="pathInput" placeholder="Select a drive or enter a remote path" @keyup.enter="goToPath" />
-                <NButton type="primary" :disabled="!pathInput" @click="goToPath">Open</NButton>
+                <NInput v-model:value="pathInput" :placeholder="$t('dataprotector.remote.files.pathPlaceholder')" @keyup.enter="goToPath" />
+                <NButton type="primary" :disabled="!pathInput" @click="goToPath">{{ $t('dataprotector.common.open') }}</NButton>
               </NInputGroup>
               <NButton type="primary" :loading="panelLoading" @click="refreshActivePanel">
                 <template #icon><SvgIcon icon="mdi:refresh" /></template>
-                Refresh
+                {{ $t('dataprotector.common.refresh') }}
               </NButton>
             </div>
-            <div class="interaction-hint">Double-click folders or drives to enter. Right-click items for actions.</div>
+            <div class="interaction-hint">{{ $t('dataprotector.remote.files.hint') }}</div>
 
             <div v-if="!currentPath" class="drive-grid">
               <button
@@ -860,11 +865,13 @@ onBeforeUnmount(() => {
                 <SvgIcon icon="mdi:harddisk" />
                 <div>
                   <div class="drive-name">{{ drive.name }} {{ drive.volumeLabel }}</div>
-                  <div class="drive-sub">{{ drive.driveType }} / {{ drive.fileSystem || 'not ready' }}</div>
-                  <div class="drive-sub">{{ formatBytes(drive.freeSpace) }} free of {{ formatBytes(drive.totalSize) }}</div>
+                  <div class="drive-sub">{{ drive.driveType }} / {{ drive.fileSystem || $t('dataprotector.remote.files.notReady') }}</div>
+                  <div class="drive-sub">
+                    {{ $t('dataprotector.remote.files.freeOf', { free: formatBytes(drive.freeSpace), total: formatBytes(drive.totalSize) }) }}
+                  </div>
                 </div>
               </button>
-              <NEmpty v-if="!drives.length && !panelLoading" description="No drives returned" />
+              <NEmpty v-if="!drives.length && !panelLoading" :description="$t('dataprotector.remote.files.noDrives')" />
             </div>
 
             <NDataTable
@@ -891,13 +898,13 @@ onBeforeUnmount(() => {
 
           <template v-else-if="activeTab === 'processes'">
             <div class="toolbar">
-              <NInput v-model:value="processSearch" clearable placeholder="Search process name, PID, path, or user" />
+              <NInput v-model:value="processSearch" clearable :placeholder="$t('dataprotector.remote.processes.searchPlaceholder')" />
               <NButton type="primary" :loading="panelLoading" @click="loadProcesses">
                 <template #icon><SvgIcon icon="mdi:refresh" /></template>
-                Refresh
+                {{ $t('dataprotector.common.refresh') }}
               </NButton>
             </div>
-            <div class="interaction-hint">Right-click a process to terminate it.</div>
+            <div class="interaction-hint">{{ $t('dataprotector.remote.processes.hint') }}</div>
             <NDataTable
               :columns="processColumns"
               :data="filteredProcesses"
@@ -920,10 +927,10 @@ onBeforeUnmount(() => {
 
           <template v-else-if="activeTab === 'apps'">
             <div class="toolbar">
-              <div class="module-count">{{ apps.length }} installed applications</div>
+              <div class="module-count">{{ $t('dataprotector.remote.apps.installed', { count: apps.length }) }}</div>
               <NButton type="primary" :loading="panelLoading" @click="loadApps">
                 <template #icon><SvgIcon icon="mdi:refresh" /></template>
-                Refresh
+                {{ $t('dataprotector.common.refresh') }}
               </NButton>
             </div>
             <div class="app-grid">
@@ -932,8 +939,8 @@ onBeforeUnmount(() => {
                   <SvgIcon icon="mdi:application" />
                 </NAvatar>
                 <div class="min-w-0">
-                  <div class="truncate text-14px font-600">{{ app.displayName || 'Unnamed application' }}</div>
-                  <div class="truncate text-12px text-gray-500">{{ app.publisher || 'Unknown publisher' }}</div>
+                  <div class="truncate text-14px font-600">{{ app.displayName || $t('dataprotector.remote.apps.unnamed') }}</div>
+                  <div class="truncate text-12px text-gray-500">{{ app.publisher || $t('dataprotector.remote.apps.unknownPublisher') }}</div>
                   <div class="truncate text-12px text-gray-400">{{ app.displayVersion || '-' }}</div>
                 </div>
               </div>
@@ -942,10 +949,10 @@ onBeforeUnmount(() => {
 
           <template v-else-if="activeTab === 'startup'">
             <div class="toolbar">
-              <div class="module-count">{{ startupItems.length }} startup entries</div>
+              <div class="module-count">{{ $t('dataprotector.remote.startup.entries', { count: startupItems.length }) }}</div>
               <NButton type="primary" :loading="panelLoading" @click="loadStartupItems">
                 <template #icon><SvgIcon icon="mdi:refresh" /></template>
-                Refresh
+                {{ $t('dataprotector.common.refresh') }}
               </NButton>
             </div>
             <NDataTable
@@ -961,35 +968,35 @@ onBeforeUnmount(() => {
             <div class="terminal-panel">
               <div class="terminal-toolbar">
                 <NTag :type="terminalRunning ? 'success' : 'default'" :bordered="false">
-                  {{ terminalRunning ? 'Connected' : 'Stopped' }}
+                  {{ terminalRunning ? $t('dataprotector.remote.shell.connected') : $t('dataprotector.remote.shell.stopped') }}
                 </NTag>
                 <NSpace>
                   <NButton type="primary" :loading="panelLoading" :disabled="terminalRunning" @click="startTerminal">
                     <template #icon><SvgIcon icon="mdi:play" /></template>
-                    Start
+                    {{ $t('dataprotector.common.start') }}
                   </NButton>
                   <NButton secondary :disabled="!terminalRunning" @click="readTerminal">
                     <template #icon><SvgIcon icon="mdi:refresh" /></template>
-                    Read
+                    {{ $t('dataprotector.common.read') }}
                   </NButton>
                   <NButton secondary type="error" :loading="panelLoading" :disabled="!terminalRunning" @click="stopTerminal">
                     <template #icon><SvgIcon icon="mdi:stop" /></template>
-                    Stop
+                    {{ $t('dataprotector.common.stop') }}
                   </NButton>
                 </NSpace>
               </div>
               <pre ref="terminalRef" class="terminal-output" @scroll="handleTerminalScroll">{{
-                terminalOutput || 'Start a session, then type commands below. Press Enter to send.'
+                terminalOutput || $t('dataprotector.remote.shell.empty')
               }}</pre>
               <NInputGroup>
                 <NInput
                   v-model:value="terminalInput"
                   :disabled="!terminalRunning"
-                  placeholder="Type a command and press Enter"
+                  :placeholder="$t('dataprotector.remote.shell.inputPlaceholder')"
                   @keyup.enter="sendTerminalInput"
                 />
                 <NButton type="primary" :disabled="!terminalRunning || !terminalInput.trim()" @click="sendTerminalInput">
-                  Send
+                  {{ $t('dataprotector.common.send') }}
                 </NButton>
               </NInputGroup>
             </div>
@@ -997,30 +1004,30 @@ onBeforeUnmount(() => {
 
           <template v-else-if="activeTab === 'desktop'">
             <div class="toolbar">
-              <div class="module-count">Remote desktop snapshot</div>
+              <div class="module-count">{{ $t('dataprotector.remote.desktop.title') }}</div>
               <NButton type="primary" :loading="panelLoading" @click="captureScreenshot">
                 <template #icon><SvgIcon icon="mdi:monitor-screenshot" /></template>
-                Capture
+                {{ $t('dataprotector.common.capture') }}
               </NButton>
             </div>
             <div class="screenshot-frame">
-              <img v-if="screenshotSrc" :src="screenshotSrc" alt="Remote desktop screenshot" />
-              <NEmpty v-else :description="screenshotError || 'No screenshot captured'" />
+              <img v-if="screenshotSrc" :src="screenshotSrc" :alt="$t('dataprotector.remote.desktop.screenshotAlt')" />
+              <NEmpty v-else :description="screenshotError || $t('dataprotector.remote.desktop.noScreenshot')" />
             </div>
           </template>
 
           <template v-else>
             <div class="account-panel">
               <NForm label-placement="top">
-                <NFormItem label="Username">
+                <NFormItem :label="$t('dataprotector.remote.accounts.username')">
                   <NInput v-model:value="accountForm.username" />
                 </NFormItem>
-                <NFormItem label="New password">
+                <NFormItem :label="$t('dataprotector.remote.accounts.newPassword')">
                   <NInput v-model:value="accountForm.newPassword" type="password" show-password-on="click" />
                 </NFormItem>
                 <NButton type="primary" :loading="panelLoading" @click="changePassword">
                   <template #icon><SvgIcon icon="mdi:account-key" /></template>
-                  Change Password
+                  {{ $t('dataprotector.remote.accounts.changePassword') }}
                 </NButton>
               </NForm>
             </div>
@@ -1028,25 +1035,25 @@ onBeforeUnmount(() => {
         </div>
       </NCard>
 
-      <NCard title="Activity" :bordered="false" class="activity-card">
+      <NCard :title="$t('dataprotector.remote.activity.title')" :bordered="false" class="activity-card">
         <div v-if="activity.length" class="activity-list">
           <div v-for="item in activity" :key="item" class="activity-item">{{ item }}</div>
         </div>
-        <NEmpty v-else description="No remote operations in this session" />
+        <NEmpty v-else :description="$t('dataprotector.remote.activity.empty')" />
       </NCard>
     </main>
 
-    <NModal v-model:show="renameVisible" preset="card" title="Rename Remote Item" class="rename-modal">
+    <NModal v-model:show="renameVisible" preset="card" :title="$t('dataprotector.remote.files.renameTitle')" class="rename-modal">
       <NForm label-placement="top">
-        <NFormItem label="Current path">
+        <NFormItem :label="$t('dataprotector.remote.files.currentPath')">
           <NInput :value="renameTarget?.path || ''" readonly />
         </NFormItem>
-        <NFormItem label="New name">
+        <NFormItem :label="$t('dataprotector.remote.files.newName')">
           <NInput v-model:value="renameName" @keyup.enter="submitRename" />
         </NFormItem>
         <div class="modal-actions">
-          <NButton @click="renameVisible = false">Cancel</NButton>
-          <NButton type="primary" :loading="panelLoading" @click="submitRename">Rename</NButton>
+          <NButton @click="renameVisible = false">{{ $t('dataprotector.common.cancel') }}</NButton>
+          <NButton type="primary" :loading="panelLoading" @click="submitRename">{{ $t('dataprotector.common.rename') }}</NButton>
         </div>
       </NForm>
     </NModal>
