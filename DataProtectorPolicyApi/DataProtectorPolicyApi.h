@@ -18,6 +18,7 @@ extern "C" {
 #define DP_POLICY_API_ERROR_RULE_TOO_LONG       0xE0010003u
 #define DP_POLICY_API_ERROR_PATH_CONVERSION     0xE0010004u
 #define DP_POLICY_API_ERROR_BUFFER_TOO_SMALL    0xE0010005u
+#define DP_POLICY_API_ERROR_WINDOWS_API         0xE0010006u
 
 #define DP_POLICY_API_RULE_PROCESS_NAME         1u
 #define DP_POLICY_API_RULE_PROCESS_DIRECTORY    2u
@@ -186,6 +187,14 @@ typedef struct _DP_POLICY_API_USB_METADATA_WRITE_RESULT {
     ULONGLONG OffsetBytes;
     ULONGLONG DiskSizeBytes;
 } DP_POLICY_API_USB_METADATA_WRITE_RESULT, *PDP_POLICY_API_USB_METADATA_WRITE_RESULT;
+
+typedef struct _DP_POLICY_API_USB_LAYOUT_RESULT {
+    DWORD Status;
+    DWORD DiskNumber;
+    ULONGLONG DiskSizeBytes;
+    ULONGLONG PublicPartitionOffsetBytes;
+    ULONGLONG PublicPartitionBytes;
+} DP_POLICY_API_USB_LAYOUT_RESULT, *PDP_POLICY_API_USB_LAYOUT_RESULT;
 
 DP_POLICY_API
 DWORD
@@ -451,6 +460,18 @@ DpPolicyWriteUsbMetadata(
     _In_ ULONGLONG requestedOffsetBytes,
     _In_reads_bytes_(DP_POLICY_API_USB_METADATA_BYTES) const BYTE *metadata,
     _Out_opt_ DP_POLICY_API_USB_METADATA_WRITE_RESULT *result
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyInitializeUsbLayout(
+    _In_z_ LPCWSTR physicalDrivePath,
+    _In_opt_z_ LPCWSTR preferredDriveRoot,
+    _In_ ULONGLONG publicPartitionOffsetBytes,
+    _In_ ULONGLONG publicPartitionBytes,
+    _Out_writes_(driveRootChars) LPWSTR driveRoot,
+    _In_ DWORD driveRootChars,
+    _Out_opt_ DP_POLICY_API_USB_LAYOUT_RESULT *result
     );
 
 DP_POLICY_API

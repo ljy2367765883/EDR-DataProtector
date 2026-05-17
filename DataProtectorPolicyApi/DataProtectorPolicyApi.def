@@ -38,5 +38,6 @@ EXPORTS
     DpPolicyClearDeviceRules
     DpPolicyQueryDeviceRules
     DpPolicyWriteUsbMetadata
+    DpPolicyInitializeUsbLayout
     DpPolicyConvertDosPathToNtPath
     DpPolicyGetLastErrorMessage

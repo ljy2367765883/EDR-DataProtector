@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -81,7 +80,7 @@ namespace DataProtectorWebBridge.Services
                 Trace(agentDirectory, "runtime package extracted tool=" + runtimePackage.toolPath + " driverDir=" + runtimePackage.driverDirectory);
                 targetRoot = ReinitializeDiskLayout(disk, normalized.publicToolAreaBytes, targetRoot, normalized.hardwareId, agentDirectory);
                 Trace(agentDirectory, "public tool partition root=" + targetRoot);
-                disk = ResolvePhysicalDiskTarget(targetRoot);
+                disk = ResolvePhysicalDiskTargetWithRetry(targetRoot, agentDirectory);
                 Trace(agentDirectory, "resolved physical disk after layout " + DescribeDisk(disk));
                 ValidateUsbCryptLayout(disk, normalized.publicToolAreaBytes, normalized.hardwareId);
                 PreparePublicToolArea(targetRoot, runtimePackage);
@@ -428,66 +427,33 @@ namespace DataProtectorWebBridge.Services
 
             int diskNumber = ParsePhysicalDriveNumber(disk.physicalDrivePath);
             ValidateUsbCryptInitializationPlan(disk, publicToolAreaBytes, expectedHardwareId);
-            string volumeLabel = "DPUSB";
-
-            try
+            Trace(agentDirectory, "layout native api begin disk=" + diskNumber + " root=" + currentDriveRoot);
+            DataProtectorPolicyNative.NativeUsbLayoutResult layoutResult;
+            StringBuilder newRoot = new StringBuilder(16);
+            uint status = DataProtectorPolicyNative.DpPolicyInitializeUsbLayout(
+                disk.physicalDrivePath,
+                NormalizeDriveRoot(currentDriveRoot),
+                (ulong)MetadataReservedBytes,
+                (ulong)PublicToolAreaBytes,
+                newRoot,
+                (uint)newRoot.Capacity,
+                out layoutResult);
+            if (status != 0 || layoutResult.Status != 0)
             {
-                Trace(agentDirectory, "layout destructive stage begin disk=" + diskNumber + " root=" + currentDriveRoot);
-                ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
-                BestEffortDismountPublicVolume(currentDriveRoot, agentDirectory);
-                RunDiskPartScript(
-                    diskNumber,
-                    "prepare",
-                    agentDirectory,
-                    new[]
-                    {
-                        "rescan",
-                        "select disk " + diskNumber,
-                        "online disk noerr",
-                        "attributes disk clear readonly noerr",
-                        "clean"
-                    });
-
-                WaitForPhysicalDisk(diskNumber, "after clean", agentDirectory);
-                ValidatePhysicalDiskStillMatches(diskNumber, publicToolAreaBytes, expectedHardwareId);
-                RunDiskPartScript(
-                    diskNumber,
-                    "create-public-tool-partition",
-                    agentDirectory,
-                    new[]
-                    {
-                        "rescan",
-                        "select disk " + diskNumber,
-                        "online disk noerr",
-                        "attributes disk clear readonly noerr",
-                        "convert mbr",
-                        "create partition primary size=5 offset=2048",
-                        "format fs=ntfs quick unit=512 label=" + volumeLabel,
-                        "assign",
-                        "rescan"
-                    });
-
-                Thread.Sleep(1500);
-                return WaitForToolPartition(diskNumber, agentDirectory);
-            }
-            catch (Exception ex)
-            {
-                Trace(agentDirectory, "layout stage failed disk=" + diskNumber + " error=" + ex);
-                RunDiskPartRescanBestEffort(agentDirectory);
-
-                string existingRoot = TryFindToolPartitionRoot(diskNumber, agentDirectory);
-                if (!string.IsNullOrWhiteSpace(existingRoot))
-                {
-                    Trace(agentDirectory, "layout stage recovered existing tool root=" + existingRoot);
-                    return existingRoot;
-                }
-
                 throw new InvalidOperationException(
-                    "Secure USB disk layout initialization failed after the single destructive layout pass. " +
-                    "The operation will not repeat clean/create to avoid repeatedly remounting the 5 MB public partition. " +
-                    "Last error: " + ex.Message + " Snapshot: " + SnapshotDiskLayout(diskNumber),
-                    ex);
+                    "Secure USB native layout initialization failed: " +
+                    FormatNativeError(status != 0 ? status : layoutResult.Status) +
+                    " Snapshot: " + SnapshotDiskLayout(diskNumber));
             }
+
+            string root = NormalizeDriveRoot(newRoot.ToString());
+            Trace(agentDirectory, "layout native api success disk=" + layoutResult.DiskNumber + " root=" + root + " diskSize=" + layoutResult.DiskSizeBytes + " publicOffset=" + layoutResult.PublicPartitionOffsetBytes + " publicBytes=" + layoutResult.PublicPartitionBytes);
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+            {
+                throw new InvalidOperationException("Secure USB native layout returned an unavailable public drive root: " + root);
+            }
+
+            return root;
         }
 
         private static int ParsePhysicalDriveNumber(string physicalDrivePath)
@@ -507,161 +473,6 @@ namespace DataProtectorWebBridge.Services
             }
 
             return number;
-        }
-
-        private static string RunProcessChecked(string fileName, string arguments, string failureMessage)
-        {
-            ProcessStartInfo startInfo = new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            using (Process process = Process.Start(startInfo))
-            {
-                if (process == null)
-                {
-                    throw new InvalidOperationException(failureMessage + " Process was not started.");
-                }
-
-                string output = process.StandardOutput.ReadToEnd();
-                string error = process.StandardError.ReadToEnd();
-                if (!process.WaitForExit(120000))
-                {
-                    try
-                    {
-                        process.Kill();
-                    }
-                    catch
-                    {
-                    }
-
-                    throw new InvalidOperationException(failureMessage + " diskpart timed out.");
-                }
-
-                if (process.ExitCode != 0)
-                {
-                    throw new InvalidOperationException(failureMessage + " ExitCode=" + process.ExitCode + " " + output + " " + error);
-                }
-
-                return output + error;
-            }
-        }
-
-        private static void RunDiskPartScript(int diskNumber, string stage, string agentDirectory, string[] commands)
-        {
-            string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-" + stage + "-" + Guid.NewGuid().ToString("N") + ".txt");
-            string script = string.Join(Environment.NewLine, commands) + Environment.NewLine + "exit" + Environment.NewLine;
-            try
-            {
-                File.WriteAllText(scriptPath, script, Encoding.ASCII);
-                Trace(agentDirectory, "diskpart stage=" + stage + " disk=" + diskNumber + " script=" + script.Replace(Environment.NewLine, " | "));
-                string output = RunProcessChecked(
-                    "diskpart.exe",
-                    "/s \"" + scriptPath + "\"",
-                    "Secure USB disk layout initialization failed at stage '" + stage + "' for disk " + diskNumber + ". Script: " + script.Replace(Environment.NewLine, " | "));
-                Trace(agentDirectory, "diskpart stage=" + stage + " output=" + Collapse(output));
-            }
-            finally
-            {
-                try
-                {
-                    if (File.Exists(scriptPath))
-                    {
-                        File.Delete(scriptPath);
-                    }
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private static void RunDiskPartRescanBestEffort(string agentDirectory)
-        {
-            string scriptPath = Path.Combine(Path.GetTempPath(), "DataProtectorUsbDiskpart-rescan-" + Guid.NewGuid().ToString("N") + ".txt");
-            try
-            {
-                File.WriteAllText(scriptPath, "rescan" + Environment.NewLine + "exit" + Environment.NewLine, Encoding.ASCII);
-                string output = RunProcessChecked("diskpart.exe", "/s \"" + scriptPath + "\"", "DiskPart rescan failed.");
-                Trace(agentDirectory, "diskpart rescan output=" + Collapse(output));
-            }
-            catch
-            {
-            }
-            finally
-            {
-                try
-                {
-                    if (File.Exists(scriptPath))
-                    {
-                        File.Delete(scriptPath);
-                    }
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private static void BestEffortDismountPublicVolume(string currentDriveRoot, string agentDirectory)
-        {
-            string root = NormalizeDriveRoot(currentDriveRoot);
-            if (string.IsNullOrWhiteSpace(root) || root.Length < 3 || root[1] != ':')
-            {
-                return;
-            }
-
-            try
-            {
-                Trace(agentDirectory, "dismount public volume root=" + root);
-                string output = RunProcessChecked("mountvol.exe", "\"" + root + "\" /d", "Secure USB public volume dismount failed.");
-                Trace(agentDirectory, "dismount output=" + Collapse(output));
-            }
-            catch (Exception ex)
-            {
-                Trace(agentDirectory, "dismount ignored error=" + ex.Message);
-            }
-
-            Thread.Sleep(500);
-        }
-
-        private static void WaitForPhysicalDisk(int diskNumber, string stage, string agentDirectory)
-        {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(20);
-            while (DateTime.UtcNow < deadline)
-            {
-                if (PhysicalDiskExists(diskNumber))
-                {
-                    Trace(agentDirectory, "physical disk available disk=" + diskNumber + " stage=" + stage);
-                    return;
-                }
-
-                Thread.Sleep(500);
-            }
-
-            throw new InvalidOperationException("Physical disk " + diskNumber + " did not become available " + stage + ". Snapshot: " + SnapshotDiskLayout(diskNumber));
-        }
-
-        private static bool PhysicalDiskExists(int diskNumber)
-        {
-            using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                "SELECT DeviceID FROM Win32_DiskDrive WHERE Index=" + diskNumber))
-            {
-                foreach (ManagementObject disk in searcher.Get())
-                {
-                    using (disk)
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
         }
 
         private static void ValidatePhysicalDiskStillMatches(int diskNumber, long publicToolAreaBytes, string expectedHardwareId)
@@ -685,111 +496,6 @@ namespace DataProtectorWebBridge.Services
             }
 
             throw new InvalidOperationException("Physical disk " + diskNumber + " is not available.");
-        }
-
-        private static string WaitForToolPartition(int diskNumber, string agentDirectory)
-        {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(45);
-            while (DateTime.UtcNow < deadline)
-            {
-                string root = TryFindToolPartitionRoot(diskNumber, agentDirectory);
-                if (!string.IsNullOrWhiteSpace(root))
-                {
-                    Trace(agentDirectory, "tool partition found root=" + root);
-                    return root;
-                }
-
-                RunDiskPartRescanBestEffort(agentDirectory);
-                Thread.Sleep(1000);
-            }
-
-            throw new InvalidOperationException("Secure USB public tool partition was created, but no drive letter became available. Snapshot: " + SnapshotDiskLayout(diskNumber));
-        }
-
-        private static string TryFindToolPartitionRoot(int diskNumber, string agentDirectory)
-        {
-            using (ManagementObjectSearcher partitionSearcher = new ManagementObjectSearcher(
-                "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='\\\\\\\\.\\\\PHYSICALDRIVE" + diskNumber + "'} WHERE AssocClass=Win32_DiskDriveToDiskPartition"))
-            {
-                foreach (ManagementObject partition in partitionSearcher.Get())
-                {
-                    using (partition)
-                    {
-                        long offset = Convert.ToInt64(partition["StartingOffset"] ?? 0);
-                        long size = Convert.ToInt64(partition["Size"] ?? 0);
-                        Trace(agentDirectory, "tool partition candidate disk=" + diskNumber + " offset=" + offset + " size=" + size + " id=" + Convert.ToString(partition["DeviceID"]));
-                        if (offset != MetadataReservedBytes)
-                        {
-                            continue;
-                        }
-
-                        string partitionDeviceId = Convert.ToString(partition["DeviceID"]);
-                        using (ManagementObjectSearcher logicalSearcher = new ManagementObjectSearcher(
-                            "ASSOCIATORS OF {Win32_DiskPartition.DeviceID='" + EscapeWmiString(partitionDeviceId) + "'} WHERE AssocClass=Win32_LogicalDiskToPartition"))
-                        {
-                            foreach (ManagementObject logical in logicalSearcher.Get())
-                            {
-                                using (logical)
-                                {
-                                    string deviceId = Convert.ToString(logical["DeviceID"]);
-                                    if (!string.IsNullOrWhiteSpace(deviceId))
-                                    {
-                                        Trace(agentDirectory, "tool partition WMI logical root=" + deviceId);
-                                        return NormalizeDriveRoot(deviceId);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            string byVolume = TryFindToolPartitionRootByVolume(diskNumber);
-            if (!string.IsNullOrWhiteSpace(byVolume))
-            {
-                Trace(agentDirectory, "tool partition volume fallback root=" + byVolume);
-                return byVolume;
-            }
-
-            return string.Empty;
-        }
-
-        private static string TryFindToolPartitionRootByVolume(int diskNumber)
-        {
-            foreach (DriveInfo drive in DriveInfo.GetDrives())
-            {
-                try
-                {
-                    if (!drive.IsReady)
-                    {
-                        continue;
-                    }
-
-                    string label = drive.VolumeLabel ?? string.Empty;
-                    if (!string.Equals(label, "DPUSB", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    long delta = Math.Abs(drive.TotalSize - PublicToolAreaBytes);
-                    if (delta > 1024L * 1024L)
-                    {
-                        continue;
-                    }
-
-                    string root = NormalizeDriveRoot(drive.Name);
-                    PhysicalDiskTarget candidate = ResolvePhysicalDiskTarget(root);
-                    if (ParsePhysicalDriveNumber(candidate.physicalDrivePath) == diskNumber)
-                    {
-                        return root;
-                    }
-                }
-                catch
-                {
-                }
-            }
-
-            return string.Empty;
         }
 
         private static PhysicalDiskTarget ResolvePhysicalDiskTarget(string driveRoot)
@@ -833,6 +539,31 @@ namespace DataProtectorWebBridge.Services
             }
 
             throw new InvalidOperationException("Unable to resolve the removable drive to a physical disk.");
+        }
+
+        private static PhysicalDiskTarget ResolvePhysicalDiskTargetWithRetry(string driveRoot, string agentDirectory)
+        {
+            Exception lastError = null;
+            for (int attempt = 1; attempt <= 20; attempt++)
+            {
+                try
+                {
+                    string root = NormalizeDriveRoot(driveRoot);
+                    if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
+                    {
+                        return ResolvePhysicalDiskTarget(root);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                }
+
+                Thread.Sleep(500);
+            }
+
+            Trace(agentDirectory, "resolve physical disk after native layout failed root=" + driveRoot + " error=" + (lastError == null ? "<none>" : lastError.ToString()));
+            throw new InvalidOperationException("Unable to resolve the Secure USB public tool partition after native layout initialization.", lastError);
         }
 
         private static PhysicalDiskTarget PhysicalDiskTargetFromDisk(ManagementBaseObject disk, long firstPartitionOffsetBytes)

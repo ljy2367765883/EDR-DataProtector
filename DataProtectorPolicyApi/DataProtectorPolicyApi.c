@@ -3,8 +3,11 @@
 #include "DataProtectorPolicyApi.h"
 
 #include <fltUser.h>
+#include <winioctl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <strsafe.h>
+#include <wctype.h>
 
 #define DP_POLICY_PORT_NAME L"\\DataProtectorPolicyPort"
 #define DP_POLICY_MESSAGE_VERSION 1u
@@ -30,6 +33,11 @@
 #define DP_USB_METADATA_MESSAGE_VERSION 1u
 #define DP_USB_METADATA_RESULT_VERSION 1u
 #define DP_USB_METADATA_DEFAULT_OFFSET_BYTES (1024ull * 1024ull)
+#define DP_USB_LAYOUT_PUBLIC_LABEL L"DPUSB"
+#define DP_USB_LAYOUT_RESCAN_TRIES 30u
+#define DP_USB_LAYOUT_RESCAN_SLEEP_MS 500u
+#define DP_USB_LAYOUT_FORMAT_SLEEP_MS 500u
+#define DP_USB_LAYOUT_PUBLIC_PARTITION_NUMBER 1u
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
 #define DP_NETWORK_CONNECTION_EVENT_STRING_CHARS (DP_NETWORK_EVENT_PROCESS_PATH_CHARS + DP_NETWORK_EVENT_DOMAIN_CHARS + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
@@ -348,6 +356,31 @@ typedef struct _DP_LATERAL_DEFENSE_POLICY_MESSAGE {
 C_ASSERT(sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY) == 1232);
 
 static WCHAR gLastErrorMessage[512];
+static volatile LONG gFormatLock = 0;
+static volatile LONG gFormatActive = 0;
+static volatile LONG gFormatCompleted = 0;
+static volatile LONG gFormatSuccess = 0;
+
+typedef enum _DP_FMIFS_PACKET_TYPE {
+    DpFmifsProgress = 0,
+    DpFmifsDoneWithStructure = 0x0B
+} DP_FMIFS_PACKET_TYPE;
+
+typedef BOOLEAN (__stdcall *DP_FMIFS_CALLBACK)(
+    _In_ DP_FMIFS_PACKET_TYPE PacketType,
+    _In_ ULONG PacketLength,
+    _In_opt_ PVOID PacketData
+    );
+
+typedef VOID (WINAPI *DP_FORMAT_EX)(
+    _In_ PWSTR DriveRoot,
+    _In_ ULONG MediaFlag,
+    _In_ PWSTR FileSystemName,
+    _In_ PWSTR Label,
+    _In_ BOOLEAN QuickFormat,
+    _In_ ULONG ClusterSize,
+    _In_ DP_FMIFS_CALLBACK Callback
+    );
 
 #if DP_POLICY_API_ENABLE_FILE_TRACE
 static
@@ -3557,6 +3590,765 @@ DpPolicyNormalizePhysicalDrivePath(
     }
 
     *NtPathLengthBytes = (ULONG)(wcslen(NtPath) * sizeof(WCHAR));
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyParsePhysicalDriveNumber(
+    _In_z_ LPCWSTR PhysicalDrivePath,
+    _Out_ DWORD *DiskNumber
+    )
+{
+    LPCWSTR source;
+    WCHAR *end = NULL;
+    unsigned long value;
+
+    if (PhysicalDrivePath == NULL || DiskNumber == NULL) {
+        DpPolicySetLastErrorMessage(L"USB layout physical drive path is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    source = PhysicalDrivePath;
+    if (wcsncmp(source, L"\\\\.\\", 4) == 0) {
+        source += 4;
+    }
+    if (wcsncmp(source, L"\\??\\", 4) == 0) {
+        source += 4;
+    }
+
+    if (_wcsnicmp(source, L"PhysicalDrive", 13) != 0 || source[13] == L'\0') {
+        DpPolicySetLastErrorMessage(L"USB layout path must target a PhysicalDrive device.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    value = wcstoul(source + 13, &end, 10);
+    if (end == source + 13 || *end != L'\0' || value > 1024ul) {
+        DpPolicySetLastErrorMessage(L"USB layout physical drive number is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    *DiskNumber = (DWORD)value;
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+HANDLE
+DpPolicyOpenPhysicalDrive(
+    _In_z_ LPCWSTR PhysicalDrivePath
+    )
+{
+    HANDLE handle;
+
+    handle = CreateFileW(PhysicalDrivePath,
+                         GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL,
+                         OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL,
+                         NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot open USB physical drive");
+    }
+
+    return handle;
+}
+
+static
+DWORD
+DpPolicyValidateUsbPhysicalDrive(
+    _In_ HANDLE DiskHandle,
+    _Out_opt_ ULONGLONG *DiskSizeBytes
+    )
+{
+    STORAGE_PROPERTY_QUERY query;
+    STORAGE_DEVICE_DESCRIPTOR descriptor;
+    DISK_GEOMETRY_EX geometry;
+    DWORD bytesReturned = 0;
+
+    ZeroMemory(&query, sizeof(query));
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType = PropertyStandardQuery;
+    ZeroMemory(&descriptor, sizeof(descriptor));
+    descriptor.Size = sizeof(descriptor);
+
+    if (!DeviceIoControl(DiskHandle,
+                         IOCTL_STORAGE_QUERY_PROPERTY,
+                         &query,
+                         sizeof(query),
+                         &descriptor,
+                         sizeof(descriptor),
+                         &bytesReturned,
+                         NULL)) {
+
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot query USB physical drive bus type");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    if (descriptor.BusType != BusTypeUsb) {
+        DpPolicySetLastErrorMessage(L"Refusing USB layout initialization because the physical disk is not USB.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&geometry, sizeof(geometry));
+    bytesReturned = 0;
+    if (!DeviceIoControl(DiskHandle,
+                         IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                         NULL,
+                         0,
+                         &geometry,
+                         sizeof(geometry),
+                         &bytesReturned,
+                         NULL)) {
+
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot query USB physical drive size");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    if (DiskSizeBytes != NULL) {
+        *DiskSizeBytes = (ULONGLONG)geometry.DiskSize.QuadPart;
+    }
+
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyUpdateDiskProperties(
+    _In_ HANDLE DiskHandle
+    )
+{
+    DWORD bytesReturned = 0;
+
+    if (!DeviceIoControl(DiskHandle,
+                         IOCTL_DISK_UPDATE_PROPERTIES,
+                         NULL,
+                         0,
+                         NULL,
+                         0,
+                         &bytesReturned,
+                         NULL)) {
+
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot refresh USB disk properties");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyLockAndDismountVolume(
+    _In_z_ LPCWSTR VolumeName
+    )
+{
+    WCHAR volumePath[MAX_PATH];
+    HANDLE volumeHandle;
+    DWORD bytesReturned = 0;
+    HRESULT hr;
+
+    if (VolumeName == NULL || wcslen(VolumeName) < 4) {
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    hr = StringCchCopyW(volumePath, ARRAYSIZE(volumePath), VolumeName);
+    if (FAILED(hr)) {
+        DpPolicySetLastErrorMessage(L"USB layout volume path is too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    if (volumePath[wcslen(volumePath) - 1] == L'\\') {
+        volumePath[wcslen(volumePath) - 1] = L'\0';
+    }
+
+    volumeHandle = CreateFileW(volumePath,
+                               GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL,
+                               NULL);
+    if (volumeHandle == INVALID_HANDLE_VALUE) {
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    (VOID)DeviceIoControl(volumeHandle,
+                          FSCTL_LOCK_VOLUME,
+                          NULL,
+                          0,
+                          NULL,
+                          0,
+                          &bytesReturned,
+                          NULL);
+    (VOID)DeviceIoControl(volumeHandle,
+                          FSCTL_DISMOUNT_VOLUME,
+                          NULL,
+                          0,
+                          NULL,
+                          0,
+                          &bytesReturned,
+                          NULL);
+    (VOID)DeviceIoControl(volumeHandle,
+                          FSCTL_UNLOCK_VOLUME,
+                          NULL,
+                          0,
+                          NULL,
+                          0,
+                          &bytesReturned,
+                          NULL);
+
+    CloseHandle(volumeHandle);
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+VOID
+DpPolicyDismountDiskVolumes(
+    _In_ DWORD DiskNumber
+    )
+{
+    WCHAR volumeName[MAX_PATH];
+    WCHAR deviceName[MAX_PATH];
+    WCHAR expectedPrefix[64];
+    HANDLE findHandle;
+    HRESULT hr;
+
+    hr = StringCchPrintfW(expectedPrefix,
+                         ARRAYSIZE(expectedPrefix),
+                         L"Harddisk%luPartition",
+                         DiskNumber);
+    if (FAILED(hr)) {
+        return;
+    }
+
+    findHandle = FindFirstVolumeW(volumeName, ARRAYSIZE(volumeName));
+    if (findHandle == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    do {
+        WCHAR queryName[MAX_PATH];
+        size_t length = wcslen(volumeName);
+        if (length == 0 || length >= ARRAYSIZE(queryName)) {
+            continue;
+        }
+
+        hr = StringCchCopyW(queryName, ARRAYSIZE(queryName), volumeName);
+        if (FAILED(hr)) {
+            continue;
+        }
+        if (queryName[length - 1] == L'\\') {
+            queryName[length - 1] = L'\0';
+        }
+
+        if (QueryDosDeviceW(queryName + 4, deviceName, ARRAYSIZE(deviceName)) != 0 &&
+            wcsstr(deviceName, expectedPrefix) != NULL) {
+
+            (VOID)DpPolicyLockAndDismountVolume(volumeName);
+        }
+    } while (FindNextVolumeW(findHandle, volumeName, ARRAYSIZE(volumeName)));
+
+    FindVolumeClose(findHandle);
+}
+
+static
+DWORD
+DpPolicyCreateUsbPublicLayout(
+    _In_ HANDLE DiskHandle,
+    _In_ ULONGLONG PublicPartitionOffsetBytes,
+    _In_ ULONGLONG PublicPartitionBytes
+    )
+{
+    BYTE layoutBuffer[FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) + sizeof(PARTITION_INFORMATION_EX)];
+    CREATE_DISK createDisk;
+    PDRIVE_LAYOUT_INFORMATION_EX layout;
+    PPARTITION_INFORMATION_EX partition;
+    DWORD bytesReturned = 0;
+    ULONG signature;
+
+    if ((PublicPartitionOffsetBytes % 512ull) != 0 ||
+        (PublicPartitionBytes % 512ull) != 0) {
+
+        DpPolicySetLastErrorMessage(L"USB layout partition range must be sector aligned.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (PublicPartitionOffsetBytes / 512ull > 0xFFFFFFFFull) {
+        DpPolicySetLastErrorMessage(L"USB layout public partition offset is not MBR-compatible.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    signature = (ULONG)GetTickCount();
+    signature ^= (ULONG)(PublicPartitionOffsetBytes >> 9);
+    signature ^= (ULONG)(PublicPartitionBytes >> 9);
+    if (signature == 0) {
+        signature = 0x44505553u;
+    }
+
+    ZeroMemory(&createDisk, sizeof(createDisk));
+    createDisk.PartitionStyle = PARTITION_STYLE_MBR;
+    createDisk.Mbr.Signature = signature;
+
+    if (!DeviceIoControl(DiskHandle,
+                         IOCTL_DISK_CREATE_DISK,
+                         &createDisk,
+                         sizeof(createDisk),
+                         NULL,
+                         0,
+                         &bytesReturned,
+                         NULL)) {
+
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot initialize USB disk partition table");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    ZeroMemory(layoutBuffer, sizeof(layoutBuffer));
+    layout = (PDRIVE_LAYOUT_INFORMATION_EX)layoutBuffer;
+    partition = &layout->PartitionEntry[0];
+
+    layout->PartitionStyle = PARTITION_STYLE_MBR;
+    layout->PartitionCount = 1;
+    layout->Mbr.Signature = signature;
+
+    partition->PartitionStyle = PARTITION_STYLE_MBR;
+    partition->StartingOffset.QuadPart = (LONGLONG)PublicPartitionOffsetBytes;
+    partition->PartitionLength.QuadPart = (LONGLONG)PublicPartitionBytes;
+    partition->PartitionNumber = DP_USB_LAYOUT_PUBLIC_PARTITION_NUMBER;
+    partition->RewritePartition = TRUE;
+    partition->Mbr.PartitionType = PARTITION_IFS;
+    partition->Mbr.BootIndicator = FALSE;
+    partition->Mbr.RecognizedPartition = TRUE;
+    partition->Mbr.HiddenSectors = (DWORD)(PublicPartitionOffsetBytes / 512ull);
+
+    if (!DeviceIoControl(DiskHandle,
+                         IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+                         layout,
+                         sizeof(layoutBuffer),
+                         NULL,
+                         0,
+                         &bytesReturned,
+                         NULL)) {
+
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot write USB disk layout");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    FlushFileBuffers(DiskHandle);
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyAssignDriveLetter(
+    _In_z_ LPCWSTR VolumeName,
+    _In_opt_z_ LPCWSTR PreferredDriveRoot,
+    _Out_writes_(DriveRootChars) LPWSTR DriveRoot,
+    _In_ DWORD DriveRootChars
+    )
+{
+    WCHAR root[4];
+    WCHAR mountedVolume[MAX_PATH];
+    WCHAR letter;
+    HRESULT hr;
+    DWORD driveType;
+
+    if (DriveRoot == NULL || DriveRootChars < 4) {
+        DpPolicySetLastErrorMessage(L"USB layout output drive root buffer is too small.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    DriveRoot[0] = L'\0';
+
+    if (PreferredDriveRoot != NULL &&
+        wcslen(PreferredDriveRoot) >= 2 &&
+        PreferredDriveRoot[1] == L':') {
+
+        root[0] = (WCHAR)towupper(PreferredDriveRoot[0]);
+        root[1] = L':';
+        root[2] = L'\\';
+        root[3] = L'\0';
+
+        if (GetVolumeNameForVolumeMountPointW(root, mountedVolume, ARRAYSIZE(mountedVolume)) &&
+            _wcsicmp(mountedVolume, VolumeName) == 0) {
+
+            hr = StringCchCopyW(DriveRoot, DriveRootChars, root);
+            return FAILED(hr) ? DP_POLICY_API_ERROR_BUFFER_TOO_SMALL : DP_POLICY_API_SUCCESS;
+        }
+
+        driveType = GetDriveTypeW(root);
+        if (driveType == DRIVE_NO_ROOT_DIR &&
+            SetVolumeMountPointW(root, VolumeName)) {
+
+            hr = StringCchCopyW(DriveRoot, DriveRootChars, root);
+            return FAILED(hr) ? DP_POLICY_API_ERROR_BUFFER_TOO_SMALL : DP_POLICY_API_SUCCESS;
+        }
+    }
+
+    for (letter = L'Z'; letter >= L'F'; letter--) {
+        root[0] = letter;
+        root[1] = L':';
+        root[2] = L'\\';
+        root[3] = L'\0';
+
+        if (GetVolumeNameForVolumeMountPointW(root, mountedVolume, ARRAYSIZE(mountedVolume)) &&
+            _wcsicmp(mountedVolume, VolumeName) == 0) {
+
+            hr = StringCchCopyW(DriveRoot, DriveRootChars, root);
+            return FAILED(hr) ? DP_POLICY_API_ERROR_BUFFER_TOO_SMALL : DP_POLICY_API_SUCCESS;
+        }
+
+        if (GetDriveTypeW(root) != DRIVE_NO_ROOT_DIR) {
+            continue;
+        }
+
+        if (SetVolumeMountPointW(root, VolumeName)) {
+            hr = StringCchCopyW(DriveRoot, DriveRootChars, root);
+            return FAILED(hr) ? DP_POLICY_API_ERROR_BUFFER_TOO_SMALL : DP_POLICY_API_SUCCESS;
+        }
+    }
+
+    DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot assign a drive letter to USB public partition");
+    return DP_POLICY_API_ERROR_WINDOWS_API;
+}
+
+static
+DWORD
+DpPolicyVerifyNtfsVolume(
+    _In_z_ LPCWSTR DriveRoot
+    )
+{
+    WCHAR fileSystem[32];
+    WCHAR label[MAX_PATH + 1];
+    DWORD serialNumber;
+    DWORD maximumComponentLength;
+    DWORD fileSystemFlags;
+    DWORD tries;
+    DWORD lastError = ERROR_SUCCESS;
+
+    for (tries = 0; tries < DP_USB_LAYOUT_RESCAN_TRIES; tries++) {
+        ZeroMemory(fileSystem, sizeof(fileSystem));
+        ZeroMemory(label, sizeof(label));
+        serialNumber = 0;
+        maximumComponentLength = 0;
+        fileSystemFlags = 0;
+
+        if (GetVolumeInformationW(DriveRoot,
+                                  label,
+                                  ARRAYSIZE(label),
+                                  &serialNumber,
+                                  &maximumComponentLength,
+                                  &fileSystemFlags,
+                                  fileSystem,
+                                  ARRAYSIZE(fileSystem))) {
+
+            if (_wcsicmp(fileSystem, L"NTFS") == 0) {
+                if (_wcsicmp(label, DP_USB_LAYOUT_PUBLIC_LABEL) != 0) {
+                    (VOID)SetVolumeLabelW(DriveRoot, DP_USB_LAYOUT_PUBLIC_LABEL);
+                }
+
+                DpPolicySetLastErrorMessage(L"Success.");
+                return DP_POLICY_API_SUCCESS;
+            }
+
+            DpPolicySetLastErrorMessage(L"USB public partition format verification did not return NTFS.");
+            return DP_POLICY_API_ERROR_WINDOWS_API;
+        }
+
+        lastError = GetLastError();
+        Sleep(DP_USB_LAYOUT_RESCAN_SLEEP_MS);
+    }
+
+    DpPolicySetLastErrorFromCode(lastError, L"Cannot verify formatted USB public partition");
+    return DP_POLICY_API_ERROR_WINDOWS_API;
+}
+
+static
+BOOLEAN __stdcall
+DpPolicyFormatCallback(
+    _In_ DP_FMIFS_PACKET_TYPE PacketType,
+    _In_ ULONG Modifier,
+    _In_opt_ PVOID PacketData
+    )
+{
+    UNREFERENCED_PARAMETER(Modifier);
+
+    if (InterlockedCompareExchange(&gFormatActive, 0, 0) != 0 &&
+        PacketType == DpFmifsDoneWithStructure) {
+
+        BOOLEAN succeeded = FALSE;
+        if (PacketData != NULL) {
+            succeeded = *((PBOOLEAN)PacketData);
+        }
+
+        InterlockedExchange(&gFormatSuccess, succeeded ? 1 : 0);
+        InterlockedExchange(&gFormatCompleted, 1);
+    }
+
+    return TRUE;
+}
+
+static
+DWORD
+DpPolicyFormatNtfs(
+    _In_z_ LPCWSTR DriveRoot
+    )
+{
+    HMODULE module;
+    DP_FORMAT_EX formatEx;
+    DWORD verifyResult;
+    DWORD waitCount = 0;
+
+    while (InterlockedCompareExchange(&gFormatLock, 1, 0) != 0) {
+        if (waitCount++ >= DP_USB_LAYOUT_RESCAN_TRIES) {
+            DpPolicySetLastErrorMessage(L"Another USB public partition format operation is still running.");
+            return DP_POLICY_API_ERROR_WINDOWS_API;
+        }
+
+        Sleep(DP_USB_LAYOUT_RESCAN_SLEEP_MS);
+    }
+
+    module = LoadLibraryW(L"fmifs.dll");
+    if (module == NULL) {
+        InterlockedExchange(&gFormatLock, 0);
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot load Windows format library");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    formatEx = (DP_FORMAT_EX)GetProcAddress(module, "FormatEx");
+    if (formatEx == NULL) {
+        DWORD error = GetLastError();
+        FreeLibrary(module);
+        InterlockedExchange(&gFormatLock, 0);
+        DpPolicySetLastErrorFromCode(error, L"Cannot resolve Windows FormatEx API");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    InterlockedExchange(&gFormatActive, 1);
+    InterlockedExchange(&gFormatCompleted, 0);
+    InterlockedExchange(&gFormatSuccess, 0);
+
+    formatEx((PWSTR)DriveRoot,
+             0,
+             L"NTFS",
+             DP_USB_LAYOUT_PUBLIC_LABEL,
+             TRUE,
+             512,
+             DpPolicyFormatCallback);
+
+    InterlockedExchange(&gFormatActive, 0);
+    FreeLibrary(module);
+    InterlockedExchange(&gFormatLock, 0);
+    Sleep(DP_USB_LAYOUT_FORMAT_SLEEP_MS);
+
+    verifyResult = DpPolicyVerifyNtfsVolume(DriveRoot);
+    if (verifyResult == DP_POLICY_API_SUCCESS) {
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (InterlockedCompareExchange(&gFormatCompleted, 0, 0) != 0 &&
+        InterlockedCompareExchange(&gFormatSuccess, 0, 0) == 0) {
+
+        DpPolicySetLastErrorMessage(L"Windows FormatEx reported that USB public partition formatting failed.");
+    }
+
+    return verifyResult;
+}
+
+static
+DWORD
+DpPolicyFindVolumeForDiskPartition(
+    _In_ DWORD DiskNumber,
+    _In_ ULONGLONG PartitionOffsetBytes,
+    _Out_writes_(VolumeNameChars) LPWSTR VolumeName,
+    _In_ DWORD VolumeNameChars
+    )
+{
+    WCHAR volumeName[MAX_PATH];
+    HANDLE findHandle;
+    DWORD tries;
+    HRESULT hr;
+
+    if (VolumeName == NULL || VolumeNameChars == 0) {
+        DpPolicySetLastErrorMessage(L"USB layout volume output is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+    VolumeName[0] = L'\0';
+
+    for (tries = 0; tries < DP_USB_LAYOUT_RESCAN_TRIES; tries++) {
+        findHandle = FindFirstVolumeW(volumeName, ARRAYSIZE(volumeName));
+        if (findHandle != INVALID_HANDLE_VALUE) {
+            do {
+                WCHAR queryName[MAX_PATH];
+                BYTE extentBuffer[FIELD_OFFSET(VOLUME_DISK_EXTENTS, Extents) + sizeof(DISK_EXTENT) * 8];
+                PVOLUME_DISK_EXTENTS extents;
+                HANDLE volumeHandle;
+                size_t length = wcslen(volumeName);
+                DWORD bytesReturned = 0;
+                DWORD index;
+                if (length == 0 || length >= ARRAYSIZE(queryName)) {
+                    continue;
+                }
+
+                hr = StringCchCopyW(queryName, ARRAYSIZE(queryName), volumeName);
+                if (FAILED(hr)) {
+                    continue;
+                }
+                if (queryName[length - 1] == L'\\') {
+                    queryName[length - 1] = L'\0';
+                }
+
+                volumeHandle = CreateFileW(queryName,
+                                           GENERIC_READ,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                           NULL,
+                                           OPEN_EXISTING,
+                                           FILE_ATTRIBUTE_NORMAL,
+                                           NULL);
+                if (volumeHandle == INVALID_HANDLE_VALUE) {
+                    continue;
+                }
+
+                ZeroMemory(extentBuffer, sizeof(extentBuffer));
+                if (DeviceIoControl(volumeHandle,
+                                    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                                    NULL,
+                                    0,
+                                    extentBuffer,
+                                    sizeof(extentBuffer),
+                                    &bytesReturned,
+                                    NULL)) {
+
+                    extents = (PVOLUME_DISK_EXTENTS)extentBuffer;
+                    for (index = 0; index < extents->NumberOfDiskExtents && index < 8; index++) {
+                        if (extents->Extents[index].DiskNumber == DiskNumber &&
+                            (ULONGLONG)extents->Extents[index].StartingOffset.QuadPart == PartitionOffsetBytes) {
+
+                            CloseHandle(volumeHandle);
+                            FindVolumeClose(findHandle);
+                            hr = StringCchCopyW(VolumeName, VolumeNameChars, volumeName);
+                            return FAILED(hr) ? DP_POLICY_API_ERROR_BUFFER_TOO_SMALL : DP_POLICY_API_SUCCESS;
+                        }
+                    }
+                }
+
+                CloseHandle(volumeHandle);
+            } while (FindNextVolumeW(findHandle, volumeName, ARRAYSIZE(volumeName)));
+
+            FindVolumeClose(findHandle);
+        }
+
+        Sleep(DP_USB_LAYOUT_RESCAN_SLEEP_MS);
+    }
+
+    DpPolicySetLastErrorMessage(L"Cannot find the USB public partition volume after layout initialization.");
+    return DP_POLICY_API_ERROR_WINDOWS_API;
+}
+
+DWORD
+DpPolicyInitializeUsbLayout(
+    _In_z_ LPCWSTR PhysicalDrivePath,
+    _In_opt_z_ LPCWSTR PreferredDriveRoot,
+    _In_ ULONGLONG PublicPartitionOffsetBytes,
+    _In_ ULONGLONG PublicPartitionBytes,
+    _Out_writes_(DriveRootChars) LPWSTR DriveRoot,
+    _In_ DWORD DriveRootChars,
+    _Out_opt_ DP_POLICY_API_USB_LAYOUT_RESULT *Result
+    )
+{
+    HANDLE diskHandle = INVALID_HANDLE_VALUE;
+    DWORD result;
+    DWORD diskNumber = 0;
+    ULONGLONG diskSizeBytes = 0;
+    WCHAR volumeName[MAX_PATH];
+
+    DpPolicySetLastErrorMessage(L"Success.");
+
+    if (Result != NULL) {
+        ZeroMemory(Result, sizeof(*Result));
+    }
+    if (DriveRoot != NULL && DriveRootChars != 0) {
+        DriveRoot[0] = L'\0';
+    }
+
+    if (PhysicalDrivePath == NULL ||
+        DriveRoot == NULL ||
+        DriveRootChars < 4 ||
+        PublicPartitionOffsetBytes == 0 ||
+        PublicPartitionBytes == 0) {
+
+        DpPolicySetLastErrorMessage(L"USB layout initialization arguments are invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    result = DpPolicyParsePhysicalDriveNumber(PhysicalDrivePath, &diskNumber);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    diskHandle = DpPolicyOpenPhysicalDrive(PhysicalDrivePath);
+    if (diskHandle == INVALID_HANDLE_VALUE) {
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    result = DpPolicyValidateUsbPhysicalDrive(diskHandle, &diskSizeBytes);
+    if (result != DP_POLICY_API_SUCCESS) {
+        CloseHandle(diskHandle);
+        return result;
+    }
+
+    if (diskSizeBytes <= PublicPartitionOffsetBytes + PublicPartitionBytes) {
+        CloseHandle(diskHandle);
+        DpPolicySetLastErrorMessage(L"USB disk is too small for the requested secure layout.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    DpPolicyDismountDiskVolumes(diskNumber);
+
+    result = DpPolicyCreateUsbPublicLayout(diskHandle,
+                                           PublicPartitionOffsetBytes,
+                                           PublicPartitionBytes);
+    if (result != DP_POLICY_API_SUCCESS) {
+        CloseHandle(diskHandle);
+        return result;
+    }
+
+    result = DpPolicyUpdateDiskProperties(diskHandle);
+    CloseHandle(diskHandle);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    ZeroMemory(volumeName, sizeof(volumeName));
+    result = DpPolicyFindVolumeForDiskPartition(diskNumber,
+                                                PublicPartitionOffsetBytes,
+                                                volumeName,
+                                                ARRAYSIZE(volumeName));
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    result = DpPolicyAssignDriveLetter(volumeName,
+                                       PreferredDriveRoot,
+                                       DriveRoot,
+                                       DriveRootChars);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    result = DpPolicyFormatNtfs(DriveRoot);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (Result != NULL) {
+        Result->Status = 0;
+        Result->DiskNumber = diskNumber;
+        Result->DiskSizeBytes = diskSizeBytes;
+        Result->PublicPartitionOffsetBytes = PublicPartitionOffsetBytes;
+        Result->PublicPartitionBytes = PublicPartitionBytes;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
     return DP_POLICY_API_SUCCESS;
 }
 

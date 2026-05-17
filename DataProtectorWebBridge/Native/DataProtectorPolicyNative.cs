@@ -160,6 +160,16 @@ namespace DataProtectorWebBridge.Native
             out NativeUsbMetadataWriteResult result);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyInitializeUsbLayout(
+            string physicalDrivePath,
+            string preferredDriveRoot,
+            ulong publicPartitionOffsetBytes,
+            ulong publicPartitionBytes,
+            StringBuilder driveRoot,
+            uint driveRootChars,
+            out NativeUsbLayoutResult result);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyGetLastErrorMessage(StringBuilder buffer, uint bufferChars);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -289,6 +299,16 @@ namespace DataProtectorWebBridge.Native
             public uint PartitionCount;
             public ulong OffsetBytes;
             public ulong DiskSizeBytes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct NativeUsbLayoutResult
+        {
+            public uint Status;
+            public uint DiskNumber;
+            public ulong DiskSizeBytes;
+            public ulong PublicPartitionOffsetBytes;
+            public ulong PublicPartitionBytes;
         }
 
         [StructLayout(LayoutKind.Sequential, Size = 100)]
