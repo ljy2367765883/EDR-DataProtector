@@ -71,6 +71,8 @@ declare namespace Api {
       baselineHours?: number;
       windowHours?: number;
       limit?: number;
+      page?: number;
+      pageSize?: number;
       host?: string;
       eventType?: NetworkInsightEventType;
       search?: string;
@@ -118,12 +120,30 @@ declare namespace Api {
     }
 
     interface NetworkInsightResponse {
+      page: number;
+      pageSize: number;
       baselineHours: number;
       windowHours: number;
       generatedUtc: string;
       total: number;
       newTotal: number;
+      http3Total: number;
+      unsignedTotal: number;
+      trendBuckets: NetworkInsightTrendBucket[];
+      eventDistribution: NetworkInsightDistributionItem[];
       items: NetworkInsightItem[];
+    }
+
+    interface NetworkInsightTrendBucket {
+      label: string;
+      total: number;
+      fresh: number;
+      quic: number;
+    }
+
+    interface NetworkInsightDistributionItem {
+      name: string;
+      value: number;
     }
 
     interface IpInfoConfiguration {
@@ -281,6 +301,8 @@ declare namespace Api {
 
     interface AuditQuery {
       limit?: number;
+      page?: number;
+      pageSize?: number;
       category?: AuditCategory;
       host?: string;
       result?: AuditResult;
@@ -289,6 +311,61 @@ declare namespace Api {
       fromUtc?: string;
       toUtc?: string;
       search?: string;
+    }
+
+    interface AuditQueryResponse {
+      page: number;
+      pageSize: number;
+      total: number;
+      criticalTotal: number;
+      warningTotal: number;
+      blockedTotal: number;
+      categorySummaries: AuditCategorySummary[];
+      hostSummaries: AuditHostSummary[];
+      trendBuckets: AuditTrendBucket[];
+      items: AuditRecord[];
+    }
+
+    interface AuditCategorySummary {
+      category: Exclude<AuditCategory, 'all'> | string;
+      count: number;
+      critical: number;
+      warning: number;
+      blocked: number;
+    }
+
+    interface AuditHostSummary {
+      host: string;
+      total: number;
+      critical: number;
+      warning: number;
+      blocked: number;
+    }
+
+    interface AuditTrendBucket {
+      label: string;
+      critical: number;
+      warning: number;
+      total: number;
+    }
+
+    interface AuditDeleteRequest {
+      TimestampUtc?: string;
+      Action?: string;
+      Target?: string;
+      Status?: string;
+      Message?: string;
+      Actor?: string;
+    }
+
+    interface DeviceDeleteRequest {
+      deviceId: string;
+      actor?: string;
+    }
+
+    interface RemovableDeviceDeleteRequest {
+      hardwareId: string;
+      actor?: string;
     }
   }
 }

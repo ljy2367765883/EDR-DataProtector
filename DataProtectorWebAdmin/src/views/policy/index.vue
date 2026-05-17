@@ -20,6 +20,7 @@ import {
   fetchRemoveDeviceRule,
   fetchRemoveNetworkRule,
   fetchRemovePolicyRule,
+  fetchRemoveRemovableDevice,
   fetchRemoveRemovableDeviceAuthorization,
   fetchRemovableDevices,
   fetchAddWebShellRule,
@@ -589,7 +590,7 @@ const removableDeviceColumns = computed<DataTableColumns<Api.DataProtector.Remov
   {
     title: $t('dataprotector.common.action'),
     key: 'actions',
-    width: 290,
+    width: 360,
     render(row) {
       return h(
         'div',
@@ -614,6 +615,11 @@ const removableDeviceColumns = computed<DataTableColumns<Api.DataProtector.Remov
             NButton,
             { size: 'small', secondary: true, onClick: () => removeRemovableAuthorization(row) },
             { default: () => $t('dataprotector.common.reset') }
+          ),
+          h(
+            NButton,
+            { size: 'small', type: 'error', secondary: true, onClick: () => deleteRemovableDevice(row) },
+            { default: () => $t('dataprotector.common.delete') }
           )
         ]
       );
@@ -1039,6 +1045,25 @@ async function removeRemovableAuthorization(device: Api.DataProtector.RemovableD
     window.$message?.success($t('dataprotector.policy.device.authorizationRemoved'));
     await refresh();
   }
+}
+
+async function deleteRemovableDevice(device: Api.DataProtector.RemovableDevice) {
+  window.$dialog?.warning({
+    title: $t('dataprotector.policy.device.deleteInventoryTitle'),
+    content: $t('dataprotector.policy.device.deleteInventoryContent', { code: device.hardwareId }),
+    positiveText: $t('dataprotector.common.delete'),
+    negativeText: $t('dataprotector.common.cancel'),
+    onPositiveClick: async () => {
+      const { error, data } = await fetchRemoveRemovableDevice({
+        hardwareId: device.hardwareId,
+        actor: 'web-admin'
+      });
+      if (!error && data.succeeded) {
+        window.$message?.success($t('dataprotector.policy.device.inventoryDeleted'));
+        await refresh();
+      }
+    }
+  });
 }
 
 onMounted(refresh);
@@ -1481,7 +1506,7 @@ onMounted(refresh);
                 :data="removableDevices"
                 :loading="loading || deviceSubmitting"
                 :pagination="{ pageSize: 8 }"
-                :scroll-x="1460"
+                :scroll-x="1540"
               />
             </NCard>
           </NGi>

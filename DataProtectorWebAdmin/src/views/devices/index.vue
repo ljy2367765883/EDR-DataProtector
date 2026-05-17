@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue';
-import { NTag, type DataTableColumns } from 'naive-ui';
-import { fetchDevices } from '@/service/api';
+import { NButton, NTag, type DataTableColumns } from 'naive-ui';
+import { fetchDevices, fetchRemoveDevice } from '@/service/api';
 import { $t } from '@/locales';
 
 defineOptions({
@@ -58,7 +58,20 @@ const columns = computed<DataTableColumns<Api.DataProtector.Device>>(() => [
     }
   },
   { title: $t('dataprotector.devices.columns.applyResult'), key: 'lastApplyMessage', ellipsis: { tooltip: true } },
-  { title: $t('dataprotector.devices.columns.deviceId'), key: 'deviceId', width: 260, ellipsis: { tooltip: true } }
+  { title: $t('dataprotector.devices.columns.deviceId'), key: 'deviceId', width: 260, ellipsis: { tooltip: true } },
+  {
+    title: $t('dataprotector.common.action'),
+    key: 'actions',
+    width: 110,
+    fixed: 'right',
+    render(row) {
+      return h(
+        NButton,
+        { size: 'small', type: 'error', secondary: true, onClick: () => removeDevice(row) },
+        { default: () => $t('dataprotector.common.delete') }
+      );
+    }
+  }
 ]);
 
 async function refresh() {
@@ -69,6 +82,22 @@ async function refresh() {
   } finally {
     loading.value = false;
   }
+}
+
+async function removeDevice(device: Api.DataProtector.Device) {
+  window.$dialog?.warning({
+    title: $t('dataprotector.devices.deleteTitle'),
+    content: $t('dataprotector.devices.deleteContent', { name: device.machine || device.deviceId }),
+    positiveText: $t('dataprotector.common.delete'),
+    negativeText: $t('dataprotector.common.cancel'),
+    onPositiveClick: async () => {
+      const { error, data } = await fetchRemoveDevice({ deviceId: device.deviceId, actor: 'web-admin' });
+      if (!error && data.succeeded) {
+        window.$message?.success($t('dataprotector.devices.deleteSuccess'));
+        await refresh();
+      }
+    }
+  });
 }
 
 onMounted(refresh);
@@ -110,7 +139,7 @@ onMounted(refresh);
     </NGrid>
 
     <NCard :title="$t('dataprotector.devices.inventory')" :bordered="false" class="card-wrapper">
-      <NDataTable :columns="columns" :data="devices" :loading="loading" :pagination="{ pageSize: 15 }" />
+      <NDataTable :columns="columns" :data="devices" :loading="loading" :pagination="{ pageSize: 15 }" :scroll-x="1540" />
     </NCard>
   </NSpace>
 </template>

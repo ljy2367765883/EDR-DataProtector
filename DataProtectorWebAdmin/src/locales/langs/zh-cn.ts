@@ -437,6 +437,9 @@ const local: App.I18n.Schema = {
       onlineAgents: '在线 Agent',
       driverConnected: '驱动已连接',
       inventory: 'Agent 清单',
+      deleteTitle: '删除 Agent',
+      deleteContent: '确认删除 {name} 的 Agent 清单吗？该 Agent 的排队任务和网络感知缓存也会被移除。',
+      deleteSuccess: 'Agent 清单已删除。',
       columns: {
         agent: 'Agent',
         online: '在线状态',
@@ -547,6 +550,12 @@ const local: App.I18n.Schema = {
       allOnlineAgents: '全部在线 Agent',
       total: '总量',
       criticalCount: '{count} 个严重',
+      clearTitle: '清空审计日志',
+      clearContent: '这会移除当前中央审计历史，并保留一条清空操作记录。',
+      clearSuccess: '审计日志已清空。',
+      deleteTitle: '删除审计事件',
+      deleteContent: '确认删除 {action} / {target} 这条审计事件吗？',
+      deleteSuccess: '审计事件已删除。',
       limits: {
         last200: '最近 200 条',
         last500: '最近 500 条',
@@ -871,6 +880,9 @@ const local: App.I18n.Schema = {
         authorizedReadonly: '可移动设备已授权为只读。',
         blockedDevice: '可移动设备已阻止。',
         authorizationRemoved: '可移动设备授权已重置。',
+        deleteInventoryTitle: '删除可移动设备',
+        deleteInventoryContent: '确认删除 {code} 的可移动设备清单和授权吗？',
+        inventoryDeleted: '可移动设备清单已删除。',
         removableStorage: '可移动存储',
         volumeCount: '{count} 个卷'
       },

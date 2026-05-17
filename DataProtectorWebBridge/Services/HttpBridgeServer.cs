@@ -195,7 +195,36 @@ namespace DataProtectorWebBridge.Services
                     {
                     }
 
-                    JsonResponse.Write(context.Response, "0000", "Success.", auditLog.Read(ParseAuditQuery(context.Request)));
+                    JsonResponse.Write(context.Response, "0000", "Success.", auditLog.ReadPage(ParseAuditQuery(context.Request)));
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/audit/events")
+                {
+                    AuditLog.AuditDeleteOptions request =
+                        JsonResponse.Read<AuditLog.AuditDeleteOptions>(context.Request.InputStream);
+                    int removed = auditLog.Remove(request);
+                    auditLog.Append(request == null ? context.Request.UserHostAddress : request.Actor, "audit.event.remove", request == null ? string.Empty : request.Target, string.Empty, true, 0, "Audit event delete request removed " + removed + " record(s).");
+                    JsonResponse.Write(context.Response, "0000", "Audit event delete request completed.", new PolicyBridgeService.OperationResult
+                    {
+                        succeeded = true,
+                        status = 0,
+                        statusText = "0x00000000",
+                        message = "Audit event delete request completed."
+                    });
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/audit/clear")
+                {
+                    auditLog.Clear(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, "0000", "Audit log cleared.", new PolicyBridgeService.OperationResult
+                    {
+                        succeeded = true,
+                        status = 0,
+                        statusText = "0x00000000",
+                        message = "Audit log cleared."
+                    });
                     return;
                 }
 
@@ -241,6 +270,8 @@ namespace DataProtectorWebBridge.Services
             return new AuditLog.AuditQueryOptions
             {
                 Limit = ParseLimit(request.QueryString["limit"]),
+                Page = ParsePage(request.QueryString["page"]),
+                PageSize = ParseOptionalLimit(request.QueryString["pageSize"]),
                 Category = request.QueryString["category"],
                 Host = request.QueryString["host"],
                 Result = request.QueryString["result"],
@@ -250,6 +281,28 @@ namespace DataProtectorWebBridge.Services
                 ToUtc = request.QueryString["toUtc"],
                 Search = request.QueryString["search"]
             };
+        }
+
+        private static int ParsePage(string value)
+        {
+            int page;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out page))
+            {
+                return 1;
+            }
+
+            return Math.Max(1, Math.Min(page, 1000000));
+        }
+
+        private static int ParseOptionalLimit(string value)
+        {
+            int limit;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out limit))
+            {
+                return 0;
+            }
+
+            return Math.Max(1, Math.Min(limit, 1000));
         }
 
         private static void AddCorsHeaders(HttpListenerResponse response)

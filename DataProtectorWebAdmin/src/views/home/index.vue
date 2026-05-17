@@ -32,7 +32,7 @@ async function refresh() {
 
     if (!statusResult.error) status.value = statusResult.data;
     if (!rulesResult.error) rules.value = rulesResult.data;
-    if (!auditResult.error) audits.value = auditResult.data;
+    if (!auditResult.error) audits.value = auditResult.data.items;
     if (!devicesResult.error) devices.value = devicesResult.data;
   } finally {
     loading.value = false;

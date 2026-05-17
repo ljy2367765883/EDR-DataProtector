@@ -21,6 +21,14 @@ export function fetchDevices() {
   });
 }
 
+export function fetchRemoveDevice(data: Api.DataProtector.DeviceDeleteRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/devices',
+    method: 'delete',
+    data
+  });
+}
+
 export function fetchRemoteTasks(params: { deviceId?: string; limit?: number } = {}) {
   return request<Api.DataProtector.RemoteTask[]>({
     url: '/tasks',
@@ -217,6 +225,14 @@ export function fetchRemovableDevices() {
   });
 }
 
+export function fetchRemoveRemovableDevice(data: Api.DataProtector.RemovableDeviceDeleteRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/device/removable',
+    method: 'delete',
+    data
+  });
+}
+
 export function fetchAuthorizeRemovableDevice(data: Api.DataProtector.RemovableDeviceAuthorizationRequest) {
   return request<Api.DataProtector.OperationResult>({
     url: '/device/removable/authorization',
@@ -236,9 +252,24 @@ export function fetchRemoveRemovableDeviceAuthorization(data: Pick<Api.DataProte
 export function fetchAuditEvents(params: number | Api.DataProtector.AuditQuery = 200) {
   const query = typeof params === 'number' ? { limit: params } : params;
 
-  return request<Api.DataProtector.AuditRecord[]>({
+  return request<Api.DataProtector.AuditQueryResponse>({
     url: '/audit/events',
     method: 'get',
     params: query
+  });
+}
+
+export function fetchRemoveAuditEvent(data: Api.DataProtector.AuditDeleteRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/audit/events',
+    method: 'delete',
+    data
+  });
+}
+
+export function fetchClearAuditEvents() {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/audit/clear',
+    method: 'post'
   });
 }

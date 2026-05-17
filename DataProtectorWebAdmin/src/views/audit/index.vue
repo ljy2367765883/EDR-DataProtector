@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref, watch } from 'vue';
-import { NButton, NTag, type DataTableColumns } from 'naive-ui';
+import { NButton, NTag, type DataTableColumns, type PaginationProps } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
-import { fetchAuditEvents, fetchDevices } from '@/service/api';
+import { fetchAuditEvents, fetchClearAuditEvents, fetchDevices, fetchRemoveAuditEvent } from '@/service/api';
 import { $t } from '@/locales';
 import { useAppStore } from '@/store/modules/app';
 
@@ -38,17 +38,36 @@ interface HostSummary {
 
 const loading = ref(false);
 const appStore = useAppStore();
-const events = ref<Api.DataProtector.AuditRecord[]>([]);
+const auditResponse = ref<Api.DataProtector.AuditQueryResponse | null>(null);
 const devices = ref<Api.DataProtector.Device[]>([]);
 const activeCategory = ref<AuditCategory>('all');
 const timeRange = ref<[number, number] | null>(null);
 
 const filters = reactive({
-  limit: 500,
   host: 'all',
   severity: 'all' as AuditSeverity,
   disposition: 'all' as AuditDisposition,
   search: ''
+});
+
+let suppressPaginationRefresh = false;
+
+const pagination = reactive<PaginationProps>({
+  page: 1,
+  pageSize: 30,
+  itemCount: 0,
+  showSizePicker: true,
+  pageSizes: [15, 30, 50, 100],
+  prefix: page => $t('datatable.itemCount', { total: page.itemCount }),
+  onUpdatePage(page) {
+    pagination.page = page;
+    if (!suppressPaginationRefresh) refresh(false);
+  },
+  onUpdatePageSize(pageSize) {
+    pagination.pageSize = pageSize;
+    pagination.page = 1;
+    if (!suppressPaginationRefresh) refresh(false);
+  }
 });
 
 const categoryOptions = computed<CategoryOption[]>(() => [
@@ -80,39 +99,27 @@ const dispositionOptions = computed(() => [
   { label: $t('dataprotector.common.failed'), value: 'failed' }
 ]);
 
-const limitOptions = computed(() => [
-  { label: $t('dataprotector.audit.limits.last200'), value: 200 },
-  { label: $t('dataprotector.audit.limits.last500'), value: 500 },
-  { label: $t('dataprotector.audit.limits.last1000'), value: 1000 }
-]);
-
 const categoryMap = computed(() => new Map(categoryOptions.value.map(item => [item.value, item])));
 const categorySelectOptions = computed(() => categoryOptions.value.map(item => ({ label: item.label, value: item.value })));
 
-const criticalCount = computed(() => events.value.filter(item => resolveSeverity(item) === 'critical').length);
-const warningCount = computed(() => events.value.filter(item => resolveSeverity(item) === 'warning').length);
-const blockedCount = computed(() => events.value.filter(item => resolveDisposition(item) === 'blocked').length);
+const events = computed(() => auditResponse.value?.items ?? []);
+const totalCount = computed(() => auditResponse.value?.total ?? 0);
+const criticalCount = computed(() => auditResponse.value?.criticalTotal ?? 0);
+const warningCount = computed(() => auditResponse.value?.warningTotal ?? 0);
+const blockedCount = computed(() => auditResponse.value?.blockedTotal ?? 0);
 
 const categorySummaries = computed<AuditSummary[]>(() =>
-  categoryOptions.value
-    .filter(item => item.value !== 'all')
-    .map(item => {
-      const items = events.value.filter(record => classifyAudit(record) === item.value);
+  categoryOptions.value.filter(item => item.value !== 'all').map(item => {
+    const summary = auditResponse.value?.categorySummaries?.find(one => one.category === item.value);
 
-      return {
-        category: item.value,
-        label: item.label,
-        count: items.length,
-        critical: items.filter(record => resolveSeverity(record) === 'critical').length
-      };
-    })
+    return {
+      category: item.value,
+      label: item.label,
+      count: summary?.count ?? 0,
+      critical: summary?.critical ?? 0
+    };
+  })
 );
-
-const visibleEvents = computed(() => {
-  if (activeCategory.value === 'all') return events.value;
-
-  return events.value.filter(record => classifyAudit(record) === activeCategory.value);
-});
 
 const onlineHostnames = computed(() =>
   Array.from(
@@ -129,35 +136,17 @@ const hostOptions = computed(() => {
   return [{ label: $t('dataprotector.audit.allOnlineAgents'), value: 'all' }, ...onlineHostnames.value.map(host => ({ label: host, value: host }))];
 });
 
-const hostSummaries = computed(() => {
-  const groups = new Map<string, HostSummary>();
-  const onlineHosts = onlineHostnames.value;
+const hostSummaries = computed<HostSummary[]>(() => {
+  const onlineHosts = new Set(onlineHostnames.value.map(host => host.toLowerCase()));
+  const summaries = auditResponse.value?.hostSummaries ?? [];
+  if (onlineHosts.size === 0) return summaries.slice(0, 12);
 
-  for (const host of onlineHosts) {
-    groups.set(host, { host, total: 0, critical: 0, warning: 0, blocked: 0 });
-  }
-
-  for (const record of visibleEvents.value) {
-    const host = resolveOnlineHost(record, onlineHosts);
-    if (!host) continue;
-
-    const current = groups.get(host) || { host, total: 0, critical: 0, warning: 0, blocked: 0 };
-    current.total += 1;
-    if (resolveSeverity(record) === 'critical') current.critical += 1;
-    if (resolveSeverity(record) === 'warning') current.warning += 1;
-    if (resolveDisposition(record) === 'blocked') current.blocked += 1;
-    groups.set(host, current);
-  }
-
-  return Array.from(groups.values())
-    .sort(
-      (left, right) =>
-        right.critical - left.critical || right.warning - left.warning || right.blocked - left.blocked || right.total - left.total || left.host.localeCompare(right.host)
-    )
+  return summaries
+    .filter(item => onlineHosts.has(item.host.toLowerCase()))
     .slice(0, 12);
 });
 
-const trendBuckets = computed(() => buildTrendBuckets(events.value));
+const trendBuckets = computed(() => auditResponse.value?.trendBuckets ?? []);
 
 const categoryChartData = computed(() =>
   categorySummaries.value
@@ -259,7 +248,6 @@ const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => 
     title: $t('dataprotector.audit.columns.time'),
     key: 'TimestampUtc',
     width: 190,
-    sorter: (a, b) => new Date(a.TimestampUtc).getTime() - new Date(b.TimestampUtc).getTime(),
     render(row) {
       return row.TimestampUtc ? new Date(row.TimestampUtc).toLocaleString() : '-';
     }
@@ -319,7 +307,20 @@ const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => 
   { title: $t('dataprotector.audit.columns.action'), key: 'Action', width: 240, ellipsis: { tooltip: true } },
   { title: $t('dataprotector.audit.columns.target'), key: 'Target', minWidth: 260, ellipsis: { tooltip: true } },
   { title: $t('dataprotector.audit.columns.status'), key: 'Status', width: 130 },
-  { title: $t('dataprotector.audit.columns.message'), key: 'Message', minWidth: 320, ellipsis: { tooltip: true } }
+  { title: $t('dataprotector.audit.columns.message'), key: 'Message', minWidth: 320, ellipsis: { tooltip: true } },
+  {
+    title: $t('dataprotector.common.action'),
+    key: 'actions',
+    width: 110,
+    fixed: 'right',
+    render(row) {
+      return h(
+        NButton,
+        { size: 'small', type: 'error', secondary: true, onClick: () => removeAuditEvent(row) },
+        { default: () => $t('dataprotector.common.delete') }
+      );
+    }
+  }
 ]);
 
 function resolveSvgIcon(icon: string) {
@@ -349,13 +350,6 @@ function classifyAudit(record: Api.DataProtector.AuditRecord): AuditCategory {
 
 function resolveHost(record: Api.DataProtector.AuditRecord) {
   return record.Host || record.Actor || '';
-}
-
-function resolveOnlineHost(record: Api.DataProtector.AuditRecord, onlineHosts: string[]) {
-  const host = (record.Host || '').trim();
-  if (!host) return '';
-
-  return onlineHosts.find(item => item.localeCompare(host, undefined, { sensitivity: 'accent' }) === 0) || '';
 }
 
 function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSeverity, 'all'> {
@@ -432,25 +426,6 @@ function dispositionTagType(disposition: Exclude<AuditDisposition, 'all'>) {
   return 'success';
 }
 
-function buildTrendBuckets(records: Api.DataProtector.AuditRecord[]) {
-  const sorted = [...records].sort((a, b) => new Date(a.TimestampUtc).getTime() - new Date(b.TimestampUtc).getTime());
-  const buckets = new Map<string, { label: string; critical: number; warning: number; total: number }>();
-
-  for (const record of sorted) {
-    const date = new Date(record.TimestampUtc);
-    if (Number.isNaN(date.getTime())) continue;
-
-    const key = `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:00`;
-    const bucket = buckets.get(key) || { label: key, critical: 0, warning: 0, total: 0 };
-    bucket.total += 1;
-    if (resolveSeverity(record) === 'critical') bucket.critical += 1;
-    if (resolveSeverity(record) === 'warning') bucket.warning += 1;
-    buckets.set(key, bucket);
-  }
-
-  return Array.from(buckets.values()).slice(-24);
-}
-
 function updateCharts() {
   updateTrendChart(opts => {
     const critical = $t('dataprotector.audit.critical');
@@ -492,7 +467,10 @@ function updateCharts() {
 
 function buildQuery(): Api.DataProtector.AuditQuery {
   const query: Api.DataProtector.AuditQuery = {
-    limit: filters.limit,
+    page: pagination.page,
+    pageSize: pagination.pageSize,
+    limit: pagination.pageSize,
+    category: activeCategory.value,
     host: filters.host,
     severity: filters.severity,
     disposition: filters.disposition,
@@ -507,11 +485,22 @@ function buildQuery(): Api.DataProtector.AuditQuery {
   return query;
 }
 
-async function refresh() {
+async function refresh(resetPage = false) {
+  if (resetPage) {
+    pagination.page = 1;
+  }
+
   loading.value = true;
   try {
     const [auditResult, deviceResult] = await Promise.all([fetchAuditEvents(buildQuery()), fetchDevices()]);
-    if (!auditResult.error) events.value = auditResult.data;
+    if (!auditResult.error) {
+      auditResponse.value = auditResult.data;
+      suppressPaginationRefresh = true;
+      pagination.itemCount = auditResult.data.total;
+      pagination.page = auditResult.data.page;
+      pagination.pageSize = auditResult.data.pageSize;
+      suppressPaginationRefresh = false;
+    }
     if (!deviceResult.error) devices.value = deviceResult.data;
   } finally {
     loading.value = false;
@@ -525,10 +514,61 @@ function resetFilters() {
   filters.disposition = 'all';
   filters.search = '';
   timeRange.value = null;
-  refresh();
+  refresh(true);
 }
 
-watch([events, activeCategory, () => appStore.locale], updateCharts, { deep: true });
+function applyFilters() {
+  refresh(true);
+}
+
+function setActiveCategory(value: string | number) {
+  const category = String(value) as AuditCategory;
+  if (activeCategory.value === category) return;
+
+  activeCategory.value = category;
+  applyFilters();
+}
+
+async function clearAuditEvents() {
+  window.$dialog?.warning({
+    title: $t('dataprotector.audit.clearTitle'),
+    content: $t('dataprotector.audit.clearContent'),
+    positiveText: $t('dataprotector.common.clear'),
+    negativeText: $t('dataprotector.common.cancel'),
+    onPositiveClick: async () => {
+      const { error, data } = await fetchClearAuditEvents();
+      if (!error && data.succeeded) {
+        window.$message?.success($t('dataprotector.audit.clearSuccess'));
+        await refresh(true);
+      }
+    }
+  });
+}
+
+async function removeAuditEvent(record: Api.DataProtector.AuditRecord) {
+  window.$dialog?.warning({
+    title: $t('dataprotector.audit.deleteTitle'),
+    content: $t('dataprotector.audit.deleteContent', { action: record.Action || '-', target: record.Target || '-' }),
+    positiveText: $t('dataprotector.common.delete'),
+    negativeText: $t('dataprotector.common.cancel'),
+    onPositiveClick: async () => {
+      const { error, data } = await fetchRemoveAuditEvent({
+        TimestampUtc: record.TimestampUtc,
+        Action: record.Action,
+        Target: record.Target,
+        Status: record.Status,
+        Message: record.Message,
+        Actor: 'web-admin'
+      });
+      if (!error && data.succeeded) {
+        window.$message?.success($t('dataprotector.audit.deleteSuccess'));
+        await refresh(false);
+      }
+    }
+  });
+}
+
+watch([auditResponse, () => appStore.locale], updateCharts, { deep: true });
 
 onMounted(refresh);
 </script>
@@ -541,9 +581,12 @@ onMounted(refresh);
           <h1 class="m-0 text-24px font-700">{{ $t('dataprotector.audit.title') }}</h1>
         </div>
         <NSpace align="center">
-          <NSelect v-model:value="filters.limit" :options="limitOptions" class="w-130px" />
           <NButton secondary @click="resetFilters">{{ $t('dataprotector.common.reset') }}</NButton>
-          <NButton type="primary" :loading="loading" @click="refresh">
+          <NButton type="error" secondary @click="clearAuditEvents">
+            <template #icon><SvgIcon icon="mdi:delete-sweep-outline" /></template>
+            {{ $t('dataprotector.common.clear') }}
+          </NButton>
+          <NButton type="primary" :loading="loading" @click="refresh(false)">
             <template #icon><SvgIcon icon="mdi:refresh" /></template>
             {{ $t('dataprotector.common.refresh') }}
           </NButton>
@@ -555,7 +598,7 @@ onMounted(refresh);
       <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
         <NGi span="24 m:6">
           <NFormItem :label="$t('dataprotector.audit.eventType')" :show-feedback="false">
-            <NSelect v-model:value="activeCategory" :options="categorySelectOptions" />
+            <NSelect :value="activeCategory" :options="categorySelectOptions" @update:value="setActiveCategory" />
           </NFormItem>
         </NGi>
         <NGi span="24 m:6">
@@ -584,9 +627,9 @@ onMounted(refresh);
               v-model:value="filters.search"
               clearable
               :placeholder="$t('dataprotector.audit.searchPlaceholder')"
-              @keyup.enter="refresh"
+              @keyup.enter="applyFilters"
             />
-            <NButton type="primary" ghost @click="refresh">
+            <NButton type="primary" ghost @click="applyFilters">
               <template #icon><SvgIcon icon="mdi:magnify" /></template>
               {{ $t('dataprotector.common.search') }}
             </NButton>
@@ -598,7 +641,7 @@ onMounted(refresh);
     <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <NGi span="24 s:12 l:6">
         <NCard :bordered="false" class="card-wrapper">
-          <NStatistic :label="$t('dataprotector.audit.loadedEvents')" :value="events.length" />
+          <NStatistic :label="$t('dataprotector.audit.loadedEvents')" :value="totalCount" />
         </NCard>
       </NGi>
       <NGi span="24 s:12 l:6">
@@ -654,7 +697,7 @@ onMounted(refresh);
           <div
             class="cursor-pointer rounded-8px border border-gray-200 px-14px py-12px transition hover:border-primary"
             :class="{ 'border-primary bg-primary/8': activeCategory === item.category }"
-            @click="activeCategory = item.category"
+            @click="setActiveCategory(item.category)"
           >
             <div class="flex items-center justify-between">
               <span class="font-600">{{ item.label }}</span>
@@ -670,22 +713,20 @@ onMounted(refresh);
 
     <NCard :title="$t('dataprotector.audit.auditEvents')" :bordered="false" class="card-wrapper">
       <NSpace vertical :size="12">
-        <NTabs v-model:value="activeCategory" type="line" animated>
+        <NTabs :value="activeCategory" type="line" animated @update:value="setActiveCategory">
           <NTabPane
             v-for="item in categoryOptions"
             :key="item.value"
             :name="item.value"
-            :tab="`${item.label} ${
-              item.value === 'all' ? events.length : categorySummaries.find(one => one.category === item.value)?.count || 0
-            }`"
+            :tab="`${item.label} ${item.value === 'all' ? totalCount : categorySummaries.find(one => one.category === item.value)?.count || 0}`"
           />
         </NTabs>
         <NDataTable
           :columns="columns"
-          :data="visibleEvents"
+          :data="events"
           :loading="loading"
-          :pagination="{ pageSize: 15 }"
-          :scroll-x="1720"
+          :pagination="pagination"
+          :scroll-x="1840"
           remote
         />
       </NSpace>

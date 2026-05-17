@@ -1,7 +1,7 @@
 <script setup lang="tsx">
 import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import type { DataTableColumns } from 'naive-ui';
-import { NButton, NTag, useMessage } from 'naive-ui';
+import { NButton, NTag, type PaginationProps, useMessage } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
 import { fetchClearIpInfoConfig, fetchDevices, fetchIpInfoConfig, fetchNetworkInsights, fetchSaveIpInfoConfig } from '@/service/api';
 import { $t } from '@/locales';
@@ -13,15 +13,40 @@ const response = ref<Api.DataProtector.NetworkInsightResponse | null>(null);
 const devices = ref<Api.DataProtector.Device[]>([]);
 const ipInfoConfig = ref<Api.DataProtector.IpInfoConfiguration | null>(null);
 const ipInfoToken = ref('');
+let suppressPaginationRefresh = false;
 
 const query = reactive<Api.DataProtector.NetworkInsightQuery>({
   baselineHours: 24,
   windowHours: 24 * 31,
   eventType: 'all',
   host: 'all',
-  limit: 300,
+  page: 1,
+  pageSize: 30,
+  limit: 30,
   search: '',
   includePrivateRemotes: false
+});
+
+const pagination = reactive<PaginationProps>({
+  page: 1,
+  pageSize: 30,
+  itemCount: 0,
+  showSizePicker: true,
+  pageSizes: [15, 30, 50, 100],
+  prefix: page => $t('datatable.itemCount', { total: page.itemCount }),
+  onUpdatePage(page) {
+    pagination.page = page;
+    query.page = page;
+    if (!suppressPaginationRefresh) refresh(false);
+  },
+  onUpdatePageSize(pageSize) {
+    pagination.pageSize = pageSize;
+    pagination.page = 1;
+    query.pageSize = pageSize;
+    query.limit = pageSize;
+    query.page = 1;
+    if (!suppressPaginationRefresh) refresh(false);
+  }
 });
 
 const baselineOptions = computed(() => [
@@ -52,41 +77,20 @@ const hostOptions = computed(() => [
 const items = computed(() => response.value?.items ?? []);
 
 const stats = computed(() => {
-  const rows = items.value;
   return {
     total: response.value?.total ?? 0,
     fresh: response.value?.newTotal ?? 0,
-    http3: rows.filter(item => item.isHttp3).length,
-    unsigned: rows.filter(item => item.signatureStatus === 'unsigned').length
+    http3: response.value?.http3Total ?? 0,
+    unsigned: response.value?.unsignedTotal ?? 0
   };
 });
 
-const trendRows = computed(() => {
-  const buckets = new Map<string, { label: string; total: number; fresh: number; quic: number }>();
-
-  for (const item of items.value) {
-    const date = new Date(item.lastSeenUtc);
-    const label = Number.isNaN(date.getTime()) ? '-' : `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:00`;
-    const current = buckets.get(label) || { label, total: 0, fresh: 0, quic: 0 };
-    current.total += item.count || 1;
-    if (item.isNew) current.fresh += item.count || 1;
-    if (item.isQuic || item.isHttp3) current.quic += item.count || 1;
-    buckets.set(label, current);
-  }
-
-  return Array.from(buckets.values()).slice(-18);
-});
+const trendRows = computed(() => response.value?.trendBuckets ?? []);
 
 const protocolRows = computed(() => {
-  const values = [
-    { name: $t('dataprotector.networkAwareness.eventTypes.connection'), value: items.value.filter(item => !item.isDns && !item.isQuic && !item.blocked).length },
-    { name: $t('dataprotector.networkAwareness.eventTypes.dns'), value: items.value.filter(item => item.isDns).length },
-    { name: $t('dataprotector.networkAwareness.eventTypes.quic'), value: items.value.filter(item => item.isQuic && !item.isHttp3).length },
-    { name: $t('dataprotector.networkAwareness.eventTypes.http3'), value: items.value.filter(item => item.isHttp3).length },
-    { name: $t('dataprotector.networkAwareness.eventTypes.blocked'), value: items.value.filter(item => item.blocked).length }
-  ];
-
-  return values.filter(item => item.value > 0);
+  return (response.value?.eventDistribution ?? [])
+    .map(item => ({ name: eventTypeLabel(item.name), value: item.value }))
+    .filter(item => item.value > 0);
 });
 
 const trendChartLabels = computed(() => ({
@@ -236,7 +240,16 @@ const columns = computed<DataTableColumns<Api.DataProtector.NetworkInsightItem>>
   }
 ]);
 
-async function refresh() {
+async function refresh(resetPage = false) {
+  if (resetPage) {
+    pagination.page = 1;
+    query.page = 1;
+  }
+
+  query.page = pagination.page;
+  query.pageSize = pagination.pageSize;
+  query.limit = pagination.pageSize;
+
   loading.value = true;
   try {
     const [deviceResult, insightResult, ipInfoResult] = await Promise.all([
@@ -246,7 +259,17 @@ async function refresh() {
     ]);
 
     if (!deviceResult.error) devices.value = deviceResult.data;
-    if (!insightResult.error) response.value = insightResult.data;
+    if (!insightResult.error) {
+      response.value = insightResult.data;
+      suppressPaginationRefresh = true;
+      pagination.itemCount = insightResult.data.total;
+      pagination.page = insightResult.data.page;
+      pagination.pageSize = insightResult.data.pageSize;
+      query.page = insightResult.data.page;
+      query.pageSize = insightResult.data.pageSize;
+      query.limit = insightResult.data.pageSize;
+      suppressPaginationRefresh = false;
+    }
     if (!ipInfoResult.error) ipInfoConfig.value = ipInfoResult.data;
   } finally {
     loading.value = false;
@@ -266,7 +289,7 @@ async function saveIpInfoToken() {
     if (!result.error) {
       ipInfoToken.value = '';
       message.success(result.data.message || $t('dataprotector.networkAwareness.tokenSaved'));
-      await refresh();
+      await refresh(false);
     }
   } finally {
     savingIpInfo.value = false;
@@ -280,7 +303,7 @@ async function clearIpInfoToken() {
     if (!result.error) {
       ipInfoToken.value = '';
       message.success(result.data.message || $t('dataprotector.networkAwareness.tokenCleared'));
-      await refresh();
+      await refresh(false);
     }
   } finally {
     savingIpInfo.value = false;
@@ -317,6 +340,14 @@ function formatIpLocation(row: Api.DataProtector.NetworkInsightItem) {
   const parts = [row.country || row.countryCode, row.continent || row.continentCode].filter(Boolean);
   if (parts.length) return parts.join(' / ');
   return row.asDomain || row.ipInfoStatus || '-';
+}
+
+function eventTypeLabel(name: string) {
+  if (name === 'dns') return $t('dataprotector.networkAwareness.eventTypes.dns');
+  if (name === 'quic') return $t('dataprotector.networkAwareness.eventTypes.quic');
+  if (name === 'http3') return $t('dataprotector.networkAwareness.eventTypes.http3');
+  if (name === 'blocked') return $t('dataprotector.networkAwareness.eventTypes.blocked');
+  return $t('dataprotector.networkAwareness.eventTypes.connection');
 }
 
 function rowKey(row: Api.DataProtector.NetworkInsightItem) {
@@ -426,7 +457,7 @@ onMounted(refresh);
       <template #header>
         <div class="panel-title">
           <span>{{ $t('dataprotector.networkAwareness.title') }}</span>
-          <NButton type="primary" :loading="loading" @click="refresh">
+          <NButton type="primary" :loading="loading" @click="refresh(false)">
             {{ $t('dataprotector.common.refresh') }}
           </NButton>
         </div>
@@ -441,11 +472,11 @@ onMounted(refresh);
           clearable
           :placeholder="$t('dataprotector.networkAwareness.searchPlaceholder')"
           class="search-control"
-          @keyup.enter="refresh"
+          @keyup.enter="refresh(true)"
         />
         <NSwitch v-model:value="query.includePrivateRemotes" />
         <span class="cell-muted">{{ $t('dataprotector.networkAwareness.showLanRemotes') }}</span>
-        <NButton secondary @click="refresh">{{ $t('dataprotector.common.apply') }}</NButton>
+        <NButton secondary @click="refresh(true)">{{ $t('dataprotector.common.apply') }}</NButton>
       </NSpace>
 
       <NDataTable
@@ -453,7 +484,8 @@ onMounted(refresh);
         :data="items"
         :loading="loading"
         :row-key="rowKey"
-        :pagination="{ pageSize: 12 }"
+        :pagination="pagination"
+        remote
         :scroll-x="2120"
         size="small"
       />

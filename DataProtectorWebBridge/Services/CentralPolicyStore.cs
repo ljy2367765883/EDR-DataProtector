@@ -178,6 +178,67 @@ namespace DataProtectorWebBridge.Services
             return Success("Removable device authorization removed.");
         }
 
+        public PolicyBridgeService.OperationResult RemoveDevice(DeviceDeleteRequest request)
+        {
+            string deviceId = NormalizeDeviceText(request == null ? string.Empty : request.deviceId);
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Device id is required.");
+            }
+
+            lock (syncRoot)
+            {
+                bool removed = state.Devices.Remove(deviceId);
+                int taskCount = state.Tasks.RemoveAll(task => string.Equals(task.deviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                int networkCount = state.NetworkConnections.RemoveAll(item => string.Equals(item.deviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                MarkRemovableVolumesOffline(deviceId);
+
+                AppendAudit(
+                    request == null ? string.Empty : request.actor,
+                    "central.agent.remove",
+                    deviceId,
+                    "agent",
+                    true,
+                    "0x00000000",
+                    "Agent inventory removed. device=" + removed + ", tasks=" + taskCount + ", network=" + networkCount + ".");
+                Save();
+            }
+
+            return Success("Agent inventory removed.");
+        }
+
+        public PolicyBridgeService.OperationResult RemoveRemovableDevice(RemovableDeviceDeleteRequest request)
+        {
+            string hardwareId = NormalizeHardwareId(request == null ? string.Empty : request.hardwareId);
+            if (string.IsNullOrWhiteSpace(hardwareId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Hardware id is required.");
+            }
+
+            lock (syncRoot)
+            {
+                EnsureDeviceAuthorizationState();
+                bool removedInventory = state.RemovableDevices.Remove(hardwareId);
+                bool removedAuthorization = state.RemovableAuthorizations.Remove(hardwareId);
+                if (removedInventory || removedAuthorization)
+                {
+                    state.PolicyVersion++;
+                }
+
+                AppendAudit(
+                    request == null ? string.Empty : request.actor,
+                    "central.device.removable.remove",
+                    hardwareId,
+                    "removable-storage",
+                    true,
+                    "0x00000000",
+                    "Removable device inventory removed.");
+                Save();
+            }
+
+            return Success("Removable device inventory removed.");
+        }
+
         public PolicyBridgeService.OperationResult AddRule(PolicyBridgeService.PolicyRuleRequest request)
         {
             PolicyBridgeService.PolicyRuleRequest normalized = NormalizeRequest(request);
@@ -471,24 +532,54 @@ namespace DataProtectorWebBridge.Services
 
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
         {
-            return QueryAudit(new AuditLog.AuditQueryOptions { Limit = limit });
+            return QueryAudit(new AuditLog.AuditQueryOptions { Limit = limit }).items;
         }
 
-        public AuditLog.AuditRecord[] QueryAudit(AuditLog.AuditQueryOptions options)
+        public AuditLog.AuditQueryResponse QueryAudit(AuditLog.AuditQueryOptions options)
         {
             AuditLog.AuditQueryOptions query = options ?? new AuditLog.AuditQueryOptions();
-            int take = AuditLog.NormalizeLimit(query.Limit);
 
             lock (syncRoot)
             {
-                return state.Audit
-                    .AsEnumerable()
-                    .Reverse()
-                    .Where(record => AuditLog.Matches(record, query))
-                    .Take(take)
-                    .Select(CloneAudit)
-                    .ToArray();
+                return AuditLog.BuildQueryResponse(state.Audit.Select(CloneAudit).ToArray(), query);
             }
+        }
+
+        public PolicyBridgeService.OperationResult ClearAudit(string actor)
+        {
+            lock (syncRoot)
+            {
+                int removed = state.Audit.Count;
+                state.Audit.Clear();
+                AppendAudit(actor, "central.audit.events.clear", "*", "audit", true, "0x00000000", "Central audit log cleared. Removed records: " + removed + ".");
+                Save();
+            }
+
+            return Success("Central audit log cleared.");
+        }
+
+        public PolicyBridgeService.OperationResult RemoveAudit(AuditLog.AuditDeleteOptions request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Audit delete request body is required.");
+            }
+
+            lock (syncRoot)
+            {
+                int removed = state.Audit.RemoveAll(record => IsAuditDeleteMatch(record, request));
+                AppendAudit(
+                    request.Actor,
+                    "central.audit.event.remove",
+                    string.IsNullOrWhiteSpace(request.Target) ? request.TimestampUtc : request.Target,
+                    "audit",
+                    true,
+                    "0x00000000",
+                    "Central audit event delete request removed " + removed + " record(s).");
+                Save();
+            }
+
+            return Success("Central audit event delete request completed.");
         }
 
         public NetworkInsightResponse QueryNetworkInsights(NetworkInsightQuery query)
@@ -497,7 +588,8 @@ namespace DataProtectorWebBridge.Services
             DateTime nowUtc = DateTime.UtcNow;
             DateTime sinceUtc = nowUtc - normalized.window;
             DateTime baselineUtc = nowUtc - normalized.baseline;
-            NetworkInsightItem[] items;
+            NetworkInsightItem[] pageItems;
+            NetworkInsightItem[] allItems;
             Dictionary<string, IpInfoCacheEntry> ipInfoCache;
 
             lock (syncRoot)
@@ -513,18 +605,23 @@ namespace DataProtectorWebBridge.Services
                         .Select(NetworkObservationKey),
                     StringComparer.OrdinalIgnoreCase);
 
-                items = current
+                allItems = current
                     .GroupBy(NetworkObservationKey, StringComparer.OrdinalIgnoreCase)
                     .Select(group => ToNetworkInsightItem(group.ToList(), baselineKeys))
                     .Where(item => item.isNew)
                     .OrderByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
-                    .Take(normalized.limit)
+                    .ToArray();
+
+                int skip = Math.Max(0, (normalized.page - 1) * normalized.pageSize);
+                pageItems = allItems
+                    .Skip(skip)
+                    .Take(normalized.pageSize)
                     .ToArray();
 
                 ipInfoCache = CloneIpInfoCache();
             }
 
-            IpInfoCacheEntry[] resolvedEntries = ResolveMissingIpInfo(items, ipInfoCache, nowUtc);
+            IpInfoCacheEntry[] resolvedEntries = ResolveMissingIpInfo(pageItems, ipInfoCache, nowUtc);
             if (resolvedEntries.Length > 0)
             {
                 lock (syncRoot)
@@ -541,16 +638,22 @@ namespace DataProtectorWebBridge.Services
                 }
             }
 
-            AttachIpInfo(items, ipInfoCache, IsIpInfoEnabled());
+            AttachIpInfo(pageItems, ipInfoCache, IsIpInfoEnabled());
 
             return new NetworkInsightResponse
             {
+                page = normalized.page,
+                pageSize = normalized.pageSize,
                 baselineHours = normalized.baseline.TotalHours,
                 windowHours = normalized.window.TotalHours,
                 generatedUtc = DateTime.UtcNow.ToString("o"),
-                total = items.Length,
-                newTotal = items.Length,
-                items = items
+                total = allItems.Length,
+                newTotal = allItems.Count(item => item.isNew),
+                http3Total = allItems.Count(item => item.isHttp3),
+                unsignedTotal = allItems.Count(item => string.Equals(item.signatureStatus, "unsigned", StringComparison.OrdinalIgnoreCase)),
+                trendBuckets = BuildNetworkTrendBuckets(allItems),
+                eventDistribution = BuildNetworkEventDistribution(allItems),
+                items = pageItems
             };
         }
 
@@ -1255,6 +1358,50 @@ namespace DataProtectorWebBridge.Services
             return changed;
         }
 
+        private void MarkRemovableVolumesOffline(string endpointDeviceId)
+        {
+            if (string.IsNullOrWhiteSpace(endpointDeviceId))
+            {
+                return;
+            }
+
+            EnsureDeviceAuthorizationState();
+            foreach (RemovableDeviceState device in state.RemovableDevices.Values)
+            {
+                if (device == null)
+                {
+                    continue;
+                }
+
+                NormalizeRemovableVolumeState(device);
+                foreach (RemovableVolumeState volume in device.volumes)
+                {
+                    if (volume != null && string.Equals(volume.deviceId, endpointDeviceId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        volume.online = false;
+                    }
+                }
+
+                RemovableVolumeState primary = SelectPrimaryRemovableVolume(device);
+                if (primary == null)
+                {
+                    device.online = false;
+                    continue;
+                }
+
+                device.deviceId = primary.deviceId;
+                device.host = primary.host;
+                device.user = primary.user;
+                device.driveLetter = primary.driveLetter;
+                device.volumeGuid = primary.volumeGuid;
+                device.volumeLabel = primary.volumeLabel;
+                device.fileSystem = primary.fileSystem;
+                device.sizeBytes = primary.sizeBytes;
+                device.lastSeenUtc = primary.lastSeenUtc;
+                device.online = IsRemovableVolumeOnline(primary);
+            }
+        }
+
         private static RemovableVolumeState UpsertRemovableVolume(
             RemovableDeviceState device,
             string deviceId,
@@ -1346,7 +1493,9 @@ namespace DataProtectorWebBridge.Services
         private static NetworkInsightQuery NormalizeNetworkInsightQuery(NetworkInsightQuery query)
         {
             NetworkInsightQuery normalized = query ?? new NetworkInsightQuery();
-            normalized.limit = normalized.limit <= 0 ? DefaultLimit : Math.Min(normalized.limit, 1000);
+            normalized.page = AuditLog.NormalizePage(normalized.page);
+            normalized.pageSize = AuditLog.NormalizePageSize(normalized.pageSize, normalized.limit);
+            normalized.limit = normalized.pageSize;
             normalized.baselineHours = ClampHours(normalized.baselineHours <= 0 ? 24 : normalized.baselineHours, 1, 24 * 31);
             normalized.windowHours = ClampHours(normalized.windowHours <= 0 ? normalized.baselineHours : normalized.windowHours, 1, 24 * 31);
             normalized.host = normalized.host ?? string.Empty;
@@ -1794,6 +1943,39 @@ namespace DataProtectorWebBridge.Services
                 signatureStatus = latest.signatureStatus,
                 signer = latest.signer
             };
+        }
+
+        private static NetworkTrendBucket[] BuildNetworkTrendBuckets(IEnumerable<NetworkInsightItem> items)
+        {
+            return (items ?? Enumerable.Empty<NetworkInsightItem>())
+                .Select(item => new { item, timestamp = ParseUtcOrMin(item.lastSeenUtc) })
+                .Where(item => item.timestamp != DateTime.MinValue)
+                .GroupBy(item => new DateTime(item.timestamp.Year, item.timestamp.Month, item.timestamp.Day, item.timestamp.Hour, 0, 0, DateTimeKind.Utc))
+                .OrderBy(group => group.Key)
+                .Select(group => new NetworkTrendBucket
+                {
+                    label = group.Key.ToLocalTime().ToString("M/d HH':00'", CultureInfo.InvariantCulture),
+                    total = group.Sum(item => Math.Max(1, item.item.count)),
+                    fresh = group.Where(item => item.item.isNew).Sum(item => Math.Max(1, item.item.count)),
+                    quic = group.Where(item => item.item.isQuic || item.item.isHttp3).Sum(item => Math.Max(1, item.item.count))
+                })
+                .TakeLastCompat(24)
+                .ToArray();
+        }
+
+        private static NetworkDistributionItem[] BuildNetworkEventDistribution(IEnumerable<NetworkInsightItem> items)
+        {
+            NetworkInsightItem[] rows = (items ?? Enumerable.Empty<NetworkInsightItem>()).ToArray();
+            return new[]
+            {
+                new NetworkDistributionItem { name = "connection", value = rows.Count(item => !item.isDns && !item.isQuic && !item.blocked) },
+                new NetworkDistributionItem { name = "dns", value = rows.Count(item => item.isDns) },
+                new NetworkDistributionItem { name = "quic", value = rows.Count(item => item.isQuic && !item.isHttp3) },
+                new NetworkDistributionItem { name = "http3", value = rows.Count(item => item.isHttp3) },
+                new NetworkDistributionItem { name = "blocked", value = rows.Count(item => item.blocked) }
+            }
+            .Where(item => item.value > 0)
+            .ToArray();
         }
 
         private static string NetworkObservationKey(NetworkConnectionObservation item)
@@ -2673,6 +2855,48 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static bool IsAuditDeleteMatch(AuditLog.AuditRecord record, AuditLog.AuditDeleteOptions options)
+        {
+            if (record == null || options == null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.TimestampUtc) &&
+                !string.Equals(record.TimestampUtc, options.TimestampUtc, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Action) &&
+                !string.Equals(record.Action, options.Action, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Target) &&
+                !string.Equals(record.Target, options.Target, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Status) &&
+                !string.Equals(record.Status, options.Status, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Message) &&
+                !string.Equals(record.Message, options.Message, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return !string.IsNullOrWhiteSpace(options.TimestampUtc) ||
+                   !string.IsNullOrWhiteSpace(options.Action) ||
+                   !string.IsNullOrWhiteSpace(options.Target);
+        }
+
         private static PolicyBridgeService.OperationResult Success(string message)
         {
             return new PolicyBridgeService.OperationResult
@@ -2727,6 +2951,8 @@ namespace DataProtectorWebBridge.Services
             public int baselineHours { get; set; }
             public int windowHours { get; set; }
             public int limit { get; set; }
+            public int page { get; set; }
+            public int pageSize { get; set; }
             public string host { get; set; }
             public string eventType { get; set; }
             public string search { get; set; }
@@ -2735,12 +2961,32 @@ namespace DataProtectorWebBridge.Services
 
         public sealed class NetworkInsightResponse
         {
+            public int page { get; set; }
+            public int pageSize { get; set; }
             public double baselineHours { get; set; }
             public double windowHours { get; set; }
             public string generatedUtc { get; set; }
             public int total { get; set; }
             public int newTotal { get; set; }
+            public int http3Total { get; set; }
+            public int unsignedTotal { get; set; }
+            public NetworkTrendBucket[] trendBuckets { get; set; }
+            public NetworkDistributionItem[] eventDistribution { get; set; }
             public NetworkInsightItem[] items { get; set; }
+        }
+
+        public sealed class NetworkTrendBucket
+        {
+            public string label { get; set; }
+            public int total { get; set; }
+            public int fresh { get; set; }
+            public int quic { get; set; }
+        }
+
+        public sealed class NetworkDistributionItem
+        {
+            public string name { get; set; }
+            public int value { get; set; }
         }
 
         public sealed class IpInfoConfiguration
@@ -2991,6 +3237,18 @@ namespace DataProtectorWebBridge.Services
             public bool allowWrite { get; set; }
             public string actor { get; set; }
             public string note { get; set; }
+        }
+
+        public sealed class DeviceDeleteRequest
+        {
+            public string deviceId { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class RemovableDeviceDeleteRequest
+        {
+            public string hardwareId { get; set; }
+            public string actor { get; set; }
         }
 
         public sealed class AgentSyncRequest

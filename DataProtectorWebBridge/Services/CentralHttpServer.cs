@@ -67,6 +67,15 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "DELETE" && path == "/api/devices")
+                {
+                    CentralPolicyStore.DeviceDeleteRequest request =
+                        JsonResponse.Read<CentralPolicyStore.DeviceDeleteRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveDevice(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/tasks")
                 {
                     int limit = ParseLimit(context.Request.QueryString["limit"]);
@@ -191,6 +200,15 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "DELETE" && path == "/api/device/removable")
+                {
+                    CentralPolicyStore.RemovableDeviceDeleteRequest request =
+                        JsonResponse.Read<CentralPolicyStore.RemovableDeviceDeleteRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveRemovableDevice(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/webshell/rules")
                 {
                     PolicyBridgeService.WebShellRuleRequest request =
@@ -295,6 +313,22 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "DELETE" && path == "/api/audit/events")
+                {
+                    AuditLog.AuditDeleteOptions request =
+                        JsonResponse.Read<AuditLog.AuditDeleteOptions>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveAudit(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/audit/clear")
+                {
+                    PolicyBridgeService.OperationResult result = store.ClearAudit(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/agent/sync")
                 {
                     CentralPolicyStore.AgentSyncRequest request =
@@ -345,6 +379,8 @@ namespace DataProtectorWebBridge.Services
             return new AuditLog.AuditQueryOptions
             {
                 Limit = ParseLimit(request.QueryString["limit"]),
+                Page = ParsePage(request.QueryString["page"]),
+                PageSize = ParseOptionalLimit(request.QueryString["pageSize"]),
                 Category = request.QueryString["category"],
                 Host = request.QueryString["host"],
                 Result = request.QueryString["result"],
@@ -361,6 +397,8 @@ namespace DataProtectorWebBridge.Services
             return new CentralPolicyStore.NetworkInsightQuery
             {
                 limit = ParseLimit(request.QueryString["limit"]),
+                page = ParsePage(request.QueryString["page"]),
+                pageSize = ParseOptionalLimit(request.QueryString["pageSize"]),
                 baselineHours = ParseHours(request.QueryString["baselineHours"], 24),
                 windowHours = ParseHours(request.QueryString["windowHours"], 24 * 31),
                 host = request.QueryString["host"],
@@ -386,6 +424,28 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Math.Max(1, Math.Min(hours, 24 * 31));
+        }
+
+        private static int ParsePage(string value)
+        {
+            int page;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out page))
+            {
+                return 1;
+            }
+
+            return Math.Max(1, Math.Min(page, 1000000));
+        }
+
+        private static int ParseOptionalLimit(string value)
+        {
+            int limit;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out limit))
+            {
+                return 0;
+            }
+
+            return Math.Max(1, Math.Min(limit, 1000));
         }
 
         private static void AddCorsHeaders(HttpListenerResponse response)

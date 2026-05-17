@@ -30,6 +30,16 @@ namespace DataProtectorWebBridge.Services
             return limit <= 0 ? DefaultLimit : Math.Min(limit, 1000);
         }
 
+        public static int NormalizePage(int page)
+        {
+            return page <= 0 ? 1 : Math.Min(page, 1000000);
+        }
+
+        public static int NormalizePageSize(int pageSize, int limit)
+        {
+            return NormalizeLimit(pageSize > 0 ? pageSize : limit);
+        }
+
         public static string ClassifyCategory(AuditRecord record)
         {
             string action = record == null || record.Action == null ? string.Empty : record.Action;
@@ -342,19 +352,22 @@ namespace DataProtectorWebBridge.Services
 
         public AuditRecord[] Read(AuditQueryOptions options)
         {
+            return ReadPage(options).items;
+        }
+
+        public AuditQueryResponse ReadPage(AuditQueryOptions options)
+        {
             AuditQueryOptions query = options ?? new AuditQueryOptions();
-            int take = NormalizeLimit(query.Limit);
 
             lock (syncRoot)
             {
                 if (!File.Exists(FilePath))
                 {
-                    return new AuditRecord[0];
+                    return BuildQueryResponse(new AuditRecord[0], query);
                 }
 
                 List<string> lines = File.ReadAllLines(FilePath, Encoding.UTF8)
                     .Where(line => !string.IsNullOrWhiteSpace(line))
-                    .Reverse()
                     .ToList();
 
                 List<AuditRecord> records = new List<AuditRecord>();
@@ -378,11 +391,108 @@ namespace DataProtectorWebBridge.Services
                     }
                 }
 
-                return records
-                    .Where(record => Matches(record, query))
-                    .Take(take)
-                    .ToArray();
+                return BuildQueryResponse(records, query);
             }
+        }
+
+        public void Clear(string actor)
+        {
+            lock (syncRoot)
+            {
+                Directory.CreateDirectory(DirectoryPath);
+                File.WriteAllText(FilePath, string.Empty, Encoding.UTF8);
+            }
+
+            Append(actor, "audit.events.clear", "*", string.Empty, true, 0, "Audit log cleared.");
+        }
+
+        public int Remove(AuditDeleteOptions options)
+        {
+            if (options == null)
+            {
+                return 0;
+            }
+
+            lock (syncRoot)
+            {
+                if (!File.Exists(FilePath))
+                {
+                    return 0;
+                }
+
+                List<string> lines = File.ReadAllLines(FilePath, Encoding.UTF8)
+                    .Where(line => !string.IsNullOrWhiteSpace(line))
+                    .ToList();
+
+                List<AuditRecord> records = new List<AuditRecord>();
+                foreach (string line in lines)
+                {
+                    try
+                    {
+                        records.Add(serializer.Deserialize<AuditRecord>(line));
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                int originalCount = records.Count;
+                records.RemoveAll(record => IsDeleteMatch(record, options));
+                int removed = originalCount - records.Count;
+                if (removed <= 0)
+                {
+                    return 0;
+                }
+
+                Directory.CreateDirectory(DirectoryPath);
+                File.WriteAllLines(
+                    FilePath,
+                    records.Select(record => serializer.Serialize(record)).ToArray(),
+                    Encoding.UTF8);
+
+                return removed;
+            }
+        }
+
+        public static AuditQueryResponse BuildQueryResponse(IEnumerable<AuditRecord> records, AuditQueryOptions options)
+        {
+            AuditQueryOptions query = options ?? new AuditQueryOptions();
+            int page = NormalizePage(query.Page);
+            int pageSize = NormalizePageSize(query.PageSize, query.Limit);
+            int skip = Math.Max(0, (page - 1) * pageSize);
+
+            AuditQueryOptions categoryNeutral = CopyWithoutCategory(query);
+            List<AuditRecord> baseMatches = (records ?? Enumerable.Empty<AuditRecord>())
+                .Where(record => Matches(record, categoryNeutral))
+                .ToList();
+
+            IEnumerable<AuditRecord> filtered = baseMatches;
+            if (!string.IsNullOrWhiteSpace(query.Category) &&
+                !string.Equals(query.Category, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                filtered = filtered.Where(record => string.Equals(ClassifyCategory(record), query.Category, StringComparison.OrdinalIgnoreCase));
+            }
+
+            List<AuditRecord> filteredList = filtered
+                .OrderByDescending(record => record == null ? string.Empty : record.TimestampUtc, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return new AuditQueryResponse
+            {
+                page = page,
+                pageSize = pageSize,
+                total = filteredList.Count,
+                criticalTotal = filteredList.Count(record => string.Equals(ResolveSeverity(record), "critical", StringComparison.OrdinalIgnoreCase)),
+                warningTotal = filteredList.Count(record => string.Equals(ResolveSeverity(record), "warning", StringComparison.OrdinalIgnoreCase)),
+                blockedTotal = filteredList.Count(record => string.Equals(ResolveDisposition(record), "blocked", StringComparison.OrdinalIgnoreCase)),
+                categorySummaries = BuildCategorySummaries(baseMatches),
+                hostSummaries = BuildHostSummaries(filteredList),
+                trendBuckets = BuildTrendBuckets(filteredList),
+                items = filteredList
+                    .Skip(skip)
+                    .Take(pageSize)
+                    .ToArray()
+            };
         }
 
         private static bool TryParseUtc(string value, out DateTime timestampUtc)
@@ -396,9 +506,137 @@ namespace DataProtectorWebBridge.Services
             return false;
         }
 
+        private static AuditQueryOptions CopyWithoutCategory(AuditQueryOptions query)
+        {
+            return new AuditQueryOptions
+            {
+                Limit = query.Limit,
+                Page = query.Page,
+                PageSize = query.PageSize,
+                Category = "all",
+                Host = query.Host,
+                Result = query.Result,
+                Severity = query.Severity,
+                Disposition = query.Disposition,
+                FromUtc = query.FromUtc,
+                ToUtc = query.ToUtc,
+                Search = query.Search
+            };
+        }
+
+        private static AuditCategorySummary[] BuildCategorySummaries(IEnumerable<AuditRecord> records)
+        {
+            return (records ?? Enumerable.Empty<AuditRecord>())
+                .GroupBy(ClassifyCategory, StringComparer.OrdinalIgnoreCase)
+                .Select(group => new AuditCategorySummary
+                {
+                    category = group.Key,
+                    count = group.Count(),
+                    critical = group.Count(record => string.Equals(ResolveSeverity(record), "critical", StringComparison.OrdinalIgnoreCase)),
+                    warning = group.Count(record => string.Equals(ResolveSeverity(record), "warning", StringComparison.OrdinalIgnoreCase)),
+                    blocked = group.Count(record => string.Equals(ResolveDisposition(record), "blocked", StringComparison.OrdinalIgnoreCase))
+                })
+                .OrderByDescending(item => item.count)
+                .ThenBy(item => item.category, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static AuditHostSummary[] BuildHostSummaries(IEnumerable<AuditRecord> records)
+        {
+            return (records ?? Enumerable.Empty<AuditRecord>())
+                .Select(record => new { record, host = ResolveHost(record) })
+                .Where(item => !string.IsNullOrWhiteSpace(item.host))
+                .GroupBy(item => item.host, StringComparer.OrdinalIgnoreCase)
+                .Select(group => new AuditHostSummary
+                {
+                    host = group.Key,
+                    total = group.Count(),
+                    critical = group.Count(item => string.Equals(ResolveSeverity(item.record), "critical", StringComparison.OrdinalIgnoreCase)),
+                    warning = group.Count(item => string.Equals(ResolveSeverity(item.record), "warning", StringComparison.OrdinalIgnoreCase)),
+                    blocked = group.Count(item => string.Equals(ResolveDisposition(item.record), "blocked", StringComparison.OrdinalIgnoreCase))
+                })
+                .OrderByDescending(item => item.critical)
+                .ThenByDescending(item => item.warning)
+                .ThenByDescending(item => item.blocked)
+                .ThenByDescending(item => item.total)
+                .ThenBy(item => item.host, StringComparer.OrdinalIgnoreCase)
+                .Take(20)
+                .ToArray();
+        }
+
+        private static AuditTrendBucket[] BuildTrendBuckets(IEnumerable<AuditRecord> records)
+        {
+            return (records ?? Enumerable.Empty<AuditRecord>())
+                .Select(record => new { record, timestamp = ParseUtcOrMin(record == null ? string.Empty : record.TimestampUtc) })
+                .Where(item => item.timestamp != DateTime.MinValue)
+                .GroupBy(item => new DateTime(item.timestamp.Year, item.timestamp.Month, item.timestamp.Day, item.timestamp.Hour, 0, 0, DateTimeKind.Utc))
+                .OrderBy(group => group.Key)
+                .Select(group => new AuditTrendBucket
+                {
+                    label = group.Key.ToLocalTime().ToString("M/d HH':00'", CultureInfo.InvariantCulture),
+                    critical = group.Count(item => string.Equals(ResolveSeverity(item.record), "critical", StringComparison.OrdinalIgnoreCase)),
+                    warning = group.Count(item => string.Equals(ResolveSeverity(item.record), "warning", StringComparison.OrdinalIgnoreCase)),
+                    total = group.Count()
+                })
+                .TakeLastCompat(24)
+                .ToArray();
+        }
+
+        private static DateTime ParseUtcOrMin(string value)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(value, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out parsed)
+                ? parsed.ToUniversalTime()
+                : DateTime.MinValue;
+        }
+
+        private static bool IsDeleteMatch(AuditRecord record, AuditDeleteOptions options)
+        {
+            if (record == null || options == null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.TimestampUtc) &&
+                !string.Equals(record.TimestampUtc, options.TimestampUtc, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Action) &&
+                !string.Equals(record.Action, options.Action, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Target) &&
+                !string.Equals(record.Target, options.Target, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Status) &&
+                !string.Equals(record.Status, options.Status, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Message) &&
+                !string.Equals(record.Message, options.Message, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return !string.IsNullOrWhiteSpace(options.TimestampUtc) ||
+                   !string.IsNullOrWhiteSpace(options.Action) ||
+                   !string.IsNullOrWhiteSpace(options.Target);
+        }
+
         public sealed class AuditQueryOptions
         {
             public int Limit { get; set; }
+            public int Page { get; set; }
+            public int PageSize { get; set; }
             public string Category { get; set; }
             public string Host { get; set; }
             public string Result { get; set; }
@@ -407,6 +645,57 @@ namespace DataProtectorWebBridge.Services
             public string FromUtc { get; set; }
             public string ToUtc { get; set; }
             public string Search { get; set; }
+        }
+
+        public sealed class AuditDeleteOptions
+        {
+            public bool Clear { get; set; }
+            public string TimestampUtc { get; set; }
+            public string Action { get; set; }
+            public string Target { get; set; }
+            public string Status { get; set; }
+            public string Message { get; set; }
+            public string Actor { get; set; }
+        }
+
+        public sealed class AuditQueryResponse
+        {
+            public int page { get; set; }
+            public int pageSize { get; set; }
+            public int total { get; set; }
+            public int criticalTotal { get; set; }
+            public int warningTotal { get; set; }
+            public int blockedTotal { get; set; }
+            public AuditCategorySummary[] categorySummaries { get; set; }
+            public AuditHostSummary[] hostSummaries { get; set; }
+            public AuditTrendBucket[] trendBuckets { get; set; }
+            public AuditRecord[] items { get; set; }
+        }
+
+        public sealed class AuditCategorySummary
+        {
+            public string category { get; set; }
+            public int count { get; set; }
+            public int critical { get; set; }
+            public int warning { get; set; }
+            public int blocked { get; set; }
+        }
+
+        public sealed class AuditHostSummary
+        {
+            public string host { get; set; }
+            public int total { get; set; }
+            public int critical { get; set; }
+            public int warning { get; set; }
+            public int blocked { get; set; }
+        }
+
+        public sealed class AuditTrendBucket
+        {
+            public string label { get; set; }
+            public int critical { get; set; }
+            public int warning { get; set; }
+            public int total { get; set; }
         }
 
         public sealed class AuditRecord
@@ -420,6 +709,29 @@ namespace DataProtectorWebBridge.Services
             public bool Succeeded { get; set; }
             public string Status { get; set; }
             public string Message { get; set; }
+        }
+    }
+
+    internal static class AuditEnumerableExtensions
+    {
+        public static IEnumerable<T> TakeLastCompat<T>(this IEnumerable<T> source, int count)
+        {
+            if (source == null || count <= 0)
+            {
+                return Enumerable.Empty<T>();
+            }
+
+            Queue<T> queue = new Queue<T>();
+            foreach (T item in source)
+            {
+                queue.Enqueue(item);
+                if (queue.Count > count)
+                {
+                    queue.Dequeue();
+                }
+            }
+
+            return queue.ToArray();
         }
     }
 }

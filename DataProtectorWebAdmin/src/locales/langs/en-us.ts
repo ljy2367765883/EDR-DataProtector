@@ -441,6 +441,9 @@ const local: App.I18n.Schema = {
       onlineAgents: 'Online agents',
       driverConnected: 'Driver connected',
       inventory: 'Agent Inventory',
+      deleteTitle: 'Delete agent',
+      deleteContent: 'Delete agent inventory for {name}? Related queued tasks and network awareness cache for this agent will also be removed.',
+      deleteSuccess: 'Agent inventory deleted.',
       columns: {
         agent: 'Agent',
         online: 'Online',
@@ -551,6 +554,12 @@ const local: App.I18n.Schema = {
       allOnlineAgents: 'All online agents',
       total: 'Total',
       criticalCount: '{count} critical',
+      clearTitle: 'Clear audit log',
+      clearContent: 'This removes the current central audit history. A clear operation record will be kept.',
+      clearSuccess: 'Audit log cleared.',
+      deleteTitle: 'Delete audit event',
+      deleteContent: 'Delete audit event {action} for {target}?',
+      deleteSuccess: 'Audit event deleted.',
       limits: {
         last200: 'Last 200',
         last500: 'Last 500',
@@ -875,6 +884,9 @@ const local: App.I18n.Schema = {
         authorizedReadonly: 'Removable device authorized as read-only.',
         blockedDevice: 'Removable device blocked.',
         authorizationRemoved: 'Removable device authorization reset.',
+        deleteInventoryTitle: 'Delete removable device',
+        deleteInventoryContent: 'Delete removable device inventory and authorization for {code}?',
+        inventoryDeleted: 'Removable device inventory deleted.',
         removableStorage: 'Removable storage',
         volumeCount: '{count} volume(s)'
       },
