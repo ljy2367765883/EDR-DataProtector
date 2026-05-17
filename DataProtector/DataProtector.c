@@ -187,10 +187,13 @@ DataProtectorInstanceTeardownComplete(
     _In_ FLT_INSTANCE_TEARDOWN_FLAGS Flags
     )
 {
-    UNREFERENCED_PARAMETER(FltObjects);
     UNREFERENCED_PARAMETER(Flags);
 
     PAGED_CODE();
+
+    if (FltObjects != NULL) {
+        DpHashProtectForgetVolume(FltObjects->Volume);
+    }
 }
 
 NTSTATUS

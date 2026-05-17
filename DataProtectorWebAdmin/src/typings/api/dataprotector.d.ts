@@ -158,6 +158,7 @@ declare namespace Api {
       protectLsass: boolean;
       protectCredentialFiles: boolean;
       protectRegistryHives: boolean;
+      protectRawExtents: boolean;
       flags: number;
       actor?: string;
     }

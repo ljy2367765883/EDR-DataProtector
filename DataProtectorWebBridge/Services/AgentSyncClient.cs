@@ -400,6 +400,7 @@ namespace DataProtectorWebBridge.Services
                 protectLsass = hashProtectPolicy.protectLsass,
                 protectCredentialFiles = hashProtectPolicy.protectCredentialFiles,
                 protectRegistryHives = hashProtectPolicy.protectRegistryHives,
+                protectRawExtents = hashProtectPolicy.protectRawExtents,
                 actor = "central-agent"
             });
 

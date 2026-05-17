@@ -79,6 +79,11 @@ Abstract:
 #define DP_HASH_REG_ALTITUDE      L"385202.77"
 #define DP_HASH_LSASS_DEDUP_SLOTS 64
 #define DP_HASH_LSASS_DEDUP_WINDOW_100NS (30LL * 1000LL * 10000LL)
+#define DP_HASH_RAW_CACHE_TTL_100NS (5LL * 1000LL * 10000LL)
+#define DP_HASH_RAW_RETRIEVAL_BUFFER_SIZE (64 * 1024)
+#define DP_HASH_RAW_MAX_EXTENTS_PER_VOLUME 8192
+#define DP_HASH_RAW_MAX_VOLUMES 64
+#define DP_HASH_RAW_TARGET_CHARS 128
 
 typedef struct _DP_HASH_PROTECT_DEDUP_ENTRY {
     BOOLEAN Valid;
@@ -92,17 +97,49 @@ typedef struct _DP_HASH_PROTECT_DEDUP_ENTRY {
     ULONGLONG SuppressedCount;
 } DP_HASH_PROTECT_DEDUP_ENTRY, *PDP_HASH_PROTECT_DEDUP_ENTRY;
 
+typedef struct _DP_HASH_RAW_EXTENT_ENTRY {
+    LIST_ENTRY Link;
+    ULONGLONG Offset;
+    ULONGLONG Length;
+    ULONG TargetLengthBytes;
+    WCHAR Target[DP_HASH_RAW_TARGET_CHARS];
+} DP_HASH_RAW_EXTENT_ENTRY, *PDP_HASH_RAW_EXTENT_ENTRY;
+
+typedef struct _DP_HASH_RAW_EXTENT_LIST {
+    LIST_ENTRY Extents;
+    ULONG ExtentCount;
+} DP_HASH_RAW_EXTENT_LIST, *PDP_HASH_RAW_EXTENT_LIST;
+
+typedef struct _DP_HASH_RAW_VOLUME_CACHE {
+    LIST_ENTRY Link;
+    PFLT_VOLUME Volume;
+    LIST_ENTRY Extents;
+    LONG ReferenceCount;
+    ULONG ExtentCount;
+    LARGE_INTEGER LastRefreshTime;
+    NTSTATUS LastRefreshStatus;
+    BOOLEAN Complete;
+} DP_HASH_RAW_VOLUME_CACHE, *PDP_HASH_RAW_VOLUME_CACHE;
+
+typedef struct _DP_HASH_INTERNAL_IO_GUARD {
+    PVOID PreviousTopLevelIrp;
+} DP_HASH_INTERNAL_IO_GUARD, *PDP_HASH_INTERNAL_IO_GUARD;
+
 static PVOID gDpHashProtectObHandle = NULL;
 static LARGE_INTEGER gDpHashProtectRegistryCookie;
 static BOOLEAN gDpHashProtectRegistryRegistered = FALSE;
 static LIST_ENTRY gDpHashProtectEvents;
 static KSPIN_LOCK gDpHashProtectEventLock;
+static LIST_ENTRY gDpHashProtectRawVolumes;
+static EX_PUSH_LOCK gDpHashProtectRawLock;
+static BOOLEAN gDpHashProtectRawLockInitialized = FALSE;
 static volatile LONG gDpHashProtectPolicyFlags = DP_HASH_PROTECT_DEFAULT_FLAGS;
 static BOOLEAN gDpHashProtectInitialized = FALSE;
 static ULONG gDpHashProtectEventCount = 0;
 static ULONGLONG gDpHashProtectEventSequence = 0;
 static ULONGLONG gDpHashProtectDroppedEvents = 0;
 static ULONGLONG gDpHashProtectSuppressedDuplicates = 0;
+static ULONG gDpHashProtectRawVolumeCount = 0;
 static DP_HASH_PROTECT_DEDUP_ENTRY gDpHashProtectDedup[DP_HASH_LSASS_DEDUP_SLOTS];
 
 extern
@@ -136,6 +173,25 @@ DpHashProtectFeatureEnabled(
 
     return FlagOn(flags, DP_HASH_PROTECT_FLAG_ENABLED) &&
            FlagOn(flags, FeatureFlag);
+}
+
+static
+VOID
+DpHashProtectBeginInternalIo(
+    _Out_ PDP_HASH_INTERNAL_IO_GUARD Guard
+    )
+{
+    Guard->PreviousTopLevelIrp = IoGetTopLevelIrp();
+    IoSetTopLevelIrp((PIRP)FSRTL_FSP_TOP_LEVEL_IRP);
+}
+
+static
+VOID
+DpHashProtectEndInternalIo(
+    _In_ PDP_HASH_INTERNAL_IO_GUARD Guard
+    )
+{
+    IoSetTopLevelIrp((PIRP)Guard->PreviousTopLevelIrp);
 }
 
 static
@@ -317,6 +373,154 @@ DpHashProtectFreeEvent(
     if (Event != NULL) {
         ExFreePoolWithTag(Event, DP_TAG_HASH_PROTECT);
     }
+}
+
+static
+VOID
+DpHashProtectClearRawExtentList(
+    _Inout_ PLIST_ENTRY Extents,
+    _Inout_ PULONG ExtentCount
+    )
+{
+    if (Extents == NULL || ExtentCount == NULL) {
+        return;
+    }
+
+    while (!IsListEmpty(Extents)) {
+        PLIST_ENTRY link = RemoveHeadList(Extents);
+        PDP_HASH_RAW_EXTENT_ENTRY extent = CONTAINING_RECORD(link,
+                                                             DP_HASH_RAW_EXTENT_ENTRY,
+                                                             Link);
+        ExFreePoolWithTag(extent, DP_TAG_HASH_PROTECT);
+    }
+
+    *ExtentCount = 0;
+}
+
+static
+VOID
+DpHashProtectClearRawExtentsLocked(
+    _Inout_ PDP_HASH_RAW_VOLUME_CACHE Cache
+    )
+{
+    if (Cache == NULL) {
+        return;
+    }
+
+    DpHashProtectClearRawExtentList(&Cache->Extents, &Cache->ExtentCount);
+    Cache->Complete = FALSE;
+}
+
+static
+VOID
+DpHashProtectMoveRawExtentListLocked(
+    _Inout_ PLIST_ENTRY Destination,
+    _Inout_ PULONG DestinationCount,
+    _Inout_ PLIST_ENTRY Source,
+    _Inout_ PULONG SourceCount
+    )
+{
+    while (!IsListEmpty(Source)) {
+        PLIST_ENTRY link = RemoveHeadList(Source);
+        InsertTailList(Destination, link);
+    }
+
+    *DestinationCount = *SourceCount;
+    *SourceCount = 0;
+}
+
+static
+VOID
+DpHashProtectFreeRawVolumeCache(
+    _In_opt_ PDP_HASH_RAW_VOLUME_CACHE Cache
+    )
+{
+    if (Cache == NULL) {
+        return;
+    }
+
+    DpHashProtectClearRawExtentList(&Cache->Extents, &Cache->ExtentCount);
+    Cache->Complete = FALSE;
+
+    if (Cache->Volume != NULL) {
+        FltObjectDereference(Cache->Volume);
+        Cache->Volume = NULL;
+    }
+
+    ExFreePoolWithTag(Cache, DP_TAG_HASH_PROTECT);
+}
+
+static
+VOID
+DpHashProtectReleaseRawVolumeCache(
+    _In_opt_ PDP_HASH_RAW_VOLUME_CACHE Cache
+    )
+{
+    if (Cache != NULL &&
+        InterlockedDecrement(&Cache->ReferenceCount) == 0) {
+
+        DpHashProtectFreeRawVolumeCache(Cache);
+    }
+}
+
+static
+VOID
+DpHashProtectClearRawVolumes(
+    VOID
+    )
+{
+    if (!gDpHashProtectRawLockInitialized) {
+        return;
+    }
+
+    FltAcquirePushLockExclusive(&gDpHashProtectRawLock);
+
+    while (!IsListEmpty(&gDpHashProtectRawVolumes)) {
+        PLIST_ENTRY link = RemoveHeadList(&gDpHashProtectRawVolumes);
+        PDP_HASH_RAW_VOLUME_CACHE cache = CONTAINING_RECORD(link,
+                                                            DP_HASH_RAW_VOLUME_CACHE,
+                                                            Link);
+        if (gDpHashProtectRawVolumeCount != 0) {
+            gDpHashProtectRawVolumeCount--;
+        }
+
+        DpHashProtectReleaseRawVolumeCache(cache);
+    }
+
+    FltReleasePushLock(&gDpHashProtectRawLock);
+}
+
+VOID
+DpHashProtectForgetVolume(
+    _In_opt_ PFLT_VOLUME Volume
+    )
+{
+    PDP_HASH_RAW_VOLUME_CACHE cache = NULL;
+    PLIST_ENTRY link;
+
+    if (Volume == NULL || !gDpHashProtectRawLockInitialized) {
+        return;
+    }
+
+    FltAcquirePushLockExclusive(&gDpHashProtectRawLock);
+
+    for (link = gDpHashProtectRawVolumes.Flink;
+         link != &gDpHashProtectRawVolumes;
+         link = link->Flink) {
+
+        cache = CONTAINING_RECORD(link, DP_HASH_RAW_VOLUME_CACHE, Link);
+        if (cache->Volume == Volume) {
+            RemoveEntryList(&cache->Link);
+            if (gDpHashProtectRawVolumeCount != 0) {
+                gDpHashProtectRawVolumeCount--;
+            }
+            FltReleasePushLock(&gDpHashProtectRawLock);
+            DpHashProtectReleaseRawVolumeCache(cache);
+            return;
+        }
+    }
+
+    FltReleasePushLock(&gDpHashProtectRawLock);
 }
 
 static
@@ -800,6 +1004,92 @@ DpHashProtectContainsInsensitive(
 }
 
 static
+VOID
+DpHashProtectCopyTargetSuffix(
+    _Out_writes_(DP_HASH_RAW_TARGET_CHARS) PWCHAR Destination,
+    _In_z_ PCWSTR Source
+    )
+{
+    size_t sourceChars = 0;
+    size_t charsToCopy;
+
+    RtlZeroMemory(Destination, DP_HASH_RAW_TARGET_CHARS * sizeof(WCHAR));
+
+    if (Source == NULL) {
+        return;
+    }
+
+    while (sourceChars < DP_HASH_RAW_TARGET_CHARS - 1 &&
+           Source[sourceChars] != L'\0') {
+
+        sourceChars++;
+    }
+
+    charsToCopy = min(sourceChars, (size_t)(DP_HASH_RAW_TARGET_CHARS - 1));
+    if (charsToCopy != 0) {
+        RtlCopyMemory(Destination, Source, charsToCopy * sizeof(WCHAR));
+    }
+    Destination[charsToCopy] = L'\0';
+}
+
+static
+NTSTATUS
+DpHashProtectBuildVolumeFileName(
+    _In_ PCUNICODE_STRING VolumeName,
+    _Out_writes_(BufferChars) PWCHAR Buffer,
+    _In_ ULONG BufferChars,
+    _Out_ PUNICODE_STRING Name,
+    _In_z_ PCWSTR RelativePath
+    )
+{
+    size_t relativeChars = 0;
+    USHORT volumeChars;
+    size_t totalChars;
+
+    RtlZeroMemory(Buffer, BufferChars * sizeof(WCHAR));
+    RtlInitEmptyUnicodeString(Name,
+                              Buffer,
+                              (USHORT)(BufferChars * sizeof(WCHAR)));
+
+    if (VolumeName == NULL ||
+        VolumeName->Buffer == NULL ||
+        VolumeName->Length == 0 ||
+        RelativePath == NULL) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!NT_SUCCESS(RtlStringCchLengthW(RelativePath,
+                                        BufferChars,
+                                        &relativeChars))) {
+
+        return STATUS_NAME_TOO_LONG;
+    }
+
+    volumeChars = VolumeName->Length / sizeof(WCHAR);
+    while (volumeChars != 0 && VolumeName->Buffer[volumeChars - 1] == L'\\') {
+        volumeChars--;
+    }
+
+    totalChars = (size_t)volumeChars + 1 + relativeChars;
+    if (totalChars + 1 > BufferChars ||
+        totalChars * sizeof(WCHAR) > MAXUSHORT) {
+
+        return STATUS_NAME_TOO_LONG;
+    }
+
+    RtlCopyMemory(Buffer, VolumeName->Buffer, volumeChars * sizeof(WCHAR));
+    Buffer[volumeChars] = L'\\';
+    RtlCopyMemory(Buffer + volumeChars + 1,
+                  RelativePath,
+                  relativeChars * sizeof(WCHAR));
+    Buffer[totalChars] = L'\0';
+    Name->Length = (USHORT)(totalChars * sizeof(WCHAR));
+
+    return STATUS_SUCCESS;
+}
+
+static
 BOOLEAN
 DpHashProtectIsCredentialStoreName(
     _In_ PCUNICODE_STRING Name
@@ -891,6 +1181,646 @@ DpHashProtectCreateRequestsDataAccess(
     default:
         return FALSE;
     }
+}
+
+static
+ULONGLONG
+DpHashProtectSaturatingAdd(
+    _In_ ULONGLONG Left,
+    _In_ ULONGLONG Right
+    )
+{
+    if (MAXULONGLONG - Left < Right) {
+        return MAXULONGLONG;
+    }
+
+    return Left + Right;
+}
+
+static
+BOOLEAN
+DpHashProtectRangesOverlap(
+    _In_ ULONGLONG FirstOffset,
+    _In_ ULONGLONG FirstLength,
+    _In_ ULONGLONG SecondOffset,
+    _In_ ULONGLONG SecondLength
+    )
+{
+    ULONGLONG firstEnd;
+    ULONGLONG secondEnd;
+
+    if (FirstLength == 0 || SecondLength == 0) {
+        return FALSE;
+    }
+
+    firstEnd = DpHashProtectSaturatingAdd(FirstOffset, FirstLength);
+    secondEnd = DpHashProtectSaturatingAdd(SecondOffset, SecondLength);
+
+    return FirstOffset < secondEnd && SecondOffset < firstEnd;
+}
+
+static
+BOOLEAN
+DpHashProtectMultiplyUlonglong(
+    _In_ ULONGLONG Left,
+    _In_ ULONGLONG Right,
+    _Out_ PULONGLONG Product
+    )
+{
+    if (Right != 0 && Left > MAXULONGLONG / Right) {
+        return FALSE;
+    }
+
+    *Product = Left * Right;
+    return TRUE;
+}
+
+static
+NTSTATUS
+DpHashProtectQueryClusterSize(
+    _In_ PFLT_INSTANCE Instance,
+    _Out_ PULONGLONG ClusterSize
+    )
+{
+    FILE_FS_SIZE_INFORMATION sizeInfo;
+    IO_STATUS_BLOCK ioStatus;
+    NTSTATUS status;
+
+    *ClusterSize = 0;
+    RtlZeroMemory(&sizeInfo, sizeof(sizeInfo));
+    RtlZeroMemory(&ioStatus, sizeof(ioStatus));
+
+    status = FltQueryVolumeInformation(Instance,
+                                       &ioStatus,
+                                       &sizeInfo,
+                                       sizeof(sizeInfo),
+                                       FileFsSizeInformation);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (sizeInfo.BytesPerSector == 0 ||
+        sizeInfo.SectorsPerAllocationUnit == 0) {
+
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    if (!DpHashProtectMultiplyUlonglong((ULONGLONG)sizeInfo.BytesPerSector,
+                                        (ULONGLONG)sizeInfo.SectorsPerAllocationUnit,
+                                        ClusterSize)) {
+
+        return STATUS_INTEGER_OVERFLOW;
+    }
+
+    if (*ClusterSize == 0) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpHashProtectOpenRelativeFile(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING Name,
+    _Out_ PHANDLE FileHandle,
+    _Outptr_ PFILE_OBJECT *FileObject
+    )
+{
+    OBJECT_ATTRIBUTES objectAttributes;
+    IO_STATUS_BLOCK ioStatus;
+    DP_HASH_INTERNAL_IO_GUARD guard;
+    NTSTATUS status;
+
+    *FileHandle = NULL;
+    *FileObject = NULL;
+
+    InitializeObjectAttributes(&objectAttributes,
+                               (PUNICODE_STRING)Name,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    DpHashProtectBeginInternalIo(&guard);
+
+    status = FltCreateFileEx2(gDataProtectorFilter,
+                              Instance,
+                              FileHandle,
+                              FileObject,
+                              FILE_READ_ATTRIBUTES | FILE_READ_DATA | SYNCHRONIZE,
+                              &objectAttributes,
+                              &ioStatus,
+                              NULL,
+                              FILE_ATTRIBUTE_NORMAL,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              FILE_OPEN,
+                              FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                              NULL,
+                              0,
+                              IO_IGNORE_SHARE_ACCESS_CHECK,
+                              NULL);
+
+    DpHashProtectEndInternalIo(&guard);
+
+    if (!NT_SUCCESS(status)) {
+        *FileHandle = NULL;
+        *FileObject = NULL;
+    }
+
+    return status;
+}
+
+static
+VOID
+DpHashProtectCloseRelativeFile(
+    _In_opt_ HANDLE FileHandle,
+    _In_opt_ PFILE_OBJECT FileObject
+    )
+{
+    if (FileObject != NULL) {
+        ObDereferenceObject(FileObject);
+    }
+
+    if (FileHandle != NULL) {
+        FltClose(FileHandle);
+    }
+}
+
+static
+NTSTATUS
+DpHashProtectAppendRawExtent(
+    _Inout_ PLIST_ENTRY Extents,
+    _Inout_ PULONG ExtentCount,
+    _In_ ULONGLONG Offset,
+    _In_ ULONGLONG Length,
+    _In_z_ PCWSTR TargetSuffix
+    )
+{
+    PDP_HASH_RAW_EXTENT_ENTRY extent;
+    size_t targetChars = 0;
+
+    if (Length == 0) {
+        return STATUS_SUCCESS;
+    }
+
+    if (*ExtentCount >= DP_HASH_RAW_MAX_EXTENTS_PER_VOLUME) {
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    extent = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                   sizeof(DP_HASH_RAW_EXTENT_ENTRY),
+                                   DP_TAG_HASH_PROTECT);
+    if (extent == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(extent, sizeof(*extent));
+    extent->Offset = Offset;
+    extent->Length = Length;
+    DpHashProtectCopyTargetSuffix(extent->Target, TargetSuffix);
+    if (!NT_SUCCESS(RtlStringCchLengthW(extent->Target,
+                                        RTL_NUMBER_OF(extent->Target),
+                                        &targetChars))) {
+        targetChars = 0;
+    }
+    extent->TargetLengthBytes = (ULONG)(targetChars * sizeof(WCHAR));
+
+    InsertTailList(Extents, &extent->Link);
+    (*ExtentCount)++;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpHashProtectAppendFileExtents(
+    _Inout_ PDP_HASH_RAW_EXTENT_LIST ExtentList,
+    _In_ PFLT_INSTANCE Instance,
+    _In_ PCUNICODE_STRING VolumeName,
+    _In_z_ PCWSTR RelativePath,
+    _In_ ULONGLONG ClusterSize
+    )
+{
+    WCHAR nameBuffer[512];
+    UNICODE_STRING fileName;
+    HANDLE fileHandle = NULL;
+    PFILE_OBJECT fileObject = NULL;
+    FILE_STANDARD_INFORMATION standardInfo;
+    PSTARTING_VCN_INPUT_BUFFER inputBuffer;
+    PRETRIEVAL_POINTERS_BUFFER outputBuffer;
+    ULONG outputLength = DP_HASH_RAW_RETRIEVAL_BUFFER_SIZE;
+    LARGE_INTEGER nextStartingVcn;
+    NTSTATUS status;
+    NTSTATUS finalStatus = STATUS_SUCCESS;
+    DP_HASH_INTERNAL_IO_GUARD guard;
+
+    status = DpHashProtectBuildVolumeFileName(VolumeName,
+                                              nameBuffer,
+                                              RTL_NUMBER_OF(nameBuffer),
+                                              &fileName,
+                                              RelativePath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = DpHashProtectOpenRelativeFile(Instance,
+                                           &fileName,
+                                           &fileHandle,
+                                           &fileObject);
+    if (!NT_SUCCESS(status)) {
+        DP_HASH_TRACE("raw extent open skipped status=0x%08X path=%wZ\n",
+                      status,
+                      &fileName);
+        return STATUS_SUCCESS;
+    }
+
+    RtlZeroMemory(&standardInfo, sizeof(standardInfo));
+    status = FltQueryInformationFile(Instance,
+                                     fileObject,
+                                     &standardInfo,
+                                     sizeof(standardInfo),
+                                     FileStandardInformation,
+                                     NULL);
+    if (!NT_SUCCESS(status)) {
+        finalStatus = status;
+        DP_HASH_TRACE("raw extent size query failed status=0x%08X path=%wZ\n",
+                      status,
+                      &fileName);
+        goto Exit;
+    }
+
+    if (standardInfo.EndOfFile.QuadPart <= 0) {
+        goto Exit;
+    }
+
+    inputBuffer = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                        sizeof(STARTING_VCN_INPUT_BUFFER),
+                                        DP_TAG_HASH_PROTECT);
+    outputBuffer = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                         outputLength,
+                                         DP_TAG_HASH_PROTECT);
+    if (inputBuffer == NULL || outputBuffer == NULL) {
+        finalStatus = STATUS_INSUFFICIENT_RESOURCES;
+        goto ExitBuffers;
+    }
+
+    nextStartingVcn.QuadPart = 0;
+    for (;;) {
+        ULONG bytesReturned = 0;
+        ULONG index;
+
+        RtlZeroMemory(inputBuffer, sizeof(*inputBuffer));
+        RtlZeroMemory(outputBuffer, outputLength);
+        inputBuffer->StartingVcn = nextStartingVcn;
+
+        DpHashProtectBeginInternalIo(&guard);
+        status = FltFsControlFile(Instance,
+                                  fileObject,
+                                  FSCTL_GET_RETRIEVAL_POINTERS,
+                                  inputBuffer,
+                                  sizeof(*inputBuffer),
+                                  outputBuffer,
+                                  outputLength,
+                                  &bytesReturned);
+        DpHashProtectEndInternalIo(&guard);
+
+        if (!NT_SUCCESS(status) && status != STATUS_BUFFER_OVERFLOW) {
+            if (status == STATUS_END_OF_FILE || status == STATUS_INVALID_PARAMETER) {
+                status = STATUS_SUCCESS;
+            } else {
+                finalStatus = status;
+                DP_HASH_TRACE("raw extent fsctl failed status=0x%08X path=%wZ startVcn=%I64d\n",
+                              status,
+                              &fileName,
+                              nextStartingVcn.QuadPart);
+            }
+            break;
+        }
+
+        if (outputBuffer->ExtentCount == 0) {
+            break;
+        }
+
+        for (index = 0; index < outputBuffer->ExtentCount; index++) {
+            LONGLONG startVcn;
+            LONGLONG nextVcn;
+            LONGLONG lcn;
+            ULONGLONG clusterCount;
+            ULONGLONG offset;
+            ULONGLONG length;
+
+            startVcn = (index == 0) ?
+                outputBuffer->StartingVcn.QuadPart :
+                outputBuffer->Extents[index - 1].NextVcn.QuadPart;
+            nextVcn = outputBuffer->Extents[index].NextVcn.QuadPart;
+            lcn = outputBuffer->Extents[index].Lcn.QuadPart;
+
+            if (nextVcn <= startVcn || lcn < 0) {
+                continue;
+            }
+
+            clusterCount = (ULONGLONG)(nextVcn - startVcn);
+            if (!DpHashProtectMultiplyUlonglong((ULONGLONG)lcn,
+                                                ClusterSize,
+                                                &offset) ||
+                !DpHashProtectMultiplyUlonglong(clusterCount,
+                                                ClusterSize,
+                                                &length)) {
+
+                finalStatus = STATUS_INTEGER_OVERFLOW;
+                break;
+            }
+
+            status = DpHashProtectAppendRawExtent(&ExtentList->Extents,
+                                                  &ExtentList->ExtentCount,
+                                                  offset,
+                                                  length,
+                                                  RelativePath);
+            if (!NT_SUCCESS(status)) {
+                finalStatus = status;
+                break;
+            }
+        }
+
+        if (!NT_SUCCESS(finalStatus)) {
+            break;
+        }
+
+        nextStartingVcn = outputBuffer->Extents[outputBuffer->ExtentCount - 1].NextVcn;
+        if (status != STATUS_BUFFER_OVERFLOW ||
+            nextStartingVcn.QuadPart <= inputBuffer->StartingVcn.QuadPart) {
+
+            break;
+        }
+    }
+
+ExitBuffers:
+    if (outputBuffer != NULL) {
+        ExFreePoolWithTag(outputBuffer, DP_TAG_HASH_PROTECT);
+    }
+
+    if (inputBuffer != NULL) {
+        ExFreePoolWithTag(inputBuffer, DP_TAG_HASH_PROTECT);
+    }
+
+Exit:
+    DpHashProtectCloseRelativeFile(fileHandle, fileObject);
+
+    return finalStatus == STATUS_BUFFER_OVERFLOW ? STATUS_SUCCESS : finalStatus;
+}
+
+static
+PDP_HASH_RAW_VOLUME_CACHE
+DpHashProtectLookupRawCacheLocked(
+    _In_ PFLT_VOLUME Volume
+    )
+{
+    PLIST_ENTRY link;
+
+    for (link = gDpHashProtectRawVolumes.Flink;
+         link != &gDpHashProtectRawVolumes;
+         link = link->Flink) {
+
+        PDP_HASH_RAW_VOLUME_CACHE cache = CONTAINING_RECORD(link,
+                                                            DP_HASH_RAW_VOLUME_CACHE,
+                                                            Link);
+        if (cache->Volume == Volume) {
+            return cache;
+        }
+    }
+
+    return NULL;
+}
+
+static
+NTSTATUS
+DpHashProtectEnsureRawCache(
+    _In_ PFLT_VOLUME Volume,
+    _Outptr_ PDP_HASH_RAW_VOLUME_CACHE *Cache
+    )
+{
+    PDP_HASH_RAW_VOLUME_CACHE cache;
+    NTSTATUS status;
+
+    *Cache = NULL;
+
+    FltAcquirePushLockExclusive(&gDpHashProtectRawLock);
+
+    cache = DpHashProtectLookupRawCacheLocked(Volume);
+    if (cache != NULL) {
+        InterlockedIncrement(&cache->ReferenceCount);
+        *Cache = cache;
+        FltReleasePushLock(&gDpHashProtectRawLock);
+        return STATUS_SUCCESS;
+    }
+
+    if (gDpHashProtectRawVolumeCount >= DP_HASH_RAW_MAX_VOLUMES) {
+        FltReleasePushLock(&gDpHashProtectRawLock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    cache = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                  sizeof(DP_HASH_RAW_VOLUME_CACHE),
+                                  DP_TAG_HASH_PROTECT);
+    if (cache == NULL) {
+        FltReleasePushLock(&gDpHashProtectRawLock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(cache, sizeof(*cache));
+    InitializeListHead(&cache->Extents);
+    cache->ReferenceCount = 2;
+    cache->Volume = Volume;
+    status = FltObjectReference(Volume);
+    if (!NT_SUCCESS(status)) {
+        cache->Volume = NULL;
+        FltReleasePushLock(&gDpHashProtectRawLock);
+        DpHashProtectFreeRawVolumeCache(cache);
+        return status;
+    }
+
+    InsertTailList(&gDpHashProtectRawVolumes, &cache->Link);
+    gDpHashProtectRawVolumeCount++;
+    *Cache = cache;
+
+    FltReleasePushLock(&gDpHashProtectRawLock);
+    return STATUS_SUCCESS;
+}
+
+static
+BOOLEAN
+DpHashProtectRawCacheNeedsRefresh(
+    _In_ const DP_HASH_RAW_VOLUME_CACHE *Cache,
+    _In_ LONGLONG CurrentTime
+    )
+{
+    if (Cache == NULL || !Cache->Complete) {
+        return TRUE;
+    }
+
+    if (CurrentTime < Cache->LastRefreshTime.QuadPart) {
+        return TRUE;
+    }
+
+    return CurrentTime - Cache->LastRefreshTime.QuadPart > DP_HASH_RAW_CACHE_TTL_100NS;
+}
+
+static
+NTSTATUS
+DpHashProtectRefreshRawCacheIfNeeded(
+    _In_ PFLT_INSTANCE Instance,
+    _Inout_ PDP_HASH_RAW_VOLUME_CACHE Cache
+    )
+{
+    static const PCWSTR SensitiveRelativePaths[] = {
+        L"Windows\\System32\\config\\SAM",
+        L"Windows\\System32\\config\\SECURITY",
+        L"Windows\\System32\\config\\SYSTEM",
+        L"Windows\\System32\\config\\RegBack\\SAM",
+        L"Windows\\System32\\config\\RegBack\\SECURITY",
+        L"Windows\\System32\\config\\RegBack\\SYSTEM",
+        L"Windows\\Repair\\SAM",
+        L"Windows\\Repair\\SECURITY",
+        L"Windows\\Repair\\SYSTEM",
+        L"Windows\\NTDS\\ntds.dit"
+    };
+    LARGE_INTEGER now;
+    WCHAR volumeNameBuffer[512];
+    UNICODE_STRING volumeName;
+    ULONG volumeNameBytesNeeded = 0;
+    ULONGLONG clusterSize = 0;
+    NTSTATUS status;
+    ULONG index;
+
+    KeQuerySystemTimePrecise(&now);
+
+    FltAcquirePushLockShared(&gDpHashProtectRawLock);
+    if (!DpHashProtectRawCacheNeedsRefresh(Cache, now.QuadPart)) {
+        FltReleasePushLock(&gDpHashProtectRawLock);
+        return STATUS_SUCCESS;
+    }
+    FltReleasePushLock(&gDpHashProtectRawLock);
+
+    FltAcquirePushLockExclusive(&gDpHashProtectRawLock);
+    if (!DpHashProtectRawCacheNeedsRefresh(Cache, now.QuadPart)) {
+        FltReleasePushLock(&gDpHashProtectRawLock);
+        return STATUS_SUCCESS;
+    }
+
+    Cache->LastRefreshTime = now;
+    Cache->LastRefreshStatus = STATUS_UNSUCCESSFUL;
+    FltReleasePushLock(&gDpHashProtectRawLock);
+
+    status = DpHashProtectQueryClusterSize(Instance, &clusterSize);
+    if (NT_SUCCESS(status)) {
+        RtlZeroMemory(volumeNameBuffer, sizeof(volumeNameBuffer));
+        RtlInitEmptyUnicodeString(&volumeName,
+                                  volumeNameBuffer,
+                                  sizeof(volumeNameBuffer));
+        status = FltGetVolumeName(Cache->Volume,
+                                  &volumeName,
+                                  &volumeNameBytesNeeded);
+    } else {
+        RtlInitEmptyUnicodeString(&volumeName,
+                                  volumeNameBuffer,
+                                  sizeof(volumeNameBuffer));
+    }
+
+    {
+        DP_HASH_RAW_EXTENT_LIST freshList;
+
+        InitializeListHead(&freshList.Extents);
+        freshList.ExtentCount = 0;
+
+        if (NT_SUCCESS(status)) {
+            for (index = 0; index < RTL_NUMBER_OF(SensitiveRelativePaths); index++) {
+                NTSTATUS pathStatus;
+
+                pathStatus = DpHashProtectAppendFileExtents(&freshList,
+                                                            Instance,
+                                                            &volumeName,
+                                                            SensitiveRelativePaths[index],
+                                                            clusterSize);
+
+                if (!NT_SUCCESS(pathStatus)) {
+                    status = pathStatus;
+                    break;
+                }
+            }
+        }
+
+        FltAcquirePushLockExclusive(&gDpHashProtectRawLock);
+        if (NT_SUCCESS(status)) {
+            DpHashProtectClearRawExtentsLocked(Cache);
+            DpHashProtectMoveRawExtentListLocked(&Cache->Extents,
+                                                 &Cache->ExtentCount,
+                                                 &freshList.Extents,
+                                                 &freshList.ExtentCount);
+        }
+        FltReleasePushLock(&gDpHashProtectRawLock);
+
+        DpHashProtectClearRawExtentList(&freshList.Extents,
+                                        &freshList.ExtentCount);
+    }
+
+    KeQuerySystemTimePrecise(&now);
+    FltAcquirePushLockExclusive(&gDpHashProtectRawLock);
+    Cache->LastRefreshTime = now;
+    Cache->LastRefreshStatus = status;
+    if (NT_SUCCESS(status)) {
+        Cache->Complete = TRUE;
+    }
+    DP_HASH_TRACE("raw extent cache refresh status=0x%08X extents=%lu cluster=%I64u\n",
+                  status,
+                  Cache->ExtentCount,
+                  clusterSize);
+    FltReleasePushLock(&gDpHashProtectRawLock);
+
+    return status;
+}
+
+static
+BOOLEAN
+DpHashProtectFindRawOverlapLocked(
+    _In_ PDP_HASH_RAW_VOLUME_CACHE Cache,
+    _In_ ULONGLONG Offset,
+    _In_ ULONGLONG Length,
+    _Out_ PULONGLONG ExtentOffset,
+    _Out_ PULONGLONG ExtentLength,
+    _Out_writes_(TargetChars) PWCHAR Target,
+    _In_ ULONG TargetChars
+    )
+{
+    PLIST_ENTRY link;
+
+    *ExtentOffset = 0;
+    *ExtentLength = 0;
+    if (Target != NULL && TargetChars != 0) {
+        Target[0] = L'\0';
+    }
+
+    for (link = Cache->Extents.Flink;
+         link != &Cache->Extents;
+         link = link->Flink) {
+
+        PDP_HASH_RAW_EXTENT_ENTRY extent = CONTAINING_RECORD(link,
+                                                             DP_HASH_RAW_EXTENT_ENTRY,
+                                                             Link);
+        if (DpHashProtectRangesOverlap(Offset,
+                                       Length,
+                                       extent->Offset,
+                                       extent->Length)) {
+
+            *ExtentOffset = extent->Offset;
+            *ExtentLength = extent->Length;
+            if (Target != NULL && TargetChars != 0) {
+                DpHashProtectCopyTargetSuffix(Target, extent->Target);
+            }
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 static
@@ -1257,12 +2187,16 @@ DpHashProtectInitialize(
 
     InitializeListHead(&gDpHashProtectEvents);
     KeInitializeSpinLock(&gDpHashProtectEventLock);
+    InitializeListHead(&gDpHashProtectRawVolumes);
+    FltInitializePushLock(&gDpHashProtectRawLock);
+    gDpHashProtectRawLockInitialized = TRUE;
     InterlockedExchange((volatile LONG *)&gDpHashProtectPolicyFlags,
                         (LONG)DP_HASH_PROTECT_DEFAULT_FLAGS);
     gDpHashProtectEventCount = 0;
     gDpHashProtectEventSequence = 0;
     gDpHashProtectDroppedEvents = 0;
     gDpHashProtectSuppressedDuplicates = 0;
+    gDpHashProtectRawVolumeCount = 0;
     RtlZeroMemory(gDpHashProtectDedup, sizeof(gDpHashProtectDedup));
     gDpHashProtectInitialized = TRUE;
 
@@ -1297,6 +2231,11 @@ DpHashProtectUninitialize(
     }
 
     DpHashProtectClearEvents();
+    DpHashProtectClearRawVolumes();
+    if (gDpHashProtectRawLockInitialized) {
+        FltDeletePushLock(&gDpHashProtectRawLock);
+        gDpHashProtectRawLockInitialized = FALSE;
+    }
     gDpHashProtectInitialized = FALSE;
 }
 
@@ -1359,6 +2298,116 @@ DpHashProtectShouldBlockCreate(
     FltReleaseFileNameInformation(nameInfo);
 
     return block;
+}
+
+BOOLEAN
+DpHashProtectShouldBlockRawVolumeRead(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    )
+{
+    PFLT_IO_PARAMETER_BLOCK iopb;
+    PFLT_VOLUME volume;
+    PDP_HASH_RAW_VOLUME_CACHE cache = NULL;
+    LARGE_INTEGER byteOffset;
+    ULONGLONG readOffset;
+    ULONGLONG readLength;
+    ULONGLONG extentOffset;
+    ULONGLONG extentLength;
+    WCHAR targetBuffer[DP_HASH_RAW_TARGET_CHARS];
+    UNICODE_STRING target;
+    NTSTATUS status;
+    BOOLEAN overlap;
+
+    if (Data == NULL ||
+        Data->Iopb == NULL ||
+        Data->Iopb->MajorFunction != IRP_MJ_READ ||
+        !DpHashProtectFeatureEnabled(DP_HASH_PROTECT_FLAG_RAW_EXTENTS) ||
+        Data->RequestorMode == KernelMode ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        FltObjects == NULL ||
+        FltObjects->Instance == NULL ||
+        FltObjects->FileObject == NULL ||
+        FltObjects->Volume == NULL ||
+        !FlagOn(FltObjects->FileObject->Flags, FO_VOLUME_OPEN) ||
+        DpHashProtectIsAllowedCurrentProcess()) {
+
+        return FALSE;
+    }
+
+    iopb = Data->Iopb;
+    if (iopb->Parameters.Read.Length == 0 ||
+        DpShadowIsInternalIo()) {
+
+        return FALSE;
+    }
+
+    byteOffset = iopb->Parameters.Read.ByteOffset;
+    if (byteOffset.QuadPart < 0 ||
+        byteOffset.LowPart == FILE_USE_FILE_POINTER_POSITION) {
+
+        return FALSE;
+    }
+
+    readOffset = (ULONGLONG)byteOffset.QuadPart;
+    readLength = (ULONGLONG)iopb->Parameters.Read.Length;
+    volume = FltObjects->Volume;
+
+    status = DpHashProtectEnsureRawCache(volume, &cache);
+    if (!NT_SUCCESS(status) || cache == NULL) {
+        DP_HASH_TRACE("raw extent cache unavailable status=0x%08X pid=%p\n",
+                      status,
+                      PsGetCurrentProcessId());
+        return FALSE;
+    }
+
+    status = DpHashProtectRefreshRawCacheIfNeeded(FltObjects->Instance, cache);
+    if (!NT_SUCCESS(status)) {
+        DP_HASH_TRACE("raw extent refresh failed status=0x%08X pid=%p offset=%I64u length=%I64u\n",
+                      status,
+                      PsGetCurrentProcessId(),
+                      readOffset,
+                      readLength);
+        DpHashProtectReleaseRawVolumeCache(cache);
+        return FALSE;
+    }
+
+    RtlZeroMemory(targetBuffer, sizeof(targetBuffer));
+
+    FltAcquirePushLockShared(&gDpHashProtectRawLock);
+    overlap = DpHashProtectFindRawOverlapLocked(cache,
+                                                readOffset,
+                                                readLength,
+                                                &extentOffset,
+                                                &extentLength,
+                                                targetBuffer,
+                                                RTL_NUMBER_OF(targetBuffer));
+    FltReleasePushLock(&gDpHashProtectRawLock);
+
+    if (!overlap) {
+        DpHashProtectReleaseRawVolumeCache(cache);
+        return FALSE;
+    }
+
+    RtlInitUnicodeString(&target, targetBuffer);
+    DpHashProtectQueueEvent(DpHashProtectOperationRawExtent,
+                            PsGetCurrentProcessId(),
+                            (ULONG)STATUS_ACCESS_DENIED,
+                            FILE_READ_DATA,
+                            &target,
+                            (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()));
+
+    DP_HASH_TRACE("blocked raw extent read pid=%p offset=%I64u length=%I64u extentOffset=%I64u extentLength=%I64u target=%wZ image=%s\n",
+                  PsGetCurrentProcessId(),
+                  readOffset,
+                  readLength,
+                  extentOffset,
+                  extentLength,
+                  &target,
+                  PsGetProcessImageFileName(PsGetCurrentProcess()));
+
+    DpHashProtectReleaseRawVolumeCache(cache);
+    return TRUE;
 }
 
 NTSTATUS

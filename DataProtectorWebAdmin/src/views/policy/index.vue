@@ -47,7 +47,8 @@ const hashProtectPolicy = reactive<Api.DataProtector.HashProtectPolicy>({
   protectLsass: true,
   protectCredentialFiles: true,
   protectRegistryHives: true,
-  flags: 0x0000000f,
+  protectRawExtents: true,
+  flags: 0x0000001f,
   actor: 'web-admin'
 });
 const formRef = ref<FormInst | null>(null);
@@ -190,7 +191,8 @@ const hashProtectGroups = computed(() => {
   const enabledFeatures = [
     hashProtectPolicy.protectLsass,
     hashProtectPolicy.protectCredentialFiles,
-    hashProtectPolicy.protectRegistryHives
+    hashProtectPolicy.protectRegistryHives,
+    hashProtectPolicy.protectRawExtents
   ].filter(Boolean).length;
 
   return {
@@ -222,6 +224,13 @@ const hashProtectAssets = computed(() => [
     detail: 'Blocks hive save, restore and replace operations against HKLM SAM, SECURITY and SYSTEM.',
     enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectRegistryHives,
     icon: 'mdi:database-lock-outline'
+  },
+  {
+    key: 'raw-extents',
+    title: 'Raw disk sensitive extents',
+    detail: 'Allows raw volume reads except when the byte range overlaps sensitive hive and NTDS file extents.',
+    enabled: hashProtectPolicy.enabled && hashProtectPolicy.protectRawExtents,
+    icon: 'mdi:harddisk'
   }
 ]);
 
@@ -556,6 +565,7 @@ function applyHashProtectPolicy(policy?: Api.DataProtector.HashProtectPolicy) {
   hashProtectPolicy.protectLsass = Boolean(policy.protectLsass);
   hashProtectPolicy.protectCredentialFiles = Boolean(policy.protectCredentialFiles);
   hashProtectPolicy.protectRegistryHives = Boolean(policy.protectRegistryHives);
+  hashProtectPolicy.protectRawExtents = Boolean(policy.protectRawExtents);
   hashProtectPolicy.flags = policy.flags ?? calculateHashProtectFlags();
   hashProtectPolicy.actor = 'web-admin';
 }
@@ -566,6 +576,7 @@ function calculateHashProtectFlags() {
   if (hashProtectPolicy.protectLsass) flags |= 0x00000002;
   if (hashProtectPolicy.protectCredentialFiles) flags |= 0x00000004;
   if (hashProtectPolicy.protectRegistryHives) flags |= 0x00000008;
+  if (hashProtectPolicy.protectRawExtents) flags |= 0x00000010;
   return flags;
 }
 
@@ -578,7 +589,10 @@ function setHashProtectEnabled(value: boolean) {
   syncHashProtectFlags();
 }
 
-function setHashProtectFeature(key: 'protectLsass' | 'protectCredentialFiles' | 'protectRegistryHives', value: boolean) {
+function setHashProtectFeature(
+  key: 'protectLsass' | 'protectCredentialFiles' | 'protectRegistryHives' | 'protectRawExtents',
+  value: boolean
+) {
   hashProtectPolicy[key] = value;
   syncHashProtectFlags();
 }
@@ -822,6 +836,7 @@ async function saveHashProtectPolicy() {
       protectLsass: hashProtectPolicy.protectLsass,
       protectCredentialFiles: hashProtectPolicy.protectCredentialFiles,
       protectRegistryHives: hashProtectPolicy.protectRegistryHives,
+      protectRawExtents: hashProtectPolicy.protectRawExtents,
       actor: 'web-admin'
     });
 
@@ -1085,7 +1100,7 @@ onMounted(refresh);
                   </NSwitch>
                 </div>
 
-                <NGrid :x-gap="12" :y-gap="12" cols="1 m:3">
+                <NGrid :x-gap="12" :y-gap="12" cols="1 m:2 xl:4">
                   <NGi>
                     <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
                       <div class="flex items-center justify-between gap-10px">
@@ -1125,11 +1140,24 @@ onMounted(refresh);
                       <div class="m-t-6px text-12px text-gray-500">Blocks save, restore and replace against credential hives.</div>
                     </div>
                   </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">Raw extents</div>
+                        <NSwitch
+                          :value="hashProtectPolicy.protectRawExtents"
+                          :disabled="!hashProtectPolicy.enabled"
+                          @update:value="value => setHashProtectFeature('protectRawExtents', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">Denies only raw reads that overlap credential file disk ranges.</div>
+                    </div>
+                  </NGi>
                 </NGrid>
 
                 <div class="flex flex-wrap items-center justify-between gap-12px">
                   <NSpace>
-                    <NTag type="info">Features: {{ hashProtectGroups.enabledFeatures }}/3</NTag>
+                    <NTag type="info">Features: {{ hashProtectGroups.enabledFeatures }}/4</NTag>
                     <NTag type="warning">Flags: {{ hashProtectGroups.flags }}</NTag>
                     <NTag :type="hashProtectPolicy.enabled ? 'success' : 'default'">Assets: {{ hashProtectGroups.protectedAssets }}</NTag>
                   </NSpace>
@@ -1144,7 +1172,7 @@ onMounted(refresh);
 
           <NGi span="24 m:16">
             <NCard title="Protected Surfaces" :bordered="false" class="card-wrapper">
-              <NGrid :x-gap="12" :y-gap="12" cols="1 l:3">
+              <NGrid :x-gap="12" :y-gap="12" cols="1 l:2 xl:4">
                 <NGi v-for="asset in hashProtectAssets" :key="asset.key">
                   <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
                     <div class="flex items-start justify-between gap-12px">

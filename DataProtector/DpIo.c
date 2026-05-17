@@ -1935,6 +1935,11 @@ DpPreRead(
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
+    if (DpHashProtectShouldBlockRawVolumeRead(Data, FltObjects)) {
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
     if (!DpCanProcessOperation(Data, FltObjects, length)) {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }

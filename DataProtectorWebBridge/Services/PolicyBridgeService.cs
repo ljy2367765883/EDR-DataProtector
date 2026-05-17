@@ -43,15 +43,18 @@ namespace DataProtectorWebBridge.Services
         private const uint HashOperationLsassHandle = 1;
         private const uint HashOperationCredentialFile = 2;
         private const uint HashOperationRegistryHive = 3;
+        private const uint HashOperationRawExtent = 4;
         private const uint HashProtectFlagEnabled = 0x00000001;
         private const uint HashProtectFlagLsassHandles = 0x00000002;
         private const uint HashProtectFlagCredentialFiles = 0x00000004;
         private const uint HashProtectFlagRegistryHives = 0x00000008;
+        private const uint HashProtectFlagRawExtents = 0x00000010;
         private const uint HashProtectAllowedFlags =
             HashProtectFlagEnabled |
             HashProtectFlagLsassHandles |
             HashProtectFlagCredentialFiles |
-            HashProtectFlagRegistryHives;
+            HashProtectFlagRegistryHives |
+            HashProtectFlagRawExtents;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -1249,6 +1252,7 @@ namespace DataProtectorWebBridge.Services
                 protectLsass = (flags & HashProtectFlagLsassHandles) != 0,
                 protectCredentialFiles = (flags & HashProtectFlagCredentialFiles) != 0,
                 protectRegistryHives = (flags & HashProtectFlagRegistryHives) != 0,
+                protectRawExtents = (flags & HashProtectFlagRawExtents) != 0,
                 flags = flags & HashProtectAllowedFlags
             };
         }
@@ -1265,6 +1269,7 @@ namespace DataProtectorWebBridge.Services
             if (policy.protectLsass) flags |= HashProtectFlagLsassHandles;
             if (policy.protectCredentialFiles) flags |= HashProtectFlagCredentialFiles;
             if (policy.protectRegistryHives) flags |= HashProtectFlagRegistryHives;
+            if (policy.protectRawExtents) flags |= HashProtectFlagRawExtents;
             return flags & HashProtectAllowedFlags;
         }
 
@@ -1282,6 +1287,7 @@ namespace DataProtectorWebBridge.Services
                 protectLsass = source.protectLsass,
                 protectCredentialFiles = source.protectCredentialFiles,
                 protectRegistryHives = source.protectRegistryHives,
+                protectRawExtents = source.protectRawExtents,
                 flags = ToHashProtectFlags(source),
                 actor = source.actor
             };
@@ -1300,6 +1306,7 @@ namespace DataProtectorWebBridge.Services
                 protectLsass = request.protectLsass,
                 protectCredentialFiles = request.protectCredentialFiles,
                 protectRegistryHives = request.protectRegistryHives,
+                protectRawExtents = request.protectRawExtents || request.actor == null,
                 actor = request.actor
             };
 
@@ -1312,11 +1319,12 @@ namespace DataProtectorWebBridge.Services
             HashProtectPolicyDto normalized = CloneHashProtectPolicy(policy);
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "enabled={0};lsass={1};credentialFiles={2};registryHives={3};flags=0x{4:X8}",
+                "enabled={0};lsass={1};credentialFiles={2};registryHives={3};rawExtents={4};flags=0x{5:X8}",
                 normalized.enabled,
                 normalized.protectLsass,
                 normalized.protectCredentialFiles,
                 normalized.protectRegistryHives,
+                normalized.protectRawExtents,
                 normalized.flags);
         }
 
@@ -1495,6 +1503,7 @@ namespace DataProtectorWebBridge.Services
             if (operation == HashOperationLsassHandle) return "lsass-handle";
             if (operation == HashOperationCredentialFile) return "credential-file";
             if (operation == HashOperationRegistryHive) return "registry-hive";
+            if (operation == HashOperationRawExtent) return "raw-extents";
             return "unknown";
         }
 
@@ -1913,6 +1922,7 @@ namespace DataProtectorWebBridge.Services
             public bool protectLsass { get; set; }
             public bool protectCredentialFiles { get; set; }
             public bool protectRegistryHives { get; set; }
+            public bool protectRawExtents { get; set; }
             public string actor { get; set; }
         }
 

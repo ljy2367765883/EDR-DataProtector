@@ -481,7 +481,8 @@ typedef struct _DP_DEVICE_RULE_QUERY_ENTRY {
 typedef enum _DP_HASH_PROTECT_OPERATION {
     DpHashProtectOperationLsassHandle = 1,
     DpHashProtectOperationCredentialFile = 2,
-    DpHashProtectOperationRegistryHive = 3
+    DpHashProtectOperationRegistryHive = 3,
+    DpHashProtectOperationRawExtent = 4
 } DP_HASH_PROTECT_OPERATION;
 
 #define DP_HASH_PROTECT_POLICY_VERSION 1
@@ -489,11 +490,13 @@ typedef enum _DP_HASH_PROTECT_OPERATION {
 #define DP_HASH_PROTECT_FLAG_LSASS_HANDLES    0x00000002
 #define DP_HASH_PROTECT_FLAG_CREDENTIAL_FILES 0x00000004
 #define DP_HASH_PROTECT_FLAG_REGISTRY_HIVES   0x00000008
+#define DP_HASH_PROTECT_FLAG_RAW_EXTENTS      0x00000010
 #define DP_HASH_PROTECT_DEFAULT_FLAGS \
     (DP_HASH_PROTECT_FLAG_ENABLED | \
      DP_HASH_PROTECT_FLAG_LSASS_HANDLES | \
      DP_HASH_PROTECT_FLAG_CREDENTIAL_FILES | \
-     DP_HASH_PROTECT_FLAG_REGISTRY_HIVES)
+     DP_HASH_PROTECT_FLAG_REGISTRY_HIVES | \
+     DP_HASH_PROTECT_FLAG_RAW_EXTENTS)
 #define DP_HASH_PROTECT_ALLOWED_FLAGS DP_HASH_PROTECT_DEFAULT_FLAGS
 
 typedef struct _DP_HASH_PROTECT_POLICY {
@@ -803,6 +806,17 @@ BOOLEAN
 DpHashProtectShouldBlockCreate(
     _In_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+BOOLEAN
+DpHashProtectShouldBlockRawVolumeRead(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects
+    );
+
+VOID
+DpHashProtectForgetVolume(
+    _In_opt_ PFLT_VOLUME Volume
     );
 
 BOOLEAN
