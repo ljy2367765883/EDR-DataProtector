@@ -151,6 +151,15 @@ DpUsbWriteAlignedBuffer(
     );
 
 static
+NTSTATUS
+DpUsbReadAlignedBuffer(
+    _In_ ULONGLONG LogicalOffset,
+    _Out_writes_bytes_(Length) VOID *Buffer,
+    _In_ ULONG Length,
+    _Out_ PULONG_PTR Information
+    );
+
+static
 VOID
 DpUsbReleaseActiveIo(
     VOID
@@ -228,6 +237,8 @@ DpUsbIoctlName(
         return "IOCTL_DPUSB_UNMOUNT_DRIVE";
     case IOCTL_DPUSB_RAW_WRITE_ALIGNED:
         return "IOCTL_DPUSB_RAW_WRITE_ALIGNED";
+    case IOCTL_DPUSB_RAW_READ_ALIGNED:
+        return "IOCTL_DPUSB_RAW_READ_ALIGNED";
     case IOCTL_DISK_GET_LENGTH_INFO:
         return "IOCTL_DISK_GET_LENGTH_INFO";
     case IOCTL_DISK_GET_DRIVE_GEOMETRY:
@@ -2031,6 +2042,144 @@ DpUsbWriteAlignedBuffer(
     return status;
 }
 
+static
+NTSTATUS
+DpUsbReadAlignedBuffer(
+    _In_ ULONGLONG LogicalOffset,
+    _Out_writes_bytes_(Length) VOID *Buffer,
+    _In_ ULONG Length,
+    _Out_ PULONG_PTR Information
+    )
+{
+    ULONGLONG physicalOffset;
+    UCHAR *allocation = NULL;
+    UCHAR *ioBuffer;
+    IO_STATUS_BLOCK ioStatus;
+    LARGE_INTEGER byteOffset;
+    ULONG alignment = DPUSB_SECTOR_BYTES;
+    ULONG allocationLength;
+    NTSTATUS status;
+
+    if (Information != NULL) {
+        *Information = 0;
+    }
+
+    if (Buffer == NULL || Length == 0 || Length > DPUSB_RAW_WRITE_MAX_BYTES) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if ((LogicalOffset % DPUSB_SECTOR_BYTES) != 0 || (Length % DPUSB_SECTOR_BYTES) != 0) {
+        DPUSB_TRACE("RawRead",
+                    "unaligned request logical=%I64u length=%lu sector=%lu\n",
+                    LogicalOffset,
+                    Length,
+                    DPUSB_SECTOR_BYTES);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ExAcquirePushLockShared(&gDpUsbSession.Lock);
+    if (!gDpUsbSession.SessionOpen || gDpUsbSession.BackingHandle == NULL) {
+        status = STATUS_DEVICE_NOT_READY;
+        DPUSB_TRACE("RawRead",
+                    "session unavailable logical=%I64u length=%lu open=%u handle=%p\n",
+                    LogicalOffset,
+                    Length,
+                    gDpUsbSession.SessionOpen,
+                    gDpUsbSession.BackingHandle);
+        ExReleasePushLockShared(&gDpUsbSession.Lock);
+        return status;
+    }
+
+    alignment = DpUsbGetDeviceAlignment(gDpUsbSession.BackingDeviceObject);
+    allocationLength = Length + alignment - 1;
+    allocation = (UCHAR *)ExAllocatePoolWithTag(NonPagedPoolNx,
+                                               allocationLength,
+                                               DPUSB_TAG_IO);
+    if (allocation == NULL) {
+        ExReleasePushLockShared(&gDpUsbSession.Lock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    ioBuffer = (UCHAR *)DpUsbAlignPointer(allocation, alignment);
+    RtlZeroMemory(ioBuffer, Length);
+
+    if (!DpUsbAddUlonglong(LogicalOffset, Length, &physicalOffset) ||
+        (gDpUsbSession.DataLengthBytes != 0 && physicalOffset > gDpUsbSession.DataLengthBytes)) {
+
+        status = STATUS_END_OF_FILE;
+        DPUSB_TRACE("RawRead",
+                    "logical range invalid logical=%I64u length=%lu dataLength=%I64u\n",
+                    LogicalOffset,
+                    Length,
+                    gDpUsbSession.DataLengthBytes);
+        ExReleasePushLockShared(&gDpUsbSession.Lock);
+        RtlSecureZeroMemory(allocation, allocationLength);
+        ExFreePoolWithTag(allocation, DPUSB_TAG_IO);
+        return status;
+    }
+
+    if (!DpUsbAddUlonglong(gDpUsbSession.DataOffsetBytes, LogicalOffset, &physicalOffset)) {
+        status = STATUS_INTEGER_OVERFLOW;
+        ExReleasePushLockShared(&gDpUsbSession.Lock);
+        RtlSecureZeroMemory(allocation, allocationLength);
+        ExFreePoolWithTag(allocation, DPUSB_TAG_IO);
+        return status;
+    }
+
+    RtlZeroMemory(&ioStatus, sizeof(ioStatus));
+    byteOffset.QuadPart = (LONGLONG)physicalOffset;
+    DPUSB_TRACE("RawRead",
+                "aligned zw read begin handle=%p logical=%I64u physical=%I64u length=%lu align=%lu buffer=%p\n",
+                gDpUsbSession.BackingHandle,
+                LogicalOffset,
+                physicalOffset,
+                Length,
+                alignment,
+                ioBuffer);
+    status = ZwReadFile(gDpUsbSession.BackingHandle,
+                        NULL,
+                        NULL,
+                        NULL,
+                        &ioStatus,
+                        ioBuffer,
+                        Length,
+                        &byteOffset,
+                        NULL);
+    if (NT_SUCCESS(status)) {
+        status = ioStatus.Status;
+    }
+    DPUSB_TRACE("RawRead",
+                "aligned zw read end status=0x%08X iosb=0x%08X information=%Iu logical=%I64u physical=%I64u length=%lu\n",
+                status,
+                ioStatus.Status,
+                ioStatus.Information,
+                LogicalOffset,
+                physicalOffset,
+                Length);
+
+    if (NT_SUCCESS(status) && ioStatus.Information != Length) {
+        status = STATUS_UNSUCCESSFUL;
+    }
+
+    if (NT_SUCCESS(status)) {
+        DpUsbCryptBuffer(gDpUsbSession.Key,
+                         gDpUsbSession.KeyLength,
+                         gDpUsbSession.CryptoVersion,
+                         LogicalOffset,
+                         ioBuffer,
+                         Length);
+        RtlCopyMemory(Buffer, ioBuffer, Length);
+        if (Information != NULL) {
+            *Information = Length;
+        }
+    }
+
+    ExReleasePushLockShared(&gDpUsbSession.Lock);
+    RtlSecureZeroMemory(allocation, allocationLength);
+    ExFreePoolWithTag(allocation, DPUSB_TAG_IO);
+    return status;
+}
+
 NTSTATUS
 DpUsbFlushBuffers(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -2424,6 +2573,28 @@ DpUsbDeviceControl(
                                              ((PDPUSB_RAW_WRITE_REQUEST)buffer)->DataLength,
                                              NULL);
             bytesReturned = 0;
+            break;
+
+        case IOCTL_DPUSB_RAW_READ_ALIGNED:
+            if (buffer == NULL ||
+                inputLength < (ULONG)FIELD_OFFSET(DPUSB_RAW_READ_REQUEST, Data) ||
+                outputLength < (ULONG)FIELD_OFFSET(DPUSB_RAW_READ_REQUEST, Data) ||
+                ((PDPUSB_RAW_READ_REQUEST)buffer)->Version != 1 ||
+                ((PDPUSB_RAW_READ_REQUEST)buffer)->DataLength > DPUSB_RAW_WRITE_MAX_BYTES ||
+                outputLength < (ULONG)FIELD_OFFSET(DPUSB_RAW_READ_REQUEST, Data) + ((PDPUSB_RAW_READ_REQUEST)buffer)->DataLength) {
+
+                status = STATUS_INVALID_PARAMETER;
+                bytesReturned = 0;
+                break;
+            }
+
+            status = DpUsbReadAlignedBuffer(((PDPUSB_RAW_READ_REQUEST)buffer)->LogicalOffset,
+                                            ((PDPUSB_RAW_READ_REQUEST)buffer)->Data,
+                                            ((PDPUSB_RAW_READ_REQUEST)buffer)->DataLength,
+                                            NULL);
+            bytesReturned = NT_SUCCESS(status) ?
+                (ULONG)FIELD_OFFSET(DPUSB_RAW_READ_REQUEST, Data) + ((PDPUSB_RAW_READ_REQUEST)buffer)->DataLength :
+                0;
             break;
 
         default:

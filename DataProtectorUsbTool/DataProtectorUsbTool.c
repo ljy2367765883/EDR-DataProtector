@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <strsafe.h>
 #include <wchar.h>
 
@@ -62,6 +63,7 @@
 #define IOCTL_DPUSB_MOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 3, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_UNMOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 4, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_RAW_WRITE_ALIGNED CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 5, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_RAW_READ_ALIGNED CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 6, METHOD_BUFFERED, FILE_READ_ACCESS)
 #ifndef IOCTL_VOLUME_UPDATE_PROPERTIES
 #define IOCTL_VOLUME_UPDATE_PROPERTIES CTL_CODE(IOCTL_VOLUME_BASE, 21, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
@@ -119,6 +121,13 @@ typedef struct _DPUSB_RAW_WRITE_REQUEST {
     ULONGLONG LogicalOffset;
     BYTE Data[1];
 } DPUSB_RAW_WRITE_REQUEST;
+
+typedef struct _DPUSB_RAW_READ_REQUEST {
+    ULONG Version;
+    ULONG DataLength;
+    ULONGLONG LogicalOffset;
+    BYTE Data[1];
+} DPUSB_RAW_READ_REQUEST;
 
 typedef struct _DPUSB_UNLOCK_MANIFEST {
     ULONG Magic;
@@ -2705,6 +2714,108 @@ static BOOL WriteWorkspaceBytes(HANDLE volume,
     return TRUE;
 }
 
+static BOOL ReadWorkspaceBytes(HANDLE volume,
+                               ULONGLONG offset,
+                               void *buffer,
+                               DWORD bytes,
+                               DWORD *win32Error)
+{
+    DPUSB_RAW_READ_REQUEST *request;
+    DWORD requestBytes;
+    DWORD returned = 0;
+    BOOL ok;
+
+    if (volume == INVALID_HANDLE_VALUE || buffer == NULL || bytes == 0) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if ((offset % DPUSB_SECTOR_BYTES) != 0 ||
+        (bytes % DPUSB_SECTOR_BYTES) != 0 ||
+        bytes > DPUSB_RAW_WRITE_MAX_BYTES) {
+
+        AppendLog(L"Private workspace aligned read rejected in user mode. Offset=%I64u bytes=%lu sector=%lu max=%lu",
+                  offset,
+                  bytes,
+                  DPUSB_SECTOR_BYTES,
+                  DPUSB_RAW_WRITE_MAX_BYTES);
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    requestBytes = (DWORD)FIELD_OFFSET(DPUSB_RAW_READ_REQUEST, Data) + bytes;
+    request = (DPUSB_RAW_READ_REQUEST *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, requestBytes);
+    if (request == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_NOT_ENOUGH_MEMORY;
+        }
+        return FALSE;
+    }
+
+    request->Version = 1;
+    request->DataLength = bytes;
+    request->LogicalOffset = offset;
+
+    ok = DeviceIoControl(volume,
+                         IOCTL_DPUSB_RAW_READ_ALIGNED,
+                         request,
+                         requestBytes,
+                         request,
+                         requestBytes,
+                         &returned,
+                         NULL);
+    if (ok && returned >= requestBytes) {
+        CopyMemory(buffer, request->Data, bytes);
+    }
+    SecureZeroMemory(request, requestBytes);
+    LocalFree(request);
+
+    if (!ok || returned < requestBytes) {
+        DWORD error = GetLastError();
+        if (error == ERROR_SUCCESS) {
+            error = ERROR_READ_FAULT;
+        }
+        AppendLog(L"Private workspace aligned kernel read failed. Offset=%I64u bytes=%lu returned=%lu Win32=%lu",
+                  offset,
+                  bytes,
+                  returned,
+                  error);
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL WorkspaceBootSectorLooksFormatted(const BYTE sector[512])
+{
+    if (sector == NULL) {
+        return FALSE;
+    }
+
+    if (sector[510] != 0x55 || sector[511] != 0xAA) {
+        return FALSE;
+    }
+
+    if (memcmp(&sector[82], "FAT32   ", 8) == 0 ||
+        memcmp(&sector[54], "FAT16   ", 8) == 0 ||
+        memcmp(&sector[3], "NTFS    ", 8) == 0 ||
+        memcmp(&sector[3], "EXFAT   ", 8) == 0) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 static BOOL ZeroWorkspaceRange(HANDLE volume,
                                ULONGLONG offset,
                                ULONGLONG bytes,
@@ -3038,43 +3149,9 @@ static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLO
     HANDLE volume = INVALID_HANDLE_VALUE;
     DWORD returned = 0;
     ULONGLONG dataLengthBytes;
+    BYTE bootSector[512];
 
-    if (!ValidateMountedWorkspaceDevice(mount, &error)) {
-        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Private workspace drive validation through %s failed: %s (Win32=%lu). Continuing with direct virtual disk initialization.",
-                  mount != NULL ? mount->Path : L"(null)",
-                  message,
-                  error);
-    }
-
-    for (attempt = 0; attempt < 6; attempt++) {
-        if (QueryWorkspaceFileSystem(mount, fileSystem, sizeof(fileSystem) / sizeof(fileSystem[0]), &error)) {
-            if (_wcsicmp(fileSystem, L"NTFS") == 0 ||
-                _wcsicmp(fileSystem, L"FAT32") == 0 ||
-                _wcsicmp(fileSystem, L"exFAT") == 0) {
-                (VOID)SetVolumeLabelW(mount->Path, DPUSB_PRIVATE_VOLUME_LABEL);
-                if (win32Error != NULL) {
-                    *win32Error = ERROR_SUCCESS;
-                }
-                return TRUE;
-            }
-            break;
-        }
-
-        if (error != ERROR_UNRECOGNIZED_VOLUME &&
-            error != ERROR_NOT_READY &&
-            error != ERROR_INVALID_PARAMETER &&
-            error != ERROR_INVALID_FUNCTION &&
-            error != ERROR_FILE_SYSTEM_LIMITATION) {
-            break;
-        }
-
-        Sleep(500);
-    }
-
-    FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-    AppendLog(L"Private workspace has no mounted file system yet (%s). Initializing encrypted FAT32 container through the virtual disk device.",
-              message);
+    AppendLog(L"Preparing private workspace file system through the driver control path...");
     dataLengthBytes = expectedDataLengthBytes;
     if (dataLengthBytes < (64ull * 1024ull * 1024ull)) {
         FormatErrorMessage(ERROR_DISK_FULL, message, sizeof(message) / sizeof(message[0]));
@@ -3100,17 +3177,28 @@ static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLO
         return FALSE;
     }
 
-    AppendLog(L"Private workspace virtual disk length from unlock metadata: %I64u bytes.", dataLengthBytes);
-    if (!InitializeWorkspaceFat32Container(volume, dataLengthBytes, &error)) {
+    AppendLog(L"Driver control device opened for private workspace file-system preparation.");
+    ZeroMemory(bootSector, sizeof(bootSector));
+    AppendLog(L"Checking private workspace boot sector through the driver control device...");
+    if (ReadWorkspaceBytes(volume, 0, bootSector, sizeof(bootSector), &error) &&
+        WorkspaceBootSectorLooksFormatted(bootSector)) {
+        AppendLog(L"Private workspace already has recognizable file-system metadata.");
+    } else {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Private workspace FAT32 metadata initialization failed: %s (Win32=%lu)",
-                  message,
-                  error);
-        CloseHandle(volume);
-        if (win32Error != NULL) {
-            *win32Error = error;
+        AppendLog(L"Private workspace has no recognizable boot sector yet (%s). Initializing encrypted FAT32 container through the driver control device.",
+                  message);
+        AppendLog(L"Private workspace virtual disk length from unlock metadata: %I64u bytes.", dataLengthBytes);
+        if (!InitializeWorkspaceFat32Container(volume, dataLengthBytes, &error)) {
+            FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+            AppendLog(L"Private workspace FAT32 metadata initialization failed: %s (Win32=%lu)",
+                      message,
+                      error);
+            CloseHandle(volume);
+            if (win32Error != NULL) {
+                *win32Error = error;
+            }
+            return FALSE;
         }
-        return FALSE;
     }
 
     if (!DeviceIoControl(volume, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL)) {
@@ -3129,6 +3217,14 @@ static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLO
             *win32Error = error;
         }
         return FALSE;
+    }
+
+    if (!ValidateMountedWorkspaceDevice(mount, &error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace drive validation through %s failed after refresh: %s (Win32=%lu).",
+                  mount != NULL ? mount->Path : L"(null)",
+                  message,
+                  error);
     }
 
     for (attempt = 0; attempt < 12; attempt++) {
