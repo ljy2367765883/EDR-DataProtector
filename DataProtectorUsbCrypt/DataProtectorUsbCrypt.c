@@ -166,6 +166,22 @@ DpUsbIoctlName(
         return "IOCTL_MOUNTDEV_QUERY_STABLE_GUID";
     case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
         return "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS";
+    case IOCTL_VOLUME_SUPPORTS_ONLINE_OFFLINE:
+        return "IOCTL_VOLUME_SUPPORTS_ONLINE_OFFLINE";
+    case IOCTL_VOLUME_IS_OFFLINE:
+        return "IOCTL_VOLUME_IS_OFFLINE";
+    case IOCTL_VOLUME_IS_IO_CAPABLE:
+        return "IOCTL_VOLUME_IS_IO_CAPABLE";
+    case IOCTL_VOLUME_QUERY_VOLUME_NUMBER:
+        return "IOCTL_VOLUME_QUERY_VOLUME_NUMBER";
+    case IOCTL_VOLUME_IS_PARTITION:
+        return "IOCTL_VOLUME_IS_PARTITION";
+    case IOCTL_VOLUME_IS_DYNAMIC:
+        return "IOCTL_VOLUME_IS_DYNAMIC";
+    case IOCTL_VOLUME_UPDATE_PROPERTIES:
+        return "IOCTL_VOLUME_UPDATE_PROPERTIES";
+    case IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER:
+        return "IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER";
     default:
         return "UNKNOWN_IOCTL";
     }
@@ -697,6 +713,57 @@ DpUsbQueryDeviceNumber(
                 DeviceNumber->DeviceNumber,
                 DeviceNumber->PartitionNumber);
     *BytesReturned = sizeof(*DeviceNumber);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbQueryVolumeNumber(
+    _Out_ PVOLUME_NUMBER VolumeNumber,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    if (VolumeNumber == NULL || BytesReturned == NULL || OutputLength < sizeof(VOLUME_NUMBER)) {
+        if (BytesReturned != NULL) {
+            *BytesReturned = sizeof(VOLUME_NUMBER);
+        }
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(VolumeNumber, sizeof(*VolumeNumber));
+    VolumeNumber->VolumeNumber = 0x44505543;
+    RtlCopyMemory(VolumeNumber->VolumeManagerName, L"DPUSB   ", sizeof(VolumeNumber->VolumeManagerName));
+    *BytesReturned = sizeof(*VolumeNumber);
+    DPUSB_TRACE("Query", "volume number=0x%08X manager=DPUSB\n", VolumeNumber->VolumeNumber);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbQueryMediaSerialNumber(
+    _Out_writes_bytes_(OutputLength) PSTORAGE_MEDIA_SERIAL_NUMBER_DATA SerialNumber,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    static const UCHAR serial[] = "DataProtectorUsbCrypt";
+    ULONG requiredBytes;
+
+    if (SerialNumber == NULL || BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    requiredBytes = (ULONG)FIELD_OFFSET(STORAGE_MEDIA_SERIAL_NUMBER_DATA, SerialNumber) + sizeof(serial) - 1;
+    *BytesReturned = requiredBytes;
+    if (OutputLength < requiredBytes) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(SerialNumber, OutputLength);
+    SerialNumber->SerialNumberLength = sizeof(serial) - 1;
+    RtlCopyMemory(SerialNumber->SerialNumber, serial, sizeof(serial) - 1);
+    DPUSB_TRACE("Query", "media serial bytes=%lu\n", requiredBytes);
     return STATUS_SUCCESS;
 }
 
@@ -1683,8 +1750,26 @@ DpUsbDeviceControl(
     case IOCTL_DISK_UPDATE_PROPERTIES:
     case IOCTL_DISK_MEDIA_REMOVAL:
     case IOCTL_STORAGE_MEDIA_REMOVAL:
+    case IOCTL_VOLUME_SUPPORTS_ONLINE_OFFLINE:
+    case IOCTL_VOLUME_IS_IO_CAPABLE:
+    case IOCTL_VOLUME_UPDATE_PROPERTIES:
         bytesReturned = 0;
         status = STATUS_SUCCESS;
+        break;
+
+    case IOCTL_VOLUME_IS_OFFLINE:
+    case IOCTL_VOLUME_IS_DYNAMIC:
+        bytesReturned = 0;
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+
+    case IOCTL_VOLUME_IS_PARTITION:
+        bytesReturned = 0;
+        status = STATUS_SUCCESS;
+        break;
+
+    case IOCTL_VOLUME_QUERY_VOLUME_NUMBER:
+        status = DpUsbQueryVolumeNumber((PVOLUME_NUMBER)buffer, outputLength, &bytesReturned);
         break;
 
     case IOCTL_DISK_VERIFY:
@@ -1698,6 +1783,10 @@ DpUsbDeviceControl(
 
     case IOCTL_STORAGE_GET_DEVICE_NUMBER:
         status = DpUsbQueryDeviceNumber((PSTORAGE_DEVICE_NUMBER)buffer, outputLength, &bytesReturned);
+        break;
+
+    case IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER:
+        status = DpUsbQueryMediaSerialNumber((PSTORAGE_MEDIA_SERIAL_NUMBER_DATA)buffer, outputLength, &bytesReturned);
         break;
 
     case IOCTL_STORAGE_GET_HOTPLUG_INFO:
@@ -1792,6 +1881,55 @@ DpUsbDeviceControl(
     return status;
 }
 
+NTSTATUS
+DpUsbFileSystemControl(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    PIO_STACK_LOCATION stack;
+    ULONG controlCode;
+    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    controlCode = stack->Parameters.FileSystemControl.FsControlCode;
+
+    DPUSB_TRACE("Fsctl",
+                "enter irp=%p code=0x%08X pid=%p file=%p\n",
+                Irp,
+                controlCode,
+                PsGetCurrentProcessId(),
+                stack->FileObject);
+
+    switch (controlCode) {
+    case FSCTL_LOCK_VOLUME:
+    case FSCTL_UNLOCK_VOLUME:
+    case FSCTL_DISMOUNT_VOLUME:
+    case FSCTL_IS_VOLUME_MOUNTED:
+    case FSCTL_ALLOW_EXTENDED_DASD_IO:
+        status = STATUS_SUCCESS;
+        break;
+
+    default:
+        DPUSB_TRACE("Fsctl",
+                    "unsupported irp=%p code=0x%08X\n",
+                    Irp,
+                    controlCode);
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+    DPUSB_TRACE("Fsctl",
+                "leave irp=%p code=0x%08X status=0x%08X\n",
+                Irp,
+                controlCode,
+                status);
+    DpUsbComplete(Irp, status, 0);
+    return status;
+}
+
 VOID
 DpUsbUnload(
     _In_ PDRIVER_OBJECT DriverObject
@@ -1869,6 +2007,7 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_CLEANUP] = DpUsbCreateClose;
     DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS] = DpUsbFlushBuffers;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DpUsbDeviceControl;
+    DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = DpUsbFileSystemControl;
     DriverObject->MajorFunction[IRP_MJ_READ] = DpUsbReadWrite;
     DriverObject->MajorFunction[IRP_MJ_WRITE] = DpUsbReadWrite;
     DriverObject->DriverUnload = DpUsbUnload;

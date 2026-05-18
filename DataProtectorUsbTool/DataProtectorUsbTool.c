@@ -17,6 +17,8 @@
 #define DPUSB_SERVICE_NAME L"DataProtectorUsbCrypt"
 #define DPUSB_DRIVER_FILE_NAME L"DataProtectorUsbCrypt.sys"
 #define DPUSB_APP_NAME L"DataProtector Secure USB"
+#define DPUSB_PRIVATE_VOLUME_LABEL L"DPUSB-PRIVATE"
+#define DPUSB_VIRTUAL_DEVICE_NUMBER 0x44505543UL
 #define DPUSB_ALGORITHM_RC4 1
 #define DPUSB_UNLOCK_METADATA_MAGIC 0x32535544UL
 #define DPUSB_UNLOCK_METADATA_VERSION 2
@@ -105,7 +107,7 @@ typedef struct _DPUSB_UNLOCK_SECRET {
 
 typedef struct _DPUSB_PRIVATE_MOUNT {
     WCHAR Letter;
-    WCHAR DosName[8];
+    WCHAR DosName[16];
     WCHAR Path[8];
 } DPUSB_PRIVATE_MOUNT;
 
@@ -173,7 +175,31 @@ typedef enum _DPUSB_SERVICE_PATH_MODE {
     DpUsbServicePathWin32 = 1
 } DPUSB_SERVICE_PATH_MODE;
 
+typedef enum _DPUSB_FMIFS_PACKET_TYPE {
+    DpUsbFmifsProgress = 0,
+    DpUsbFmifsDoneWithStructure = 0x0B
+} DPUSB_FMIFS_PACKET_TYPE;
+
+typedef BOOLEAN (__stdcall *DPUSB_FMIFS_CALLBACK)(
+    _In_ DPUSB_FMIFS_PACKET_TYPE PacketType,
+    _In_ ULONG PacketLength,
+    _In_opt_ PVOID PacketData
+    );
+
+typedef VOID (WINAPI *DPUSB_FORMAT_EX)(
+    _In_ PWSTR DriveRoot,
+    _In_ ULONG MediaFlag,
+    _In_ PWSTR FileSystemName,
+    _In_ PWSTR Label,
+    _In_ BOOLEAN QuickFormat,
+    _In_ ULONG ClusterSize,
+    _In_ DPUSB_FMIFS_CALLBACK Callback
+    );
+
 static DPUSB_UI_STATE g_Ui;
+static volatile LONG g_FormatActive = 0;
+static volatile LONG g_FormatCompleted = 0;
+static volatile LONG g_FormatSuccess = 0;
 
 static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, wchar_t *servicePath, DWORD servicePathChars, DWORD *win32Error);
 static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
@@ -181,6 +207,7 @@ static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRE
 static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Error);
 static BOOL IsProcessElevated(void);
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
+static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
 static void UnmountAllPrivateWorkspaces(void);
 static DWORD WINAPI UnlockWorkerThread(LPVOID parameter);
@@ -419,6 +446,14 @@ static int UnlockPassword(int argc, wchar_t **argv)
         SecureZeroMemory(&secret, sizeof(secret));
         SetLastError(error);
         return PrintLastError(L"Mount private workspace");
+    }
+
+    if (!EnsurePrivateWorkspaceNtfs(&mount, &error)) {
+        UnmountPrivateWorkspace(&mount);
+        CloseSessionData(NULL);
+        SecureZeroMemory(&secret, sizeof(secret));
+        SetLastError(error);
+        return PrintLastError(L"Initialize private workspace file system");
     }
 
     SecureZeroMemory(&secret, sizeof(secret));
@@ -1044,11 +1079,48 @@ static BOOL DriveLetterIsAvailable(WCHAR letter)
     return GetDriveTypeW(root) == DRIVE_NO_ROOT_DIR;
 }
 
+static BOOL BuildGlobalDosName(WCHAR letter, wchar_t *dosName, DWORD dosNameChars)
+{
+    if (dosName == NULL || dosNameChars < 12) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    return swprintf_s(dosName, dosNameChars, L"Global\\%c:", letter) > 0;
+}
+
+static BOOL RemoveDosDeviceDefinition(const wchar_t *dosName)
+{
+    BOOL removed = TRUE;
+    DWORD error = ERROR_SUCCESS;
+
+    if (dosName == NULL || dosName[0] == L'\0') {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    while (DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE | DDD_NO_BROADCAST_SYSTEM,
+                            dosName,
+                            DPUSB_NT_DEVICE_NAME)) {
+        removed = TRUE;
+    }
+
+    error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND || error == ERROR_SUCCESS) {
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+
+    SetLastError(error);
+    return removed && error == ERROR_SUCCESS;
+}
+
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
 {
     WCHAR letter;
-    WCHAR dosName[8];
+    WCHAR dosName[16];
     WCHAR path[8];
+    DWORD error = ERROR_SUCCESS;
 
     if (mount == NULL) {
         if (win32Error != NULL) {
@@ -1064,9 +1136,13 @@ static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
             continue;
         }
 
-        swprintf_s(dosName, sizeof(dosName) / sizeof(dosName[0]), L"%c:", letter);
+        if (!BuildGlobalDosName(letter, dosName, sizeof(dosName) / sizeof(dosName[0]))) {
+            error = GetLastError();
+            continue;
+        }
+
         swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
-        DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, dosName, DPUSB_NT_DEVICE_NAME);
+        (VOID)RemoveDosDeviceDefinition(dosName);
         if (DefineDosDeviceW(DDD_RAW_TARGET_PATH, dosName, DPUSB_NT_DEVICE_NAME)) {
             mount->Letter = letter;
             wcsncpy_s(mount->DosName, sizeof(mount->DosName) / sizeof(mount->DosName[0]), dosName, _TRUNCATE);
@@ -1076,10 +1152,12 @@ static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
             }
             return TRUE;
         }
+
+        error = GetLastError();
     }
 
     if (win32Error != NULL) {
-        *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_NO_MORE_ITEMS;
+        *win32Error = error != ERROR_SUCCESS ? error : ERROR_NO_MORE_ITEMS;
     }
     return FALSE;
 }
@@ -1090,26 +1168,294 @@ static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount)
         return;
     }
 
-    DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, mount->DosName, DPUSB_NT_DEVICE_NAME);
+    (VOID)RemoveDosDeviceDefinition(mount->DosName);
 }
 
 static void UnmountAllPrivateWorkspaces(void)
 {
     WCHAR letter;
-    WCHAR dosName[8];
+    WCHAR dosName[16];
+    WCHAR localDosName[8];
     WCHAR target[512];
 
     for (letter = L'A'; letter <= L'Z'; letter++) {
-        swprintf_s(dosName, sizeof(dosName) / sizeof(dosName[0]), L"%c:", letter);
-        ZeroMemory(target, sizeof(target));
-        if (QueryDosDeviceW(dosName, target, sizeof(target) / sizeof(target[0])) == 0) {
+        if (!BuildGlobalDosName(letter, dosName, sizeof(dosName) / sizeof(dosName[0]))) {
             continue;
         }
 
+        ZeroMemory(target, sizeof(target));
+        if (QueryDosDeviceW(dosName, target, sizeof(target) / sizeof(target[0])) == 0) {
+            swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
+            ZeroMemory(target, sizeof(target));
+            if (QueryDosDeviceW(localDosName, target, sizeof(target) / sizeof(target[0])) == 0) {
+                continue;
+            }
+        }
+
         if (_wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
-            DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, dosName, DPUSB_NT_DEVICE_NAME);
+            (VOID)RemoveDosDeviceDefinition(dosName);
+            swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
+            (VOID)RemoveDosDeviceDefinition(localDosName);
         }
     }
+}
+
+static BOOL OpenMountedWorkspaceHandle(const DPUSB_PRIVATE_MOUNT *mount, DWORD access, HANDLE *handle, DWORD *win32Error)
+{
+    WCHAR volumePath[8];
+    HANDLE volume;
+
+    if (mount == NULL || mount->Letter == L'\0' || handle == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    swprintf_s(volumePath, sizeof(volumePath) / sizeof(volumePath[0]), L"\\\\.\\%c:", mount->Letter);
+    volume = CreateFileW(volumePath,
+                         access,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL,
+                         OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL,
+                         NULL);
+    if (volume == INVALID_HANDLE_VALUE) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    *handle = volume;
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL ValidateMountedWorkspaceDevice(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+{
+    HANDLE volume = INVALID_HANDLE_VALUE;
+    STORAGE_DEVICE_NUMBER deviceNumber;
+    DWORD returned = 0;
+
+    if (!OpenMountedWorkspaceHandle(mount, 0, &volume, win32Error)) {
+        return FALSE;
+    }
+
+    ZeroMemory(&deviceNumber, sizeof(deviceNumber));
+    if (!DeviceIoControl(volume,
+                         IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                         NULL,
+                         0,
+                         &deviceNumber,
+                         sizeof(deviceNumber),
+                         &returned,
+                         NULL)) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        CloseHandle(volume);
+        return FALSE;
+    }
+
+    CloseHandle(volume);
+    if (deviceNumber.DeviceNumber != DPUSB_VIRTUAL_DEVICE_NUMBER) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_DATA;
+        }
+        return FALSE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL QueryWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount,
+                                     wchar_t *fileSystem,
+                                     DWORD fileSystemChars,
+                                     DWORD *win32Error)
+{
+    WCHAR label[MAX_PATH + 1];
+    DWORD serialNumber = 0;
+    DWORD maximumComponentLength = 0;
+    DWORD fileSystemFlags = 0;
+
+    if (mount == NULL || fileSystem == NULL || fileSystemChars == 0) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    fileSystem[0] = L'\0';
+    ZeroMemory(label, sizeof(label));
+    if (!GetVolumeInformationW(mount->Path,
+                               label,
+                               sizeof(label) / sizeof(label[0]),
+                               &serialNumber,
+                               &maximumComponentLength,
+                               &fileSystemFlags,
+                               fileSystem,
+                               fileSystemChars)) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOLEAN __stdcall PrivateFormatCallback(DPUSB_FMIFS_PACKET_TYPE packetType,
+                                               ULONG packetLength,
+                                               PVOID packetData)
+{
+    UNREFERENCED_PARAMETER(packetLength);
+
+    if (InterlockedCompareExchange(&g_FormatActive, 0, 0) != 0 &&
+        packetType == DpUsbFmifsDoneWithStructure) {
+
+        BOOLEAN succeeded = FALSE;
+        if (packetData != NULL) {
+            succeeded = *((PBOOLEAN)packetData);
+        }
+
+        InterlockedExchange(&g_FormatSuccess, succeeded ? 1 : 0);
+        InterlockedExchange(&g_FormatCompleted, 1);
+    }
+
+    return TRUE;
+}
+
+static BOOL FormatPrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+{
+    HMODULE module;
+    DPUSB_FORMAT_EX formatEx;
+    DWORD error = ERROR_SUCCESS;
+
+    if (mount == NULL || mount->Path[0] == L'\0') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    module = LoadLibraryW(L"fmifs.dll");
+    if (module == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    formatEx = (DPUSB_FORMAT_EX)GetProcAddress(module, "FormatEx");
+    if (formatEx == NULL) {
+        error = GetLastError();
+        FreeLibrary(module);
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    InterlockedExchange(&g_FormatActive, 1);
+    InterlockedExchange(&g_FormatCompleted, 0);
+    InterlockedExchange(&g_FormatSuccess, 0);
+
+    formatEx((PWSTR)mount->Path,
+             0,
+             L"NTFS",
+             DPUSB_PRIVATE_VOLUME_LABEL,
+             TRUE,
+             512,
+             PrivateFormatCallback);
+
+    InterlockedExchange(&g_FormatActive, 0);
+    FreeLibrary(module);
+
+    if (InterlockedCompareExchange(&g_FormatCompleted, 0, 0) != 0 &&
+        InterlockedCompareExchange(&g_FormatSuccess, 0, 0) == 0) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_WRITE_FAULT;
+        }
+        return FALSE;
+    }
+
+    Sleep(1000);
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+{
+    WCHAR fileSystem[32];
+    DWORD error = ERROR_SUCCESS;
+    DWORD attempt;
+
+    if (!ValidateMountedWorkspaceDevice(mount, &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    for (attempt = 0; attempt < 6; attempt++) {
+        if (QueryWorkspaceFileSystem(mount, fileSystem, sizeof(fileSystem) / sizeof(fileSystem[0]), &error)) {
+            if (_wcsicmp(fileSystem, L"NTFS") == 0) {
+                (VOID)SetVolumeLabelW(mount->Path, DPUSB_PRIVATE_VOLUME_LABEL);
+                if (win32Error != NULL) {
+                    *win32Error = ERROR_SUCCESS;
+                }
+                return TRUE;
+            }
+            break;
+        }
+
+        if (error != ERROR_UNRECOGNIZED_VOLUME &&
+            error != ERROR_NOT_READY &&
+            error != ERROR_INVALID_PARAMETER &&
+            error != ERROR_FILE_SYSTEM_LIMITATION) {
+            break;
+        }
+
+        Sleep(500);
+    }
+
+    AppendLog(L"Private workspace has no NTFS file system yet. Initializing encrypted container...");
+    if (!FormatPrivateWorkspaceNtfs(mount, &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    for (attempt = 0; attempt < 12; attempt++) {
+        if (QueryWorkspaceFileSystem(mount, fileSystem, sizeof(fileSystem) / sizeof(fileSystem[0]), &error) &&
+            _wcsicmp(fileSystem, L"NTFS") == 0) {
+
+            (VOID)SetVolumeLabelW(mount->Path, DPUSB_PRIVATE_VOLUME_LABEL);
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+
+        Sleep(500);
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = error != ERROR_SUCCESS ? error : ERROR_UNRECOGNIZED_VOLUME;
+    }
+    return FALSE;
 }
 
 static DWORD ReadFixedUtf8(const CHAR *source, DWORD sourceBytes, wchar_t *target, DWORD targetChars)
@@ -1735,6 +2081,16 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
     if (!MountPrivateWorkspace(&mount, &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Private workspace mount failed: %s", message);
+        CloseSessionData(NULL);
+        SecureZeroMemory(&secret, sizeof(secret));
+        PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
+        return 0;
+    }
+
+    if (!EnsurePrivateWorkspaceNtfs(&mount, &error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace file system initialization failed: %s", message);
+        UnmountPrivateWorkspace(&mount);
         CloseSessionData(NULL);
         SecureZeroMemory(&secret, sizeof(secret));
         PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
