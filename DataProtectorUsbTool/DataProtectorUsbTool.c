@@ -3,6 +3,7 @@
 #include <winioctl.h>
 #include <bcrypt.h>
 #include <commctrl.h>
+#include <dbt.h>
 #include <setupapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -256,6 +257,7 @@ static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Err
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
 static BOOL EnsurePrivateWorkspaceFileSystem(ULONGLONG expectedDataLengthBytes, DWORD *win32Error);
 static void NotifyWorkspaceDriveArrived(const DPUSB_PRIVATE_MOUNT *mount);
+static void NotifyWorkspaceDriveRemoved(WCHAR letter);
 static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error);
 static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
@@ -2322,6 +2324,7 @@ static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount)
         return;
     }
 
+    NotifyWorkspaceDriveRemoved(mount->Letter);
     RequestKernelDriveUnmount(mount->Letter);
     (VOID)RemoveDosDeviceDefinition(mount->DosName, DPUSB_NT_VOLUME_DEVICE_NAME);
 }
@@ -2349,6 +2352,7 @@ static void UnmountAllPrivateWorkspaces(void)
 
         if (_wcsicmp(target, DPUSB_NT_VOLUME_DEVICE_NAME) == 0 ||
             _wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
+            NotifyWorkspaceDriveRemoved(letter);
             (VOID)RemoveDosDeviceDefinition(dosName, target);
             swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
             (VOID)RemoveDosDeviceDefinition(localDosName, target);
@@ -2482,6 +2486,7 @@ static BOOL FlushDismountPrivateWorkspace(DWORD *win32Error)
             }
 
             if (unmounted) {
+                NotifyWorkspaceDriveRemoved(letter);
                 RequestKernelDriveUnmount(letter);
                 (VOID)RemoveDosDeviceDefinition(dosName, target);
                 swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
@@ -3218,14 +3223,76 @@ static BOOL EnsurePrivateWorkspaceFileSystem(ULONGLONG expectedDataLengthBytes, 
 static void NotifyWorkspaceDriveArrived(const DPUSB_PRIVATE_MOUNT *mount)
 {
     DWORD driveMask;
+    DEV_BROADCAST_VOLUME volume;
+    DWORD recipients = BSM_APPLICATIONS;
 
     if (mount == NULL || mount->Letter < L'A' || mount->Letter > L'Z') {
         return;
     }
 
     driveMask = 1UL << (mount->Letter - L'A');
-    SHChangeNotify(SHCNE_DRIVEADD, SHCNF_DWORD, (LPCVOID)(ULONG_PTR)driveMask, NULL);
+    SHChangeNotify(SHCNE_DRIVEADD, SHCNF_PATHW, mount->Path, NULL);
     SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, mount->Path, NULL);
+
+    ZeroMemory(&volume, sizeof(volume));
+    volume.dbcv_size = sizeof(volume);
+    volume.dbcv_devicetype = DBT_DEVTYP_VOLUME;
+    volume.dbcv_unitmask = driveMask;
+
+    (VOID)BroadcastSystemMessageW(BSF_IGNORECURRENTTASK | BSF_POSTMESSAGE | BSF_FORCEIFHUNG,
+                                  &recipients,
+                                  WM_DEVICECHANGE,
+                                  DBT_DEVNODES_CHANGED,
+                                  0);
+    recipients = BSM_APPLICATIONS;
+    (VOID)BroadcastSystemMessageW(BSF_IGNORECURRENTTASK | BSF_POSTMESSAGE | BSF_FORCEIFHUNG,
+                                  &recipients,
+                                  WM_DEVICECHANGE,
+                                  DBT_DEVICEARRIVAL,
+                                  (LPARAM)&volume);
+    recipients = BSM_APPLICATIONS;
+    (VOID)BroadcastSystemMessageW(BSF_IGNORECURRENTTASK | BSF_POSTMESSAGE | BSF_FORCEIFHUNG,
+                                  &recipients,
+                                  WM_DEVICECHANGE,
+                                  DBT_DEVNODES_CHANGED,
+                                  0);
+}
+
+static void NotifyWorkspaceDriveRemoved(WCHAR letter)
+{
+    WCHAR path[8];
+    DWORD driveMask;
+    DEV_BROADCAST_VOLUME volume;
+    DWORD recipients = BSM_APPLICATIONS;
+
+    if (letter >= L'a' && letter <= L'z') {
+        letter = (WCHAR)(letter - L'a' + L'A');
+    }
+    if (letter < L'A' || letter > L'Z') {
+        return;
+    }
+
+    swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
+    driveMask = 1UL << (letter - L'A');
+
+    SHChangeNotify(SHCNE_DRIVEREMOVED, SHCNF_PATHW, path, NULL);
+
+    ZeroMemory(&volume, sizeof(volume));
+    volume.dbcv_size = sizeof(volume);
+    volume.dbcv_devicetype = DBT_DEVTYP_VOLUME;
+    volume.dbcv_unitmask = driveMask;
+
+    (VOID)BroadcastSystemMessageW(BSF_IGNORECURRENTTASK | BSF_POSTMESSAGE | BSF_FORCEIFHUNG,
+                                  &recipients,
+                                  WM_DEVICECHANGE,
+                                  DBT_DEVNODES_CHANGED,
+                                  0);
+    recipients = BSM_APPLICATIONS;
+    (VOID)BroadcastSystemMessageW(BSF_IGNORECURRENTTASK | BSF_POSTMESSAGE | BSF_FORCEIFHUNG,
+                                  &recipients,
+                                  WM_DEVICECHANGE,
+                                  DBT_DEVICEREMOVECOMPLETE,
+                                  (LPARAM)&volume);
 }
 
 static DWORD ReadFixedUtf8(const CHAR *source, DWORD sourceBytes, wchar_t *target, DWORD targetChars)
