@@ -18,6 +18,13 @@ static PDEVICE_OBJECT gDpUsbDeviceObject = NULL;
 static UNICODE_STRING gDpUsbDosName;
 static DPUSB_SESSION_STATE gDpUsbSession;
 
+#if DPUSB_TRACE_ENABLED
+#define DPUSB_TRACE(_area, _format, ...) \
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "DataProtectorUsbCrypt77[" _area "] " _format, __VA_ARGS__)
+#else
+#define DPUSB_TRACE(_area, _format, ...) ((void)0)
+#endif
+
 typedef struct _DPUSB_SESSION_SNAPSHOT {
     BOOLEAN SessionOpen;
     ULONG Algorithm;
@@ -29,6 +36,96 @@ typedef struct _DPUSB_SESSION_SNAPSHOT {
 } DPUSB_SESSION_SNAPSHOT, *PDPUSB_SESSION_SNAPSHOT;
 
 static
+PCSTR
+DpUsbMajorName(
+    _In_ UCHAR MajorFunction
+    )
+{
+    switch (MajorFunction) {
+    case IRP_MJ_CREATE:
+        return "CREATE";
+    case IRP_MJ_CLOSE:
+        return "CLOSE";
+    case IRP_MJ_CLEANUP:
+        return "CLEANUP";
+    case IRP_MJ_READ:
+        return "READ";
+    case IRP_MJ_WRITE:
+        return "WRITE";
+    case IRP_MJ_FLUSH_BUFFERS:
+        return "FLUSH";
+    case IRP_MJ_DEVICE_CONTROL:
+        return "DEVICE_CONTROL";
+    case IRP_MJ_QUERY_INFORMATION:
+        return "QUERY_INFORMATION";
+    case IRP_MJ_SET_INFORMATION:
+        return "SET_INFORMATION";
+    case IRP_MJ_DIRECTORY_CONTROL:
+        return "DIRECTORY_CONTROL";
+    case IRP_MJ_FILE_SYSTEM_CONTROL:
+        return "FILE_SYSTEM_CONTROL";
+    case IRP_MJ_PNP:
+        return "PNP";
+    case IRP_MJ_POWER:
+        return "POWER";
+    default:
+        return "OTHER";
+    }
+}
+
+static
+PCSTR
+DpUsbIoctlName(
+    _In_ ULONG ControlCode
+    )
+{
+    switch (ControlCode) {
+    case IOCTL_DPUSB_QUERY_STATUS:
+        return "IOCTL_DPUSB_QUERY_STATUS";
+    case IOCTL_DPUSB_OPEN_SESSION:
+        return "IOCTL_DPUSB_OPEN_SESSION";
+    case IOCTL_DPUSB_CLOSE_SESSION:
+        return "IOCTL_DPUSB_CLOSE_SESSION";
+    case IOCTL_DISK_GET_LENGTH_INFO:
+        return "IOCTL_DISK_GET_LENGTH_INFO";
+    case IOCTL_DISK_GET_DRIVE_GEOMETRY:
+        return "IOCTL_DISK_GET_DRIVE_GEOMETRY";
+    case IOCTL_DISK_GET_PARTITION_INFO_EX:
+        return "IOCTL_DISK_GET_PARTITION_INFO_EX";
+    case IOCTL_DISK_GET_MEDIA_TYPES:
+        return "IOCTL_DISK_GET_MEDIA_TYPES";
+    case IOCTL_DISK_CHECK_VERIFY:
+        return "IOCTL_DISK_CHECK_VERIFY";
+    case IOCTL_STORAGE_CHECK_VERIFY:
+        return "IOCTL_STORAGE_CHECK_VERIFY";
+    case IOCTL_STORAGE_CHECK_VERIFY2:
+        return "IOCTL_STORAGE_CHECK_VERIFY2";
+    case IOCTL_DISK_UPDATE_PROPERTIES:
+        return "IOCTL_DISK_UPDATE_PROPERTIES";
+    case IOCTL_DISK_MEDIA_REMOVAL:
+        return "IOCTL_DISK_MEDIA_REMOVAL";
+    case IOCTL_STORAGE_MEDIA_REMOVAL:
+        return "IOCTL_STORAGE_MEDIA_REMOVAL";
+    case IOCTL_DISK_VERIFY:
+        return "IOCTL_DISK_VERIFY";
+    case IOCTL_DISK_IS_WRITABLE:
+        return "IOCTL_DISK_IS_WRITABLE";
+    case IOCTL_STORAGE_GET_DEVICE_NUMBER:
+        return "IOCTL_STORAGE_GET_DEVICE_NUMBER";
+    case IOCTL_STORAGE_GET_HOTPLUG_INFO:
+        return "IOCTL_STORAGE_GET_HOTPLUG_INFO";
+    case IOCTL_DISK_GET_DRIVE_LAYOUT_EX:
+        return "IOCTL_DISK_GET_DRIVE_LAYOUT_EX";
+    case IOCTL_STORAGE_GET_MEDIA_TYPES_EX:
+        return "IOCTL_STORAGE_GET_MEDIA_TYPES_EX";
+    case IOCTL_STORAGE_QUERY_PROPERTY:
+        return "IOCTL_STORAGE_QUERY_PROPERTY";
+    default:
+        return "UNKNOWN_IOCTL";
+    }
+}
+
+static
 VOID
 DpUsbComplete(
     _In_ PIRP Irp,
@@ -36,6 +133,17 @@ DpUsbComplete(
     _In_ ULONG_PTR Information
     )
 {
+    PIO_STACK_LOCATION stack;
+
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    DPUSB_TRACE("Complete",
+                "irp=%p major=%s status=0x%08X information=%Iu pid=%p\n",
+                Irp,
+                DpUsbMajorName(stack->MajorFunction),
+                Status,
+                Information,
+                PsGetCurrentProcessId());
+
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = Information;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -86,6 +194,15 @@ DpUsbOpenSession(
         Request->ToolAreaBytes != DPUSB_MIN_TOOL_BYTES ||
         Request->DataOffsetBytes < DPUSB_DATA_OFFSET_BYTES ||
         Request->PhysicalDrivePath[0] == L'\0') {
+        DPUSB_TRACE("Session",
+                    "open invalid request=%p version=%lu algorithm=%lu keyLength=%lu tool=%I64u dataOffset=%I64u pathFirst=0x%04X\n",
+                    Request,
+                    Request != NULL ? Request->Version : 0,
+                    Request != NULL ? Request->Algorithm : 0,
+                    Request != NULL ? Request->KeyLength : 0,
+                    Request != NULL ? Request->ToolAreaBytes : 0,
+                    Request != NULL ? Request->DataOffsetBytes : 0,
+                    Request != NULL ? Request->PhysicalDrivePath[0] : 0);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -93,8 +210,21 @@ DpUsbOpenSession(
                                         normalizedPath,
                                         RTL_NUMBER_OF(normalizedPath));
     if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("Session",
+                    "normalize failed status=0x%08X path=%ws\n",
+                    status,
+                    Request->PhysicalDrivePath);
         return status;
     }
+
+    DPUSB_TRACE("Session",
+                "open begin deviceId=%ws physical=%ws normalized=%ws dataOffset=%I64u dataLength=%I64u keyLength=%lu\n",
+                Request->DeviceId,
+                Request->PhysicalDrivePath,
+                normalizedPath,
+                Request->DataOffsetBytes,
+                Request->DataLengthBytes,
+                Request->KeyLength);
 
     ExAcquirePushLockExclusive(&gDpUsbSession.Lock);
     gDpUsbSession.SessionOpen = TRUE;
@@ -112,6 +242,7 @@ DpUsbOpenSession(
                       Request->DeviceId);
     ExReleasePushLockExclusive(&gDpUsbSession.Lock);
 
+    DPUSB_TRACE("Session", "open complete deviceId=%ws\n", Request->DeviceId);
     return STATUS_SUCCESS;
 }
 
@@ -121,6 +252,7 @@ DpUsbCloseSession(
     VOID
     )
 {
+    DPUSB_TRACE("Session", "close begin\n");
     ExAcquirePushLockExclusive(&gDpUsbSession.Lock);
     RtlSecureZeroMemory(gDpUsbSession.Key, sizeof(gDpUsbSession.Key));
     gDpUsbSession.SessionOpen = FALSE;
@@ -132,6 +264,7 @@ DpUsbCloseSession(
     RtlZeroMemory(gDpUsbSession.PhysicalDrivePath, sizeof(gDpUsbSession.PhysicalDrivePath));
     RtlZeroMemory(gDpUsbSession.DeviceId, sizeof(gDpUsbSession.DeviceId));
     ExReleasePushLockExclusive(&gDpUsbSession.Lock);
+    DPUSB_TRACE("Session", "close complete\n");
 }
 
 static
@@ -162,6 +295,14 @@ DpUsbQueryStatus(
                       RTL_NUMBER_OF(Status->DeviceId),
                       gDpUsbSession.DeviceId);
     ExReleasePushLockShared(&gDpUsbSession.Lock);
+
+    DPUSB_TRACE("Query",
+                "status session=%u dataOffset=%I64u dataLength=%I64u physical=%ws deviceId=%ws\n",
+                Status->SessionOpen,
+                Status->DataOffsetBytes,
+                Status->DataLengthBytes,
+                Status->PhysicalDrivePath,
+                Status->DeviceId);
 
     *BytesReturned = sizeof(*Status);
     return STATUS_SUCCESS;
@@ -201,6 +342,7 @@ DpUsbQueryDiskLength(
     DpUsbQueryLengthValue(&lengthBytes);
     Length->Length.QuadPart = (LONGLONG)lengthBytes;
 
+    DPUSB_TRACE("Query", "length bytes=%I64u\n", lengthBytes);
     *BytesReturned = sizeof(*Length);
     return STATUS_SUCCESS;
 }
@@ -250,6 +392,13 @@ DpUsbQueryDriveGeometry(
     DpUsbQueryLengthValue(&lengthBytes);
     DpUsbBuildGeometry(lengthBytes, Geometry);
 
+    DPUSB_TRACE("Query",
+                "geometry length=%I64u cylinders=%I64d tracks=%lu sectors=%lu bytesPerSector=%lu\n",
+                lengthBytes,
+                Geometry->Cylinders.QuadPart,
+                Geometry->TracksPerCylinder,
+                Geometry->SectorsPerTrack,
+                Geometry->BytesPerSector);
     *BytesReturned = sizeof(*Geometry);
     return STATUS_SUCCESS;
 }
@@ -295,6 +444,7 @@ DpUsbQueryPartitionInfo(
     DpUsbQueryLengthValue(&lengthBytes);
     DpUsbBuildPartitionInfo(lengthBytes, Partition);
 
+    DPUSB_TRACE("Query", "partition length=%I64u number=%lu\n", lengthBytes, Partition->PartitionNumber);
     *BytesReturned = sizeof(*Partition);
     return STATUS_SUCCESS;
 }
@@ -340,6 +490,11 @@ DpUsbQueryDeviceNumber(
     DeviceNumber->DeviceType = FILE_DEVICE_DISK;
     DeviceNumber->DeviceNumber = 0x44505543;
     DeviceNumber->PartitionNumber = 1;
+    DPUSB_TRACE("Query",
+                "device number type=%lu number=0x%08X partition=%lu\n",
+                DeviceNumber->DeviceType,
+                DeviceNumber->DeviceNumber,
+                DeviceNumber->PartitionNumber);
     *BytesReturned = sizeof(*DeviceNumber);
     return STATUS_SUCCESS;
 }
@@ -362,6 +517,7 @@ DpUsbQueryHotplugInfo(
     HotplugInfo->MediaHotplug = TRUE;
     HotplugInfo->DeviceHotplug = TRUE;
     HotplugInfo->WriteCacheEnableOverride = FALSE;
+    DPUSB_TRACE("Query", "hotplug mediaRemovable=%u mediaHotplug=%u deviceHotplug=%u\n", TRUE, TRUE, TRUE);
     *BytesReturned = sizeof(*HotplugInfo);
     return STATUS_SUCCESS;
 }
@@ -389,6 +545,7 @@ DpUsbQueryDriveLayout(
     Layout->PartitionCount = 1;
     Layout->Mbr.Signature = 0x44505543;
     DpUsbBuildPartitionInfo(lengthBytes, &Layout->PartitionEntry[0]);
+    DPUSB_TRACE("Query", "layout partitions=%lu length=%I64u\n", Layout->PartitionCount, lengthBytes);
     *BytesReturned = (ULONG)FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) + sizeof(PARTITION_INFORMATION_EX);
     return STATUS_SUCCESS;
 }
@@ -467,6 +624,7 @@ DpUsbQueryStorageProperty(
         descriptor->CommandQueueing = FALSE;
         descriptor->BusType = BusTypeVirtual;
         descriptor->RawPropertiesLength = 0;
+        DPUSB_TRACE("Query", "storage property device descriptor output=%lu\n", OutputLength);
         *BytesReturned = sizeof(STORAGE_DEVICE_DESCRIPTOR);
         return STATUS_SUCCESS;
     }
@@ -483,10 +641,17 @@ DpUsbQueryStorageProperty(
         descriptor->Version = sizeof(*descriptor);
         descriptor->Size = sizeof(*descriptor);
         descriptor->IncursSeekPenalty = FALSE;
+        DPUSB_TRACE("Query", "storage property seek penalty output=%lu\n", OutputLength);
         *BytesReturned = sizeof(*descriptor);
         return STATUS_SUCCESS;
     }
 
+    DPUSB_TRACE("Query",
+                "storage property unsupported id=%lu type=%lu input=%lu output=%lu\n",
+                query->PropertyId,
+                query->QueryType,
+                InputLength,
+                OutputLength);
     return STATUS_INVALID_DEVICE_REQUEST;
 }
 
@@ -496,7 +661,16 @@ DpUsbCreateClose(
     _Inout_ PIRP Irp
     )
 {
+    PIO_STACK_LOCATION stack;
+
     UNREFERENCED_PARAMETER(DeviceObject);
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    DPUSB_TRACE("Dispatch",
+                "enter irp=%p major=%s pid=%p file=%p\n",
+                Irp,
+                DpUsbMajorName(stack->MajorFunction),
+                PsGetCurrentProcessId(),
+                stack->FileObject);
     DpUsbComplete(Irp, STATUS_SUCCESS, 0);
     return STATUS_SUCCESS;
 }
@@ -507,7 +681,18 @@ DpUsbUnsupported(
     _Inout_ PIRP Irp
     )
 {
+    PIO_STACK_LOCATION stack;
+
     UNREFERENCED_PARAMETER(DeviceObject);
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    DPUSB_TRACE("Unsupported",
+                "irp=%p major=0x%02X(%s) minor=0x%02X pid=%p file=%p\n",
+                Irp,
+                stack->MajorFunction,
+                DpUsbMajorName(stack->MajorFunction),
+                stack->MinorFunction,
+                PsGetCurrentProcessId(),
+                stack->FileObject);
     DpUsbComplete(Irp, STATUS_NOT_SUPPORTED, 0);
     return STATUS_NOT_SUPPORTED;
 }
@@ -546,6 +731,12 @@ DpUsbCaptureSession(
         gDpUsbSession.KeyLength > DPUSB_MAX_KEY_BYTES ||
         gDpUsbSession.PhysicalDrivePath[0] == L'\0') {
 
+        DPUSB_TRACE("Session",
+                    "capture failed open=%u algorithm=%lu keyLength=%lu pathFirst=0x%04X\n",
+                    gDpUsbSession.SessionOpen,
+                    gDpUsbSession.Algorithm,
+                    gDpUsbSession.KeyLength,
+                    gDpUsbSession.PhysicalDrivePath[0]);
         ExReleasePushLockShared(&gDpUsbSession.Lock);
         return STATUS_MEDIA_WRITE_PROTECTED;
     }
@@ -561,6 +752,12 @@ DpUsbCaptureSession(
                       gDpUsbSession.PhysicalDrivePath);
     ExReleasePushLockShared(&gDpUsbSession.Lock);
 
+    DPUSB_TRACE("Session",
+                "capture ok physical=%ws dataOffset=%I64u dataLength=%I64u keyLength=%lu\n",
+                Snapshot->PhysicalDrivePath,
+                Snapshot->DataOffsetBytes,
+                Snapshot->DataLengthBytes,
+                Snapshot->KeyLength);
     return STATUS_SUCCESS;
 }
 
@@ -587,17 +784,32 @@ DpUsbOpenBackingDisk(
                                NULL,
                                NULL);
 
-    return ZwCreateFile(DiskHandle,
-                        DesiredAccess | SYNCHRONIZE,
-                        &objectAttributes,
-                        &ioStatus,
-                        NULL,
-                        FILE_ATTRIBUTE_NORMAL,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        FILE_OPEN,
-                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
-                        NULL,
-                        0);
+    DPUSB_TRACE("Backing",
+                "open begin desired=0x%08X path=%ws\n",
+                DesiredAccess,
+                Snapshot->PhysicalDrivePath);
+
+    {
+        NTSTATUS status;
+        status = ZwCreateFile(DiskHandle,
+                              DesiredAccess | SYNCHRONIZE,
+                              &objectAttributes,
+                              &ioStatus,
+                              NULL,
+                              FILE_ATTRIBUTE_NORMAL,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              FILE_OPEN,
+                              FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+                              NULL,
+                              0);
+        DPUSB_TRACE("Backing",
+                    "open end status=0x%08X information=%Iu handle=%p path=%ws\n",
+                    status,
+                    ioStatus.Information,
+                    NT_SUCCESS(status) ? *DiskHandle : NULL,
+                    Snapshot->PhysicalDrivePath);
+        return status;
+    }
 }
 
 static
@@ -616,17 +828,33 @@ DpUsbValidateRange(
     }
 
     if (!DpUsbAddUlonglong(LogicalOffset, Length, &logicalEnd)) {
+        DPUSB_TRACE("Range", "overflow logical=%I64u length=%lu\n", LogicalOffset, Length);
         return STATUS_INTEGER_OVERFLOW;
     }
 
     if (Snapshot->DataLengthBytes != 0 && logicalEnd > Snapshot->DataLengthBytes) {
+        DPUSB_TRACE("Range",
+                    "eof logical=%I64u end=%I64u length=%lu dataLength=%I64u\n",
+                    LogicalOffset,
+                    logicalEnd,
+                    Length,
+                    Snapshot->DataLengthBytes);
         return STATUS_END_OF_FILE;
     }
 
     if (!DpUsbAddUlonglong(Snapshot->DataOffsetBytes, LogicalOffset, PhysicalOffset)) {
+        DPUSB_TRACE("Range",
+                    "physical overflow dataOffset=%I64u logical=%I64u\n",
+                    Snapshot->DataOffsetBytes,
+                    LogicalOffset);
         return STATUS_INTEGER_OVERFLOW;
     }
 
+    DPUSB_TRACE("Range",
+                "mapped logical=%I64u length=%lu physical=%I64u\n",
+                LogicalOffset,
+                Length,
+                *PhysicalOffset);
     return STATUS_SUCCESS;
 }
 
@@ -638,6 +866,7 @@ DpUsbFlushBuffers(
 {
     UNREFERENCED_PARAMETER(DeviceObject);
 
+    DPUSB_TRACE("Dispatch", "flush irp=%p pid=%p\n", Irp, PsGetCurrentProcessId());
     DpUsbComplete(Irp, STATUS_SUCCESS, 0);
     return STATUS_SUCCESS;
 }
@@ -671,13 +900,38 @@ DpUsbReadWrite(
         stack->Parameters.Write.ByteOffset.QuadPart :
         stack->Parameters.Read.ByteOffset.QuadPart);
 
+    DPUSB_TRACE("ReadWrite",
+                "enter irp=%p op=%s length=%lu logical=%I64u mdl=%p flags=0x%08X pid=%p\n",
+                Irp,
+                isWrite ? "WRITE" : "READ",
+                length,
+                logicalOffset,
+                Irp->MdlAddress,
+                Irp->Flags,
+                PsGetCurrentProcessId());
+
     if (length == 0) {
+        DPUSB_TRACE("ReadWrite", "zero length irp=%p op=%s\n", Irp, isWrite ? "WRITE" : "READ");
         DpUsbComplete(Irp, STATUS_SUCCESS, 0);
         return STATUS_SUCCESS;
     }
 
+    if (Irp->MdlAddress == NULL) {
+        DPUSB_TRACE("ReadWrite",
+                    "missing mdl irp=%p op=%s length=%lu flags=0x%08X systemBuffer=%p userBuffer=%p\n",
+                    Irp,
+                    isWrite ? "WRITE" : "READ",
+                    length,
+                    Irp->Flags,
+                    Irp->AssociatedIrp.SystemBuffer,
+                    Irp->UserBuffer);
+        DpUsbComplete(Irp, STATUS_INVALID_PARAMETER, 0);
+        return STATUS_INVALID_PARAMETER;
+    }
+
     status = DpUsbCaptureSession(&snapshot);
     if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("ReadWrite", "capture failed irp=%p status=0x%08X\n", Irp, status);
         DpUsbComplete(Irp, status, 0);
         return status;
     }
@@ -687,6 +941,7 @@ DpUsbReadWrite(
                                 length,
                                 &physicalOffset);
     if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("ReadWrite", "range failed irp=%p status=0x%08X\n", Irp, status);
         RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
         DpUsbComplete(Irp, status, 0);
         return status;
@@ -694,6 +949,7 @@ DpUsbReadWrite(
 
     systemAddress = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
     if (systemAddress == NULL) {
+        DPUSB_TRACE("ReadWrite", "mdl mapping failed irp=%p mdl=%p\n", Irp, Irp->MdlAddress);
         RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
         DpUsbComplete(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -701,6 +957,7 @@ DpUsbReadWrite(
 
     ioBuffer = ExAllocatePoolWithTag(NonPagedPoolNx, length, DPUSB_TAG_IO);
     if (ioBuffer == NULL) {
+        DPUSB_TRACE("ReadWrite", "alloc failed irp=%p length=%lu\n", Irp, length);
         RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
         DpUsbComplete(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -721,11 +978,18 @@ DpUsbReadWrite(
                                   isWrite ? GENERIC_WRITE : GENERIC_READ,
                                   &diskHandle);
     if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("ReadWrite", "backing open failed irp=%p status=0x%08X\n", Irp, status);
         goto Exit;
     }
 
     byteOffset.QuadPart = (LONGLONG)physicalOffset;
     if (isWrite) {
+        DPUSB_TRACE("ReadWrite",
+                    "ZwWrite begin irp=%p handle=%p physical=%I64u length=%lu\n",
+                    Irp,
+                    diskHandle,
+                    physicalOffset,
+                    length);
         status = ZwWriteFile(diskHandle,
                              NULL,
                              NULL,
@@ -735,7 +999,18 @@ DpUsbReadWrite(
                              length,
                              &byteOffset,
                              NULL);
+        DPUSB_TRACE("ReadWrite",
+                    "ZwWrite end irp=%p status=0x%08X information=%Iu\n",
+                    Irp,
+                    status,
+                    ioStatus.Information);
     } else {
+        DPUSB_TRACE("ReadWrite",
+                    "ZwRead begin irp=%p handle=%p physical=%I64u length=%lu\n",
+                    Irp,
+                    diskHandle,
+                    physicalOffset,
+                    length);
         status = ZwReadFile(diskHandle,
                             NULL,
                             NULL,
@@ -745,6 +1020,11 @@ DpUsbReadWrite(
                             length,
                             &byteOffset,
                             NULL);
+        DPUSB_TRACE("ReadWrite",
+                    "ZwRead end irp=%p status=0x%08X information=%Iu\n",
+                    Irp,
+                    status,
+                    ioStatus.Information);
         if (NT_SUCCESS(status) && ioStatus.Information != 0) {
             DpUsbRc4CryptAtOffset(snapshot.Key,
                                   snapshot.KeyLength,
@@ -770,6 +1050,12 @@ Exit:
     }
 
     RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
+    DPUSB_TRACE("ReadWrite",
+                "leave irp=%p op=%s status=0x%08X information=%Iu\n",
+                Irp,
+                isWrite ? "WRITE" : "READ",
+                status,
+                information);
     DpUsbComplete(Irp, status, information);
     return status;
 }
@@ -795,6 +1081,17 @@ DpUsbDeviceControl(
     inputLength = stack->Parameters.DeviceIoControl.InputBufferLength;
     outputLength = stack->Parameters.DeviceIoControl.OutputBufferLength;
     buffer = Irp->AssociatedIrp.SystemBuffer;
+
+    DPUSB_TRACE("Ioctl",
+                "enter irp=%p code=0x%08X(%s) input=%lu output=%lu buffer=%p pid=%p file=%p\n",
+                Irp,
+                controlCode,
+                DpUsbIoctlName(controlCode),
+                inputLength,
+                outputLength,
+                buffer,
+                PsGetCurrentProcessId(),
+                stack->FileObject);
 
     switch (controlCode) {
     case IOCTL_DPUSB_QUERY_STATUS:
@@ -875,10 +1172,23 @@ DpUsbDeviceControl(
         break;
 
     default:
+        DPUSB_TRACE("Ioctl",
+                    "unsupported irp=%p code=0x%08X input=%lu output=%lu\n",
+                    Irp,
+                    controlCode,
+                    inputLength,
+                    outputLength);
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }
 
+    DPUSB_TRACE("Ioctl",
+                "leave irp=%p code=0x%08X(%s) status=0x%08X bytes=%lu\n",
+                Irp,
+                controlCode,
+                DpUsbIoctlName(controlCode),
+                status,
+                bytesReturned);
     DpUsbComplete(Irp, status, bytesReturned);
     return status;
 }
@@ -888,6 +1198,7 @@ DpUsbUnload(
     _In_ PDRIVER_OBJECT DriverObject
     )
 {
+    DPUSB_TRACE("Driver", "unload begin driver=%p device=%p\n", DriverObject, gDpUsbDeviceObject);
     DpUsbCloseSession();
     IoDeleteSymbolicLink(&gDpUsbDosName);
 
@@ -897,6 +1208,7 @@ DpUsbUnload(
     }
 
     UNREFERENCED_PARAMETER(DriverObject);
+    DPUSB_TRACE("Driver", "unload complete\n");
 }
 
 NTSTATUS
@@ -911,6 +1223,7 @@ DriverEntry(
 
     UNREFERENCED_PARAMETER(RegistryPath);
 
+    DPUSB_TRACE("Driver", "entry begin driver=%p registry=%wZ\n", DriverObject, RegistryPath);
     RtlZeroMemory(&gDpUsbSession, sizeof(gDpUsbSession));
     ExInitializePushLock(&gDpUsbSession.Lock);
     gDpUsbSession.LockInitialized = TRUE;
@@ -926,11 +1239,13 @@ DriverEntry(
                             FALSE,
                             &gDpUsbDeviceObject);
     if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("Driver", "IoCreateDevice failed status=0x%08X\n", status);
         return status;
     }
 
     status = IoCreateSymbolicLink(&gDpUsbDosName, &deviceName);
     if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("Driver", "IoCreateSymbolicLink failed status=0x%08X\n", status);
         IoDeleteDevice(gDpUsbDeviceObject);
         gDpUsbDeviceObject = NULL;
         return status;
@@ -951,5 +1266,10 @@ DriverEntry(
 
     gDpUsbDeviceObject->Flags |= DO_DIRECT_IO;
     gDpUsbDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+    DPUSB_TRACE("Driver",
+                "entry complete device=%p flags=0x%08X trace=%u\n",
+                gDpUsbDeviceObject,
+                gDpUsbDeviceObject->Flags,
+                DPUSB_TRACE_ENABLED);
     return STATUS_SUCCESS;
 }

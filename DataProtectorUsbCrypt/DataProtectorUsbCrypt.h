@@ -13,6 +13,12 @@
 #define DPUSB_TAG_TEXT  'tUpD'
 #define DPUSB_TAG_IO    'iUpD'
 
+// Compile-time investigation switch for Secure USB virtual disk hangs.
+// Set to 0 for quiet production builds after the I/O path is validated.
+#ifndef DPUSB_TRACE_ENABLED
+#define DPUSB_TRACE_ENABLED 1
+#endif
+
 #define DPUSB_IOCTL_INDEX 0x900
 #define IOCTL_DPUSB_QUERY_STATUS CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 0, METHOD_BUFFERED, FILE_READ_ACCESS)
 #define IOCTL_DPUSB_OPEN_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 1, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
