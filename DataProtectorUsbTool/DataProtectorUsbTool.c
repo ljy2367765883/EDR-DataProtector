@@ -2821,24 +2821,40 @@ static BOOL ZeroWorkspaceRange(HANDLE volume,
                                ULONGLONG bytes,
                                DWORD *win32Error)
 {
-    BYTE zero[64 * 1024];
+    BYTE *zero;
+    DWORD zeroBytes = 1024UL * 1024UL;
     ULONGLONG remaining = bytes;
+    BOOL ok = TRUE;
 
-    ZeroMemory(zero, sizeof(zero));
+    zero = (BYTE *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, zeroBytes);
+    if (zero == NULL) {
+        zeroBytes = 256UL * 1024UL;
+        zero = (BYTE *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, zeroBytes);
+    }
+    if (zero == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_NOT_ENOUGH_MEMORY;
+        }
+        return FALSE;
+    }
+
     while (remaining != 0) {
-        DWORD chunk = remaining > sizeof(zero) ? (DWORD)sizeof(zero) : (DWORD)remaining;
+        DWORD chunk = remaining > zeroBytes ? zeroBytes : (DWORD)remaining;
         if (!WriteWorkspaceBytes(volume, offset, zero, chunk, win32Error)) {
-            return FALSE;
+            ok = FALSE;
+            break;
         }
 
         offset += chunk;
         remaining -= chunk;
     }
 
-    if (win32Error != NULL) {
+    SecureZeroMemory(zero, zeroBytes);
+    LocalFree(zero);
+    if (ok && win32Error != NULL) {
         *win32Error = ERROR_SUCCESS;
     }
-    return TRUE;
+    return ok;
 }
 
 static DWORD CalculateFat32SectorsPerCluster(ULONGLONG totalBytes)
@@ -2989,7 +3005,6 @@ static BOOL InitializeWorkspaceFat32Container(HANDLE volume,
 {
     DPUSB_FAT32_LAYOUT layout;
     BYTE sector[512];
-    ULONGLONG fatBytes;
     ULONGLONG rootOffset;
 
     if (!CalculateFat32Layout(totalBytes, &layout)) {
@@ -2999,14 +3014,22 @@ static BOOL InitializeWorkspaceFat32Container(HANDLE volume,
         return FALSE;
     }
 
-    AppendLog(L"Writing FAT32 container metadata directly to the encrypted data region. Size=%I64u MB, cluster=%lu sectors, FAT=%lu sectors.",
+    AppendLog(L"Writing FAT32 quick-format metadata directly to the encrypted data region. Size=%I64u MB, cluster=%lu sectors, FAT=%lu sectors.",
               totalBytes / (1024ull * 1024ull),
               layout.SectorsPerCluster,
               layout.SectorsPerFat);
 
     if (!ZeroWorkspaceRange(volume,
                             0,
-                            ((ULONGLONG)layout.DataStartSector + layout.SectorsPerCluster) * 512ull,
+                            (ULONGLONG)layout.ReservedSectors * 512ull,
+                            win32Error) ||
+        !ZeroWorkspaceRange(volume,
+                            (ULONGLONG)layout.Fat1Sector * 512ull,
+                            (ULONGLONG)layout.SectorsPerFat * 512ull,
+                            win32Error) ||
+        !ZeroWorkspaceRange(volume,
+                            (ULONGLONG)layout.Fat2Sector * 512ull,
+                            (ULONGLONG)layout.SectorsPerFat * 512ull,
                             win32Error)) {
         return FALSE;
     }
@@ -3032,23 +3055,9 @@ static BOOL InitializeWorkspaceFat32Container(HANDLE volume,
     }
 
     BuildFat32FatStart(sector);
-    fatBytes = (ULONGLONG)layout.SectorsPerFat * 512ull;
     if (!WriteWorkspaceBytes(volume, (ULONGLONG)layout.Fat1Sector * 512ull, sector, sizeof(sector), win32Error) ||
         !WriteWorkspaceBytes(volume, (ULONGLONG)layout.Fat2Sector * 512ull, sector, sizeof(sector), win32Error)) {
         return FALSE;
-    }
-
-    if (fatBytes > sizeof(sector)) {
-        if (!ZeroWorkspaceRange(volume,
-                                ((ULONGLONG)layout.Fat1Sector * 512ull) + sizeof(sector),
-                                fatBytes - sizeof(sector),
-                                win32Error) ||
-            !ZeroWorkspaceRange(volume,
-                                ((ULONGLONG)layout.Fat2Sector * 512ull) + sizeof(sector),
-                                fatBytes - sizeof(sector),
-                                win32Error)) {
-            return FALSE;
-        }
     }
 
     rootOffset = ((ULONGLONG)layout.DataStartSector +
@@ -3058,7 +3067,6 @@ static BOOL InitializeWorkspaceFat32Container(HANDLE volume,
     }
 
     FlushFileBuffers(volume);
-    (VOID)fatBytes;
     if (win32Error != NULL) {
         *win32Error = ERROR_SUCCESS;
     }
