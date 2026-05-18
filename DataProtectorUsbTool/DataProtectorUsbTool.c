@@ -4037,8 +4037,8 @@ static void ComputeLayout(HWND hwnd, DPUSB_UI_LAYOUT *layout)
     if (width < 420) {
         width = 420;
     }
-    if (height < 250) {
-        height = 250;
+    if (height < 360) {
+        height = 360;
     }
 
     SetRectSize(&layout->ControlCard, margin, 70, width - (margin * 2), 152);
@@ -4085,7 +4085,17 @@ static void LayoutControls(HWND hwnd)
         ShowWindow(g_Ui.PlanButton, SW_HIDE);
     }
     if (g_Ui.LogEdit != NULL) {
-        ShowWindow(g_Ui.LogEdit, SW_HIDE);
+        RECT logEdit;
+        logEdit = layout.LogCard;
+        logEdit.left += 14;
+        logEdit.top += 42;
+        logEdit.right -= 14;
+        logEdit.bottom -= 14;
+        if (RectHeight(&logEdit) < 48) {
+            logEdit.bottom = logEdit.top + 48;
+        }
+        MoveControlToRect(g_Ui.LogEdit, &logEdit);
+        ShowWindow(g_Ui.LogEdit, SW_SHOW);
     }
 }
 
@@ -4213,6 +4223,16 @@ static void DrawUi(HDC dc, HWND hwnd)
                   g_Ui.TextColor,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawOneLine(dc, L"Password", layout.PasswordEdit.left, layout.PasswordEdit.top - 20, RectWidth(&layout.PasswordEdit), 16, g_Ui.SmallFont, g_Ui.MutedColor);
+
+    DrawRoundFill(dc, &layout.LogCard, g_Ui.CardColor, g_Ui.BorderColor, 14);
+    DrawOneLine(dc,
+                L"Diagnostics",
+                layout.LogCard.left + 16,
+                layout.LogCard.top + 14,
+                RectWidth(&layout.LogCard) - 32,
+                18,
+                g_Ui.SmallFont,
+                g_Ui.MutedColor);
 }
 
 static void PaintUi(HWND hwnd)
@@ -4604,7 +4624,7 @@ static int RunGui(HINSTANCE instance, int showCommand)
                            CW_USEDEFAULT,
                            CW_USEDEFAULT,
                            460,
-                           300,
+                           430,
                            NULL,
                            NULL,
                            instance,
