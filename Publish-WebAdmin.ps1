@@ -5,7 +5,9 @@ param(
     [ValidateSet("x64")]
     [string]$Platform = "x64",
 
-    [string]$OutputDirectory = ""
+    [string]$OutputDirectory = "",
+
+    [switch]$AllowInvalidUsbRuntimeKernelSignature
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,6 +90,11 @@ function Invoke-UsbRuntimeKernelSigningVerification {
 
     & $signtool verify /v /kp $FilePath
     if ($LASTEXITCODE -ne 0) {
+        if ($AllowInvalidUsbRuntimeKernelSignature) {
+            Write-Warning "USB runtime kernel-mode signature verification failed for: $FilePath. Continuing because -AllowInvalidUsbRuntimeKernelSignature was specified. This package is not a production driver-signing release and may fail to load with Win32=577 on default Windows systems."
+            return
+        }
+
         throw "USB runtime kernel-mode signature verification failed for: $FilePath. Windows will reject this driver at load time, usually as Win32=577. Use a currently valid kernel-mode signing certificate or Microsoft attestation/WHQL signing for release builds."
     }
 }
