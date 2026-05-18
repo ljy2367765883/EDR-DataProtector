@@ -221,7 +221,7 @@ static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Erro
 static BOOL IsProcessElevated(void);
 static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error);
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
-static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
+static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLONG expectedDataLengthBytes, DWORD *win32Error);
 static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error);
 static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
@@ -253,6 +253,17 @@ static HANDLE OpenControlDevice(DWORD access)
                        NULL,
                        OPEN_EXISTING,
                        FILE_ATTRIBUTE_NORMAL,
+                       NULL);
+}
+
+static HANDLE OpenControlDeviceRawIo(DWORD access)
+{
+    return CreateFileW(DPUSB_DOS_NAME,
+                       access,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       NULL,
+                       OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                        NULL);
 }
 
@@ -466,7 +477,7 @@ static int UnlockPassword(int argc, wchar_t **argv)
         return PrintLastError(L"Mount private workspace");
     }
 
-    if (!EnsurePrivateWorkspaceFileSystem(&mount, &error)) {
+    if (!EnsurePrivateWorkspaceFileSystem(&mount, secret.DataLengthBytes, &error)) {
         UnmountPrivateWorkspace(&mount);
         CloseSessionData(NULL);
         SecureZeroMemory(&secret, sizeof(secret));
@@ -2509,8 +2520,9 @@ static BOOL WriteWorkspaceBytes(HANDLE volume,
                                 DWORD bytes,
                                 DWORD *win32Error)
 {
-    LARGE_INTEGER position;
+    OVERLAPPED overlapped;
     DWORD written = 0;
+    BOOL ok;
 
     if (volume == INVALID_HANDLE_VALUE || buffer == NULL || bytes == 0) {
         if (win32Error != NULL) {
@@ -2519,10 +2531,14 @@ static BOOL WriteWorkspaceBytes(HANDLE volume,
         return FALSE;
     }
 
-    position.QuadPart = (LONGLONG)offset;
-    if (!SetFilePointerEx(volume, position, NULL, FILE_BEGIN) ||
-        !WriteFile(volume, buffer, bytes, &written, NULL) ||
-        written != bytes) {
+    ZeroMemory(&overlapped, sizeof(overlapped));
+    overlapped.Offset = (DWORD)(offset & 0xFFFFFFFFUL);
+    overlapped.OffsetHigh = (DWORD)((offset >> 32) & 0xFFFFFFFFUL);
+    ok = WriteFile(volume, buffer, bytes, &written, &overlapped);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+        ok = GetOverlappedResult(volume, &overlapped, &written, TRUE);
+    }
+    if (!ok || written != bytes) {
 
         DWORD error = GetLastError();
         if (error == ERROR_SUCCESS) {
@@ -2869,15 +2885,15 @@ static BOOL RefreshPrivateWorkspaceMount(DPUSB_PRIVATE_MOUNT *mount, DWORD *win3
     return FALSE;
 }
 
-static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLONG expectedDataLengthBytes, DWORD *win32Error)
 {
     WCHAR fileSystem[32];
     WCHAR message[256];
     DWORD error = ERROR_SUCCESS;
     DWORD attempt;
     HANDLE volume = INVALID_HANDLE_VALUE;
-    GET_LENGTH_INFORMATION lengthInfo;
     DWORD returned = 0;
+    ULONGLONG dataLengthBytes;
 
     if (!ValidateMountedWorkspaceDevice(mount, &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
@@ -2915,7 +2931,19 @@ static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, DWORD *
     FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
     AppendLog(L"Private workspace has no mounted file system yet (%s). Initializing encrypted FAT32 container through the virtual disk device.",
               message);
-    volume = OpenControlDevice(GENERIC_READ | GENERIC_WRITE);
+    dataLengthBytes = expectedDataLengthBytes;
+    if (dataLengthBytes < (64ull * 1024ull * 1024ull)) {
+        FormatErrorMessage(ERROR_DISK_FULL, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace metadata length is too small for FAT32 initialization: %I64u bytes (%s).",
+                  dataLengthBytes,
+                  message);
+        if (win32Error != NULL) {
+            *win32Error = ERROR_DISK_FULL;
+        }
+        return FALSE;
+    }
+
+    volume = OpenControlDeviceRawIo(GENERIC_READ | GENERIC_WRITE);
     if (volume == INVALID_HANDLE_VALUE) {
         error = GetLastError();
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
@@ -2928,29 +2956,8 @@ static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, DWORD *
         return FALSE;
     }
 
-    ZeroMemory(&lengthInfo, sizeof(lengthInfo));
-    if (!DeviceIoControl(volume,
-                         IOCTL_DISK_GET_LENGTH_INFO,
-                         NULL,
-                         0,
-                         &lengthInfo,
-                         sizeof(lengthInfo),
-                         &returned,
-                         NULL)) {
-        error = GetLastError();
-        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Private workspace length query failed on virtual disk device: %s (Win32=%lu)",
-                  message,
-                  error);
-        CloseHandle(volume);
-        if (win32Error != NULL) {
-            *win32Error = error;
-        }
-        return FALSE;
-    }
-
-    AppendLog(L"Private workspace virtual disk length: %I64u bytes.", (ULONGLONG)lengthInfo.Length.QuadPart);
-    if (!InitializeWorkspaceFat32Container(volume, (ULONGLONG)lengthInfo.Length.QuadPart, &error)) {
+    AppendLog(L"Private workspace virtual disk length from unlock metadata: %I64u bytes.", dataLengthBytes);
+    if (!InitializeWorkspaceFat32Container(volume, dataLengthBytes, &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Private workspace FAT32 metadata initialization failed: %s (Win32=%lu)",
                   message,
@@ -3568,7 +3575,7 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
         return 0;
     }
 
-    if (!EnsurePrivateWorkspaceFileSystem(&mount, &error)) {
+    if (!EnsurePrivateWorkspaceFileSystem(&mount, secret.DataLengthBytes, &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Private workspace file system initialization failed: %s", message);
         UnmountPrivateWorkspace(&mount);
