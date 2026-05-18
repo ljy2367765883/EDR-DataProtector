@@ -4,6 +4,8 @@
 #include <ntdddisk.h>
 #include <scsi.h>
 #include <ntddstor.h>
+#include <ntddvol.h>
+#include <mountdev.h>
 #include <ntstrsafe.h>
 
 #define DPUSB_DEVICE_NAME L"\\Device\\DataProtectorUsbCrypt"
@@ -12,6 +14,7 @@
 #define DPUSB_TAG_STATE 'sUpD'
 #define DPUSB_TAG_TEXT  'tUpD'
 #define DPUSB_TAG_IO    'iUpD'
+#define DPUSB_TAG_WORK  'wUpD'
 
 // Compile-time investigation switch for Secure USB virtual disk hangs.
 // Set to 0 for quiet production builds after the I/O path is validated.

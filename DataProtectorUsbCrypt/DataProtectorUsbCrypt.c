@@ -10,6 +10,9 @@ typedef struct _DPUSB_SESSION_STATE {
     ULONGLONG DataLengthBytes;
     ULONG KeyLength;
     WCHAR PhysicalDrivePath[128];
+    HANDLE BackingHandle;
+    PFILE_OBJECT BackingFileObject;
+    PDEVICE_OBJECT BackingDeviceObject;
     UCHAR Key[DPUSB_MAX_KEY_BYTES];
     WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
 } DPUSB_SESSION_STATE, *PDPUSB_SESSION_STATE;
@@ -17,6 +20,9 @@ typedef struct _DPUSB_SESSION_STATE {
 static PDEVICE_OBJECT gDpUsbDeviceObject = NULL;
 static UNICODE_STRING gDpUsbDosName;
 static DPUSB_SESSION_STATE gDpUsbSession;
+static volatile LONG gDpUsbUnloading = 0;
+static volatile LONG gDpUsbActiveWorkers = 0;
+static KEVENT gDpUsbNoActiveWorkers;
 
 #if DPUSB_TRACE_ENABLED
 #define DPUSB_TRACE(_area, _format, ...) \
@@ -32,8 +38,34 @@ typedef struct _DPUSB_SESSION_SNAPSHOT {
     ULONGLONG DataLengthBytes;
     ULONG KeyLength;
     WCHAR PhysicalDrivePath[128];
+    PFILE_OBJECT BackingFileObject;
+    PDEVICE_OBJECT BackingDeviceObject;
     UCHAR Key[DPUSB_MAX_KEY_BYTES];
 } DPUSB_SESSION_SNAPSHOT, *PDPUSB_SESSION_SNAPSHOT;
+
+typedef struct _DPUSB_IO_WORK_ITEM {
+    WORK_QUEUE_ITEM WorkItem;
+    PIRP Irp;
+    BOOLEAN IsWrite;
+} DPUSB_IO_WORK_ITEM, *PDPUSB_IO_WORK_ITEM;
+
+static
+VOID
+DpUsbReadWriteWorker(
+    _In_ PVOID Context
+    );
+
+static
+VOID
+DpUsbFinishReadWriteWorker(
+    _In_ PDPUSB_IO_WORK_ITEM WorkItem
+    )
+{
+    ExFreePoolWithTag(WorkItem, DPUSB_TAG_WORK);
+    if (InterlockedDecrement(&gDpUsbActiveWorkers) == 0) {
+        KeSetEvent(&gDpUsbNoActiveWorkers, IO_NO_INCREMENT, FALSE);
+    }
+}
 
 static
 PCSTR
@@ -120,6 +152,20 @@ DpUsbIoctlName(
         return "IOCTL_STORAGE_GET_MEDIA_TYPES_EX";
     case IOCTL_STORAGE_QUERY_PROPERTY:
         return "IOCTL_STORAGE_QUERY_PROPERTY";
+    case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
+        return "IOCTL_MOUNTDEV_QUERY_UNIQUE_ID";
+    case IOCTL_MOUNTDEV_QUERY_DEVICE_NAME:
+        return "IOCTL_MOUNTDEV_QUERY_DEVICE_NAME";
+    case IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME:
+        return "IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME";
+    case IOCTL_MOUNTDEV_LINK_CREATED:
+        return "IOCTL_MOUNTDEV_LINK_CREATED";
+    case IOCTL_MOUNTDEV_LINK_DELETED:
+        return "IOCTL_MOUNTDEV_LINK_DELETED";
+    case IOCTL_MOUNTDEV_QUERY_STABLE_GUID:
+        return "IOCTL_MOUNTDEV_QUERY_STABLE_GUID";
+    case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
+        return "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS";
     default:
         return "UNKNOWN_IOCTL";
     }
@@ -179,11 +225,143 @@ DpUsbNormalizePhysicalPath(
 
 static
 NTSTATUS
+DpUsbOpenBackingDiskByPath(
+    _In_z_ PCWSTR PhysicalDrivePath,
+    _In_ ACCESS_MASK DesiredAccess,
+    _Out_ PHANDLE DiskHandle,
+    _Outptr_ PFILE_OBJECT *FileObject,
+    _Outptr_ PDEVICE_OBJECT *DeviceObject
+    )
+{
+    UNICODE_STRING path;
+    OBJECT_ATTRIBUTES objectAttributes;
+    IO_STATUS_BLOCK ioStatus;
+    HANDLE handle = NULL;
+    PFILE_OBJECT fileObject = NULL;
+    PDEVICE_OBJECT deviceObject = NULL;
+    NTSTATUS status;
+
+    if (PhysicalDrivePath == NULL ||
+        PhysicalDrivePath[0] == L'\0' ||
+        DiskHandle == NULL ||
+        FileObject == NULL ||
+        DeviceObject == NULL) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *DiskHandle = NULL;
+    *FileObject = NULL;
+    *DeviceObject = NULL;
+
+    RtlInitUnicodeString(&path, PhysicalDrivePath);
+    InitializeObjectAttributes(&objectAttributes,
+                               &path,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    DPUSB_TRACE("Backing",
+                "session open begin desired=0x%08X path=%ws\n",
+                DesiredAccess,
+                PhysicalDrivePath);
+
+    status = ZwCreateFile(&handle,
+                          DesiredAccess | SYNCHRONIZE,
+                          &objectAttributes,
+                          &ioStatus,
+                          NULL,
+                          FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          FILE_OPEN,
+                          FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+                          NULL,
+                          0);
+    DPUSB_TRACE("Backing",
+                "session open file status=0x%08X information=%Iu handle=%p path=%ws\n",
+                status,
+                ioStatus.Information,
+                NT_SUCCESS(status) ? handle : NULL,
+                PhysicalDrivePath);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = ObReferenceObjectByHandle(handle,
+                                       DesiredAccess,
+                                       *IoFileObjectType,
+                                       KernelMode,
+                                       (PVOID *)&fileObject,
+                                       NULL);
+    DPUSB_TRACE("Backing",
+                "session reference status=0x%08X fileObject=%p\n",
+                status,
+                fileObject);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(handle);
+        return status;
+    }
+
+    deviceObject = IoGetRelatedDeviceObject(fileObject);
+    if (deviceObject == NULL) {
+        ObDereferenceObject(fileObject);
+        ZwClose(handle);
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    ObReferenceObject(deviceObject);
+
+    *DiskHandle = handle;
+    *FileObject = fileObject;
+    *DeviceObject = deviceObject;
+    DPUSB_TRACE("Backing",
+                "session open complete handle=%p fileObject=%p deviceObject=%p flags=0x%08X\n",
+                handle,
+                fileObject,
+                deviceObject,
+                deviceObject->Flags);
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+DpUsbReleaseBackingLocked(
+    VOID
+    )
+{
+    HANDLE backingHandle;
+    PFILE_OBJECT backingFileObject;
+    PDEVICE_OBJECT backingDeviceObject;
+
+    backingHandle = gDpUsbSession.BackingHandle;
+    backingFileObject = gDpUsbSession.BackingFileObject;
+    backingDeviceObject = gDpUsbSession.BackingDeviceObject;
+    gDpUsbSession.BackingHandle = NULL;
+    gDpUsbSession.BackingFileObject = NULL;
+    gDpUsbSession.BackingDeviceObject = NULL;
+
+    if (backingFileObject != NULL) {
+        ObDereferenceObject(backingFileObject);
+    }
+
+    if (backingDeviceObject != NULL) {
+        ObDereferenceObject(backingDeviceObject);
+    }
+
+    if (backingHandle != NULL) {
+        ZwClose(backingHandle);
+    }
+}
+
+static
+NTSTATUS
 DpUsbOpenSession(
     _In_ PDPUSB_OPEN_SESSION Request
     )
 {
     WCHAR normalizedPath[128];
+    HANDLE backingHandle = NULL;
+    PFILE_OBJECT backingFileObject = NULL;
+    PDEVICE_OBJECT backingDeviceObject = NULL;
     NTSTATUS status;
 
     if (Request == NULL ||
@@ -226,7 +404,21 @@ DpUsbOpenSession(
                 Request->DataLengthBytes,
                 Request->KeyLength);
 
+    status = DpUsbOpenBackingDiskByPath(normalizedPath,
+                                        GENERIC_READ | GENERIC_WRITE,
+                                        &backingHandle,
+                                        &backingFileObject,
+                                        &backingDeviceObject);
+    if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("Session",
+                    "backing open failed status=0x%08X path=%ws\n",
+                    status,
+                    normalizedPath);
+        return status;
+    }
+
     ExAcquirePushLockExclusive(&gDpUsbSession.Lock);
+    DpUsbReleaseBackingLocked();
     gDpUsbSession.SessionOpen = TRUE;
     gDpUsbSession.Algorithm = Request->Algorithm;
     gDpUsbSession.ToolAreaBytes = Request->ToolAreaBytes;
@@ -236,13 +428,21 @@ DpUsbOpenSession(
     RtlStringCchCopyW(gDpUsbSession.PhysicalDrivePath,
                       RTL_NUMBER_OF(gDpUsbSession.PhysicalDrivePath),
                       normalizedPath);
+    gDpUsbSession.BackingHandle = backingHandle;
+    gDpUsbSession.BackingFileObject = backingFileObject;
+    gDpUsbSession.BackingDeviceObject = backingDeviceObject;
     RtlCopyMemory(gDpUsbSession.Key, Request->Key, Request->KeyLength);
     RtlStringCchCopyW(gDpUsbSession.DeviceId,
                       RTL_NUMBER_OF(gDpUsbSession.DeviceId),
                       Request->DeviceId);
     ExReleasePushLockExclusive(&gDpUsbSession.Lock);
 
-    DPUSB_TRACE("Session", "open complete deviceId=%ws\n", Request->DeviceId);
+    DPUSB_TRACE("Session",
+                "open complete deviceId=%ws backingHandle=%p fileObject=%p deviceObject=%p\n",
+                Request->DeviceId,
+                backingHandle,
+                backingFileObject,
+                backingDeviceObject);
     return STATUS_SUCCESS;
 }
 
@@ -261,6 +461,7 @@ DpUsbCloseSession(
     gDpUsbSession.DataOffsetBytes = 0;
     gDpUsbSession.DataLengthBytes = 0;
     gDpUsbSession.KeyLength = 0;
+    DpUsbReleaseBackingLocked();
     RtlZeroMemory(gDpUsbSession.PhysicalDrivePath, sizeof(gDpUsbSession.PhysicalDrivePath));
     RtlZeroMemory(gDpUsbSession.DeviceId, sizeof(gDpUsbSession.DeviceId));
     ExReleasePushLockExclusive(&gDpUsbSession.Lock);
@@ -655,6 +856,240 @@ DpUsbQueryStorageProperty(
     return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+static
+NTSTATUS
+DpUsbQueryMountDeviceName(
+    _Out_writes_bytes_(OutputLength) PMOUNTDEV_NAME MountName,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    USHORT nameBytes;
+    ULONG requiredBytes;
+    UNICODE_STRING deviceName;
+
+    if (MountName == NULL || BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlInitUnicodeString(&deviceName, DPUSB_DEVICE_NAME);
+    nameBytes = deviceName.Length;
+    requiredBytes = (ULONG)FIELD_OFFSET(MOUNTDEV_NAME, Name) + nameBytes;
+    *BytesReturned = requiredBytes;
+
+    if (OutputLength < requiredBytes) {
+        if (OutputLength >= sizeof(MOUNTDEV_NAME)) {
+            MountName->NameLength = nameBytes;
+        }
+        DPUSB_TRACE("Query",
+                    "mountdev name too small output=%lu required=%lu\n",
+                    OutputLength,
+                    requiredBytes);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    RtlZeroMemory(MountName, OutputLength);
+    MountName->NameLength = nameBytes;
+    RtlCopyMemory(MountName->Name, deviceName.Buffer, nameBytes);
+    DPUSB_TRACE("Query", "mountdev name=%wZ bytes=%lu\n", &deviceName, requiredBytes);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbBuildUniqueIdString(
+    _Out_writes_(IdChars) PWCHAR Id,
+    _In_ ULONG IdChars
+    )
+{
+    DPUSB_STATUS status;
+    ULONG bytesReturned;
+    NTSTATUS queryStatus;
+
+    if (Id == NULL || IdChars == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(Id, IdChars * sizeof(WCHAR));
+    queryStatus = DpUsbQueryStatus(&status, sizeof(status), &bytesReturned);
+    if (NT_SUCCESS(queryStatus) && status.DeviceId[0] != L'\0') {
+        return RtlStringCchPrintfW(Id, IdChars, L"DataProtectorUsbCrypt-%ws", status.DeviceId);
+    }
+
+    return RtlStringCchCopyW(Id, IdChars, L"DataProtectorUsbCrypt-locked");
+}
+
+static
+NTSTATUS
+DpUsbQueryMountUniqueId(
+    _Out_writes_bytes_(OutputLength) PMOUNTDEV_UNIQUE_ID UniqueId,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    WCHAR uniqueText[DPUSB_MAX_DEVICE_ID_CHARS + 32];
+    USHORT uniqueBytes;
+    ULONG requiredBytes;
+    NTSTATUS status;
+
+    if (UniqueId == NULL || BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = DpUsbBuildUniqueIdString(uniqueText, RTL_NUMBER_OF(uniqueText));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    uniqueBytes = (USHORT)(wcslen(uniqueText) * sizeof(WCHAR));
+    requiredBytes = (ULONG)FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + uniqueBytes;
+    *BytesReturned = requiredBytes;
+
+    if (OutputLength < requiredBytes) {
+        if (OutputLength >= sizeof(MOUNTDEV_UNIQUE_ID)) {
+            UniqueId->UniqueIdLength = uniqueBytes;
+        }
+        DPUSB_TRACE("Query",
+                    "mountdev unique id too small output=%lu required=%lu\n",
+                    OutputLength,
+                    requiredBytes);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    RtlZeroMemory(UniqueId, OutputLength);
+    UniqueId->UniqueIdLength = uniqueBytes;
+    RtlCopyMemory(UniqueId->UniqueId, uniqueText, uniqueBytes);
+    DPUSB_TRACE("Query", "mountdev unique id bytes=%lu text=%ws\n", requiredBytes, uniqueText);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbQueryMountSuggestedLinkName(
+    _Out_writes_bytes_(OutputLength) PMOUNTDEV_SUGGESTED_LINK_NAME LinkName,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    static const WCHAR suggestedName[] = L"\\DosDevices\\Z:";
+    USHORT nameBytes;
+    ULONG requiredBytes;
+
+    if (LinkName == NULL || BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    nameBytes = (USHORT)((RTL_NUMBER_OF(suggestedName) - 1) * sizeof(WCHAR));
+    requiredBytes = (ULONG)FIELD_OFFSET(MOUNTDEV_SUGGESTED_LINK_NAME, Name) + nameBytes;
+    *BytesReturned = requiredBytes;
+
+    if (OutputLength < requiredBytes) {
+        if (OutputLength >= sizeof(MOUNTDEV_SUGGESTED_LINK_NAME)) {
+            LinkName->NameLength = nameBytes;
+        }
+        DPUSB_TRACE("Query",
+                    "mountdev suggested link too small output=%lu required=%lu\n",
+                    OutputLength,
+                    requiredBytes);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    RtlZeroMemory(LinkName, OutputLength);
+    LinkName->UseOnlyIfThereAreNoOtherLinks = TRUE;
+    LinkName->NameLength = nameBytes;
+    RtlCopyMemory(LinkName->Name, suggestedName, nameBytes);
+    DPUSB_TRACE("Query", "mountdev suggested link=%ws bytes=%lu\n", suggestedName, requiredBytes);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbQueryMountStableGuid(
+    _Out_writes_bytes_(OutputLength) PMOUNTDEV_STABLE_GUID StableGuid,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    WCHAR uniqueText[DPUSB_MAX_DEVICE_ID_CHARS + 32];
+    const UCHAR *bytes;
+    ULONG byteCount;
+    ULONG hash = 2166136261UL;
+    ULONG index;
+
+    if (StableGuid == NULL || BytesReturned == NULL || OutputLength < sizeof(MOUNTDEV_STABLE_GUID)) {
+        if (BytesReturned != NULL) {
+            *BytesReturned = sizeof(MOUNTDEV_STABLE_GUID);
+        }
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (!NT_SUCCESS(DpUsbBuildUniqueIdString(uniqueText, RTL_NUMBER_OF(uniqueText)))) {
+        RtlStringCchCopyW(uniqueText, RTL_NUMBER_OF(uniqueText), L"DataProtectorUsbCrypt-locked");
+    }
+
+    bytes = (const UCHAR *)uniqueText;
+    byteCount = (ULONG)(wcslen(uniqueText) * sizeof(WCHAR));
+    for (index = 0; index < byteCount; index++) {
+        hash ^= bytes[index];
+        hash *= 16777619UL;
+    }
+
+    RtlZeroMemory(StableGuid, sizeof(*StableGuid));
+    StableGuid->StableGuid.Data1 = hash;
+    StableGuid->StableGuid.Data2 = (USHORT)((hash >> 16) ^ 0x5553);
+    StableGuid->StableGuid.Data3 = (USHORT)((hash & 0xFFFF) ^ 0x4243);
+    StableGuid->StableGuid.Data4[0] = 0x90;
+    StableGuid->StableGuid.Data4[1] = 0x00;
+    StableGuid->StableGuid.Data4[2] = 0x44;
+    StableGuid->StableGuid.Data4[3] = 0x50;
+    StableGuid->StableGuid.Data4[4] = 0x55;
+    StableGuid->StableGuid.Data4[5] = 0x53;
+    StableGuid->StableGuid.Data4[6] = 0x42;
+    StableGuid->StableGuid.Data4[7] = (UCHAR)(hash & 0xFF);
+    *BytesReturned = sizeof(*StableGuid);
+    DPUSB_TRACE("Query", "mountdev stable guid bytes=%lu hash=0x%08X id=%ws\n", *BytesReturned, hash, uniqueText);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbQueryVolumeDiskExtents(
+    _Out_writes_bytes_(OutputLength) PVOLUME_DISK_EXTENTS Extents,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    ULONGLONG lengthBytes;
+    ULONG requiredBytes;
+
+    if (Extents == NULL || BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    requiredBytes = (ULONG)FIELD_OFFSET(VOLUME_DISK_EXTENTS, Extents) + sizeof(DISK_EXTENT);
+    *BytesReturned = requiredBytes;
+
+    if (OutputLength < requiredBytes) {
+        DPUSB_TRACE("Query",
+                    "volume extents too small output=%lu required=%lu\n",
+                    OutputLength,
+                    requiredBytes);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    DpUsbQueryLengthValue(&lengthBytes);
+    RtlZeroMemory(Extents, OutputLength);
+    Extents->NumberOfDiskExtents = 1;
+    Extents->Extents[0].DiskNumber = 0x44505543;
+    Extents->Extents[0].StartingOffset.QuadPart = 0;
+    Extents->Extents[0].ExtentLength.QuadPart = (LONGLONG)lengthBytes;
+    DPUSB_TRACE("Query",
+                "volume extents disk=0x%08X length=%I64u\n",
+                Extents->Extents[0].DiskNumber,
+                lengthBytes);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 DpUsbCreateClose(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -729,14 +1164,18 @@ DpUsbCaptureSession(
         gDpUsbSession.Algorithm != DPUSB_ALGORITHM_RC4 ||
         gDpUsbSession.KeyLength == 0 ||
         gDpUsbSession.KeyLength > DPUSB_MAX_KEY_BYTES ||
-        gDpUsbSession.PhysicalDrivePath[0] == L'\0') {
+        gDpUsbSession.PhysicalDrivePath[0] == L'\0' ||
+        gDpUsbSession.BackingFileObject == NULL ||
+        gDpUsbSession.BackingDeviceObject == NULL) {
 
         DPUSB_TRACE("Session",
-                    "capture failed open=%u algorithm=%lu keyLength=%lu pathFirst=0x%04X\n",
+                    "capture failed open=%u algorithm=%lu keyLength=%lu pathFirst=0x%04X fileObject=%p deviceObject=%p\n",
                     gDpUsbSession.SessionOpen,
                     gDpUsbSession.Algorithm,
                     gDpUsbSession.KeyLength,
-                    gDpUsbSession.PhysicalDrivePath[0]);
+                    gDpUsbSession.PhysicalDrivePath[0],
+                    gDpUsbSession.BackingFileObject,
+                    gDpUsbSession.BackingDeviceObject);
         ExReleasePushLockShared(&gDpUsbSession.Lock);
         return STATUS_MEDIA_WRITE_PROTECTED;
     }
@@ -750,66 +1189,50 @@ DpUsbCaptureSession(
     RtlStringCchCopyW(Snapshot->PhysicalDrivePath,
                       RTL_NUMBER_OF(Snapshot->PhysicalDrivePath),
                       gDpUsbSession.PhysicalDrivePath);
+    Snapshot->BackingFileObject = gDpUsbSession.BackingFileObject;
+    Snapshot->BackingDeviceObject = gDpUsbSession.BackingDeviceObject;
+    ObReferenceObject(Snapshot->BackingFileObject);
+    ObReferenceObject(Snapshot->BackingDeviceObject);
     ExReleasePushLockShared(&gDpUsbSession.Lock);
 
     DPUSB_TRACE("Session",
-                "capture ok physical=%ws dataOffset=%I64u dataLength=%I64u keyLength=%lu\n",
+                "capture ok physical=%ws dataOffset=%I64u dataLength=%I64u keyLength=%lu fileObject=%p deviceObject=%p\n",
                 Snapshot->PhysicalDrivePath,
                 Snapshot->DataOffsetBytes,
                 Snapshot->DataLengthBytes,
-                Snapshot->KeyLength);
+                Snapshot->KeyLength,
+                Snapshot->BackingFileObject,
+                Snapshot->BackingDeviceObject);
     return STATUS_SUCCESS;
 }
 
 static
-NTSTATUS
-DpUsbOpenBackingDisk(
-    _In_ const DPUSB_SESSION_SNAPSHOT *Snapshot,
-    _In_ ACCESS_MASK DesiredAccess,
-    _Out_ PHANDLE DiskHandle
+VOID
+DpUsbReleaseSessionSnapshot(
+    _Inout_ PDPUSB_SESSION_SNAPSHOT Snapshot
     )
 {
-    UNICODE_STRING path;
-    OBJECT_ATTRIBUTES objectAttributes;
-    IO_STATUS_BLOCK ioStatus;
+    PFILE_OBJECT fileObject;
+    PDEVICE_OBJECT deviceObject;
 
-    if (Snapshot == NULL || DiskHandle == NULL || Snapshot->PhysicalDrivePath[0] == L'\0') {
-        return STATUS_INVALID_PARAMETER;
+    if (Snapshot == NULL) {
+        return;
     }
 
-    RtlInitUnicodeString(&path, Snapshot->PhysicalDrivePath);
-    InitializeObjectAttributes(&objectAttributes,
-                               &path,
-                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
+    fileObject = Snapshot->BackingFileObject;
+    deviceObject = Snapshot->BackingDeviceObject;
+    Snapshot->BackingFileObject = NULL;
+    Snapshot->BackingDeviceObject = NULL;
 
-    DPUSB_TRACE("Backing",
-                "open begin desired=0x%08X path=%ws\n",
-                DesiredAccess,
-                Snapshot->PhysicalDrivePath);
-
-    {
-        NTSTATUS status;
-        status = ZwCreateFile(DiskHandle,
-                              DesiredAccess | SYNCHRONIZE,
-                              &objectAttributes,
-                              &ioStatus,
-                              NULL,
-                              FILE_ATTRIBUTE_NORMAL,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              FILE_OPEN,
-                              FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
-                              NULL,
-                              0);
-        DPUSB_TRACE("Backing",
-                    "open end status=0x%08X information=%Iu handle=%p path=%ws\n",
-                    status,
-                    ioStatus.Information,
-                    NT_SUCCESS(status) ? *DiskHandle : NULL,
-                    Snapshot->PhysicalDrivePath);
-        return status;
+    if (fileObject != NULL) {
+        ObDereferenceObject(fileObject);
     }
+
+    if (deviceObject != NULL) {
+        ObDereferenceObject(deviceObject);
+    }
+
+    RtlSecureZeroMemory(Snapshot, sizeof(*Snapshot));
 }
 
 static
@@ -858,6 +1281,91 @@ DpUsbValidateRange(
     return STATUS_SUCCESS;
 }
 
+static
+NTSTATUS
+DpUsbForwardBackingReadWrite(
+    _In_ const DPUSB_SESSION_SNAPSHOT *Snapshot,
+    _In_ BOOLEAN IsWrite,
+    _Inout_updates_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length,
+    _In_ ULONGLONG PhysicalOffset,
+    _Out_ PULONG_PTR Information
+    )
+{
+    KEVENT event;
+    PIRP irp;
+    IO_STATUS_BLOCK ioStatus;
+    LARGE_INTEGER byteOffset;
+    NTSTATUS status;
+
+    if (Information != NULL) {
+        *Information = 0;
+    }
+
+    if (Snapshot == NULL ||
+        Snapshot->BackingFileObject == NULL ||
+        Snapshot->BackingDeviceObject == NULL ||
+        Buffer == NULL ||
+        Length == 0) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KeInitializeEvent(&event, NotificationEvent, FALSE);
+    RtlZeroMemory(&ioStatus, sizeof(ioStatus));
+    byteOffset.QuadPart = (LONGLONG)PhysicalOffset;
+
+    irp = IoBuildSynchronousFsdRequest(IsWrite ? IRP_MJ_WRITE : IRP_MJ_READ,
+                                       Snapshot->BackingDeviceObject,
+                                       Buffer,
+                                       Length,
+                                       &byteOffset,
+                                       &event,
+                                       &ioStatus);
+    if (irp == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    IoGetNextIrpStackLocation(irp)->FileObject = Snapshot->BackingFileObject;
+
+    DPUSB_TRACE("Backing",
+                "%s call begin irp=%p device=%p file=%p physical=%I64u length=%lu\n",
+                IsWrite ? "write" : "read",
+                irp,
+                Snapshot->BackingDeviceObject,
+                Snapshot->BackingFileObject,
+                PhysicalOffset,
+                Length);
+
+    status = IoCallDriver(Snapshot->BackingDeviceObject, irp);
+    DPUSB_TRACE("Backing",
+                "%s call returned status=0x%08X iosbStatus=0x%08X information=%Iu\n",
+                IsWrite ? "write" : "read",
+                status,
+                ioStatus.Status,
+                ioStatus.Information);
+    if (status == STATUS_PENDING) {
+        DPUSB_TRACE("Backing",
+                    "%s wait begin physical=%I64u length=%lu\n",
+                    IsWrite ? "write" : "read",
+                    PhysicalOffset,
+                    Length);
+        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+        status = ioStatus.Status;
+        DPUSB_TRACE("Backing",
+                    "%s wait end status=0x%08X information=%Iu\n",
+                    IsWrite ? "write" : "read",
+                    status,
+                    ioStatus.Information);
+    }
+
+    if (NT_SUCCESS(status) && Information != NULL) {
+        *Information = ioStatus.Information;
+    }
+
+    return status;
+}
+
 NTSTATUS
 DpUsbFlushBuffers(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -877,37 +1385,26 @@ DpUsbReadWrite(
     _Inout_ PIRP Irp
     )
 {
+    PDPUSB_IO_WORK_ITEM workItem;
     PIO_STACK_LOCATION stack;
     BOOLEAN isWrite;
     ULONG length;
-    ULONGLONG logicalOffset;
-    ULONGLONG physicalOffset;
-    DPUSB_SESSION_SNAPSHOT snapshot;
-    HANDLE diskHandle = NULL;
-    PVOID systemAddress;
-    UCHAR *ioBuffer = NULL;
-    LARGE_INTEGER byteOffset;
-    IO_STATUS_BLOCK ioStatus;
-    NTSTATUS status;
-    ULONG_PTR information = 0;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     stack = IoGetCurrentIrpStackLocation(Irp);
     isWrite = stack->MajorFunction == IRP_MJ_WRITE;
     length = isWrite ? stack->Parameters.Write.Length : stack->Parameters.Read.Length;
-    logicalOffset = (ULONGLONG)(isWrite ?
-        stack->Parameters.Write.ByteOffset.QuadPart :
-        stack->Parameters.Read.ByteOffset.QuadPart);
 
     DPUSB_TRACE("ReadWrite",
-                "enter irp=%p op=%s length=%lu logical=%I64u mdl=%p flags=0x%08X pid=%p\n",
+                "queue enter irp=%p op=%s length=%lu logical=%I64d mdl=%p flags=0x%08X irql=%lu pid=%p\n",
                 Irp,
                 isWrite ? "WRITE" : "READ",
                 length,
-                logicalOffset,
+                isWrite ? stack->Parameters.Write.ByteOffset.QuadPart : stack->Parameters.Read.ByteOffset.QuadPart,
                 Irp->MdlAddress,
                 Irp->Flags,
+                (ULONG)KeGetCurrentIrql(),
                 PsGetCurrentProcessId());
 
     if (length == 0) {
@@ -915,6 +1412,92 @@ DpUsbReadWrite(
         DpUsbComplete(Irp, STATUS_SUCCESS, 0);
         return STATUS_SUCCESS;
     }
+
+    if (InterlockedCompareExchange(&gDpUsbUnloading, 0, 0) != 0) {
+        DPUSB_TRACE("ReadWrite", "reject during unload irp=%p op=%s\n", Irp, isWrite ? "WRITE" : "READ");
+        DpUsbComplete(Irp, STATUS_DELETE_PENDING, 0);
+        return STATUS_DELETE_PENDING;
+    }
+
+    workItem = (PDPUSB_IO_WORK_ITEM)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*workItem), DPUSB_TAG_WORK);
+    if (workItem == NULL) {
+        DPUSB_TRACE("ReadWrite", "work item alloc failed irp=%p length=%lu\n", Irp, length);
+        DpUsbComplete(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (InterlockedIncrement(&gDpUsbActiveWorkers) == 1) {
+        KeClearEvent(&gDpUsbNoActiveWorkers);
+    }
+
+    if (InterlockedCompareExchange(&gDpUsbUnloading, 0, 0) != 0) {
+        if (InterlockedDecrement(&gDpUsbActiveWorkers) == 0) {
+            KeSetEvent(&gDpUsbNoActiveWorkers, IO_NO_INCREMENT, FALSE);
+        }
+        ExFreePoolWithTag(workItem, DPUSB_TAG_WORK);
+        DPUSB_TRACE("ReadWrite", "reject after worker reserve during unload irp=%p\n", Irp);
+        DpUsbComplete(Irp, STATUS_DELETE_PENDING, 0);
+        return STATUS_DELETE_PENDING;
+    }
+
+    RtlZeroMemory(workItem, sizeof(*workItem));
+    workItem->Irp = Irp;
+    workItem->IsWrite = isWrite;
+    IoMarkIrpPending(Irp);
+    ExInitializeWorkItem(&workItem->WorkItem, DpUsbReadWriteWorker, workItem);
+    ExQueueWorkItem(&workItem->WorkItem, DelayedWorkQueue);
+    DPUSB_TRACE("ReadWrite", "queued worker irp=%p work=%p\n", Irp, workItem);
+    return STATUS_PENDING;
+}
+
+static
+VOID
+DpUsbReadWriteWorker(
+    _In_ PVOID Context
+    )
+{
+    PDPUSB_IO_WORK_ITEM workItem;
+    PIRP Irp;
+    PIO_STACK_LOCATION stack;
+    BOOLEAN isWrite;
+    ULONG length;
+    ULONGLONG logicalOffset;
+    ULONGLONG physicalOffset;
+    DPUSB_SESSION_SNAPSHOT snapshot;
+    PVOID systemAddress;
+    UCHAR *ioBuffer = NULL;
+    NTSTATUS status;
+    ULONG_PTR information = 0;
+
+    workItem = (PDPUSB_IO_WORK_ITEM)Context;
+    if (workItem == NULL || workItem->Irp == NULL) {
+        if (workItem != NULL) {
+            DpUsbFinishReadWriteWorker(workItem);
+        } else if (InterlockedDecrement(&gDpUsbActiveWorkers) == 0) {
+            KeSetEvent(&gDpUsbNoActiveWorkers, IO_NO_INCREMENT, FALSE);
+        }
+        return;
+    }
+
+    Irp = workItem->Irp;
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    isWrite = workItem->IsWrite;
+    length = isWrite ? stack->Parameters.Write.Length : stack->Parameters.Read.Length;
+    logicalOffset = (ULONGLONG)(isWrite ?
+        stack->Parameters.Write.ByteOffset.QuadPart :
+        stack->Parameters.Read.ByteOffset.QuadPart);
+
+    DPUSB_TRACE("ReadWrite",
+                "worker enter irp=%p work=%p op=%s length=%lu logical=%I64u mdl=%p flags=0x%08X irql=%lu pid=%p\n",
+                Irp,
+                workItem,
+                isWrite ? "WRITE" : "READ",
+                length,
+                logicalOffset,
+                Irp->MdlAddress,
+                Irp->Flags,
+                (ULONG)KeGetCurrentIrql(),
+                PsGetCurrentProcessId());
 
     if (Irp->MdlAddress == NULL) {
         DPUSB_TRACE("ReadWrite",
@@ -926,14 +1509,16 @@ DpUsbReadWrite(
                     Irp->AssociatedIrp.SystemBuffer,
                     Irp->UserBuffer);
         DpUsbComplete(Irp, STATUS_INVALID_PARAMETER, 0);
-        return STATUS_INVALID_PARAMETER;
+        DpUsbFinishReadWriteWorker(workItem);
+        return;
     }
 
     status = DpUsbCaptureSession(&snapshot);
     if (!NT_SUCCESS(status)) {
         DPUSB_TRACE("ReadWrite", "capture failed irp=%p status=0x%08X\n", Irp, status);
         DpUsbComplete(Irp, status, 0);
-        return status;
+        DpUsbFinishReadWriteWorker(workItem);
+        return;
     }
 
     status = DpUsbValidateRange(&snapshot,
@@ -942,25 +1527,28 @@ DpUsbReadWrite(
                                 &physicalOffset);
     if (!NT_SUCCESS(status)) {
         DPUSB_TRACE("ReadWrite", "range failed irp=%p status=0x%08X\n", Irp, status);
-        RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
+        DpUsbReleaseSessionSnapshot(&snapshot);
         DpUsbComplete(Irp, status, 0);
-        return status;
+        DpUsbFinishReadWriteWorker(workItem);
+        return;
     }
 
     systemAddress = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
     if (systemAddress == NULL) {
         DPUSB_TRACE("ReadWrite", "mdl mapping failed irp=%p mdl=%p\n", Irp, Irp->MdlAddress);
-        RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
+        DpUsbReleaseSessionSnapshot(&snapshot);
         DpUsbComplete(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
-        return STATUS_INSUFFICIENT_RESOURCES;
+        DpUsbFinishReadWriteWorker(workItem);
+        return;
     }
 
     ioBuffer = ExAllocatePoolWithTag(NonPagedPoolNx, length, DPUSB_TAG_IO);
     if (ioBuffer == NULL) {
         DPUSB_TRACE("ReadWrite", "alloc failed irp=%p length=%lu\n", Irp, length);
-        RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
+        DpUsbReleaseSessionSnapshot(&snapshot);
         DpUsbComplete(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
-        return STATUS_INSUFFICIENT_RESOURCES;
+        DpUsbFinishReadWriteWorker(workItem);
+        return;
     }
 
     if (isWrite) {
@@ -974,74 +1562,48 @@ DpUsbReadWrite(
         RtlZeroMemory(ioBuffer, length);
     }
 
-    status = DpUsbOpenBackingDisk(&snapshot,
-                                  isWrite ? GENERIC_WRITE : GENERIC_READ,
-                                  &diskHandle);
-    if (!NT_SUCCESS(status)) {
-        DPUSB_TRACE("ReadWrite", "backing open failed irp=%p status=0x%08X\n", Irp, status);
-        goto Exit;
-    }
-
-    byteOffset.QuadPart = (LONGLONG)physicalOffset;
     if (isWrite) {
         DPUSB_TRACE("ReadWrite",
-                    "ZwWrite begin irp=%p handle=%p physical=%I64u length=%lu\n",
+                    "forward write begin irp=%p physical=%I64u length=%lu\n",
                     Irp,
-                    diskHandle,
                     physicalOffset,
                     length);
-        status = ZwWriteFile(diskHandle,
-                             NULL,
-                             NULL,
-                             NULL,
-                             &ioStatus,
-                             ioBuffer,
-                             length,
-                             &byteOffset,
-                             NULL);
+        status = DpUsbForwardBackingReadWrite(&snapshot,
+                                              TRUE,
+                                              ioBuffer,
+                                              length,
+                                              physicalOffset,
+                                              &information);
         DPUSB_TRACE("ReadWrite",
-                    "ZwWrite end irp=%p status=0x%08X information=%Iu\n",
+                    "forward write end irp=%p status=0x%08X information=%Iu\n",
                     Irp,
                     status,
-                    ioStatus.Information);
+                    information);
     } else {
         DPUSB_TRACE("ReadWrite",
-                    "ZwRead begin irp=%p handle=%p physical=%I64u length=%lu\n",
+                    "forward read begin irp=%p physical=%I64u length=%lu\n",
                     Irp,
-                    diskHandle,
                     physicalOffset,
                     length);
-        status = ZwReadFile(diskHandle,
-                            NULL,
-                            NULL,
-                            NULL,
-                            &ioStatus,
-                            ioBuffer,
-                            length,
-                            &byteOffset,
-                            NULL);
+        status = DpUsbForwardBackingReadWrite(&snapshot,
+                                              FALSE,
+                                              ioBuffer,
+                                              length,
+                                              physicalOffset,
+                                              &information);
         DPUSB_TRACE("ReadWrite",
-                    "ZwRead end irp=%p status=0x%08X information=%Iu\n",
+                    "forward read end irp=%p status=0x%08X information=%Iu\n",
                     Irp,
                     status,
-                    ioStatus.Information);
-        if (NT_SUCCESS(status) && ioStatus.Information != 0) {
+                    information);
+        if (NT_SUCCESS(status) && information != 0) {
             DpUsbRc4CryptAtOffset(snapshot.Key,
                                   snapshot.KeyLength,
                                   logicalOffset,
                                   ioBuffer,
-                                  (ULONG)ioStatus.Information);
-            RtlCopyMemory(systemAddress, ioBuffer, (SIZE_T)ioStatus.Information);
+                                  (ULONG)information);
+            RtlCopyMemory(systemAddress, ioBuffer, (SIZE_T)information);
         }
-    }
-
-    if (NT_SUCCESS(status)) {
-        information = ioStatus.Information;
-    }
-
-Exit:
-    if (diskHandle != NULL) {
-        ZwClose(diskHandle);
     }
 
     if (ioBuffer != NULL) {
@@ -1049,15 +1611,16 @@ Exit:
         ExFreePoolWithTag(ioBuffer, DPUSB_TAG_IO);
     }
 
-    RtlSecureZeroMemory(&snapshot, sizeof(snapshot));
+    DpUsbReleaseSessionSnapshot(&snapshot);
     DPUSB_TRACE("ReadWrite",
-                "leave irp=%p op=%s status=0x%08X information=%Iu\n",
+                "worker leave irp=%p work=%p op=%s status=0x%08X information=%Iu\n",
                 Irp,
+                workItem,
                 isWrite ? "WRITE" : "READ",
                 status,
                 information);
     DpUsbComplete(Irp, status, information);
-    return status;
+    DpUsbFinishReadWriteWorker(workItem);
 }
 
 NTSTATUS
@@ -1157,6 +1720,42 @@ DpUsbDeviceControl(
                                            &bytesReturned);
         break;
 
+    case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
+        status = DpUsbQueryMountUniqueId((PMOUNTDEV_UNIQUE_ID)buffer,
+                                         outputLength,
+                                         &bytesReturned);
+        break;
+
+    case IOCTL_MOUNTDEV_QUERY_DEVICE_NAME:
+        status = DpUsbQueryMountDeviceName((PMOUNTDEV_NAME)buffer,
+                                           outputLength,
+                                           &bytesReturned);
+        break;
+
+    case IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME:
+        status = DpUsbQueryMountSuggestedLinkName((PMOUNTDEV_SUGGESTED_LINK_NAME)buffer,
+                                                  outputLength,
+                                                  &bytesReturned);
+        break;
+
+    case IOCTL_MOUNTDEV_LINK_CREATED:
+    case IOCTL_MOUNTDEV_LINK_DELETED:
+        bytesReturned = 0;
+        status = STATUS_SUCCESS;
+        break;
+
+    case IOCTL_MOUNTDEV_QUERY_STABLE_GUID:
+        status = DpUsbQueryMountStableGuid((PMOUNTDEV_STABLE_GUID)buffer,
+                                           outputLength,
+                                           &bytesReturned);
+        break;
+
+    case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
+        status = DpUsbQueryVolumeDiskExtents((PVOLUME_DISK_EXTENTS)buffer,
+                                             outputLength,
+                                             &bytesReturned);
+        break;
+
     case IOCTL_DPUSB_OPEN_SESSION:
         if (inputLength < sizeof(DPUSB_OPEN_SESSION)) {
             status = STATUS_BUFFER_TOO_SMALL;
@@ -1199,6 +1798,13 @@ DpUsbUnload(
     )
 {
     DPUSB_TRACE("Driver", "unload begin driver=%p device=%p\n", DriverObject, gDpUsbDeviceObject);
+    InterlockedExchange(&gDpUsbUnloading, 1);
+    if (InterlockedCompareExchange(&gDpUsbActiveWorkers, 0, 0) != 0) {
+        DPUSB_TRACE("Driver",
+                    "unload waiting activeWorkers=%ld\n",
+                    InterlockedCompareExchange(&gDpUsbActiveWorkers, 0, 0));
+        KeWaitForSingleObject(&gDpUsbNoActiveWorkers, Executive, KernelMode, FALSE, NULL);
+    }
     DpUsbCloseSession();
     IoDeleteSymbolicLink(&gDpUsbDosName);
 
@@ -1227,6 +1833,9 @@ DriverEntry(
     RtlZeroMemory(&gDpUsbSession, sizeof(gDpUsbSession));
     ExInitializePushLock(&gDpUsbSession.Lock);
     gDpUsbSession.LockInitialized = TRUE;
+    InterlockedExchange(&gDpUsbUnloading, 0);
+    InterlockedExchange(&gDpUsbActiveWorkers, 0);
+    KeInitializeEvent(&gDpUsbNoActiveWorkers, NotificationEvent, TRUE);
 
     RtlInitUnicodeString(&deviceName, DPUSB_DEVICE_NAME);
     RtlInitUnicodeString(&gDpUsbDosName, DPUSB_DOS_DEVICE_NAME);
