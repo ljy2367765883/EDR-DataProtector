@@ -19,6 +19,11 @@
 #define DPUSB_APP_NAME L"DataProtector Secure USB"
 #define DPUSB_PRIVATE_VOLUME_LABEL L"DPUSB-PRIVATE"
 #define DPUSB_VIRTUAL_DEVICE_NUMBER 0x44505543UL
+#define DPUSB_SERVICE_STOP_WAIT_MS 10000UL
+#define DPUSB_SERVICE_DELETE_WAIT_MS 12000UL
+#define DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS 3000UL
+#define DPUSB_SERVICE_POLL_MS 250UL
+#define DPUSB_SERVICE_INSTALL_RETRIES 4UL
 #define DPUSB_ALGORITHM_RC4 1
 #define DPUSB_UNLOCK_METADATA_MAGIC 0x32535544UL
 #define DPUSB_UNLOCK_METADATA_VERSION 2
@@ -1212,6 +1217,124 @@ static BOOL BuildKernelDriverServicePath(const wchar_t *driverPath,
     return FALSE;
 }
 
+static BOOL WaitForDriverServiceState(DWORD desiredState, DWORD timeoutMs, DWORD *win32Error)
+{
+    SC_HANDLE scm;
+    SC_HANDLE service;
+    SERVICE_STATUS_PROCESS status;
+    DWORD bytesNeeded = 0;
+    DWORD elapsed = 0;
+    DWORD lastError = ERROR_SUCCESS;
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_QUERY_STATUS);
+    if (service == NULL) {
+        lastError = GetLastError();
+        CloseServiceHandle(scm);
+        if (desiredState == SERVICE_STOPPED && lastError == ERROR_SERVICE_DOES_NOT_EXIST) {
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+        if (win32Error != NULL) {
+            *win32Error = lastError;
+        }
+        return FALSE;
+    }
+
+    for (;;) {
+        ZeroMemory(&status, sizeof(status));
+        if (!QueryServiceStatusEx(service,
+                                  SC_STATUS_PROCESS_INFO,
+                                  (LPBYTE)&status,
+                                  sizeof(status),
+                                  &bytesNeeded)) {
+            lastError = GetLastError();
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            if (win32Error != NULL) {
+                *win32Error = lastError;
+            }
+            return FALSE;
+        }
+
+        if (status.dwCurrentState == desiredState) {
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+
+        if (elapsed >= timeoutMs) {
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            if (win32Error != NULL) {
+                *win32Error = ERROR_TIMEOUT;
+            }
+            return FALSE;
+        }
+
+        Sleep(DPUSB_SERVICE_POLL_MS);
+        elapsed += DPUSB_SERVICE_POLL_MS;
+    }
+}
+
+static BOOL WaitForDriverServiceDeleted(DWORD timeoutMs, DWORD *win32Error)
+{
+    SC_HANDLE scm;
+    SC_HANDLE service;
+    DWORD elapsed = 0;
+    DWORD lastError = ERROR_SUCCESS;
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    for (;;) {
+    service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_QUERY_STATUS | DELETE);
+    if (service == NULL) {
+        lastError = GetLastError();
+        CloseServiceHandle(scm);
+        if (lastError == ERROR_SERVICE_DOES_NOT_EXIST || lastError == ERROR_SERVICE_MARKED_FOR_DELETE) {
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+            }
+            if (win32Error != NULL) {
+                *win32Error = lastError;
+            }
+            return FALSE;
+        }
+
+        CloseServiceHandle(service);
+        if (elapsed >= timeoutMs) {
+            CloseServiceHandle(scm);
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SERVICE_MARKED_FOR_DELETE;
+            }
+            return FALSE;
+        }
+
+        Sleep(DPUSB_SERVICE_POLL_MS);
+        elapsed += DPUSB_SERVICE_POLL_MS;
+    }
+}
+
 static BOOL InstallDriverServicePath(const wchar_t *path,
                                      DPUSB_SERVICE_PATH_MODE mode,
                                      wchar_t *installedServicePath,
@@ -1315,6 +1438,7 @@ static BOOL StopAndDeleteDriverService(DWORD *win32Error)
     SC_HANDLE scm;
     SC_HANDLE service;
     SERVICE_STATUS status;
+    DWORD waitError = ERROR_SUCCESS;
     DWORD lastError = ERROR_SUCCESS;
     BOOL ok = TRUE;
 
@@ -1332,6 +1456,10 @@ static BOOL StopAndDeleteDriverService(DWORD *win32Error)
             if (!ControlService(service, SERVICE_CONTROL_STOP, &status) && GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
                 lastError = GetLastError();
                 ok = FALSE;
+            } else if (!WaitForDriverServiceState(SERVICE_STOPPED, DPUSB_SERVICE_STOP_WAIT_MS, &waitError) &&
+                       waitError != ERROR_SERVICE_DOES_NOT_EXIST) {
+                lastError = waitError;
+                ok = FALSE;
             }
         }
 
@@ -1346,6 +1474,11 @@ static BOOL StopAndDeleteDriverService(DWORD *win32Error)
     }
 
     CloseServiceHandle(scm);
+    if (ok && !WaitForDriverServiceDeleted(DPUSB_SERVICE_DELETE_WAIT_MS, &waitError)) {
+        lastError = waitError;
+        ok = FALSE;
+    }
+
     if (win32Error != NULL) {
         *win32Error = ok ? ERROR_SUCCESS : lastError;
     }
@@ -1400,6 +1533,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
                               DWORD *win32Error)
 {
     DWORD error = ERROR_SUCCESS;
+    DWORD attempt;
     wchar_t attemptedServicePath[MAX_PATH + 8];
 
     if (deployedPath == NULL || deployedPathChars == 0) {
@@ -1421,13 +1555,29 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
     (VOID)StopAndDeleteDriverService(NULL);
 
     ZeroMemory(attemptedServicePath, sizeof(attemptedServicePath));
-    if (!InstallDriverServicePath(deployedPath,
-                                  DpUsbServicePathNativeDos,
-                                  attemptedServicePath,
-                                  sizeof(attemptedServicePath) / sizeof(attemptedServicePath[0]),
-                                  &error)) {
+    for (attempt = 0; attempt < DPUSB_SERVICE_INSTALL_RETRIES; attempt++) {
+        if (InstallDriverServicePath(deployedPath,
+                                     DpUsbServicePathNativeDos,
+                                     attemptedServicePath,
+                                     sizeof(attemptedServicePath) / sizeof(attemptedServicePath[0]),
+                                     &error)) {
+            break;
+        }
+
+        if (error != ERROR_SERVICE_MARKED_FOR_DELETE) {
+            if (win32Error != NULL) {
+                *win32Error = error;
+            }
+            return FALSE;
+        }
+
+        (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS, NULL);
+        Sleep(DPUSB_SERVICE_POLL_MS);
+    }
+
+    if (attempt >= DPUSB_SERVICE_INSTALL_RETRIES) {
         if (win32Error != NULL) {
-            *win32Error = error;
+            *win32Error = ERROR_SERVICE_MARKED_FOR_DELETE;
         }
         return FALSE;
     }
@@ -1439,11 +1589,25 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
     if (!StartDriverService(&error)) {
         if (IsExpectedDriverNotLoadedError(error)) {
             (VOID)StopAndDeleteDriverService(NULL);
-            if (!InstallDriverServicePath(deployedPath,
-                                          DpUsbServicePathWin32,
-                                          attemptedServicePath,
-                                          sizeof(attemptedServicePath) / sizeof(attemptedServicePath[0]),
-                                          &error) ||
+            for (attempt = 0; attempt < DPUSB_SERVICE_INSTALL_RETRIES; attempt++) {
+                if (InstallDriverServicePath(deployedPath,
+                                             DpUsbServicePathWin32,
+                                             attemptedServicePath,
+                                             sizeof(attemptedServicePath) / sizeof(attemptedServicePath[0]),
+                                             &error)) {
+                    break;
+                }
+
+                if (error != ERROR_SERVICE_MARKED_FOR_DELETE) {
+                    break;
+                }
+
+                (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS, NULL);
+                Sleep(DPUSB_SERVICE_POLL_MS);
+            }
+
+            if (attempt >= DPUSB_SERVICE_INSTALL_RETRIES ||
+                error == ERROR_SERVICE_MARKED_FOR_DELETE ||
                 !StartDriverService(&error)) {
 
                 if (servicePath != NULL && servicePathChars > 0 && attemptedServicePath[0] != L'\0') {
