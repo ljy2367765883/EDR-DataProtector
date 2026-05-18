@@ -3,6 +3,7 @@
 #include <winioctl.h>
 #include <bcrypt.h>
 #include <commctrl.h>
+#include <setupapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <stddef.h>
@@ -14,16 +15,18 @@
 
 #define DPUSB_DOS_NAME L"\\\\.\\DataProtectorUsbCrypt"
 #define DPUSB_NT_DEVICE_NAME L"\\Device\\DataProtectorUsbCrypt"
-#define DPUSB_SERVICE_NAME L"DataProtectorUsbCrypt"
+#define DPUSB_SERVICE_NAME L"DataProtectorUsbCryptRuntime"
+#define DPUSB_LEGACY_SERVICE_NAME L"DataProtectorUsbCrypt"
 #define DPUSB_DRIVER_FILE_NAME L"DataProtectorUsbCrypt.sys"
+#define DPUSB_DRIVER_INF_FILE_NAME L"DataProtectorUsbCrypt.inf"
 #define DPUSB_APP_NAME L"DataProtector Secure USB"
 #define DPUSB_PRIVATE_VOLUME_LABEL L"DPUSB-PRIVATE"
 #define DPUSB_VIRTUAL_DEVICE_NUMBER 0x44505543UL
 #define DPUSB_SERVICE_STOP_WAIT_MS 10000UL
-#define DPUSB_SERVICE_DELETE_WAIT_MS 60000UL
-#define DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS 5000UL
+#define DPUSB_SERVICE_DELETE_WAIT_MS 5000UL
+#define DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS 1000UL
 #define DPUSB_SERVICE_POLL_MS 250UL
-#define DPUSB_SERVICE_INSTALL_RETRIES 12UL
+#define DPUSB_SERVICE_INSTALL_RETRIES 4UL
 #define DPUSB_ALGORITHM_RC4 1
 #define DPUSB_UNLOCK_METADATA_MAGIC 0x32535544UL
 #define DPUSB_UNLOCK_METADATA_VERSION 2
@@ -676,6 +679,25 @@ static BOOL CombinePath(wchar_t *output, DWORD outputChars, const wchar_t *left,
     return swprintf_s(output, outputChars, L"%s\\%s", left, right) > 0;
 }
 
+static BOOL GetDirectoryFromPath(const wchar_t *path, wchar_t *directory, DWORD directoryChars)
+{
+    wchar_t *slash;
+
+    if (path == NULL || path[0] == L'\0' || directory == NULL || directoryChars == 0) {
+        return FALSE;
+    }
+
+    wcsncpy_s(directory, directoryChars, path, _TRUNCATE);
+    slash = wcsrchr(directory, L'\\');
+    if (slash == NULL || slash == directory) {
+        directory[0] = L'\0';
+        return FALSE;
+    }
+
+    *slash = L'\0';
+    return TRUE;
+}
+
 static BOOL GetModuleDriveRoot(wchar_t *root, DWORD rootChars)
 {
     wchar_t moduleDir[MAX_PATH];
@@ -773,6 +795,33 @@ static BOOL RootContainsUsbRuntime(const wchar_t *root)
     }
 
     return GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES;
+}
+
+static BOOL FindPackagedInf(const wchar_t *driverPath, wchar_t *infPath, DWORD infPathChars)
+{
+    wchar_t driverDirectory[MAX_PATH];
+
+    if (driverPath == NULL || driverPath[0] == L'\0' || infPath == NULL || infPathChars == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!GetDirectoryFromPath(driverPath, driverDirectory, sizeof(driverDirectory) / sizeof(driverDirectory[0]))) {
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return FALSE;
+    }
+
+    if (!CombinePath(infPath, infPathChars, driverDirectory, DPUSB_DRIVER_INF_FILE_NAME)) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    if (GetFileAttributesW(infPath) == INVALID_FILE_ATTRIBUTES) {
+        SetLastError(GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_FILE_NOT_FOUND);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 static BOOL PhysicalPathForRoot(const wchar_t *root,
@@ -1289,7 +1338,7 @@ static BOOL WaitForDriverServiceState(DWORD desiredState, DWORD timeoutMs, DWORD
     }
 }
 
-static BOOL WaitForDriverServiceDeleted(DWORD timeoutMs, DWORD *win32Error)
+static BOOL WaitForNamedDriverServiceDeleted(const wchar_t *serviceName, DWORD timeoutMs, DWORD *win32Error)
 {
     SC_HANDLE scm;
     SC_HANDLE service;
@@ -1305,7 +1354,7 @@ static BOOL WaitForDriverServiceDeleted(DWORD timeoutMs, DWORD *win32Error)
     }
 
     for (;;) {
-        service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_QUERY_STATUS | DELETE);
+        service = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS | DELETE);
         if (service == NULL) {
             lastError = GetLastError();
             if (lastError == ERROR_SERVICE_DOES_NOT_EXIST) {
@@ -1360,6 +1409,106 @@ static BOOL WaitForDriverServiceDeleted(DWORD timeoutMs, DWORD *win32Error)
         Sleep(DPUSB_SERVICE_POLL_MS);
         elapsed += DPUSB_SERVICE_POLL_MS;
     }
+}
+
+static BOOL WaitForDriverServiceDeleted(DWORD timeoutMs, DWORD *win32Error)
+{
+    return WaitForNamedDriverServiceDeleted(DPUSB_SERVICE_NAME, timeoutMs, win32Error);
+}
+
+static BOOL InstallDriverPackageFromInf(const wchar_t *infPath, DWORD *win32Error)
+{
+    HINF infHandle;
+    wchar_t infDirectory[MAX_PATH];
+    BOOL rebootRequired = FALSE;
+    BOOL ok;
+
+    if (infPath == NULL || infPath[0] == L'\0') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (!GetDirectoryFromPath(infPath, infDirectory, sizeof(infDirectory) / sizeof(infDirectory[0]))) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_PATH_NOT_FOUND;
+        }
+        return FALSE;
+    }
+
+    infHandle = SetupOpenInfFileW(infPath, NULL, INF_STYLE_WIN4, NULL);
+    if (infHandle == INVALID_HANDLE_VALUE) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    ok = SetupInstallFromInfSectionW(NULL,
+                                     infHandle,
+                                     L"DefaultInstall",
+                                     SPINST_FILES,
+                                     NULL,
+                                     infDirectory,
+                                     SP_COPY_FORCE_IN_USE | SP_COPY_NEWER_OR_SAME,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     NULL);
+    if (!ok) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        SetupCloseInfFile(infHandle);
+        return FALSE;
+    }
+
+    ok = SetupInstallServicesFromInfSectionExW(infHandle,
+                                               L"DefaultInstall.Services",
+                                               0,
+                                               NULL,
+                                               NULL,
+                                               NULL,
+                                               &rebootRequired);
+    if (!ok) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        SetupCloseInfFile(infHandle);
+        return FALSE;
+    }
+
+    SetupCloseInfFile(infHandle);
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL GetSystemDriverPath(wchar_t *path, DWORD pathChars)
+{
+    wchar_t systemDirectory[MAX_PATH];
+
+    if (path == NULL || pathChars == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (GetSystemDirectoryW(systemDirectory, sizeof(systemDirectory) / sizeof(systemDirectory[0])) == 0) {
+        return FALSE;
+    }
+
+    if (swprintf_s(path,
+                  pathChars,
+                  L"%s\\drivers\\%s",
+                  systemDirectory,
+                  DPUSB_DRIVER_FILE_NAME) <= 0) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 static BOOL InstallDriverServicePath(const wchar_t *path,
@@ -1512,6 +1661,97 @@ static BOOL StopAndDeleteDriverService(DWORD *win32Error)
     return ok;
 }
 
+static BOOL StopDriverService(DWORD *win32Error)
+{
+    SC_HANDLE scm;
+    SC_HANDLE service;
+    SERVICE_STATUS status;
+    DWORD waitError = ERROR_SUCCESS;
+    DWORD lastError = ERROR_SUCCESS;
+    BOOL ok = TRUE;
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_STOP | SERVICE_QUERY_STATUS);
+    if (service != NULL) {
+        if (QueryServiceStatus(service, &status) && status.dwCurrentState != SERVICE_STOPPED) {
+            if (!ControlService(service, SERVICE_CONTROL_STOP, &status) && GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
+                lastError = GetLastError();
+                ok = FALSE;
+            } else if (!WaitForDriverServiceState(SERVICE_STOPPED, DPUSB_SERVICE_STOP_WAIT_MS, &waitError) &&
+                       waitError != ERROR_SERVICE_DOES_NOT_EXIST) {
+                lastError = waitError;
+                ok = FALSE;
+            }
+        }
+        CloseServiceHandle(service);
+    } else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST) {
+        lastError = GetLastError();
+        ok = FALSE;
+    }
+
+    CloseServiceHandle(scm);
+    if (win32Error != NULL) {
+        *win32Error = ok ? ERROR_SUCCESS : lastError;
+    }
+    return ok;
+}
+
+static BOOL StopAndDeleteNamedDriverService(const wchar_t *serviceName, DWORD *win32Error)
+{
+    SC_HANDLE scm;
+    SC_HANDLE service;
+    SERVICE_STATUS status;
+    DWORD lastError = ERROR_SUCCESS;
+    BOOL ok = TRUE;
+
+    if (serviceName == NULL || serviceName[0] == L'\0') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    service = OpenServiceW(scm, serviceName, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
+    if (service != NULL) {
+        if (QueryServiceStatus(service, &status) && status.dwCurrentState != SERVICE_STOPPED) {
+            if (!ControlService(service, SERVICE_CONTROL_STOP, &status) && GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
+                lastError = GetLastError();
+                ok = FALSE;
+            }
+        }
+
+        if (!DeleteService(service) && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE) {
+            lastError = GetLastError();
+            ok = FALSE;
+        }
+        CloseServiceHandle(service);
+    } else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE) {
+        lastError = GetLastError();
+        ok = FALSE;
+    }
+
+    CloseServiceHandle(scm);
+    if (win32Error != NULL) {
+        *win32Error = ok ? ERROR_SUCCESS : lastError;
+    }
+    return ok;
+}
+
 static BOOL StartDriverService(DWORD *win32Error)
 {
     SC_HANDLE scm;
@@ -1560,9 +1800,9 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
                               DWORD *win32Error)
 {
     DWORD error = ERROR_SUCCESS;
-    DWORD deleteError = ERROR_SUCCESS;
-    DWORD attempt;
-    wchar_t attemptedServicePath[MAX_PATH + 8];
+    wchar_t packageInfPath[MAX_PATH];
+    wchar_t systemDriverPath[MAX_PATH];
+    wchar_t systemServicePath[MAX_PATH + 8];
 
     if (deployedPath == NULL || deployedPathChars == 0) {
         if (win32Error != NULL) {
@@ -1578,73 +1818,94 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
         return FALSE;
     }
 
+    if (!FindPackagedInf(deployedPath, packageInfPath, sizeof(packageInfPath) / sizeof(packageInfPath[0]))) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_FILE_NOT_FOUND;
+        }
+        return FALSE;
+    }
+
+    if (!GetSystemDriverPath(systemDriverPath, sizeof(systemDriverPath) / sizeof(systemDriverPath[0]))) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_PATH_NOT_FOUND;
+        }
+        return FALSE;
+    }
+
     UnmountAllPrivateWorkspaces();
     (VOID)CloseSessionData(NULL);
-    if (!StopAndDeleteDriverService(&deleteError) && deleteError == ERROR_SERVICE_MARKED_FOR_DELETE) {
-        AppendLog(L"Previous USB crypt driver service is still marked for deletion. Waiting before reloading the current USB driver...");
-        (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_DELETE_WAIT_MS, NULL);
-    }
+    (VOID)StopDriverService(NULL);
+    (VOID)StopAndDeleteNamedDriverService(DPUSB_LEGACY_SERVICE_NAME, NULL);
 
-    ZeroMemory(attemptedServicePath, sizeof(attemptedServicePath));
-    for (attempt = 0; attempt < DPUSB_SERVICE_INSTALL_RETRIES; attempt++) {
-        if (InstallDriverServicePath(deployedPath,
-                                     DpUsbServicePathNativeDos,
-                                     attemptedServicePath,
-                                     sizeof(attemptedServicePath) / sizeof(attemptedServicePath[0]),
-                                     &error)) {
-            break;
-        }
-
-        if (error != ERROR_SERVICE_MARKED_FOR_DELETE) {
-            if (win32Error != NULL) {
-                *win32Error = error;
-            }
-            return FALSE;
-        }
-
-        AppendLog(L"Previous USB crypt driver service is still marked for deletion. Retry %lu/%lu...", attempt + 1, DPUSB_SERVICE_INSTALL_RETRIES);
-        (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS, NULL);
-        Sleep(DPUSB_SERVICE_POLL_MS);
-    }
-
-    if (attempt >= DPUSB_SERVICE_INSTALL_RETRIES) {
+    AppendLog(L"Installing USB crypt driver package from INF: %s", packageInfPath);
+    if (!InstallDriverPackageFromInf(packageInfPath, &error)) {
         if (win32Error != NULL) {
-            *win32Error = ERROR_SERVICE_MARKED_FOR_DELETE;
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    if (GetFileAttributesW(systemDriverPath) == INVALID_FILE_ATTRIBUTES) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_FILE_NOT_FOUND;
+        }
+        return FALSE;
+    }
+
+    ZeroMemory(systemServicePath, sizeof(systemServicePath));
+    if (!InstallDriverServicePath(systemDriverPath,
+                                  DpUsbServicePathNativeDos,
+                                  systemServicePath,
+                                  sizeof(systemServicePath) / sizeof(systemServicePath[0]),
+                                  &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
         }
         return FALSE;
     }
 
     if (servicePath != NULL && servicePathChars > 0) {
-        wcsncpy_s(servicePath, servicePathChars, attemptedServicePath, _TRUNCATE);
+        wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
     }
 
     if (!StartDriverService(&error)) {
-        if (IsExpectedDriverNotLoadedError(error)) {
-            (VOID)StopAndDeleteDriverService(NULL);
-            for (attempt = 0; attempt < DPUSB_SERVICE_INSTALL_RETRIES; attempt++) {
-                if (InstallDriverServicePath(deployedPath,
-                                             DpUsbServicePathWin32,
-                                             attemptedServicePath,
-                                             sizeof(attemptedServicePath) / sizeof(attemptedServicePath[0]),
-                                             &error)) {
-                    break;
-                }
+        DPUSB_STATUS existingStatus;
 
-                if (error != ERROR_SERVICE_MARKED_FOR_DELETE) {
-                    break;
-                }
-
-                AppendLog(L"Previous USB crypt driver service is still marked for deletion. Retry %lu/%lu...", attempt + 1, DPUSB_SERVICE_INSTALL_RETRIES);
-                (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS, NULL);
-                Sleep(DPUSB_SERVICE_POLL_MS);
+        ZeroMemory(&existingStatus, sizeof(existingStatus));
+        if (QueryStatusData(&existingStatus, NULL)) {
+            if (servicePath != NULL && servicePathChars > 0) {
+                wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
             }
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            AppendLog(L"USB crypt driver device is already responding; reusing the loaded runtime.");
+            return TRUE;
+        }
 
-            if (attempt >= DPUSB_SERVICE_INSTALL_RETRIES ||
-                error == ERROR_SERVICE_MARKED_FOR_DELETE ||
+        if (IsExpectedDriverNotLoadedError(error)) {
+            (VOID)StopDriverService(NULL);
+            if (!InstallDriverServicePath(systemDriverPath,
+                                          DpUsbServicePathWin32,
+                                          systemServicePath,
+                                          sizeof(systemServicePath) / sizeof(systemServicePath[0]),
+                                          &error) ||
                 !StartDriverService(&error)) {
 
-                if (servicePath != NULL && servicePathChars > 0 && attemptedServicePath[0] != L'\0') {
-                    wcsncpy_s(servicePath, servicePathChars, attemptedServicePath, _TRUNCATE);
+                ZeroMemory(&existingStatus, sizeof(existingStatus));
+                if (QueryStatusData(&existingStatus, NULL)) {
+                    if (servicePath != NULL && servicePathChars > 0 && systemServicePath[0] != L'\0') {
+                        wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
+                    }
+                    if (win32Error != NULL) {
+                        *win32Error = ERROR_SUCCESS;
+                    }
+                    AppendLog(L"USB crypt driver device is already responding; reusing the loaded runtime.");
+                    return TRUE;
+                }
+
+                if (servicePath != NULL && servicePathChars > 0 && systemServicePath[0] != L'\0') {
+                    wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
                 }
                 if (win32Error != NULL) {
                     *win32Error = error;
@@ -1653,7 +1914,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
             }
 
             if (servicePath != NULL && servicePathChars > 0) {
-                wcsncpy_s(servicePath, servicePathChars, attemptedServicePath, _TRUNCATE);
+                wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
             }
             if (win32Error != NULL) {
                 *win32Error = ERROR_SUCCESS;
@@ -3296,8 +3557,8 @@ static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter)
         ok = FALSE;
     }
 
-    AppendLog(L"Stopping and unregistering USB crypt runtime driver...");
-    if (!StopAndDeleteDriverService(&error) && error != ERROR_SERVICE_DOES_NOT_EXIST) {
+    AppendLog(L"Stopping USB crypt runtime driver...");
+    if (!StopDriverService(&error) && error != ERROR_SERVICE_DOES_NOT_EXIST) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Driver stop reported: %s", message);
         ok = FALSE;

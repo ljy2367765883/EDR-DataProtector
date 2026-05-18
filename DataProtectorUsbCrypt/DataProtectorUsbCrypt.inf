@@ -47,6 +47,6 @@ DataProtectorUsbCrypt.sys = 1,,
 [Strings]
 ManufacturerName   = "DataProtector"
 ServiceDescription = "DataProtector removable media block encryption driver"
-ServiceName        = "DataProtectorUsbCrypt"
+ServiceName        = "DataProtectorUsbCryptRuntime"
 DriverName         = "DataProtectorUsbCrypt"
 DiskId1            = "DataProtector USB Crypt Installation Disk"
