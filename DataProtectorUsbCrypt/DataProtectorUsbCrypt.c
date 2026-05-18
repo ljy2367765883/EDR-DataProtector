@@ -126,6 +126,10 @@ DpUsbIoctlName(
         return "IOCTL_DISK_GET_LENGTH_INFO";
     case IOCTL_DISK_GET_DRIVE_GEOMETRY:
         return "IOCTL_DISK_GET_DRIVE_GEOMETRY";
+    case IOCTL_DISK_GET_DRIVE_GEOMETRY_EX:
+        return "IOCTL_DISK_GET_DRIVE_GEOMETRY_EX";
+    case IOCTL_DISK_GET_PARTITION_INFO:
+        return "IOCTL_DISK_GET_PARTITION_INFO";
     case IOCTL_DISK_GET_PARTITION_INFO_EX:
         return "IOCTL_DISK_GET_PARTITION_INFO_EX";
     case IOCTL_DISK_GET_MEDIA_TYPES:
@@ -626,6 +630,39 @@ DpUsbQueryDriveGeometry(
 
 static
 NTSTATUS
+DpUsbQueryDriveGeometryEx(
+    _Out_writes_bytes_(OutputLength) PDISK_GEOMETRY_EX Geometry,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    ULONGLONG lengthBytes;
+    ULONG requiredBytes;
+
+    if (Geometry == NULL || BytesReturned == NULL || OutputLength < sizeof(DISK_GEOMETRY_EX)) {
+        if (BytesReturned != NULL) {
+            *BytesReturned = sizeof(DISK_GEOMETRY_EX);
+        }
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    requiredBytes = sizeof(DISK_GEOMETRY_EX);
+    DpUsbQueryLengthValue(&lengthBytes);
+    RtlZeroMemory(Geometry, OutputLength);
+    DpUsbBuildGeometry(lengthBytes, &Geometry->Geometry);
+    Geometry->DiskSize.QuadPart = (LONGLONG)lengthBytes;
+    Geometry->Data[0] = 0;
+    DPUSB_TRACE("Query",
+                "geometry ex length=%I64u cylinders=%I64d bytesReturned=%lu\n",
+                lengthBytes,
+                Geometry->Geometry.Cylinders.QuadPart,
+                requiredBytes);
+    *BytesReturned = requiredBytes;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
 DpUsbBuildPartitionInfo(
     _In_ ULONGLONG LengthBytes,
     _Out_ PPARTITION_INFORMATION_EX Partition
@@ -641,10 +678,46 @@ DpUsbBuildPartitionInfo(
     Partition->PartitionLength.QuadPart = (LONGLONG)LengthBytes;
     Partition->PartitionNumber = 1;
     Partition->RewritePartition = FALSE;
-    Partition->Mbr.PartitionType = PARTITION_IFS;
+    Partition->Mbr.PartitionType = PARTITION_FAT32;
     Partition->Mbr.BootIndicator = FALSE;
     Partition->Mbr.RecognizedPartition = TRUE;
 
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbQueryPartitionInfoLegacy(
+    _Out_ PPARTITION_INFORMATION Partition,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    ULONGLONG lengthBytes;
+
+    if (Partition == NULL || BytesReturned == NULL || OutputLength < sizeof(PARTITION_INFORMATION)) {
+        if (BytesReturned != NULL) {
+            *BytesReturned = sizeof(PARTITION_INFORMATION);
+        }
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    DpUsbQueryLengthValue(&lengthBytes);
+    RtlZeroMemory(Partition, sizeof(*Partition));
+    Partition->StartingOffset.QuadPart = 0;
+    Partition->PartitionLength.QuadPart = (LONGLONG)lengthBytes;
+    Partition->HiddenSectors = 0;
+    Partition->PartitionNumber = 1;
+    Partition->PartitionType = PARTITION_FAT32;
+    Partition->BootIndicator = FALSE;
+    Partition->RecognizedPartition = TRUE;
+    Partition->RewritePartition = FALSE;
+    DPUSB_TRACE("Query",
+                "partition legacy length=%I64u type=0x%02X number=%lu\n",
+                lengthBytes,
+                Partition->PartitionType,
+                Partition->PartitionNumber);
+    *BytesReturned = sizeof(*Partition);
     return STATUS_SUCCESS;
 }
 
@@ -1844,6 +1917,14 @@ DpUsbDeviceControl(
 
     case IOCTL_DISK_GET_DRIVE_GEOMETRY:
         status = DpUsbQueryDriveGeometry((PDISK_GEOMETRY)buffer, outputLength, &bytesReturned);
+        break;
+
+    case IOCTL_DISK_GET_DRIVE_GEOMETRY_EX:
+        status = DpUsbQueryDriveGeometryEx((PDISK_GEOMETRY_EX)buffer, outputLength, &bytesReturned);
+        break;
+
+    case IOCTL_DISK_GET_PARTITION_INFO:
+        status = DpUsbQueryPartitionInfoLegacy((PPARTITION_INFORMATION)buffer, outputLength, &bytesReturned);
         break;
 
     case IOCTL_DISK_GET_PARTITION_INFO_EX:

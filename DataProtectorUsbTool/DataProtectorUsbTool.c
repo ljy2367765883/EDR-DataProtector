@@ -43,6 +43,9 @@
 #define IOCTL_DPUSB_CLOSE_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 2, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_MOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 3, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_UNMOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 4, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#ifndef IOCTL_VOLUME_UPDATE_PROPERTIES
+#define IOCTL_VOLUME_UPDATE_PROPERTIES CTL_CODE(IOCTL_VOLUME_BASE, 21, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
 
 #define DPUSB_ID_UNLOCK 1002
 #define DPUSB_ID_LOCK 1003
@@ -182,31 +185,7 @@ typedef enum _DPUSB_SERVICE_PATH_MODE {
     DpUsbServicePathWin32 = 1
 } DPUSB_SERVICE_PATH_MODE;
 
-typedef enum _DPUSB_FMIFS_PACKET_TYPE {
-    DpUsbFmifsProgress = 0,
-    DpUsbFmifsDoneWithStructure = 0x0B
-} DPUSB_FMIFS_PACKET_TYPE;
-
-typedef BOOLEAN (__stdcall *DPUSB_FMIFS_CALLBACK)(
-    _In_ DPUSB_FMIFS_PACKET_TYPE PacketType,
-    _In_ ULONG PacketLength,
-    _In_opt_ PVOID PacketData
-    );
-
-typedef VOID (WINAPI *DPUSB_FORMAT_EX)(
-    _In_ PWSTR DriveRoot,
-    _In_ ULONG MediaFlag,
-    _In_ PWSTR FileSystemName,
-    _In_ PWSTR Label,
-    _In_ BOOLEAN QuickFormat,
-    _In_ ULONG ClusterSize,
-    _In_ DPUSB_FMIFS_CALLBACK Callback
-    );
-
 static DPUSB_UI_STATE g_Ui;
-static volatile LONG g_FormatActive = 0;
-static volatile LONG g_FormatCompleted = 0;
-static volatile LONG g_FormatSuccess = 0;
 
 static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, wchar_t *servicePath, DWORD servicePathChars, DWORD *win32Error);
 static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
@@ -215,7 +194,7 @@ static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Erro
 static BOOL IsProcessElevated(void);
 static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error);
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
-static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
+static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
 static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error);
 static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
@@ -458,7 +437,7 @@ static int UnlockPassword(int argc, wchar_t **argv)
         return PrintLastError(L"Mount private workspace");
     }
 
-    if (!EnsurePrivateWorkspaceNtfs(&mount, &error)) {
+    if (!EnsurePrivateWorkspaceFileSystem(&mount, &error)) {
         UnmountPrivateWorkspace(&mount);
         CloseSessionData(NULL);
         SecureZeroMemory(&secret, sizeof(secret));
@@ -1543,93 +1522,323 @@ static BOOL QueryWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount,
     return TRUE;
 }
 
-static BOOLEAN __stdcall PrivateFormatCallback(DPUSB_FMIFS_PACKET_TYPE packetType,
-                                               ULONG packetLength,
-                                               PVOID packetData)
+typedef struct _DPUSB_FAT32_LAYOUT {
+    DWORD TotalSectors;
+    DWORD SectorsPerFat;
+    DWORD ReservedSectors;
+    DWORD SectorsPerCluster;
+    DWORD RootCluster;
+    DWORD Fat1Sector;
+    DWORD Fat2Sector;
+    DWORD DataStartSector;
+    DWORD ClusterCount;
+    DWORD VolumeSerial;
+} DPUSB_FAT32_LAYOUT;
+
+static void WriteLe16(BYTE *target, WORD value)
 {
-    UNREFERENCED_PARAMETER(packetLength);
-
-    if (InterlockedCompareExchange(&g_FormatActive, 0, 0) != 0 &&
-        packetType == DpUsbFmifsDoneWithStructure) {
-
-        BOOLEAN succeeded = FALSE;
-        if (packetData != NULL) {
-            succeeded = *((PBOOLEAN)packetData);
-        }
-
-        InterlockedExchange(&g_FormatSuccess, succeeded ? 1 : 0);
-        InterlockedExchange(&g_FormatCompleted, 1);
-    }
-
-    return TRUE;
+    target[0] = (BYTE)(value & 0xFF);
+    target[1] = (BYTE)((value >> 8) & 0xFF);
 }
 
-static BOOL FormatPrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+static void WriteLe32(BYTE *target, DWORD value)
 {
-    HMODULE module;
-    DPUSB_FORMAT_EX formatEx;
-    DWORD error = ERROR_SUCCESS;
+    target[0] = (BYTE)(value & 0xFF);
+    target[1] = (BYTE)((value >> 8) & 0xFF);
+    target[2] = (BYTE)((value >> 16) & 0xFF);
+    target[3] = (BYTE)((value >> 24) & 0xFF);
+}
 
-    if (mount == NULL || mount->Path[0] == L'\0') {
+static BOOL WriteWorkspaceBytes(HANDLE volume,
+                                ULONGLONG offset,
+                                const void *buffer,
+                                DWORD bytes,
+                                DWORD *win32Error)
+{
+    LARGE_INTEGER position;
+    DWORD written = 0;
+
+    if (volume == INVALID_HANDLE_VALUE || buffer == NULL || bytes == 0) {
         if (win32Error != NULL) {
             *win32Error = ERROR_INVALID_PARAMETER;
         }
         return FALSE;
     }
 
-    module = LoadLibraryW(L"fmifs.dll");
-    if (module == NULL) {
+    position.QuadPart = (LONGLONG)offset;
+    if (!SetFilePointerEx(volume, position, NULL, FILE_BEGIN) ||
+        !WriteFile(volume, buffer, bytes, &written, NULL) ||
+        written != bytes) {
+
         if (win32Error != NULL) {
-            *win32Error = GetLastError();
+            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_WRITE_FAULT;
         }
         return FALSE;
     }
 
-    formatEx = (DPUSB_FORMAT_EX)GetProcAddress(module, "FormatEx");
-    if (formatEx == NULL) {
-        error = GetLastError();
-        FreeLibrary(module);
-        if (win32Error != NULL) {
-            *win32Error = error;
-        }
-        return FALSE;
-    }
-
-    InterlockedExchange(&g_FormatActive, 1);
-    InterlockedExchange(&g_FormatCompleted, 0);
-    InterlockedExchange(&g_FormatSuccess, 0);
-
-    formatEx((PWSTR)mount->Path,
-             0,
-             L"NTFS",
-             DPUSB_PRIVATE_VOLUME_LABEL,
-             TRUE,
-             512,
-             PrivateFormatCallback);
-
-    InterlockedExchange(&g_FormatActive, 0);
-    FreeLibrary(module);
-
-    if (InterlockedCompareExchange(&g_FormatCompleted, 0, 0) != 0 &&
-        InterlockedCompareExchange(&g_FormatSuccess, 0, 0) == 0) {
-        if (win32Error != NULL) {
-            *win32Error = ERROR_WRITE_FAULT;
-        }
-        return FALSE;
-    }
-
-    Sleep(1000);
     if (win32Error != NULL) {
         *win32Error = ERROR_SUCCESS;
     }
     return TRUE;
 }
 
-static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+static BOOL ZeroWorkspaceRange(HANDLE volume,
+                               ULONGLONG offset,
+                               ULONGLONG bytes,
+                               DWORD *win32Error)
+{
+    BYTE zero[64 * 1024];
+    ULONGLONG remaining = bytes;
+
+    ZeroMemory(zero, sizeof(zero));
+    while (remaining != 0) {
+        DWORD chunk = remaining > sizeof(zero) ? (DWORD)sizeof(zero) : (DWORD)remaining;
+        if (!WriteWorkspaceBytes(volume, offset, zero, chunk, win32Error)) {
+            return FALSE;
+        }
+
+        offset += chunk;
+        remaining -= chunk;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static DWORD CalculateFat32SectorsPerCluster(ULONGLONG totalBytes)
+{
+    ULONGLONG totalMb = totalBytes / (1024ull * 1024ull);
+
+    if (totalMb < 260) {
+        return 1;
+    }
+    if (totalMb < 8192) {
+        return 8;
+    }
+    if (totalMb < 16384) {
+        return 16;
+    }
+    if (totalMb < 32768) {
+        return 32;
+    }
+    return 64;
+}
+
+static BOOL CalculateFat32Layout(ULONGLONG totalBytes, DPUSB_FAT32_LAYOUT *layout)
+{
+    DWORD totalSectors;
+    DWORD sectorsPerCluster;
+    DWORD sectorsPerFat = 0;
+    DWORD reservedSectors = 32;
+    DWORD fatCount = 2;
+    DWORD previous;
+    DWORD clusterCount;
+    DWORD dataSectors;
+    DWORD rootDirectorySectors = 0;
+    DWORD iterations;
+
+    if (layout == NULL || totalBytes < (64ull * 1024ull * 1024ull)) {
+        return FALSE;
+    }
+
+    totalSectors = (DWORD)(totalBytes / 512ull);
+    sectorsPerCluster = CalculateFat32SectorsPerCluster(totalBytes);
+    if (sectorsPerCluster == 0) {
+        return FALSE;
+    }
+
+    for (iterations = 0; iterations < 32; iterations++) {
+        ULONGLONG fatBytes;
+
+        if (totalSectors <= reservedSectors + (fatCount * sectorsPerFat)) {
+            return FALSE;
+        }
+
+        dataSectors = totalSectors - reservedSectors - (fatCount * sectorsPerFat) - rootDirectorySectors;
+        clusterCount = dataSectors / sectorsPerCluster;
+        fatBytes = ((ULONGLONG)clusterCount + 2ull) * sizeof(DWORD);
+        previous = sectorsPerFat;
+        sectorsPerFat = (DWORD)((fatBytes + 511ull) / 512ull);
+        if (sectorsPerFat == previous) {
+            break;
+        }
+    }
+
+    dataSectors = totalSectors - reservedSectors - (fatCount * sectorsPerFat);
+    clusterCount = dataSectors / sectorsPerCluster;
+    if (clusterCount < 65525) {
+        return FALSE;
+    }
+
+    ZeroMemory(layout, sizeof(*layout));
+    layout->TotalSectors = totalSectors;
+    layout->SectorsPerFat = sectorsPerFat;
+    layout->ReservedSectors = reservedSectors;
+    layout->SectorsPerCluster = sectorsPerCluster;
+    layout->RootCluster = 2;
+    layout->Fat1Sector = reservedSectors;
+    layout->Fat2Sector = reservedSectors + sectorsPerFat;
+    layout->DataStartSector = reservedSectors + (fatCount * sectorsPerFat);
+    layout->ClusterCount = clusterCount;
+    layout->VolumeSerial = ((DWORD)GetTickCount() << 16) ^ GetCurrentProcessId();
+    return TRUE;
+}
+
+static void BuildFat32BootSector(const DPUSB_FAT32_LAYOUT *layout, BOOL backupBoot, BYTE sector[512])
+{
+    static const BYTE bootstrap[] = {
+        0xFA, 0x33, 0xC0, 0x8E, 0xD0, 0xBC, 0x00, 0x7C,
+        0xFB, 0x8E, 0xD8, 0x8E, 0xC0, 0xBE, 0x74, 0x7C,
+        0xAC, 0x22, 0xC0, 0x74, 0x06, 0xB4, 0x0E, 0xCD,
+        0x10, 0xEB, 0xF5, 0xF4, 0xEB, 0xFD
+    };
+
+    ZeroMemory(sector, 512);
+    sector[0] = 0xEB;
+    sector[1] = 0x58;
+    sector[2] = 0x90;
+    CopyMemory(&sector[3], "MSWIN4.1", 8);
+    WriteLe16(&sector[11], 512);
+    sector[13] = (BYTE)layout->SectorsPerCluster;
+    WriteLe16(&sector[14], (WORD)layout->ReservedSectors);
+    sector[16] = 2;
+    WriteLe16(&sector[17], 0);
+    WriteLe16(&sector[19], 0);
+    sector[21] = 0xF8;
+    WriteLe16(&sector[22], 0);
+    WriteLe16(&sector[24], 63);
+    WriteLe16(&sector[26], 255);
+    WriteLe32(&sector[28], 0);
+    WriteLe32(&sector[32], layout->TotalSectors);
+    WriteLe32(&sector[36], layout->SectorsPerFat);
+    WriteLe16(&sector[40], 0);
+    WriteLe16(&sector[42], 0);
+    WriteLe32(&sector[44], layout->RootCluster);
+    WriteLe16(&sector[48], 1);
+    WriteLe16(&sector[50], 6);
+    sector[64] = 0x80;
+    sector[66] = 0x29;
+    WriteLe32(&sector[67], layout->VolumeSerial);
+    CopyMemory(&sector[71], "DPUSBPRIVATE", 11);
+    CopyMemory(&sector[82], "FAT32   ", 8);
+    if (!backupBoot) {
+        CopyMemory(&sector[90], bootstrap, sizeof(bootstrap));
+        CopyMemory(&sector[122], "DataProtector Secure USB\r\n", 26);
+    }
+    sector[510] = 0x55;
+    sector[511] = 0xAA;
+}
+
+static void BuildFat32FsInfo(const DPUSB_FAT32_LAYOUT *layout, BYTE sector[512])
+{
+    ZeroMemory(sector, 512);
+    WriteLe32(&sector[0], 0x41615252);
+    WriteLe32(&sector[484], 0x61417272);
+    WriteLe32(&sector[488], layout->ClusterCount > 1 ? layout->ClusterCount - 1 : 0xFFFFFFFF);
+    WriteLe32(&sector[492], 3);
+    WriteLe32(&sector[508], 0xAA550000);
+}
+
+static void BuildFat32FatStart(BYTE sector[512])
+{
+    ZeroMemory(sector, 512);
+    WriteLe32(&sector[0], 0x0FFFFFF8);
+    WriteLe32(&sector[4], 0x0FFFFFFF);
+    WriteLe32(&sector[8], 0x0FFFFFFF);
+}
+
+static BOOL InitializeWorkspaceFat32Container(HANDLE volume,
+                                              ULONGLONG totalBytes,
+                                              DWORD *win32Error)
+{
+    DPUSB_FAT32_LAYOUT layout;
+    BYTE sector[512];
+    ULONGLONG fatBytes;
+    ULONGLONG rootOffset;
+
+    if (!CalculateFat32Layout(totalBytes, &layout)) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_DISK_FULL;
+        }
+        return FALSE;
+    }
+
+    AppendLog(L"Writing FAT32 container metadata directly to the encrypted data region. Size=%I64u MB, cluster=%lu sectors, FAT=%lu sectors.",
+              totalBytes / (1024ull * 1024ull),
+              layout.SectorsPerCluster,
+              layout.SectorsPerFat);
+
+    if (!ZeroWorkspaceRange(volume,
+                            0,
+                            ((ULONGLONG)layout.DataStartSector + layout.SectorsPerCluster) * 512ull,
+                            win32Error)) {
+        return FALSE;
+    }
+
+    BuildFat32BootSector(&layout, FALSE, sector);
+    if (!WriteWorkspaceBytes(volume, 0, sector, sizeof(sector), win32Error)) {
+        return FALSE;
+    }
+
+    BuildFat32FsInfo(&layout, sector);
+    if (!WriteWorkspaceBytes(volume, 512ull, sector, sizeof(sector), win32Error)) {
+        return FALSE;
+    }
+
+    BuildFat32BootSector(&layout, TRUE, sector);
+    if (!WriteWorkspaceBytes(volume, 6ull * 512ull, sector, sizeof(sector), win32Error)) {
+        return FALSE;
+    }
+
+    BuildFat32FsInfo(&layout, sector);
+    if (!WriteWorkspaceBytes(volume, 7ull * 512ull, sector, sizeof(sector), win32Error)) {
+        return FALSE;
+    }
+
+    BuildFat32FatStart(sector);
+    fatBytes = (ULONGLONG)layout.SectorsPerFat * 512ull;
+    if (!WriteWorkspaceBytes(volume, (ULONGLONG)layout.Fat1Sector * 512ull, sector, sizeof(sector), win32Error) ||
+        !WriteWorkspaceBytes(volume, (ULONGLONG)layout.Fat2Sector * 512ull, sector, sizeof(sector), win32Error)) {
+        return FALSE;
+    }
+
+    if (fatBytes > sizeof(sector)) {
+        if (!ZeroWorkspaceRange(volume,
+                                ((ULONGLONG)layout.Fat1Sector * 512ull) + sizeof(sector),
+                                fatBytes - sizeof(sector),
+                                win32Error) ||
+            !ZeroWorkspaceRange(volume,
+                                ((ULONGLONG)layout.Fat2Sector * 512ull) + sizeof(sector),
+                                fatBytes - sizeof(sector),
+                                win32Error)) {
+            return FALSE;
+        }
+    }
+
+    rootOffset = ((ULONGLONG)layout.DataStartSector +
+                  ((ULONGLONG)(layout.RootCluster - 2) * layout.SectorsPerCluster)) * 512ull;
+    if (!ZeroWorkspaceRange(volume, rootOffset, (ULONGLONG)layout.SectorsPerCluster * 512ull, win32Error)) {
+        return FALSE;
+    }
+
+    FlushFileBuffers(volume);
+    (VOID)fatBytes;
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
 {
     WCHAR fileSystem[32];
     DWORD error = ERROR_SUCCESS;
     DWORD attempt;
+    HANDLE volume = INVALID_HANDLE_VALUE;
+    GET_LENGTH_INFORMATION lengthInfo;
+    DWORD returned = 0;
 
     if (!ValidateMountedWorkspaceDevice(mount, &error)) {
         if (win32Error != NULL) {
@@ -1640,7 +1849,9 @@ static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *
 
     for (attempt = 0; attempt < 6; attempt++) {
         if (QueryWorkspaceFileSystem(mount, fileSystem, sizeof(fileSystem) / sizeof(fileSystem[0]), &error)) {
-            if (_wcsicmp(fileSystem, L"NTFS") == 0) {
+            if (_wcsicmp(fileSystem, L"NTFS") == 0 ||
+                _wcsicmp(fileSystem, L"FAT32") == 0 ||
+                _wcsicmp(fileSystem, L"exFAT") == 0) {
                 (VOID)SetVolumeLabelW(mount->Path, DPUSB_PRIVATE_VOLUME_LABEL);
                 if (win32Error != NULL) {
                     *win32Error = ERROR_SUCCESS;
@@ -1660,8 +1871,45 @@ static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *
         Sleep(500);
     }
 
-    AppendLog(L"Private workspace has no NTFS file system yet. Initializing encrypted container...");
-    if (!FormatPrivateWorkspaceNtfs(mount, &error)) {
+    AppendLog(L"Private workspace has no file system yet. Initializing encrypted FAT32 container in-place...");
+    if (!OpenMountedWorkspaceHandle(mount, GENERIC_READ | GENERIC_WRITE, &volume, &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    ZeroMemory(&lengthInfo, sizeof(lengthInfo));
+    if (!DeviceIoControl(volume,
+                         IOCTL_DISK_GET_LENGTH_INFO,
+                         NULL,
+                         0,
+                         &lengthInfo,
+                         sizeof(lengthInfo),
+                         &returned,
+                         NULL)) {
+        error = GetLastError();
+        CloseHandle(volume);
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    if (!InitializeWorkspaceFat32Container(volume, (ULONGLONG)lengthInfo.Length.QuadPart, &error)) {
+        CloseHandle(volume);
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    (VOID)DeviceIoControl(volume, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL);
+    (VOID)DeviceIoControl(volume, IOCTL_VOLUME_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL);
+    CloseHandle(volume);
+    RequestKernelDriveUnmount(mount->Letter);
+    Sleep(500);
+    if (!RequestKernelDriveMount(mount->Letter, &error)) {
         if (win32Error != NULL) {
             *win32Error = error;
         }
@@ -1670,7 +1918,9 @@ static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *
 
     for (attempt = 0; attempt < 12; attempt++) {
         if (QueryWorkspaceFileSystem(mount, fileSystem, sizeof(fileSystem) / sizeof(fileSystem[0]), &error) &&
-            _wcsicmp(fileSystem, L"NTFS") == 0) {
+            (_wcsicmp(fileSystem, L"FAT32") == 0 ||
+             _wcsicmp(fileSystem, L"NTFS") == 0 ||
+             _wcsicmp(fileSystem, L"exFAT") == 0)) {
 
             (VOID)SetVolumeLabelW(mount->Path, DPUSB_PRIVATE_VOLUME_LABEL);
             if (win32Error != NULL) {
@@ -2317,7 +2567,7 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
         return 0;
     }
 
-    if (!EnsurePrivateWorkspaceNtfs(&mount, &error)) {
+    if (!EnsurePrivateWorkspaceFileSystem(&mount, &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Private workspace file system initialization failed: %s", message);
         UnmountPrivateWorkspace(&mount);
