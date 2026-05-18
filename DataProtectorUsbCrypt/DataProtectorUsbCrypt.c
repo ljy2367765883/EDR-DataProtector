@@ -5,6 +5,7 @@ typedef struct _DPUSB_SESSION_STATE {
     BOOLEAN LockInitialized;
     BOOLEAN SessionOpen;
     ULONG Algorithm;
+    ULONG CryptoVersion;
     ULONGLONG ToolAreaBytes;
     ULONGLONG DataOffsetBytes;
     ULONGLONG DataLengthBytes;
@@ -35,6 +36,7 @@ static KEVENT gDpUsbNoActiveWorkers;
 typedef struct _DPUSB_SESSION_SNAPSHOT {
     BOOLEAN SessionOpen;
     ULONG Algorithm;
+    ULONG CryptoVersion;
     ULONGLONG DataOffsetBytes;
     ULONGLONG DataLengthBytes;
     ULONG KeyLength;
@@ -44,6 +46,25 @@ typedef struct _DPUSB_SESSION_SNAPSHOT {
     ULONG BackingAlignment;
     UCHAR Key[DPUSB_MAX_KEY_BYTES];
 } DPUSB_SESSION_SNAPSHOT, *PDPUSB_SESSION_SNAPSHOT;
+
+static
+VOID
+DpUsbCryptBuffer(
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength,
+    _In_ ULONG CryptoVersion,
+    _In_ ULONGLONG Offset,
+    _Inout_updates_bytes_(Length) UCHAR *Buffer,
+    _In_ ULONG Length
+    )
+{
+    if (CryptoVersion == DPUSB_CRYPTO_VERSION_LEGACY_RC4_OFFSET) {
+        DpUsbRc4CryptAtOffsetLegacy(Key, KeyLength, Offset, Buffer, Length);
+        return;
+    }
+
+    DpUsbRc4CryptAtOffset(Key, KeyLength, Offset, Buffer, Length);
+}
 
 typedef struct _DPUSB_IO_WORK_ITEM {
     WORK_QUEUE_ITEM WorkItem;
@@ -477,16 +498,19 @@ DpUsbOpenSession(
     if (Request == NULL ||
         Request->Version != 1 ||
         Request->Algorithm != DPUSB_ALGORITHM_RC4 ||
+        (Request->CryptoVersion != DPUSB_CRYPTO_VERSION_LEGACY_RC4_OFFSET &&
+         Request->CryptoVersion != DPUSB_CRYPTO_VERSION_FAST_BLOCK_RC4) ||
         Request->KeyLength == 0 ||
         Request->KeyLength > DPUSB_MAX_KEY_BYTES ||
         Request->ToolAreaBytes != DPUSB_MIN_TOOL_BYTES ||
         Request->DataOffsetBytes < DPUSB_DATA_OFFSET_BYTES ||
         Request->PhysicalDrivePath[0] == L'\0') {
         DPUSB_TRACE("Session",
-                    "open invalid request=%p version=%lu algorithm=%lu keyLength=%lu tool=%I64u dataOffset=%I64u pathFirst=0x%04X\n",
+                    "open invalid request=%p version=%lu algorithm=%lu crypto=%lu keyLength=%lu tool=%I64u dataOffset=%I64u pathFirst=0x%04X\n",
                     Request,
                     Request != NULL ? Request->Version : 0,
                     Request != NULL ? Request->Algorithm : 0,
+                    Request != NULL ? Request->CryptoVersion : 0,
                     Request != NULL ? Request->KeyLength : 0,
                     Request != NULL ? Request->ToolAreaBytes : 0,
                     Request != NULL ? Request->DataOffsetBytes : 0,
@@ -506,10 +530,11 @@ DpUsbOpenSession(
     }
 
     DPUSB_TRACE("Session",
-                "open begin deviceId=%ws physical=%ws normalized=%ws dataOffset=%I64u dataLength=%I64u keyLength=%lu\n",
+                "open begin deviceId=%ws physical=%ws normalized=%ws crypto=%lu dataOffset=%I64u dataLength=%I64u keyLength=%lu\n",
                 Request->DeviceId,
                 Request->PhysicalDrivePath,
                 normalizedPath,
+                Request->CryptoVersion,
                 Request->DataOffsetBytes,
                 Request->DataLengthBytes,
                 Request->KeyLength);
@@ -531,6 +556,7 @@ DpUsbOpenSession(
     DpUsbReleaseBackingLocked();
     gDpUsbSession.SessionOpen = TRUE;
     gDpUsbSession.Algorithm = Request->Algorithm;
+    gDpUsbSession.CryptoVersion = Request->CryptoVersion;
     gDpUsbSession.ToolAreaBytes = Request->ToolAreaBytes;
     gDpUsbSession.DataOffsetBytes = Request->DataOffsetBytes;
     gDpUsbSession.DataLengthBytes = Request->DataLengthBytes;
@@ -567,6 +593,7 @@ DpUsbCloseSession(
     RtlSecureZeroMemory(gDpUsbSession.Key, sizeof(gDpUsbSession.Key));
     gDpUsbSession.SessionOpen = FALSE;
     gDpUsbSession.Algorithm = 0;
+    gDpUsbSession.CryptoVersion = 0;
     gDpUsbSession.ToolAreaBytes = 0;
     gDpUsbSession.DataOffsetBytes = 0;
     gDpUsbSession.DataLengthBytes = 0;
@@ -1646,6 +1673,8 @@ DpUsbCaptureSession(
     ExAcquirePushLockShared(&gDpUsbSession.Lock);
     if (!gDpUsbSession.SessionOpen ||
         gDpUsbSession.Algorithm != DPUSB_ALGORITHM_RC4 ||
+        (gDpUsbSession.CryptoVersion != DPUSB_CRYPTO_VERSION_LEGACY_RC4_OFFSET &&
+         gDpUsbSession.CryptoVersion != DPUSB_CRYPTO_VERSION_FAST_BLOCK_RC4) ||
         gDpUsbSession.KeyLength == 0 ||
         gDpUsbSession.KeyLength > DPUSB_MAX_KEY_BYTES ||
         gDpUsbSession.PhysicalDrivePath[0] == L'\0' ||
@@ -1653,9 +1682,10 @@ DpUsbCaptureSession(
         gDpUsbSession.BackingDeviceObject == NULL) {
 
         DPUSB_TRACE("Session",
-                    "capture failed open=%u algorithm=%lu keyLength=%lu pathFirst=0x%04X fileObject=%p deviceObject=%p\n",
+                    "capture failed open=%u algorithm=%lu crypto=%lu keyLength=%lu pathFirst=0x%04X fileObject=%p deviceObject=%p\n",
                     gDpUsbSession.SessionOpen,
                     gDpUsbSession.Algorithm,
+                    gDpUsbSession.CryptoVersion,
                     gDpUsbSession.KeyLength,
                     gDpUsbSession.PhysicalDrivePath[0],
                     gDpUsbSession.BackingFileObject,
@@ -1666,6 +1696,7 @@ DpUsbCaptureSession(
 
     Snapshot->SessionOpen = gDpUsbSession.SessionOpen;
     Snapshot->Algorithm = gDpUsbSession.Algorithm;
+    Snapshot->CryptoVersion = gDpUsbSession.CryptoVersion;
     Snapshot->DataOffsetBytes = gDpUsbSession.DataOffsetBytes;
     Snapshot->DataLengthBytes = gDpUsbSession.DataLengthBytes;
     Snapshot->KeyLength = gDpUsbSession.KeyLength;
@@ -1681,8 +1712,9 @@ DpUsbCaptureSession(
     ExReleasePushLockShared(&gDpUsbSession.Lock);
 
     DPUSB_TRACE("Session",
-                "capture ok physical=%ws dataOffset=%I64u dataLength=%I64u keyLength=%lu fileObject=%p deviceObject=%p alignment=%lu\n",
+                "capture ok physical=%ws crypto=%lu dataOffset=%I64u dataLength=%I64u keyLength=%lu fileObject=%p deviceObject=%p alignment=%lu\n",
                 Snapshot->PhysicalDrivePath,
+                Snapshot->CryptoVersion,
                 Snapshot->DataOffsetBytes,
                 Snapshot->DataLengthBytes,
                 Snapshot->KeyLength,
@@ -1946,11 +1978,12 @@ DpUsbWriteAlignedBuffer(
         return status;
     }
 
-    DpUsbRc4CryptAtOffset(gDpUsbSession.Key,
-                          gDpUsbSession.KeyLength,
-                          LogicalOffset,
-                          ioBuffer,
-                          Length);
+    DpUsbCryptBuffer(gDpUsbSession.Key,
+                     gDpUsbSession.KeyLength,
+                     gDpUsbSession.CryptoVersion,
+                     LogicalOffset,
+                     ioBuffer,
+                     Length);
 
     RtlZeroMemory(&ioStatus, sizeof(ioStatus));
     byteOffset.QuadPart = (LONGLONG)physicalOffset;
@@ -2205,11 +2238,12 @@ DpUsbProcessReadWriteIrp(
 
     if (IsWrite) {
         RtlCopyMemory(ioBuffer, systemAddress, length);
-        DpUsbRc4CryptAtOffset(snapshot.Key,
-                              snapshot.KeyLength,
-                              logicalOffset,
-                              ioBuffer,
-                              length);
+        DpUsbCryptBuffer(snapshot.Key,
+                         snapshot.KeyLength,
+                         snapshot.CryptoVersion,
+                         logicalOffset,
+                         ioBuffer,
+                         length);
     } else {
         RtlZeroMemory(ioBuffer, length);
     }
@@ -2260,11 +2294,12 @@ DpUsbProcessReadWriteIrp(
                     status,
                     information);
         if (NT_SUCCESS(status) && information != 0) {
-            DpUsbRc4CryptAtOffset(snapshot.Key,
-                                  snapshot.KeyLength,
-                                  logicalOffset,
-                                  ioBuffer,
-                                  (ULONG)information);
+            DpUsbCryptBuffer(snapshot.Key,
+                             snapshot.KeyLength,
+                             snapshot.CryptoVersion,
+                             logicalOffset,
+                             ioBuffer,
+                             (ULONG)information);
             RtlCopyMemory(systemAddress, ioBuffer, (SIZE_T)information);
         }
     }

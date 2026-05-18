@@ -50,13 +50,15 @@
 #define DPUSB_MAX_DEVICE_ID_CHARS 260
 #define DPUSB_MAX_KEY_BYTES 64
 #define DPUSB_ALGORITHM_RC4 1
+#define DPUSB_CRYPTO_VERSION_LEGACY_RC4_OFFSET 2
+#define DPUSB_CRYPTO_VERSION_FAST_BLOCK_RC4 3
 #define DPUSB_SECTOR_BYTES 512
 #define DPUSB_CRYPTO_BLOCK_BYTES (4 * 1024)
 #define DPUSB_RAW_WRITE_MAX_BYTES (1024 * 1024)
 #define DPUSB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
 #define DPUSB_MIN_TOOL_BYTES (5ull * 1024ull * 1024ull)
 #define DPUSB_DATA_OFFSET_BYTES (DPUSB_METADATA_RESERVED_BYTES + DPUSB_MIN_TOOL_BYTES)
-#define DPUSB_RUNTIME_VERSION 0x20260519u
+#define DPUSB_RUNTIME_VERSION 0x20260520u
 #define DPUSB_CAP_SPLIT_VOLUME_DEVICE 0x00000001u
 #define DPUSB_CAP_ALIGNED_KERNEL_BACKING_IO 0x00000002u
 #define DPUSB_CAP_FAST_RANDOM_ACCESS_CRYPTO 0x00000004u
@@ -75,6 +77,7 @@ typedef struct _DPUSB_OPEN_SESSION {
     WCHAR PhysicalDrivePath[128];
     UCHAR Key[DPUSB_MAX_KEY_BYTES];
     WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
+    ULONG CryptoVersion;
 } DPUSB_OPEN_SESSION, *PDPUSB_OPEN_SESSION;
 
 typedef struct _DPUSB_STATUS {
@@ -158,6 +161,15 @@ DpUsbRc4Apply(
 
 VOID
 DpUsbRc4CryptAtOffset(
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength,
+    _In_ ULONGLONG Offset,
+    _Inout_updates_bytes_(Length) UCHAR *Buffer,
+    _In_ ULONG Length
+    );
+
+VOID
+DpUsbRc4CryptAtOffsetLegacy(
     _In_reads_bytes_(KeyLength) const UCHAR *Key,
     _In_ ULONG KeyLength,
     _In_ ULONGLONG Offset,

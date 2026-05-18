@@ -30,13 +30,16 @@
 #define DPUSB_SERVICE_INSTALL_RETRIES 4UL
 #define DPUSB_ALGORITHM_RC4 1
 #define DPUSB_UNLOCK_METADATA_MAGIC 0x32535544UL
+#define DPUSB_UNLOCK_METADATA_VERSION_LEGACY 2
 #define DPUSB_UNLOCK_METADATA_VERSION 3
+#define DPUSB_CRYPTO_VERSION_LEGACY_RC4_OFFSET DPUSB_UNLOCK_METADATA_VERSION_LEGACY
+#define DPUSB_CRYPTO_VERSION_FAST_BLOCK_RC4 DPUSB_UNLOCK_METADATA_VERSION
 #define DPUSB_UNLOCK_METADATA_BYTES 512
 #define DPUSB_RAW_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
 #define DPUSB_UNLOCK_METADATA_OFFSET_BYTES (1024ull * 1024ull)
 #define DPUSB_PUBLIC_TOOL_BYTES (5ull * 1024ull * 1024ull)
 #define DPUSB_DATA_OFFSET_BYTES (DPUSB_RAW_METADATA_RESERVED_BYTES + DPUSB_PUBLIC_TOOL_BYTES)
-#define DPUSB_RUNTIME_VERSION 0x20260519UL
+#define DPUSB_RUNTIME_VERSION 0x20260520UL
 #define DPUSB_CAP_SPLIT_VOLUME_DEVICE 0x00000001UL
 #define DPUSB_CAP_ALIGNED_KERNEL_BACKING_IO 0x00000002UL
 #define DPUSB_CAP_FAST_RANDOM_ACCESS_CRYPTO 0x00000004UL
@@ -88,6 +91,7 @@ typedef struct _DPUSB_OPEN_SESSION {
     WCHAR PhysicalDrivePath[128];
     UCHAR Key[DPUSB_MAX_KEY_BYTES];
     WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
+    ULONG CryptoVersion;
 } DPUSB_OPEN_SESSION;
 
 typedef struct _DPUSB_STATUS {
@@ -142,6 +146,7 @@ typedef struct _DPUSB_UNLOCK_SECRET {
     WCHAR PhysicalDrivePath[128];
     BYTE Key[DPUSB_MAX_KEY_BYTES];
     DWORD KeyLength;
+    DWORD CryptoVersion;
     ULONGLONG ToolAreaBytes;
     ULONGLONG DataOffsetBytes;
     ULONGLONG DataLengthBytes;
@@ -1066,7 +1071,8 @@ static BOOL ReadManifestFromPhysicalPath(const wchar_t *physicalPath,
     actualCrc = Crc32Bytes(raw, DPUSB_UNLOCK_METADATA_BYTES - sizeof(DWORD));
 
     if (manifest->Magic != DPUSB_UNLOCK_METADATA_MAGIC ||
-        manifest->Version != DPUSB_UNLOCK_METADATA_VERSION ||
+        (manifest->Version != DPUSB_UNLOCK_METADATA_VERSION_LEGACY &&
+         manifest->Version != DPUSB_UNLOCK_METADATA_VERSION) ||
         manifest->MetadataBytes != DPUSB_UNLOCK_METADATA_BYTES ||
         manifest->Algorithm != DPUSB_ALGORITHM_RC4 ||
         manifest->KeyLength == 0 ||
@@ -3329,6 +3335,7 @@ static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRE
     }
 
     secret->KeyLength = manifest.KeyLength;
+    secret->CryptoVersion = manifest.Version;
     secret->ToolAreaBytes = DPUSB_PUBLIC_TOOL_BYTES;
     secret->DataOffsetBytes = manifest.DataOffsetBytes < DPUSB_DATA_OFFSET_BYTES ? DPUSB_DATA_OFFSET_BYTES : manifest.DataOffsetBytes;
     secret->DataLengthBytes = manifest.DataLengthBytes;
@@ -3382,6 +3389,7 @@ static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win3
     ZeroMemory(&request, sizeof(request));
     request.Version = 1;
     request.Algorithm = DPUSB_ALGORITHM_RC4;
+    request.CryptoVersion = secret->CryptoVersion;
     request.ToolAreaBytes = secret->ToolAreaBytes < DPUSB_MIN_TOOL_BYTES ? DPUSB_MIN_TOOL_BYTES : secret->ToolAreaBytes;
     request.DataOffsetBytes = secret->DataOffsetBytes;
     request.DataLengthBytes = secret->DataLengthBytes;
@@ -3657,6 +3665,12 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
 
     SecureZeroMemory(workItem, sizeof(*workItem));
     LocalFree(workItem);
+
+    if (secret.CryptoVersion == DPUSB_CRYPTO_VERSION_LEGACY_RC4_OFFSET) {
+        AppendLog(L"USB metadata version 2 detected. Opening in compatibility mode; reinitialize this USB for fast writes.");
+    } else {
+        AppendLog(L"USB metadata version 3 detected. Fast encrypted I/O mode enabled.");
+    }
 
     if (!IsProcessElevated()) {
         AppendLog(L"Administrator privileges are required. Restart this tool as Administrator. The driver has not been loaded.");
@@ -3936,6 +3950,7 @@ static void ShowProvisioningPlan(void)
     wchar_t deviceId[DPUSB_MAX_DEVICE_ID_CHARS];
     wchar_t packageVersion[96];
     wchar_t packageSha256[96];
+    wchar_t metadataVersionText[32];
     wchar_t text[1400];
     DWORD error = ERROR_SUCCESS;
 
@@ -3951,27 +3966,34 @@ static void ShowProvisioningPlan(void)
     ZeroMemory(deviceId, sizeof(deviceId));
     ZeroMemory(packageVersion, sizeof(packageVersion));
     ZeroMemory(packageSha256, sizeof(packageSha256));
+    ZeroMemory(metadataVersionText, sizeof(metadataVersionText));
     if (ReadUnlockManifest(&manifest, &error)) {
         ReadFixedUtf8(manifest.DeviceId, sizeof(manifest.DeviceId), deviceId, sizeof(deviceId) / sizeof(deviceId[0]));
         ReadFixedUtf8(manifest.PackageVersion, sizeof(manifest.PackageVersion), packageVersion, sizeof(packageVersion) / sizeof(packageVersion[0]));
         ReadFixedUtf8(manifest.PackageSha256, sizeof(manifest.PackageSha256), packageSha256, sizeof(packageSha256) / sizeof(packageSha256[0]));
+        swprintf_s(metadataVersionText,
+                   sizeof(metadataVersionText) / sizeof(metadataVersionText[0]),
+                   L"%lu",
+                   manifest.Version);
     } else {
         wcscpy_s(deviceId, sizeof(deviceId) / sizeof(deviceId[0]), L"metadata not found or invalid");
         wcscpy_s(packageVersion, sizeof(packageVersion) / sizeof(packageVersion[0]), L"unknown");
         wcscpy_s(packageSha256, sizeof(packageSha256) / sizeof(packageSha256[0]), L"unknown");
+        wcscpy_s(metadataVersionText, sizeof(metadataVersionText) / sizeof(metadataVersionText[0]), L"unknown");
     }
 
     swprintf_s(text,
                sizeof(text) / sizeof(text[0]),
                L"Raw metadata location:\r\n%s @ %I64u\r\n\r\n"
                L"Disk layout:\r\n0-2 MB raw metadata reserve\r\n2-7 MB public tool partition\r\n7 MB+ encrypted data region\r\n\r\n"
-               L"Device: %s\r\nRuntime package: %s\r\nSHA256: %s\r\n\r\n"
+               L"Device: %s\r\nMetadata version: %s\r\nRuntime package: %s\r\nSHA256: %s\r\n\r\n"
                L"The endpoint agent writes unlock information into a reserved raw-disk metadata sector. "
                L"No DataProtector key manifest file is required in the public partition. "
                L"The driver is deployed and loaded only after the password validates this raw metadata.",
                physicalPath,
                DPUSB_UNLOCK_METADATA_OFFSET_BYTES,
                deviceId,
+               metadataVersionText,
                packageVersion,
                packageSha256);
 

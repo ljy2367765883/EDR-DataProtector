@@ -61,6 +61,38 @@ DpUsbRc4Apply(
 }
 
 VOID
+DpUsbRc4CryptAtOffsetLegacy(
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength,
+    _In_ ULONGLONG Offset,
+    _Inout_updates_bytes_(Length) UCHAR *Buffer,
+    _In_ ULONG Length
+    )
+{
+    DPUSB_RC4_STATE state;
+    UCHAR discard[256];
+    ULONGLONG remaining;
+
+    if (Key == NULL || KeyLength == 0 || Buffer == NULL || Length == 0) {
+        return;
+    }
+
+    DpUsbRc4Initialize(&state, Key, KeyLength);
+
+    remaining = Offset;
+    while (remaining != 0) {
+        ULONG chunk = remaining > sizeof(discard) ? (ULONG)sizeof(discard) : (ULONG)remaining;
+        RtlZeroMemory(discard, chunk);
+        DpUsbRc4Apply(&state, discard, chunk);
+        remaining -= chunk;
+    }
+
+    DpUsbRc4Apply(&state, Buffer, Length);
+    RtlSecureZeroMemory(discard, sizeof(discard));
+    RtlSecureZeroMemory(&state, sizeof(state));
+}
+
+VOID
 DpUsbRc4CryptAtOffset(
     _In_reads_bytes_(KeyLength) const UCHAR *Key,
     _In_ ULONG KeyLength,
