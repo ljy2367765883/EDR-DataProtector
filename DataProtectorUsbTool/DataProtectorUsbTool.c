@@ -45,12 +45,15 @@
 #define DPUSB_PASSWORD_SALT_BYTES 16
 #define DPUSB_PASSWORD_VERIFIER_BYTES 32
 #define DPUSB_MIN_TOOL_BYTES (5ull * 1024ull * 1024ull)
+#define DPUSB_SECTOR_BYTES 512UL
+#define DPUSB_RAW_WRITE_MAX_BYTES (64UL * 1024UL)
 #define DPUSB_IOCTL_INDEX 0x900
 #define IOCTL_DPUSB_QUERY_STATUS CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 0, METHOD_BUFFERED, FILE_READ_ACCESS)
 #define IOCTL_DPUSB_OPEN_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 1, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_CLOSE_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 2, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_MOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 3, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_UNMOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 4, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_RAW_WRITE_ALIGNED CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 5, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #ifndef IOCTL_VOLUME_UPDATE_PROPERTIES
 #define IOCTL_VOLUME_UPDATE_PROPERTIES CTL_CODE(IOCTL_VOLUME_BASE, 21, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
@@ -97,6 +100,13 @@ typedef struct _DPUSB_DRIVE_MOUNT {
     ULONG Version;
     WCHAR DriveLetter;
 } DPUSB_DRIVE_MOUNT;
+
+typedef struct _DPUSB_RAW_WRITE_REQUEST {
+    ULONG Version;
+    ULONG DataLength;
+    ULONGLONG LogicalOffset;
+    BYTE Data[1];
+} DPUSB_RAW_WRITE_REQUEST;
 
 typedef struct _DPUSB_UNLOCK_MANIFEST {
     ULONG Magic;
@@ -253,17 +263,6 @@ static HANDLE OpenControlDevice(DWORD access)
                        NULL,
                        OPEN_EXISTING,
                        FILE_ATTRIBUTE_NORMAL,
-                       NULL);
-}
-
-static HANDLE OpenControlDeviceRawIo(DWORD access)
-{
-    return CreateFileW(DPUSB_DOS_NAME,
-                       access,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE,
-                       NULL,
-                       OPEN_EXISTING,
-                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                        NULL);
 }
 
@@ -2520,8 +2519,9 @@ static BOOL WriteWorkspaceBytes(HANDLE volume,
                                 DWORD bytes,
                                 DWORD *win32Error)
 {
-    OVERLAPPED overlapped;
-    DWORD written = 0;
+    DPUSB_RAW_WRITE_REQUEST *request;
+    DWORD requestBytes;
+    DWORD returned = 0;
     BOOL ok;
 
     if (volume == INVALID_HANDLE_VALUE || buffer == NULL || bytes == 0) {
@@ -2531,23 +2531,54 @@ static BOOL WriteWorkspaceBytes(HANDLE volume,
         return FALSE;
     }
 
-    ZeroMemory(&overlapped, sizeof(overlapped));
-    overlapped.Offset = (DWORD)(offset & 0xFFFFFFFFUL);
-    overlapped.OffsetHigh = (DWORD)((offset >> 32) & 0xFFFFFFFFUL);
-    ok = WriteFile(volume, buffer, bytes, &written, &overlapped);
-    if (!ok && GetLastError() == ERROR_IO_PENDING) {
-        ok = GetOverlappedResult(volume, &overlapped, &written, TRUE);
-    }
-    if (!ok || written != bytes) {
+    if ((offset % DPUSB_SECTOR_BYTES) != 0 ||
+        (bytes % DPUSB_SECTOR_BYTES) != 0 ||
+        bytes > DPUSB_RAW_WRITE_MAX_BYTES) {
 
+        AppendLog(L"Private workspace aligned write rejected in user mode. Offset=%I64u bytes=%lu sector=%lu max=%lu",
+                  offset,
+                  bytes,
+                  DPUSB_SECTOR_BYTES,
+                  DPUSB_RAW_WRITE_MAX_BYTES);
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    requestBytes = (DWORD)FIELD_OFFSET(DPUSB_RAW_WRITE_REQUEST, Data) + bytes;
+    request = (DPUSB_RAW_WRITE_REQUEST *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, requestBytes);
+    if (request == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_NOT_ENOUGH_MEMORY;
+        }
+        return FALSE;
+    }
+
+    request->Version = 1;
+    request->DataLength = bytes;
+    request->LogicalOffset = offset;
+    CopyMemory(request->Data, buffer, bytes);
+
+    ok = DeviceIoControl(volume,
+                         IOCTL_DPUSB_RAW_WRITE_ALIGNED,
+                         request,
+                         requestBytes,
+                         NULL,
+                         0,
+                         &returned,
+                         NULL);
+    SecureZeroMemory(request, requestBytes);
+    LocalFree(request);
+
+    if (!ok) {
         DWORD error = GetLastError();
         if (error == ERROR_SUCCESS) {
             error = ERROR_WRITE_FAULT;
         }
-        AppendLog(L"Private workspace raw write failed. Offset=%I64u bytes=%lu written=%lu Win32=%lu",
+        AppendLog(L"Private workspace aligned kernel write failed. Offset=%I64u bytes=%lu Win32=%lu",
                   offset,
                   bytes,
-                  written,
                   error);
         if (win32Error != NULL) {
             *win32Error = error;
@@ -2943,7 +2974,7 @@ static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLO
         return FALSE;
     }
 
-    volume = OpenControlDeviceRawIo(GENERIC_READ | GENERIC_WRITE);
+    volume = OpenControlDevice(GENERIC_READ | GENERIC_WRITE);
     if (volume == INVALID_HANDLE_VALUE) {
         error = GetLastError();
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));

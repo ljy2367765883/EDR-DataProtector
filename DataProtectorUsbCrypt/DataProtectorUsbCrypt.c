@@ -56,6 +56,15 @@ DpUsbReadWriteWorker(
     );
 
 static
+NTSTATUS
+DpUsbWriteAlignedBuffer(
+    _In_ ULONGLONG LogicalOffset,
+    _In_reads_bytes_(Length) const VOID *Buffer,
+    _In_ ULONG Length,
+    _Out_ PULONG_PTR Information
+    );
+
+static
 VOID
 DpUsbFinishReadWriteWorker(
     _In_ PDPUSB_IO_WORK_ITEM WorkItem
@@ -122,6 +131,8 @@ DpUsbIoctlName(
         return "IOCTL_DPUSB_MOUNT_DRIVE";
     case IOCTL_DPUSB_UNMOUNT_DRIVE:
         return "IOCTL_DPUSB_UNMOUNT_DRIVE";
+    case IOCTL_DPUSB_RAW_WRITE_ALIGNED:
+        return "IOCTL_DPUSB_RAW_WRITE_ALIGNED";
     case IOCTL_DISK_GET_LENGTH_INFO:
         return "IOCTL_DISK_GET_LENGTH_INFO";
     case IOCTL_DISK_GET_DRIVE_GEOMETRY:
@@ -1760,6 +1771,110 @@ DpUsbForwardBackingReadWrite(
     return status;
 }
 
+static
+NTSTATUS
+DpUsbWriteAlignedBuffer(
+    _In_ ULONGLONG LogicalOffset,
+    _In_reads_bytes_(Length) const VOID *Buffer,
+    _In_ ULONG Length,
+    _Out_ PULONG_PTR Information
+    )
+{
+    DPUSB_SESSION_SNAPSHOT snapshot;
+    ULONGLONG physicalOffset;
+    UCHAR *ioBuffer = NULL;
+    ULONG_PTR written = 0;
+    NTSTATUS status;
+
+    if (Information != NULL) {
+        *Information = 0;
+    }
+
+    if (Buffer == NULL || Length == 0 || Length > DPUSB_RAW_WRITE_MAX_BYTES) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if ((LogicalOffset % DPUSB_SECTOR_BYTES) != 0 || (Length % DPUSB_SECTOR_BYTES) != 0) {
+        DPUSB_TRACE("RawWrite",
+                    "unaligned request logical=%I64u length=%lu sector=%lu\n",
+                    LogicalOffset,
+                    Length,
+                    DPUSB_SECTOR_BYTES);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = DpUsbCaptureSession(&snapshot);
+    if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("RawWrite", "capture failed status=0x%08X\n", status);
+        return status;
+    }
+
+    status = DpUsbValidateRange(&snapshot, LogicalOffset, Length, &physicalOffset);
+    if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("RawWrite",
+                    "range failed status=0x%08X logical=%I64u length=%lu\n",
+                    status,
+                    LogicalOffset,
+                    Length);
+        DpUsbReleaseSessionSnapshot(&snapshot);
+        return status;
+    }
+
+    if ((physicalOffset % DPUSB_SECTOR_BYTES) != 0) {
+        DPUSB_TRACE("RawWrite",
+                    "physical offset unaligned logical=%I64u physical=%I64u length=%lu\n",
+                    LogicalOffset,
+                    physicalOffset,
+                    Length);
+        DpUsbReleaseSessionSnapshot(&snapshot);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ioBuffer = (UCHAR *)ExAllocatePoolWithTag(NonPagedPoolNx, Length, DPUSB_TAG_IO);
+    if (ioBuffer == NULL) {
+        DpUsbReleaseSessionSnapshot(&snapshot);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlCopyMemory(ioBuffer, Buffer, Length);
+    DpUsbRc4CryptAtOffset(snapshot.Key,
+                          snapshot.KeyLength,
+                          LogicalOffset,
+                          ioBuffer,
+                          Length);
+
+    DPUSB_TRACE("RawWrite",
+                "aligned write begin logical=%I64u physical=%I64u length=%lu\n",
+                LogicalOffset,
+                physicalOffset,
+                Length);
+    status = DpUsbForwardBackingReadWrite(&snapshot,
+                                          TRUE,
+                                          ioBuffer,
+                                          Length,
+                                          physicalOffset,
+                                          &written);
+    DPUSB_TRACE("RawWrite",
+                "aligned write end status=0x%08X written=%Iu logical=%I64u length=%lu\n",
+                status,
+                written,
+                LogicalOffset,
+                Length);
+
+    RtlSecureZeroMemory(ioBuffer, Length);
+    ExFreePoolWithTag(ioBuffer, DPUSB_TAG_IO);
+    DpUsbReleaseSessionSnapshot(&snapshot);
+
+    if (NT_SUCCESS(status) && written != Length) {
+        status = STATUS_UNSUCCESSFUL;
+    }
+
+    if (NT_SUCCESS(status) && Information != NULL) {
+        *Information = Length;
+    }
+    return status;
+}
+
 NTSTATUS
 DpUsbFlushBuffers(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -2202,6 +2317,27 @@ DpUsbDeviceControl(
     case IOCTL_DPUSB_UNMOUNT_DRIVE:
         status = DpUsbUnmountDriveLetter((PDPUSB_DRIVE_MOUNT)buffer, inputLength);
         bytesReturned = 0;
+        break;
+
+    case IOCTL_DPUSB_RAW_WRITE_ALIGNED:
+        if (buffer == NULL ||
+            inputLength < (ULONG)FIELD_OFFSET(DPUSB_RAW_WRITE_REQUEST, Data) ||
+            ((PDPUSB_RAW_WRITE_REQUEST)buffer)->Version != 1 ||
+            ((PDPUSB_RAW_WRITE_REQUEST)buffer)->DataLength > DPUSB_RAW_WRITE_MAX_BYTES ||
+            inputLength < (ULONG)FIELD_OFFSET(DPUSB_RAW_WRITE_REQUEST, Data) + ((PDPUSB_RAW_WRITE_REQUEST)buffer)->DataLength) {
+
+            status = STATUS_INVALID_PARAMETER;
+            bytesReturned = 0;
+            break;
+        }
+
+        {
+            status = DpUsbWriteAlignedBuffer(((PDPUSB_RAW_WRITE_REQUEST)buffer)->LogicalOffset,
+                                             ((PDPUSB_RAW_WRITE_REQUEST)buffer)->Data,
+                                             ((PDPUSB_RAW_WRITE_REQUEST)buffer)->DataLength,
+                                             NULL);
+            bytesReturned = 0;
+        }
         break;
 
     default:
