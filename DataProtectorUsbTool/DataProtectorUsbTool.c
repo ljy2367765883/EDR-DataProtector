@@ -20,10 +20,10 @@
 #define DPUSB_PRIVATE_VOLUME_LABEL L"DPUSB-PRIVATE"
 #define DPUSB_VIRTUAL_DEVICE_NUMBER 0x44505543UL
 #define DPUSB_SERVICE_STOP_WAIT_MS 10000UL
-#define DPUSB_SERVICE_DELETE_WAIT_MS 12000UL
-#define DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS 3000UL
+#define DPUSB_SERVICE_DELETE_WAIT_MS 60000UL
+#define DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS 5000UL
 #define DPUSB_SERVICE_POLL_MS 250UL
-#define DPUSB_SERVICE_INSTALL_RETRIES 4UL
+#define DPUSB_SERVICE_INSTALL_RETRIES 12UL
 #define DPUSB_ALGORITHM_RC4 1
 #define DPUSB_UNLOCK_METADATA_MAGIC 0x32535544UL
 #define DPUSB_UNLOCK_METADATA_VERSION 2
@@ -1305,23 +1305,50 @@ static BOOL WaitForDriverServiceDeleted(DWORD timeoutMs, DWORD *win32Error)
     }
 
     for (;;) {
-    service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_QUERY_STATUS | DELETE);
-    if (service == NULL) {
-        lastError = GetLastError();
-        CloseServiceHandle(scm);
-        if (lastError == ERROR_SERVICE_DOES_NOT_EXIST || lastError == ERROR_SERVICE_MARKED_FOR_DELETE) {
-            if (win32Error != NULL) {
-                *win32Error = ERROR_SUCCESS;
+        service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_QUERY_STATUS | DELETE);
+        if (service == NULL) {
+            lastError = GetLastError();
+            if (lastError == ERROR_SERVICE_DOES_NOT_EXIST) {
+                CloseServiceHandle(scm);
+                if (win32Error != NULL) {
+                    *win32Error = ERROR_SUCCESS;
+                }
+                return TRUE;
             }
-            return TRUE;
+
+            if (lastError != ERROR_SERVICE_MARKED_FOR_DELETE) {
+                CloseServiceHandle(scm);
+                if (win32Error != NULL) {
+                    *win32Error = lastError;
+                }
+                return FALSE;
             }
+
+            if (elapsed >= timeoutMs) {
+                CloseServiceHandle(scm);
+                if (win32Error != NULL) {
+                    *win32Error = ERROR_SERVICE_MARKED_FOR_DELETE;
+                }
+                return FALSE;
+            }
+
+            Sleep(DPUSB_SERVICE_POLL_MS);
+            elapsed += DPUSB_SERVICE_POLL_MS;
+            continue;
+        }
+
+        if (DeleteService(service) || GetLastError() == ERROR_SERVICE_MARKED_FOR_DELETE) {
+            CloseServiceHandle(service);
+        } else {
+            lastError = GetLastError();
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
             if (win32Error != NULL) {
                 *win32Error = lastError;
             }
             return FALSE;
         }
 
-        CloseServiceHandle(service);
         if (elapsed >= timeoutMs) {
             CloseServiceHandle(scm);
             if (win32Error != NULL) {
@@ -1533,6 +1560,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
                               DWORD *win32Error)
 {
     DWORD error = ERROR_SUCCESS;
+    DWORD deleteError = ERROR_SUCCESS;
     DWORD attempt;
     wchar_t attemptedServicePath[MAX_PATH + 8];
 
@@ -1552,7 +1580,10 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
 
     UnmountAllPrivateWorkspaces();
     (VOID)CloseSessionData(NULL);
-    (VOID)StopAndDeleteDriverService(NULL);
+    if (!StopAndDeleteDriverService(&deleteError) && deleteError == ERROR_SERVICE_MARKED_FOR_DELETE) {
+        AppendLog(L"Previous USB crypt driver service is still marked for deletion. Waiting before reloading the current USB driver...");
+        (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_DELETE_WAIT_MS, NULL);
+    }
 
     ZeroMemory(attemptedServicePath, sizeof(attemptedServicePath));
     for (attempt = 0; attempt < DPUSB_SERVICE_INSTALL_RETRIES; attempt++) {
@@ -1571,6 +1602,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
             return FALSE;
         }
 
+        AppendLog(L"Previous USB crypt driver service is still marked for deletion. Retry %lu/%lu...", attempt + 1, DPUSB_SERVICE_INSTALL_RETRIES);
         (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS, NULL);
         Sleep(DPUSB_SERVICE_POLL_MS);
     }
@@ -1602,6 +1634,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
                     break;
                 }
 
+                AppendLog(L"Previous USB crypt driver service is still marked for deletion. Retry %lu/%lu...", attempt + 1, DPUSB_SERVICE_INSTALL_RETRIES);
                 (VOID)WaitForDriverServiceDeleted(DPUSB_SERVICE_INSTALL_DELETE_WAIT_MS, NULL);
                 Sleep(DPUSB_SERVICE_POLL_MS);
             }
