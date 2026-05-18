@@ -1361,6 +1361,150 @@ DpUsbCreateClose(
 }
 
 NTSTATUS
+DpUsbQueryInformation(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    PIO_STACK_LOCATION stack;
+    FILE_INFORMATION_CLASS informationClass;
+    ULONG outputLength;
+    PVOID buffer;
+    ULONG_PTR information = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONGLONG lengthBytes = 0;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    informationClass = stack->Parameters.QueryFile.FileInformationClass;
+    outputLength = stack->Parameters.QueryFile.Length;
+    buffer = Irp->AssociatedIrp.SystemBuffer;
+    DpUsbQueryLengthValue(&lengthBytes);
+
+    DPUSB_TRACE("Information",
+                "query irp=%p class=%lu length=%lu buffer=%p file=%p current=%I64d dataLength=%I64u pid=%p\n",
+                Irp,
+                (ULONG)informationClass,
+                outputLength,
+                buffer,
+                stack->FileObject,
+                stack->FileObject != NULL ? stack->FileObject->CurrentByteOffset.QuadPart : 0,
+                lengthBytes,
+                PsGetCurrentProcessId());
+
+    switch (informationClass) {
+    case FilePositionInformation:
+        if (buffer == NULL || outputLength < sizeof(FILE_POSITION_INFORMATION)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            information = sizeof(FILE_POSITION_INFORMATION);
+            break;
+        }
+
+        ((PFILE_POSITION_INFORMATION)buffer)->CurrentByteOffset =
+            stack->FileObject != NULL ? stack->FileObject->CurrentByteOffset : RtlConvertLongToLargeInteger(0);
+        information = sizeof(FILE_POSITION_INFORMATION);
+        break;
+
+    case FileStandardInformation:
+        if (buffer == NULL || outputLength < sizeof(FILE_STANDARD_INFORMATION)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            information = sizeof(FILE_STANDARD_INFORMATION);
+            break;
+        }
+
+        RtlZeroMemory(buffer, sizeof(FILE_STANDARD_INFORMATION));
+        ((PFILE_STANDARD_INFORMATION)buffer)->AllocationSize.QuadPart = (LONGLONG)lengthBytes;
+        ((PFILE_STANDARD_INFORMATION)buffer)->EndOfFile.QuadPart = (LONGLONG)lengthBytes;
+        ((PFILE_STANDARD_INFORMATION)buffer)->NumberOfLinks = 1;
+        ((PFILE_STANDARD_INFORMATION)buffer)->DeletePending = FALSE;
+        ((PFILE_STANDARD_INFORMATION)buffer)->Directory = FALSE;
+        information = sizeof(FILE_STANDARD_INFORMATION);
+        break;
+
+    default:
+        DPUSB_TRACE("Information",
+                    "query unsupported irp=%p class=%lu length=%lu\n",
+                    Irp,
+                    (ULONG)informationClass,
+                    outputLength);
+        status = STATUS_INVALID_INFO_CLASS;
+        information = 0;
+        break;
+    }
+
+    DpUsbComplete(Irp, status, information);
+    return status;
+}
+
+NTSTATUS
+DpUsbSetInformation(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    PIO_STACK_LOCATION stack;
+    FILE_INFORMATION_CLASS informationClass;
+    ULONG inputLength;
+    PVOID buffer;
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG_PTR information = 0;
+    ULONGLONG lengthBytes = 0;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    informationClass = stack->Parameters.SetFile.FileInformationClass;
+    inputLength = stack->Parameters.SetFile.Length;
+    buffer = Irp->AssociatedIrp.SystemBuffer;
+    DpUsbQueryLengthValue(&lengthBytes);
+
+    DPUSB_TRACE("Information",
+                "set irp=%p class=%lu length=%lu buffer=%p file=%p current=%I64d dataLength=%I64u pid=%p\n",
+                Irp,
+                (ULONG)informationClass,
+                inputLength,
+                buffer,
+                stack->FileObject,
+                stack->FileObject != NULL ? stack->FileObject->CurrentByteOffset.QuadPart : 0,
+                lengthBytes,
+                PsGetCurrentProcessId());
+
+    switch (informationClass) {
+    case FilePositionInformation:
+        if (buffer == NULL || inputLength < sizeof(FILE_POSITION_INFORMATION)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        if (((PFILE_POSITION_INFORMATION)buffer)->CurrentByteOffset.QuadPart < 0 ||
+            (ULONGLONG)((PFILE_POSITION_INFORMATION)buffer)->CurrentByteOffset.QuadPart > lengthBytes) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        if (stack->FileObject != NULL) {
+            stack->FileObject->CurrentByteOffset =
+                ((PFILE_POSITION_INFORMATION)buffer)->CurrentByteOffset;
+        }
+        status = STATUS_SUCCESS;
+        break;
+
+    default:
+        DPUSB_TRACE("Information",
+                    "set unsupported irp=%p class=%lu length=%lu\n",
+                    Irp,
+                    (ULONG)informationClass,
+                    inputLength);
+        status = STATUS_INVALID_INFO_CLASS;
+        break;
+    }
+
+    DpUsbComplete(Irp, status, information);
+    return status;
+}
+
+NTSTATUS
 DpUsbUnsupported(
     _In_ PDEVICE_OBJECT DeviceObject,
     _Inout_ PIRP Irp
@@ -2206,6 +2350,8 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_CREATE] = DpUsbCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = DpUsbCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLEANUP] = DpUsbCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_QUERY_INFORMATION] = DpUsbQueryInformation;
+    DriverObject->MajorFunction[IRP_MJ_SET_INFORMATION] = DpUsbSetInformation;
     DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS] = DpUsbFlushBuffers;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DpUsbDeviceControl;
     DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = DpUsbFileSystemControl;

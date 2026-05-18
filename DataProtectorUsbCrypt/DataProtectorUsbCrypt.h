@@ -102,6 +102,12 @@ DRIVER_DISPATCH DpUsbCreateClose;
 _Dispatch_type_(IRP_MJ_CLEANUP)
 DRIVER_DISPATCH DpUsbCreateClose;
 
+_Dispatch_type_(IRP_MJ_QUERY_INFORMATION)
+DRIVER_DISPATCH DpUsbQueryInformation;
+
+_Dispatch_type_(IRP_MJ_SET_INFORMATION)
+DRIVER_DISPATCH DpUsbSetInformation;
+
 _Dispatch_type_(IRP_MJ_FLUSH_BUFFERS)
 DRIVER_DISPATCH DpUsbFlushBuffers;
 

@@ -221,7 +221,7 @@ static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Erro
 static BOOL IsProcessElevated(void);
 static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error);
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
-static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
+static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
 static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error);
 static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
@@ -2524,8 +2524,17 @@ static BOOL WriteWorkspaceBytes(HANDLE volume,
         !WriteFile(volume, buffer, bytes, &written, NULL) ||
         written != bytes) {
 
+        DWORD error = GetLastError();
+        if (error == ERROR_SUCCESS) {
+            error = ERROR_WRITE_FAULT;
+        }
+        AppendLog(L"Private workspace raw write failed. Offset=%I64u bytes=%lu written=%lu Win32=%lu",
+                  offset,
+                  bytes,
+                  written,
+                  error);
         if (win32Error != NULL) {
-            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_WRITE_FAULT;
+            *win32Error = error;
         }
         return FALSE;
     }
@@ -2785,9 +2794,85 @@ static BOOL InitializeWorkspaceFat32Container(HANDLE volume,
     return TRUE;
 }
 
-static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+static BOOL RefreshPrivateWorkspaceMount(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+{
+    WCHAR letter;
+    BOOL preferGlobal;
+    DWORD error = ERROR_SUCCESS;
+
+    if (mount == NULL || mount->Letter == L'\0') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    letter = mount->Letter;
+    preferGlobal = _wcsnicmp(mount->DosName, L"Global\\", 7) == 0;
+
+    RequestKernelDriveUnmount(letter);
+    if (mount->DosName[0] != L'\0') {
+        (VOID)RemoveDosDeviceDefinition(mount->DosName, DPUSB_NT_DEVICE_NAME);
+    }
+
+    Sleep(300);
+
+    if (preferGlobal) {
+        if (RequestKernelDriveMount(letter, &error)) {
+            WCHAR globalName[16];
+            WCHAR path[8];
+
+            if (!BuildGlobalDosName(letter, globalName, sizeof(globalName) / sizeof(globalName[0]))) {
+                if (win32Error != NULL) {
+                    *win32Error = GetLastError();
+                }
+                return FALSE;
+            }
+
+            swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
+            mount->Letter = letter;
+            wcsncpy_s(mount->DosName, sizeof(mount->DosName) / sizeof(mount->DosName[0]), globalName, _TRUNCATE);
+            wcsncpy_s(mount->Path, sizeof(mount->Path) / sizeof(mount->Path[0]), path, _TRUNCATE);
+            AppendLog(L"Private workspace drive letter refreshed by kernel: %s", path);
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+
+        AppendLog(L"Kernel drive-letter refresh failed for %c:. Win32=%lu; trying user-mode mapping.",
+                  letter,
+                  error);
+
+        if (TryCreatePrivateWorkspaceLink(letter, TRUE, mount, &error)) {
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+
+        AppendLog(L"Global drive-letter refresh failed for %c:. Win32=%lu; trying current-session mapping.",
+                  letter,
+                  error);
+    }
+
+    if (TryCreatePrivateWorkspaceLink(letter, FALSE, mount, &error)) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_SUCCESS;
+        }
+        return TRUE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = error;
+    }
+    return FALSE;
+}
+
+static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
 {
     WCHAR fileSystem[32];
+    WCHAR message[256];
     DWORD error = ERROR_SUCCESS;
     DWORD attempt;
     HANDLE volume = INVALID_HANDLE_VALUE;
@@ -2795,10 +2880,11 @@ static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, D
     DWORD returned = 0;
 
     if (!ValidateMountedWorkspaceDevice(mount, &error)) {
-        if (win32Error != NULL) {
-            *win32Error = error;
-        }
-        return FALSE;
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace drive validation through %s failed: %s (Win32=%lu). Continuing with direct virtual disk initialization.",
+                  mount != NULL ? mount->Path : L"(null)",
+                  message,
+                  error);
     }
 
     for (attempt = 0; attempt < 6; attempt++) {
@@ -2818,6 +2904,7 @@ static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, D
         if (error != ERROR_UNRECOGNIZED_VOLUME &&
             error != ERROR_NOT_READY &&
             error != ERROR_INVALID_PARAMETER &&
+            error != ERROR_INVALID_FUNCTION &&
             error != ERROR_FILE_SYSTEM_LIMITATION) {
             break;
         }
@@ -2825,8 +2912,16 @@ static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, D
         Sleep(500);
     }
 
-    AppendLog(L"Private workspace has no file system yet. Initializing encrypted FAT32 container in-place...");
-    if (!OpenMountedWorkspaceHandle(mount, GENERIC_READ | GENERIC_WRITE, &volume, &error)) {
+    FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+    AppendLog(L"Private workspace has no mounted file system yet (%s). Initializing encrypted FAT32 container through the virtual disk device.",
+              message);
+    volume = OpenControlDevice(GENERIC_READ | GENERIC_WRITE);
+    if (volume == INVALID_HANDLE_VALUE) {
+        error = GetLastError();
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Opening virtual disk device for private workspace initialization failed: %s (Win32=%lu)",
+                  message,
+                  error);
         if (win32Error != NULL) {
             *win32Error = error;
         }
@@ -2843,6 +2938,10 @@ static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, D
                          &returned,
                          NULL)) {
         error = GetLastError();
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace length query failed on virtual disk device: %s (Win32=%lu)",
+                  message,
+                  error);
         CloseHandle(volume);
         if (win32Error != NULL) {
             *win32Error = error;
@@ -2850,7 +2949,12 @@ static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, D
         return FALSE;
     }
 
+    AppendLog(L"Private workspace virtual disk length: %I64u bytes.", (ULONGLONG)lengthInfo.Length.QuadPart);
     if (!InitializeWorkspaceFat32Container(volume, (ULONGLONG)lengthInfo.Length.QuadPart, &error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace FAT32 metadata initialization failed: %s (Win32=%lu)",
+                  message,
+                  error);
         CloseHandle(volume);
         if (win32Error != NULL) {
             *win32Error = error;
@@ -2858,12 +2962,18 @@ static BOOL EnsurePrivateWorkspaceFileSystem(const DPUSB_PRIVATE_MOUNT *mount, D
         return FALSE;
     }
 
-    (VOID)DeviceIoControl(volume, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL);
-    (VOID)DeviceIoControl(volume, IOCTL_VOLUME_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL);
+    if (!DeviceIoControl(volume, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL)) {
+        AppendLog(L"Private workspace disk property refresh returned Win32=%lu.", GetLastError());
+    }
+    if (!DeviceIoControl(volume, IOCTL_VOLUME_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL)) {
+        AppendLog(L"Private workspace volume property refresh returned Win32=%lu.", GetLastError());
+    }
     CloseHandle(volume);
-    RequestKernelDriveUnmount(mount->Letter);
-    Sleep(500);
-    if (!RequestKernelDriveMount(mount->Letter, &error)) {
+    if (!RefreshPrivateWorkspaceMount(mount, &error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace drive-letter refresh after initialization failed: %s (Win32=%lu)",
+                  message,
+                  error);
         if (win32Error != NULL) {
             *win32Error = error;
         }
