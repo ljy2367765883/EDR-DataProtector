@@ -118,6 +118,10 @@ DpUsbIoctlName(
         return "IOCTL_DPUSB_OPEN_SESSION";
     case IOCTL_DPUSB_CLOSE_SESSION:
         return "IOCTL_DPUSB_CLOSE_SESSION";
+    case IOCTL_DPUSB_MOUNT_DRIVE:
+        return "IOCTL_DPUSB_MOUNT_DRIVE";
+    case IOCTL_DPUSB_UNMOUNT_DRIVE:
+        return "IOCTL_DPUSB_UNMOUNT_DRIVE";
     case IOCTL_DISK_GET_LENGTH_INFO:
         return "IOCTL_DISK_GET_LENGTH_INFO";
     case IOCTL_DISK_GET_DRIVE_GEOMETRY:
@@ -1157,6 +1161,112 @@ DpUsbQueryVolumeDiskExtents(
     return STATUS_SUCCESS;
 }
 
+static
+NTSTATUS
+DpUsbBuildGlobalDriveName(
+    _In_ WCHAR DriveLetter,
+    _Out_ PUNICODE_STRING DriveName,
+    _Out_writes_(DriveNameChars) PWCHAR DriveNameBuffer,
+    _In_ ULONG DriveNameChars
+    )
+{
+    NTSTATUS status;
+    WCHAR letter;
+
+    if (DriveName == NULL || DriveNameBuffer == NULL || DriveNameChars < 24) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    letter = DriveLetter;
+    if (letter >= L'a' && letter <= L'z') {
+        letter = (WCHAR)(letter - L'a' + L'A');
+    }
+
+    if (letter < L'A' || letter > L'Z') {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = RtlStringCchPrintfW(DriveNameBuffer,
+                                 DriveNameChars,
+                                 L"\\DosDevices\\Global\\%wc:",
+                                 letter);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(DriveName, DriveNameBuffer);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbMountDriveLetter(
+    _In_ PDPUSB_DRIVE_MOUNT Request,
+    _In_ ULONG InputLength
+    )
+{
+    WCHAR driveNameBuffer[32];
+    UNICODE_STRING driveName;
+    UNICODE_STRING deviceName;
+    NTSTATUS status;
+    NTSTATUS deleteStatus;
+
+    if (Request == NULL || InputLength < sizeof(DPUSB_DRIVE_MOUNT) || Request->Version != 1) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = DpUsbBuildGlobalDriveName(Request->DriveLetter,
+                                       &driveName,
+                                       driveNameBuffer,
+                                       RTL_NUMBER_OF(driveNameBuffer));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&deviceName, DPUSB_DEVICE_NAME);
+    deleteStatus = IoDeleteSymbolicLink(&driveName);
+    status = IoCreateSymbolicLink(&driveName, &deviceName);
+    DPUSB_TRACE("Mount",
+                "mount drive=%wZ target=%wZ delete=0x%08X create=0x%08X\n",
+                &driveName,
+                &deviceName,
+                deleteStatus,
+                status);
+    return status;
+}
+
+static
+NTSTATUS
+DpUsbUnmountDriveLetter(
+    _In_ PDPUSB_DRIVE_MOUNT Request,
+    _In_ ULONG InputLength
+    )
+{
+    WCHAR driveNameBuffer[32];
+    UNICODE_STRING driveName;
+    NTSTATUS status;
+
+    if (Request == NULL || InputLength < sizeof(DPUSB_DRIVE_MOUNT) || Request->Version != 1) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = DpUsbBuildGlobalDriveName(Request->DriveLetter,
+                                       &driveName,
+                                       driveNameBuffer,
+                                       RTL_NUMBER_OF(driveNameBuffer));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = IoDeleteSymbolicLink(&driveName);
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND) {
+        status = STATUS_SUCCESS;
+    }
+
+    DPUSB_TRACE("Mount", "unmount drive=%wZ status=0x%08X\n", &driveName, status);
+    return status;
+}
+
 NTSTATUS
 DpUsbCreateClose(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -1857,6 +1967,16 @@ DpUsbDeviceControl(
     case IOCTL_DPUSB_CLOSE_SESSION:
         DpUsbCloseSession();
         status = STATUS_SUCCESS;
+        break;
+
+    case IOCTL_DPUSB_MOUNT_DRIVE:
+        status = DpUsbMountDriveLetter((PDPUSB_DRIVE_MOUNT)buffer, inputLength);
+        bytesReturned = 0;
+        break;
+
+    case IOCTL_DPUSB_UNMOUNT_DRIVE:
+        status = DpUsbUnmountDriveLetter((PDPUSB_DRIVE_MOUNT)buffer, inputLength);
+        bytesReturned = 0;
         break;
 
     default:

@@ -41,6 +41,8 @@
 #define IOCTL_DPUSB_QUERY_STATUS CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 0, METHOD_BUFFERED, FILE_READ_ACCESS)
 #define IOCTL_DPUSB_OPEN_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 1, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DPUSB_CLOSE_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 2, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_MOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 3, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_UNMOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 4, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
 #define DPUSB_ID_UNLOCK 1002
 #define DPUSB_ID_LOCK 1003
@@ -73,6 +75,11 @@ typedef struct _DPUSB_STATUS {
     WCHAR PhysicalDrivePath[128];
     WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
 } DPUSB_STATUS;
+
+typedef struct _DPUSB_DRIVE_MOUNT {
+    ULONG Version;
+    WCHAR DriveLetter;
+} DPUSB_DRIVE_MOUNT;
 
 typedef struct _DPUSB_UNLOCK_MANIFEST {
     ULONG Magic;
@@ -206,8 +213,11 @@ static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win3
 static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
 static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Error);
 static BOOL IsProcessElevated(void);
+static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error);
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
 static BOOL EnsurePrivateWorkspaceNtfs(const DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
+static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error);
+static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
 static void UnmountAllPrivateWorkspaces(void);
 static DWORD WINAPI UnlockWorkerThread(LPVOID parameter);
@@ -557,6 +567,64 @@ static BOOL IsProcessElevated(void)
 
     CloseHandle(token);
     return elevated;
+}
+
+static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error)
+{
+    HANDLE token = NULL;
+    TOKEN_PRIVILEGES privileges;
+    LUID luid;
+    DWORD error;
+
+    if (privilegeName == NULL || privilegeName[0] == L'\0') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    if (!LookupPrivilegeValueW(NULL, privilegeName, &luid)) {
+        error = GetLastError();
+        CloseHandle(token);
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    ZeroMemory(&privileges, sizeof(privileges));
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Luid = luid;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), NULL, NULL)) {
+        error = GetLastError();
+        CloseHandle(token);
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    error = GetLastError();
+    CloseHandle(token);
+    if (error == ERROR_NOT_ALL_ASSIGNED) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
 }
 
 static BOOL GetModuleDirectory(wchar_t *directory, DWORD directoryChars)
@@ -1089,10 +1157,21 @@ static BOOL BuildGlobalDosName(WCHAR letter, wchar_t *dosName, DWORD dosNameChar
     return swprintf_s(dosName, dosNameChars, L"Global\\%c:", letter) > 0;
 }
 
-static BOOL RemoveDosDeviceDefinition(const wchar_t *dosName)
+static BOOL BuildLocalDosName(WCHAR letter, wchar_t *dosName, DWORD dosNameChars)
+{
+    if (dosName == NULL || dosNameChars < 3) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    return swprintf_s(dosName, dosNameChars, L"%c:", letter) > 0;
+}
+
+static BOOL RemoveDosDeviceDefinition(const wchar_t *dosName, const wchar_t *target)
 {
     BOOL removed = TRUE;
     DWORD error = ERROR_SUCCESS;
+    const wchar_t *exactTarget = target != NULL ? target : DPUSB_NT_DEVICE_NAME;
 
     if (dosName == NULL || dosName[0] == L'\0') {
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -1101,7 +1180,7 @@ static BOOL RemoveDosDeviceDefinition(const wchar_t *dosName)
 
     while (DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE | DDD_NO_BROADCAST_SYSTEM,
                             dosName,
-                            DPUSB_NT_DEVICE_NAME)) {
+                            exactTarget)) {
         removed = TRUE;
     }
 
@@ -1115,12 +1194,132 @@ static BOOL RemoveDosDeviceDefinition(const wchar_t *dosName)
     return removed && error == ERROR_SUCCESS;
 }
 
+static BOOL TryCreatePrivateWorkspaceLink(WCHAR letter, BOOL globalLink, DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
+{
+    WCHAR dosName[16];
+    WCHAR path[8];
+    DWORD error;
+
+    if (mount == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (globalLink) {
+        if (!BuildGlobalDosName(letter, dosName, sizeof(dosName) / sizeof(dosName[0]))) {
+            if (win32Error != NULL) {
+                *win32Error = GetLastError();
+            }
+            return FALSE;
+        }
+    } else if (!BuildLocalDosName(letter, dosName, sizeof(dosName) / sizeof(dosName[0]))) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
+    (VOID)RemoveDosDeviceDefinition(dosName, DPUSB_NT_DEVICE_NAME);
+    if (DefineDosDeviceW(DDD_RAW_TARGET_PATH, dosName, DPUSB_NT_DEVICE_NAME)) {
+        mount->Letter = letter;
+        wcsncpy_s(mount->DosName, sizeof(mount->DosName) / sizeof(mount->DosName[0]), dosName, _TRUNCATE);
+        wcsncpy_s(mount->Path, sizeof(mount->Path) / sizeof(mount->Path[0]), path, _TRUNCATE);
+        if (globalLink) {
+            AppendLog(L"Private workspace drive letter created globally: %s", path);
+        } else {
+            AppendLog(L"Private workspace drive letter created for the current logon session only: %s", path);
+        }
+        if (win32Error != NULL) {
+            *win32Error = ERROR_SUCCESS;
+        }
+        return TRUE;
+    }
+
+    error = GetLastError();
+    if (win32Error != NULL) {
+        *win32Error = error;
+    }
+    return FALSE;
+}
+
+static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error)
+{
+    HANDLE device;
+    DPUSB_DRIVE_MOUNT request;
+    DWORD returned = 0;
+
+    device = OpenControlDevice(GENERIC_READ | GENERIC_WRITE);
+    if (device == INVALID_HANDLE_VALUE) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    ZeroMemory(&request, sizeof(request));
+    request.Version = 1;
+    request.DriveLetter = letter;
+    if (!DeviceIoControl(device,
+                         IOCTL_DPUSB_MOUNT_DRIVE,
+                         &request,
+                         sizeof(request),
+                         NULL,
+                         0,
+                         &returned,
+                         NULL)) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        CloseHandle(device);
+        return FALSE;
+    }
+
+    CloseHandle(device);
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static void RequestKernelDriveUnmount(WCHAR letter)
+{
+    HANDLE device;
+    DPUSB_DRIVE_MOUNT request;
+    DWORD returned = 0;
+
+    if (letter == L'\0') {
+        return;
+    }
+
+    device = OpenControlDevice(GENERIC_READ | GENERIC_WRITE);
+    if (device == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    ZeroMemory(&request, sizeof(request));
+    request.Version = 1;
+    request.DriveLetter = letter;
+    (VOID)DeviceIoControl(device,
+                          IOCTL_DPUSB_UNMOUNT_DRIVE,
+                          &request,
+                          sizeof(request),
+                          NULL,
+                          0,
+                          &returned,
+                          NULL);
+    CloseHandle(device);
+}
+
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
 {
     WCHAR letter;
-    WCHAR dosName[16];
-    WCHAR path[8];
     DWORD error = ERROR_SUCCESS;
+    DWORD privilegeError = ERROR_SUCCESS;
+    DWORD globalError = ERROR_SUCCESS;
+    BOOL globalPrivilegeEnabled;
 
     if (mount == NULL) {
         if (win32Error != NULL) {
@@ -1131,29 +1330,59 @@ static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error)
 
     ZeroMemory(mount, sizeof(*mount));
     UnmountAllPrivateWorkspaces();
+    globalPrivilegeEnabled = EnableProcessPrivilege(SE_CREATE_GLOBAL_NAME, &privilegeError);
+    if (!globalPrivilegeEnabled) {
+        AppendLog(L"Global drive-letter privilege is unavailable; falling back if needed. Win32=%lu", privilegeError);
+    }
+
     for (letter = L'Z'; letter >= L'M'; letter--) {
         if (!DriveLetterIsAvailable(letter)) {
             continue;
         }
 
-        if (!BuildGlobalDosName(letter, dosName, sizeof(dosName) / sizeof(dosName[0]))) {
-            error = GetLastError();
-            continue;
-        }
+        if (RequestKernelDriveMount(letter, &error)) {
+            WCHAR globalName[16];
+            WCHAR path[8];
 
-        swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
-        (VOID)RemoveDosDeviceDefinition(dosName);
-        if (DefineDosDeviceW(DDD_RAW_TARGET_PATH, dosName, DPUSB_NT_DEVICE_NAME)) {
+            swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
+            if (!BuildGlobalDosName(letter, globalName, sizeof(globalName) / sizeof(globalName[0]))) {
+                RequestKernelDriveUnmount(letter);
+                error = GetLastError();
+                continue;
+            }
+
             mount->Letter = letter;
-            wcsncpy_s(mount->DosName, sizeof(mount->DosName) / sizeof(mount->DosName[0]), dosName, _TRUNCATE);
+            wcsncpy_s(mount->DosName, sizeof(mount->DosName) / sizeof(mount->DosName[0]), globalName, _TRUNCATE);
             wcsncpy_s(mount->Path, sizeof(mount->Path) / sizeof(mount->Path[0]), path, _TRUNCATE);
+            AppendLog(L"Private workspace drive letter created by kernel: %s", path);
             if (win32Error != NULL) {
                 *win32Error = ERROR_SUCCESS;
             }
             return TRUE;
         }
 
-        error = GetLastError();
+        if (error == ERROR_ACCESS_DENIED) {
+            AppendLog(L"Kernel drive-letter creation was denied; trying user-mode fallback.");
+        }
+
+        if (globalPrivilegeEnabled && TryCreatePrivateWorkspaceLink(letter, TRUE, mount, &globalError)) {
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
+
+        error = globalError != ERROR_SUCCESS ? globalError : error;
+        if (globalPrivilegeEnabled && globalError == ERROR_ACCESS_DENIED) {
+            AppendLog(L"Global drive-letter creation was denied; using current-session mapping fallback.");
+        }
+
+        if (TryCreatePrivateWorkspaceLink(letter, FALSE, mount, &error)) {
+            if (win32Error != NULL) {
+                *win32Error = ERROR_SUCCESS;
+            }
+            return TRUE;
+        }
     }
 
     if (win32Error != NULL) {
@@ -1168,7 +1397,8 @@ static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount)
         return;
     }
 
-    (VOID)RemoveDosDeviceDefinition(mount->DosName);
+    RequestKernelDriveUnmount(mount->Letter);
+    (VOID)RemoveDosDeviceDefinition(mount->DosName, DPUSB_NT_DEVICE_NAME);
 }
 
 static void UnmountAllPrivateWorkspaces(void)
@@ -1193,9 +1423,9 @@ static void UnmountAllPrivateWorkspaces(void)
         }
 
         if (_wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
-            (VOID)RemoveDosDeviceDefinition(dosName);
+            (VOID)RemoveDosDeviceDefinition(dosName, DPUSB_NT_DEVICE_NAME);
             swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
-            (VOID)RemoveDosDeviceDefinition(localDosName);
+            (VOID)RemoveDosDeviceDefinition(localDosName, DPUSB_NT_DEVICE_NAME);
         }
     }
 }
