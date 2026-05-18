@@ -70,7 +70,6 @@
 #endif
 
 #define DPUSB_ID_UNLOCK 1002
-#define DPUSB_ID_LOCK 1003
 #define DPUSB_ID_REFRESH 1004
 #define DPUSB_ID_PLAN 1005
 #define DPUSB_ID_SAFE_EJECT 1006
@@ -192,7 +191,6 @@ typedef struct _DPUSB_UI_STATE {
     HWND LogEdit;
     HWND RefreshButton;
     HWND UnlockButton;
-    HWND LockButton;
     HWND SafeEjectButton;
     HWND PlanButton;
     HFONT TitleFont;
@@ -233,7 +231,6 @@ typedef struct _DPUSB_UI_LAYOUT {
     RECT PasswordEdit;
     RECT RefreshButton;
     RECT UnlockButton;
-    RECT LockButton;
     RECT SafeEjectButton;
     RECT PlanButton;
 } DPUSB_UI_LAYOUT;
@@ -3744,7 +3741,7 @@ static void RunUnlockFromUi(void)
     g_Ui.OperationInProgress = TRUE;
     EnableWindow(g_Ui.UnlockButton, FALSE);
     EnableWindow(g_Ui.RefreshButton, FALSE);
-    EnableWindow(g_Ui.LockButton, FALSE);
+    EnableWindow(g_Ui.SafeEjectButton, FALSE);
     SetWindowTextSafe(g_Ui.UnlockButton, L"Unlocking...");
     AppendLog(L"Unlock task started in background.");
 
@@ -3754,7 +3751,7 @@ static void RunUnlockFromUi(void)
         g_Ui.OperationInProgress = FALSE;
         EnableWindow(g_Ui.UnlockButton, TRUE);
         EnableWindow(g_Ui.RefreshButton, TRUE);
-        EnableWindow(g_Ui.LockButton, TRUE);
+        EnableWindow(g_Ui.SafeEjectButton, TRUE);
         SetWindowTextSafe(g_Ui.UnlockButton, L"Unlock");
         AppendLog(L"Unlock failed: unable to start worker thread.");
         return;
@@ -3888,24 +3885,24 @@ static void CompleteSafeEjectFromWorker(DPUSB_SAFE_EJECT_WORK_RESULT *result)
     g_Ui.OperationInProgress = FALSE;
     EnableWindow(g_Ui.UnlockButton, TRUE);
     EnableWindow(g_Ui.RefreshButton, TRUE);
-    EnableWindow(g_Ui.LockButton, TRUE);
     EnableWindow(g_Ui.SafeEjectButton, TRUE);
     SetWindowTextSafe(g_Ui.SafeEjectButton, L"Eject");
 
     if (result == NULL) {
-        AppendLog(L"Safe eject failed before returning a result.");
+        AppendLog(L"Eject failed before returning a result.");
         UpdateStatusUi();
         return;
     }
 
     if (result->Success) {
+        g_Ui.MountPath[0] = L'\0';
         AppendLog(L"%s", result->Message);
         MessageBoxW(g_Ui.Window,
                     result->Message,
                     DPUSB_APP_NAME,
                     MB_ICONINFORMATION | MB_OK);
     } else {
-        AppendLog(L"Safe eject failed: %s", result->Message);
+        AppendLog(L"Eject failed: %s", result->Message);
         MessageBoxW(g_Ui.Window,
                     result->Message,
                     DPUSB_APP_NAME,
@@ -3942,8 +3939,8 @@ static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter)
     }
 
     wcsncpy_s(result->UsbRoot, sizeof(result->UsbRoot) / sizeof(result->UsbRoot[0]), root, _TRUNCATE);
-    AppendLog(L"Safe eject started for %s", root);
-    AppendLog(L"Flushing and unmounting the encrypted private workspace...");
+    AppendLog(L"Eject started for %s", root);
+    AppendLog(L"Locking encrypted private workspace before eject...");
     if (!FlushDismountPrivateWorkspace(&error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Private workspace flush/unmount reported: %s", message);
@@ -3951,12 +3948,12 @@ static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter)
         result->Error = error;
         swprintf_s(result->Message,
                    sizeof(result->Message) / sizeof(result->Message[0]),
-                   L"Safe eject stopped because the encrypted private workspace is still in use. Close all files and Explorer windows under the private drive, then try again.");
+                   L"Eject stopped because the encrypted private workspace is still in use. Close all files and Explorer windows under the private drive, then try again.");
         PostMessageW(g_Ui.Window, DPUSB_WM_SAFE_EJECT_DONE, 0, (LPARAM)result);
         return 0;
     }
 
-    AppendLog(L"Closing DataProtector USB crypt session...");
+    AppendLog(L"Closing DataProtector USB crypt session as part of eject...");
     if (!CloseSessionData(&error) && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Session close reported: %s", message);
@@ -3973,7 +3970,7 @@ static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter)
     AppendLog(L"Flushing and dismounting the public USB tool partition...");
     if (!FlushDismountVolumeByRoot(root, TRUE, &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Public volume flush/eject reported: %s", message);
+        AppendLog(L"Public volume eject reported: %s", message);
         ok = FALSE;
     }
 
@@ -3982,12 +3979,12 @@ static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter)
     if (ok) {
         swprintf_s(result->Message,
                    sizeof(result->Message) / sizeof(result->Message[0]),
-                   L"All DataProtector USB caches were flushed and %s was dismounted. You can safely remove the USB device now.",
+                   L"The private workspace was locked, all caches were flushed, and %s was dismounted. You can safely remove the USB device now.",
                    root);
     } else {
         swprintf_s(result->Message,
                    sizeof(result->Message) / sizeof(result->Message[0]),
-                   L"Safe eject could not fully complete for %s. Close any open files or Explorer windows on the USB device, then try again.",
+                   L"Eject could not fully complete for %s. Close any open files or Explorer windows on the USB device, then try again.",
                    root);
     }
 
@@ -4000,7 +3997,6 @@ static void CompleteUnlockFromWorker(DPUSB_UNLOCK_WORK_RESULT *result)
     g_Ui.OperationInProgress = FALSE;
     EnableWindow(g_Ui.UnlockButton, TRUE);
     EnableWindow(g_Ui.RefreshButton, TRUE);
-    EnableWindow(g_Ui.LockButton, TRUE);
     EnableWindow(g_Ui.SafeEjectButton, TRUE);
     SetWindowTextSafe(g_Ui.UnlockButton, L"Unlock");
 
@@ -4029,29 +4025,6 @@ static void CompleteUnlockFromWorker(DPUSB_UNLOCK_WORK_RESULT *result)
     UpdateStatusUi();
 }
 
-static void RunLockFromUi(void)
-{
-    DWORD error = ERROR_SUCCESS;
-    wchar_t message[256];
-    DPUSB_PRIVATE_MOUNT mount;
-
-    AppendLog(L"Closing secure USB session...");
-    ZeroMemory(&mount, sizeof(mount));
-    (VOID)FlushDismountPrivateWorkspace(NULL);
-    UnmountAllPrivateWorkspaces();
-    if (!CloseSessionData(&error)) {
-        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Lock failed: %s", message);
-        MessageBoxW(g_Ui.Window, message, DPUSB_APP_NAME, MB_ICONERROR | MB_OK);
-        UpdateStatusUi();
-        return;
-    }
-
-    AppendLog(L"Secure USB session closed.");
-    g_Ui.MountPath[0] = L'\0';
-    UpdateStatusUi();
-}
-
 static void RunSafeEjectFromUi(void)
 {
     HANDLE thread;
@@ -4065,20 +4038,18 @@ static void RunSafeEjectFromUi(void)
     g_Ui.OperationInProgress = TRUE;
     EnableWindow(g_Ui.UnlockButton, FALSE);
     EnableWindow(g_Ui.RefreshButton, FALSE);
-    EnableWindow(g_Ui.LockButton, FALSE);
     EnableWindow(g_Ui.SafeEjectButton, FALSE);
     SetWindowTextSafe(g_Ui.SafeEjectButton, L"Ejecting...");
-    AppendLog(L"Safe eject task started in background.");
+    AppendLog(L"Eject task started in background.");
 
     thread = CreateThread(NULL, 0, SafeEjectWorkerThread, NULL, 0, &threadId);
     if (thread == NULL) {
         g_Ui.OperationInProgress = FALSE;
         EnableWindow(g_Ui.UnlockButton, TRUE);
         EnableWindow(g_Ui.RefreshButton, TRUE);
-        EnableWindow(g_Ui.LockButton, TRUE);
         EnableWindow(g_Ui.SafeEjectButton, TRUE);
         SetWindowTextSafe(g_Ui.SafeEjectButton, L"Eject");
-        AppendLog(L"Safe eject failed: unable to start worker thread.");
+        AppendLog(L"Eject failed: unable to start worker thread.");
         return;
     }
 
@@ -4187,14 +4158,10 @@ static void ComputeLayout(HWND hwnd, DPUSB_UI_LAYOUT *layout)
     SetRectSize(&layout->PasswordEdit, layout->ControlCard.left + 18, layout->ControlCard.top + 58, RectWidth(&layout->ControlCard) - 36, 32);
 
     buttonTop = layout->PasswordEdit.bottom + 18;
-    buttonWidth = (RectWidth(&layout->ControlCard) - 36 - 16) / 3;
-    if (buttonWidth < 92) {
-        buttonWidth = 92;
-    }
+    buttonWidth = (RectWidth(&layout->ControlCard) - 36 - 8) / 2;
 
     SetRectSize(&layout->UnlockButton, layout->ControlCard.left + 18, buttonTop, buttonWidth, 34);
-    SetRectSize(&layout->LockButton, layout->UnlockButton.right + 8, buttonTop, buttonWidth, 34);
-    SetRectSize(&layout->SafeEjectButton, layout->LockButton.right + 8, buttonTop, buttonWidth, 34);
+    SetRectSize(&layout->SafeEjectButton, layout->UnlockButton.right + 8, buttonTop, buttonWidth, 34);
 
     SetRectSize(&layout->DriverCard, 0, 0, 0, 0);
     SetRectSize(&layout->SessionCard, 0, 0, 0, 0);
@@ -4217,7 +4184,6 @@ static void LayoutControls(HWND hwnd)
     ComputeLayout(hwnd, &layout);
     MoveControlToRect(g_Ui.PasswordEdit, &layout.PasswordEdit);
     MoveControlToRect(g_Ui.UnlockButton, &layout.UnlockButton);
-    MoveControlToRect(g_Ui.LockButton, &layout.LockButton);
     MoveControlToRect(g_Ui.SafeEjectButton, &layout.SafeEjectButton);
 
     if (g_Ui.RefreshButton != NULL) {
@@ -4514,8 +4480,7 @@ static void ShowTrayMenu(void)
     }
 
     AppendMenuW(menu, MF_STRING, DPUSB_ID_TRAY_SHOW, L"Open");
-    AppendMenuW(menu, MF_STRING, DPUSB_ID_SAFE_EJECT, L"Safe Eject");
-    AppendMenuW(menu, MF_STRING, DPUSB_ID_LOCK, L"Lock");
+    AppendMenuW(menu, MF_STRING, DPUSB_ID_SAFE_EJECT, L"Eject");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, DPUSB_ID_TRAY_EXIT, L"Exit");
 
@@ -4569,7 +4534,6 @@ static void CreateUi(HWND hwnd)
     g_Ui.PasswordEdit = CreateEditBox(hwnd, DPUSB_ID_PASSWORD, L"", 0, 0, 10, 10, ES_PASSWORD);
     g_Ui.RefreshButton = CreateButton(hwnd, DPUSB_ID_REFRESH, L"Refresh", 0, 0, 10, 10);
     g_Ui.UnlockButton = CreateButton(hwnd, DPUSB_ID_UNLOCK, L"Unlock", 0, 0, 10, 10);
-    g_Ui.LockButton = CreateButton(hwnd, DPUSB_ID_LOCK, L"Lock", 0, 0, 10, 10);
     g_Ui.SafeEjectButton = CreateButton(hwnd, DPUSB_ID_SAFE_EJECT, L"Eject", 0, 0, 10, 10);
     g_Ui.PlanButton = CreateButton(hwnd, DPUSB_ID_PLAN, L"Metadata Info", 0, 0, 10, 10);
     g_Ui.LogEdit = CreateWindowExW(WS_EX_CLIENTEDGE,
@@ -4650,9 +4614,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         case DPUSB_ID_UNLOCK:
             RunUnlockFromUi();
             return 0;
-        case DPUSB_ID_LOCK:
-            RunLockFromUi();
-            return 0;
         case DPUSB_ID_SAFE_EJECT:
             RunSafeEjectFromUi();
             return 0;
@@ -4693,7 +4654,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
     case WM_CLOSE:
         if (g_Ui.OperationInProgress) {
             MessageBoxW(hwnd,
-                        L"An unlock or lock operation is still running. Wait until the operation finishes before closing this tool.",
+                        L"An unlock or eject operation is still running. Wait until the operation finishes before closing this tool.",
                         DPUSB_APP_NAME,
                         MB_ICONINFORMATION | MB_OK);
             return 0;
