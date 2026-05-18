@@ -51,10 +51,16 @@
 #define DPUSB_ID_LOCK 1003
 #define DPUSB_ID_REFRESH 1004
 #define DPUSB_ID_PLAN 1005
+#define DPUSB_ID_SAFE_EJECT 1006
+#define DPUSB_ID_TRAY_SHOW 1007
+#define DPUSB_ID_TRAY_EXIT 1008
 #define DPUSB_ID_PASSWORD 1102
 #define DPUSB_ICON_ID 101
 #define DPUSB_WM_APPEND_LOG (WM_APP + 1)
 #define DPUSB_WM_UNLOCK_DONE (WM_APP + 2)
+#define DPUSB_WM_TRAY (WM_APP + 3)
+#define DPUSB_WM_SAFE_EJECT_DONE (WM_APP + 4)
+#define DPUSB_TRAY_ICON_ID 1
 
 typedef struct _DPUSB_OPEN_SESSION {
     ULONG Version;
@@ -132,6 +138,13 @@ typedef struct _DPUSB_UNLOCK_WORK_RESULT {
     WCHAR MountPath[8];
 } DPUSB_UNLOCK_WORK_RESULT;
 
+typedef struct _DPUSB_SAFE_EJECT_WORK_RESULT {
+    BOOL Success;
+    DWORD Error;
+    WCHAR UsbRoot[MAX_PATH];
+    WCHAR Message[512];
+} DPUSB_SAFE_EJECT_WORK_RESULT;
+
 typedef struct _DPUSB_UI_STATE {
     HWND Window;
     HWND PasswordEdit;
@@ -139,6 +152,7 @@ typedef struct _DPUSB_UI_STATE {
     HWND RefreshButton;
     HWND UnlockButton;
     HWND LockButton;
+    HWND SafeEjectButton;
     HWND PlanButton;
     HFONT TitleFont;
     HFONT HeaderFont;
@@ -162,9 +176,11 @@ typedef struct _DPUSB_UI_STATE {
     WCHAR SessionStateText[768];
     WCHAR DriverBadgeText[64];
     WCHAR SessionBadgeText[64];
+    WCHAR MountPath[8];
     BOOL DriverReady;
     BOOL SessionOpen;
     BOOL OperationInProgress;
+    BOOL TrayAdded;
     DWORD UiThreadId;
 } DPUSB_UI_STATE;
 
@@ -177,6 +193,7 @@ typedef struct _DPUSB_UI_LAYOUT {
     RECT RefreshButton;
     RECT UnlockButton;
     RECT LockButton;
+    RECT SafeEjectButton;
     RECT PlanButton;
 } DPUSB_UI_LAYOUT;
 
@@ -186,6 +203,8 @@ typedef enum _DPUSB_SERVICE_PATH_MODE {
 } DPUSB_SERVICE_PATH_MODE;
 
 static DPUSB_UI_STATE g_Ui;
+static BOOL g_UsbSourceRootSet = FALSE;
+static WCHAR g_UsbSourceRoot[MAX_PATH];
 
 static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, wchar_t *servicePath, DWORD servicePathChars, DWORD *win32Error);
 static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
@@ -200,6 +219,7 @@ static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
 static void UnmountAllPrivateWorkspaces(void);
 static DWORD WINAPI UnlockWorkerThread(LPVOID parameter);
+static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter);
 
 static void PrintUsage(void)
 {
@@ -629,6 +649,18 @@ static BOOL GetModuleDirectory(wchar_t *directory, DWORD directoryChars)
     return TRUE;
 }
 
+static BOOL GetModulePath(wchar_t *path, DWORD pathChars)
+{
+    DWORD length;
+
+    if (path == NULL || pathChars == 0) {
+        return FALSE;
+    }
+
+    length = GetModuleFileNameW(NULL, path, pathChars);
+    return length != 0 && length < pathChars;
+}
+
 static BOOL CombinePath(wchar_t *output, DWORD outputChars, const wchar_t *left, const wchar_t *right)
 {
     if (output == NULL || outputChars == 0 || left == NULL || right == NULL) {
@@ -659,6 +691,127 @@ static BOOL GetModuleDriveRoot(wchar_t *root, DWORD rootChars)
     return TRUE;
 }
 
+static BOOL NormalizeUsbRootArgument(const wchar_t *source, wchar_t *root, DWORD rootChars)
+{
+    size_t length;
+
+    if (source == NULL || source[0] == L'\0' || root == NULL || rootChars < 4) {
+        return FALSE;
+    }
+
+    wcsncpy_s(root, rootChars, source, _TRUNCATE);
+    length = wcslen(root);
+    if (length == 2 && root[1] == L':') {
+        root[2] = L'\\';
+        root[3] = L'\0';
+        return TRUE;
+    }
+
+    if (length > 0 && root[length - 1] != L'\\') {
+        if (length + 1 >= rootChars) {
+            return FALSE;
+        }
+        root[length] = L'\\';
+        root[length + 1] = L'\0';
+    }
+
+    return TRUE;
+}
+
+static BOOL SetUsbSourceRoot(const wchar_t *source)
+{
+    if (!NormalizeUsbRootArgument(source, g_UsbSourceRoot, sizeof(g_UsbSourceRoot) / sizeof(g_UsbSourceRoot[0]))) {
+        g_UsbSourceRootSet = FALSE;
+        g_UsbSourceRoot[0] = L'\0';
+        return FALSE;
+    }
+
+    g_UsbSourceRootSet = TRUE;
+    return TRUE;
+}
+
+static BOOL RelaunchGuiFromLocalCacheIfNeeded(int showCommand)
+{
+    wchar_t modulePath[MAX_PATH];
+    wchar_t moduleRoot[MAX_PATH];
+    wchar_t targetDir[MAX_PATH];
+    wchar_t targetPath[MAX_PATH];
+    wchar_t commandLine[2048];
+    SHELLEXECUTEINFOW executeInfo;
+    UINT driveType;
+
+    if (!GetModulePath(modulePath, sizeof(modulePath) / sizeof(modulePath[0])) ||
+        !GetModuleDriveRoot(moduleRoot, sizeof(moduleRoot) / sizeof(moduleRoot[0]))) {
+        return FALSE;
+    }
+
+    driveType = GetDriveTypeW(moduleRoot);
+    if (driveType != DRIVE_REMOVABLE && driveType != DRIVE_CDROM) {
+        return FALSE;
+    }
+
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, targetDir))) {
+        return FALSE;
+    }
+
+    if (FAILED(StringCchCatW(targetDir, sizeof(targetDir) / sizeof(targetDir[0]), L"\\DataProtector\\UsbTool"))) {
+        return FALSE;
+    }
+
+    if (SHCreateDirectoryExW(NULL, targetDir, NULL) != ERROR_SUCCESS &&
+        GetFileAttributesW(targetDir) == INVALID_FILE_ATTRIBUTES) {
+        return FALSE;
+    }
+
+    if (FAILED(StringCchPrintfW(targetPath,
+                                sizeof(targetPath) / sizeof(targetPath[0]),
+                                L"%s\\DataProtectorUsbTool.exe",
+                                targetDir))) {
+        return FALSE;
+    }
+
+    if (!CopyFileW(modulePath, targetPath, FALSE)) {
+        return FALSE;
+    }
+
+    if (FAILED(StringCchPrintfW(commandLine,
+                                sizeof(commandLine) / sizeof(commandLine[0]),
+                                L"--usb-root \"%s\"",
+                                moduleRoot))) {
+        return FALSE;
+    }
+
+    ZeroMemory(&executeInfo, sizeof(executeInfo));
+    executeInfo.cbSize = sizeof(executeInfo);
+    executeInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+    executeInfo.lpFile = targetPath;
+    executeInfo.lpParameters = commandLine;
+    executeInfo.nShow = showCommand;
+
+    if (!ShellExecuteExW(&executeInfo)) {
+        return FALSE;
+    }
+
+    if (executeInfo.hProcess != NULL) {
+        CloseHandle(executeInfo.hProcess);
+    }
+    return TRUE;
+}
+
+static BOOL GetUsbSourceRoot(wchar_t *root, DWORD rootChars)
+{
+    if (root == NULL || rootChars == 0) {
+        return FALSE;
+    }
+
+    if (g_UsbSourceRootSet && g_UsbSourceRoot[0] != L'\0') {
+        wcsncpy_s(root, rootChars, g_UsbSourceRoot, _TRUNCATE);
+        return TRUE;
+    }
+
+    return GetModuleDriveRoot(root, rootChars);
+}
+
 static BOOL GetPhysicalDriveForVolume(wchar_t *physicalPath, DWORD physicalPathChars, DWORD *win32Error)
 {
     wchar_t root[MAX_PATH];
@@ -674,7 +827,7 @@ static BOOL GetPhysicalDriveForVolume(wchar_t *physicalPath, DWORD physicalPathC
         return FALSE;
     }
 
-    if (!GetModuleDriveRoot(root, sizeof(root) / sizeof(root[0]))) {
+    if (!GetUsbSourceRoot(root, sizeof(root) / sizeof(root[0]))) {
         if (win32Error != NULL) {
             *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_PATH_NOT_FOUND;
         }
@@ -755,6 +908,18 @@ static BOOL FindPackagedDriver(wchar_t *path, DWORD pathChars)
 
     if (path == NULL || pathChars == 0 || !GetModuleDirectory(moduleDir, sizeof(moduleDir) / sizeof(moduleDir[0]))) {
         return FALSE;
+    }
+
+    if (g_UsbSourceRootSet && g_UsbSourceRoot[0] != L'\0') {
+        if (swprintf_s(candidate,
+                      sizeof(candidate) / sizeof(candidate[0]),
+                      L"%sDataProtectorUsbRuntime\\driver\\%s",
+                      g_UsbSourceRoot,
+                      DPUSB_DRIVER_FILE_NAME) > 0 &&
+            GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
+            wcsncpy_s(path, pathChars, candidate, _TRUNCATE);
+            return TRUE;
+        }
     }
 
     if (CombinePath(candidate, sizeof(candidate) / sizeof(candidate[0]), moduleDir, DPUSB_DRIVER_FILE_NAME) &&
@@ -1407,6 +1572,145 @@ static void UnmountAllPrivateWorkspaces(void)
             (VOID)RemoveDosDeviceDefinition(localDosName, DPUSB_NT_DEVICE_NAME);
         }
     }
+}
+
+static BOOL FlushDismountVolumeByRoot(const wchar_t *root, BOOL preventRemoval, DWORD *win32Error)
+{
+    WCHAR volumePath[16];
+    HANDLE volume;
+    DWORD returned = 0;
+    DWORD error = ERROR_SUCCESS;
+    BOOL ok = TRUE;
+    BOOL locked = FALSE;
+
+    if (root == NULL || root[0] == L'\0' || root[1] != L':') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (swprintf_s(volumePath,
+                   sizeof(volumePath) / sizeof(volumePath[0]),
+                   L"\\\\.\\%c:",
+                   root[0]) <= 0) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INSUFFICIENT_BUFFER;
+        }
+        return FALSE;
+    }
+
+    volume = CreateFileW(volumePath,
+                         GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL,
+                         OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL,
+                         NULL);
+    if (volume == INVALID_HANDLE_VALUE) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    if (!FlushFileBuffers(volume)) {
+        error = GetLastError();
+        ok = FALSE;
+    }
+
+    if (DeviceIoControl(volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &returned, NULL)) {
+        locked = TRUE;
+    } else if (ok) {
+        error = GetLastError();
+        ok = FALSE;
+    }
+
+    if (!DeviceIoControl(volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &returned, NULL) && ok) {
+        error = GetLastError();
+        ok = FALSE;
+    }
+
+    if (preventRemoval) {
+        PREVENT_MEDIA_REMOVAL removal;
+
+        ZeroMemory(&removal, sizeof(removal));
+        removal.PreventMediaRemoval = FALSE;
+        if (!DeviceIoControl(volume,
+                             IOCTL_STORAGE_MEDIA_REMOVAL,
+                             &removal,
+                             sizeof(removal),
+                             NULL,
+                             0,
+                             &returned,
+                             NULL) && ok) {
+            error = GetLastError();
+            ok = FALSE;
+        }
+
+        if (!DeviceIoControl(volume, IOCTL_STORAGE_EJECT_MEDIA, NULL, 0, NULL, 0, &returned, NULL) && ok) {
+            error = GetLastError();
+            ok = FALSE;
+        }
+    }
+
+    if (locked) {
+        (VOID)DeviceIoControl(volume, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0, &returned, NULL);
+    }
+    CloseHandle(volume);
+
+    if (win32Error != NULL) {
+        *win32Error = ok ? ERROR_SUCCESS : error;
+    }
+    return ok;
+}
+
+static BOOL FlushDismountPrivateWorkspace(DWORD *win32Error)
+{
+    WCHAR letter;
+    WCHAR root[4];
+    WCHAR dosName[16];
+    WCHAR localDosName[8];
+    WCHAR target[512];
+    DWORD firstError = ERROR_SUCCESS;
+
+    for (letter = L'A'; letter <= L'Z'; letter++) {
+        if (!BuildGlobalDosName(letter, dosName, sizeof(dosName) / sizeof(dosName[0]))) {
+            continue;
+        }
+
+        ZeroMemory(target, sizeof(target));
+        if (QueryDosDeviceW(dosName, target, sizeof(target) / sizeof(target[0])) == 0) {
+            swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
+            ZeroMemory(target, sizeof(target));
+            if (QueryDosDeviceW(localDosName, target, sizeof(target) / sizeof(target[0])) == 0) {
+                continue;
+            }
+        }
+
+        if (_wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
+            DWORD error = ERROR_SUCCESS;
+            BOOL unmounted;
+
+            swprintf_s(root, sizeof(root) / sizeof(root[0]), L"%c:\\", letter);
+            unmounted = FlushDismountVolumeByRoot(root, FALSE, &error);
+            if (!unmounted && firstError == ERROR_SUCCESS) {
+                firstError = error;
+            }
+
+            if (unmounted) {
+                RequestKernelDriveUnmount(letter);
+                (VOID)RemoveDosDeviceDefinition(dosName, DPUSB_NT_DEVICE_NAME);
+                swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
+                (VOID)RemoveDosDeviceDefinition(localDosName, DPUSB_NT_DEVICE_NAME);
+            }
+        }
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = firstError;
+    }
+    return firstError == ERROR_SUCCESS;
 }
 
 static BOOL OpenMountedWorkspaceHandle(const DPUSB_PRIVATE_MOUNT *mount, DWORD access, HANDLE *handle, DWORD *win32Error)
@@ -2585,12 +2889,125 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
     return 0;
 }
 
+static void CompleteSafeEjectFromWorker(DPUSB_SAFE_EJECT_WORK_RESULT *result)
+{
+    g_Ui.OperationInProgress = FALSE;
+    EnableWindow(g_Ui.UnlockButton, TRUE);
+    EnableWindow(g_Ui.RefreshButton, TRUE);
+    EnableWindow(g_Ui.LockButton, TRUE);
+    EnableWindow(g_Ui.SafeEjectButton, TRUE);
+    SetWindowTextSafe(g_Ui.SafeEjectButton, L"Safe Eject");
+
+    if (result == NULL) {
+        AppendLog(L"Safe eject failed before returning a result.");
+        UpdateStatusUi();
+        return;
+    }
+
+    if (result->Success) {
+        AppendLog(L"%s", result->Message);
+        MessageBoxW(g_Ui.Window,
+                    result->Message,
+                    DPUSB_APP_NAME,
+                    MB_ICONINFORMATION | MB_OK);
+    } else {
+        AppendLog(L"Safe eject failed: %s", result->Message);
+        MessageBoxW(g_Ui.Window,
+                    result->Message,
+                    DPUSB_APP_NAME,
+                    MB_ICONWARNING | MB_OK);
+    }
+
+    LocalFree(result);
+    UpdateStatusUi();
+}
+
+static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter)
+{
+    DPUSB_SAFE_EJECT_WORK_RESULT *result;
+    WCHAR root[MAX_PATH];
+    WCHAR message[256];
+    DWORD error = ERROR_SUCCESS;
+    BOOL ok = TRUE;
+
+    UNREFERENCED_PARAMETER(parameter);
+
+    result = (DPUSB_SAFE_EJECT_WORK_RESULT *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, sizeof(*result));
+    if (result == NULL) {
+        PostMessageW(g_Ui.Window, DPUSB_WM_SAFE_EJECT_DONE, 0, 0);
+        return 1;
+    }
+
+    if (!GetUsbSourceRoot(root, sizeof(root) / sizeof(root[0]))) {
+        result->Error = ERROR_PATH_NOT_FOUND;
+        wcscpy_s(result->Message,
+                 sizeof(result->Message) / sizeof(result->Message[0]),
+                 L"Could not resolve the public USB tool volume. The device was not ejected.");
+        PostMessageW(g_Ui.Window, DPUSB_WM_SAFE_EJECT_DONE, 0, (LPARAM)result);
+        return 0;
+    }
+
+    wcsncpy_s(result->UsbRoot, sizeof(result->UsbRoot) / sizeof(result->UsbRoot[0]), root, _TRUNCATE);
+    AppendLog(L"Safe eject started for %s", root);
+    AppendLog(L"Flushing and unmounting the encrypted private workspace...");
+    if (!FlushDismountPrivateWorkspace(&error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace flush/unmount reported: %s", message);
+        result->Success = FALSE;
+        result->Error = error;
+        swprintf_s(result->Message,
+                   sizeof(result->Message) / sizeof(result->Message[0]),
+                   L"Safe eject stopped because the encrypted private workspace is still in use. Close all files and Explorer windows under the private drive, then try again.");
+        PostMessageW(g_Ui.Window, DPUSB_WM_SAFE_EJECT_DONE, 0, (LPARAM)result);
+        return 0;
+    }
+
+    AppendLog(L"Closing DataProtector USB crypt session...");
+    if (!CloseSessionData(&error) && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Session close reported: %s", message);
+        ok = FALSE;
+    }
+
+    AppendLog(L"Stopping and unregistering USB crypt runtime driver...");
+    if (!StopAndDeleteDriverService(&error) && error != ERROR_SERVICE_DOES_NOT_EXIST) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Driver stop reported: %s", message);
+        ok = FALSE;
+    }
+
+    AppendLog(L"Flushing and dismounting the public USB tool partition...");
+    if (!FlushDismountVolumeByRoot(root, TRUE, &error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Public volume flush/eject reported: %s", message);
+        ok = FALSE;
+    }
+
+    result->Success = ok;
+    result->Error = ok ? ERROR_SUCCESS : error;
+    if (ok) {
+        swprintf_s(result->Message,
+                   sizeof(result->Message) / sizeof(result->Message[0]),
+                   L"All DataProtector USB caches were flushed and %s was dismounted. You can safely remove the USB device now.",
+                   root);
+    } else {
+        swprintf_s(result->Message,
+                   sizeof(result->Message) / sizeof(result->Message[0]),
+                   L"Safe eject could not fully complete for %s. Close any open files or Explorer windows on the USB device, then try again.",
+                   root);
+    }
+
+    PostMessageW(g_Ui.Window, DPUSB_WM_SAFE_EJECT_DONE, 0, (LPARAM)result);
+    return 0;
+}
+
 static void CompleteUnlockFromWorker(DPUSB_UNLOCK_WORK_RESULT *result)
 {
     g_Ui.OperationInProgress = FALSE;
     EnableWindow(g_Ui.UnlockButton, TRUE);
     EnableWindow(g_Ui.RefreshButton, TRUE);
     EnableWindow(g_Ui.LockButton, TRUE);
+    EnableWindow(g_Ui.SafeEjectButton, TRUE);
     SetWindowTextSafe(g_Ui.UnlockButton, L"Unlock Workspace");
 
     if (result != NULL) {
@@ -2605,6 +3022,9 @@ static void CompleteUnlockFromWorker(DPUSB_UNLOCK_WORK_RESULT *result)
 
         if (!result->Success) {
             AppendLog(L"Unlock task finished without opening the private workspace.");
+            g_Ui.MountPath[0] = L'\0';
+        } else {
+            SetTextBuffer(g_Ui.MountPath, sizeof(g_Ui.MountPath) / sizeof(g_Ui.MountPath[0]), result->MountPath);
         }
 
         LocalFree(result);
@@ -2623,6 +3043,7 @@ static void RunLockFromUi(void)
 
     AppendLog(L"Closing secure USB session...");
     ZeroMemory(&mount, sizeof(mount));
+    (VOID)FlushDismountPrivateWorkspace(NULL);
     UnmountAllPrivateWorkspaces();
     if (!CloseSessionData(&error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
@@ -2633,7 +3054,41 @@ static void RunLockFromUi(void)
     }
 
     AppendLog(L"Secure USB session closed.");
+    g_Ui.MountPath[0] = L'\0';
     UpdateStatusUi();
+}
+
+static void RunSafeEjectFromUi(void)
+{
+    HANDLE thread;
+    DWORD threadId;
+
+    if (g_Ui.OperationInProgress) {
+        AppendLog(L"Another USB operation is already running.");
+        return;
+    }
+
+    g_Ui.OperationInProgress = TRUE;
+    EnableWindow(g_Ui.UnlockButton, FALSE);
+    EnableWindow(g_Ui.RefreshButton, FALSE);
+    EnableWindow(g_Ui.LockButton, FALSE);
+    EnableWindow(g_Ui.SafeEjectButton, FALSE);
+    SetWindowTextSafe(g_Ui.SafeEjectButton, L"Ejecting...");
+    AppendLog(L"Safe eject task started in background.");
+
+    thread = CreateThread(NULL, 0, SafeEjectWorkerThread, NULL, 0, &threadId);
+    if (thread == NULL) {
+        g_Ui.OperationInProgress = FALSE;
+        EnableWindow(g_Ui.UnlockButton, TRUE);
+        EnableWindow(g_Ui.RefreshButton, TRUE);
+        EnableWindow(g_Ui.LockButton, TRUE);
+        EnableWindow(g_Ui.SafeEjectButton, TRUE);
+        SetWindowTextSafe(g_Ui.SafeEjectButton, L"Safe Eject");
+        AppendLog(L"Safe eject failed: unable to start worker thread.");
+        return;
+    }
+
+    CloseHandle(thread);
 }
 
 static void ShowProvisioningPlan(void)
@@ -2743,7 +3198,8 @@ static void ComputeLayout(HWND hwnd, DPUSB_UI_LAYOUT *layout)
     SetRectSize(&layout->PasswordEdit, layout->ControlCard.left + 28, layout->ControlCard.top + 116, rightWidth - 56, 34);
     SetRectSize(&layout->UnlockButton, layout->ControlCard.left + 28, layout->ControlCard.bottom - 58, 168, 38);
     SetRectSize(&layout->LockButton, layout->UnlockButton.right + 12, layout->ControlCard.bottom - 58, 82, 38);
-    SetRectSize(&layout->PlanButton, layout->LockButton.right + 12, layout->ControlCard.bottom - 58, 136, 38);
+    SetRectSize(&layout->SafeEjectButton, layout->LockButton.right + 12, layout->ControlCard.bottom - 58, 118, 38);
+    SetRectSize(&layout->PlanButton, layout->SafeEjectButton.right + 12, layout->ControlCard.bottom - 58, 122, 38);
 }
 
 static void MoveControlToRect(HWND hwnd, const RECT *rect)
@@ -2763,6 +3219,7 @@ static void LayoutControls(HWND hwnd)
     MoveControlToRect(g_Ui.RefreshButton, &layout.RefreshButton);
     MoveControlToRect(g_Ui.UnlockButton, &layout.UnlockButton);
     MoveControlToRect(g_Ui.LockButton, &layout.LockButton);
+    MoveControlToRect(g_Ui.SafeEjectButton, &layout.SafeEjectButton);
     MoveControlToRect(g_Ui.PlanButton, &layout.PlanButton);
 
     logEdit = layout.LogCard;
@@ -3035,6 +3492,86 @@ static LRESULT HandleCtlColor(HDC dc, HWND control)
     return (LRESULT)g_Ui.WindowBrush;
 }
 
+static BOOL UpdateTrayIcon(BOOL addIcon)
+{
+    NOTIFYICONDATAW nid;
+
+    if (g_Ui.Window == NULL) {
+        return FALSE;
+    }
+
+    ZeroMemory(&nid, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_Ui.Window;
+    nid.uID = DPUSB_TRAY_ICON_ID;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = DPUSB_WM_TRAY;
+    nid.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(DPUSB_ICON_ID));
+    wcscpy_s(nid.szTip, sizeof(nid.szTip) / sizeof(nid.szTip[0]), L"DataProtector Secure USB");
+
+    if (addIcon) {
+        if (!Shell_NotifyIconW(g_Ui.TrayAdded ? NIM_MODIFY : NIM_ADD, &nid)) {
+            if (nid.hIcon != NULL) {
+                DestroyIcon(nid.hIcon);
+            }
+            return FALSE;
+        }
+        g_Ui.TrayAdded = TRUE;
+    } else if (g_Ui.TrayAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        g_Ui.TrayAdded = FALSE;
+    }
+
+    if (nid.hIcon != NULL) {
+        DestroyIcon(nid.hIcon);
+    }
+    return TRUE;
+}
+
+static void ShowMainWindowFromTray(void)
+{
+    if (g_Ui.Window == NULL) {
+        return;
+    }
+
+    ShowWindow(g_Ui.Window, SW_SHOW);
+    ShowWindow(g_Ui.Window, SW_RESTORE);
+    SetForegroundWindow(g_Ui.Window);
+}
+
+static void ShowTrayMenu(void)
+{
+    HMENU menu;
+    POINT point;
+    UINT command;
+
+    menu = CreatePopupMenu();
+    if (menu == NULL) {
+        return;
+    }
+
+    AppendMenuW(menu, MF_STRING, DPUSB_ID_TRAY_SHOW, L"Open");
+    AppendMenuW(menu, MF_STRING, DPUSB_ID_SAFE_EJECT, L"Safe Eject");
+    AppendMenuW(menu, MF_STRING, DPUSB_ID_LOCK, L"Lock");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, DPUSB_ID_TRAY_EXIT, L"Exit");
+
+    GetCursorPos(&point);
+    SetForegroundWindow(g_Ui.Window);
+    command = TrackPopupMenu(menu,
+                             TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                             point.x,
+                             point.y,
+                             0,
+                             g_Ui.Window,
+                             NULL);
+    DestroyMenu(menu);
+
+    if (command != 0) {
+        PostMessageW(g_Ui.Window, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+    }
+}
+
 static void CreateUi(HWND hwnd)
 {
     g_Ui.Window = hwnd;
@@ -3070,6 +3607,7 @@ static void CreateUi(HWND hwnd)
     g_Ui.RefreshButton = CreateButton(hwnd, DPUSB_ID_REFRESH, L"Refresh", 0, 0, 10, 10);
     g_Ui.UnlockButton = CreateButton(hwnd, DPUSB_ID_UNLOCK, L"Unlock Workspace", 0, 0, 10, 10);
     g_Ui.LockButton = CreateButton(hwnd, DPUSB_ID_LOCK, L"Lock", 0, 0, 10, 10);
+    g_Ui.SafeEjectButton = CreateButton(hwnd, DPUSB_ID_SAFE_EJECT, L"Safe Eject", 0, 0, 10, 10);
     g_Ui.PlanButton = CreateButton(hwnd, DPUSB_ID_PLAN, L"Metadata Info", 0, 0, 10, 10);
     g_Ui.LogEdit = CreateWindowExW(WS_EX_CLIENTEDGE,
                                    L"EDIT",
@@ -3087,11 +3625,17 @@ static void CreateUi(HWND hwnd)
     SendMessageW(g_Ui.PasswordEdit, EM_SETPASSWORDCHAR, (WPARAM)L'*', 0);
     LayoutControls(hwnd);
 
-    AppendLog(L"UI started. Enter the initialization password to unlock this USB workspace.");
+    if (g_UsbSourceRootSet) {
+        AppendLog(L"UI started from local cache for USB source %s", g_UsbSourceRoot);
+    } else {
+        AppendLog(L"UI started. Enter the initialization password to unlock this USB workspace.");
+    }
+    (VOID)UpdateTrayIcon(TRUE);
 }
 
 static void DestroyUiResources(void)
 {
+    (VOID)UpdateTrayIcon(FALSE);
     if (g_Ui.TitleFont != NULL) DeleteObject(g_Ui.TitleFont);
     if (g_Ui.HeaderFont != NULL) DeleteObject(g_Ui.HeaderFont);
     if (g_Ui.BodyFont != NULL) DeleteObject(g_Ui.BodyFont);
@@ -3118,6 +3662,21 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         CompleteUnlockFromWorker((DPUSB_UNLOCK_WORK_RESULT *)lParam);
         return 0;
 
+    case DPUSB_WM_SAFE_EJECT_DONE:
+        CompleteSafeEjectFromWorker((DPUSB_SAFE_EJECT_WORK_RESULT *)lParam);
+        return 0;
+
+    case DPUSB_WM_TRAY:
+        if (lParam == WM_LBUTTONDBLCLK) {
+            ShowMainWindowFromTray();
+            return 0;
+        }
+        if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+            ShowTrayMenu();
+            return 0;
+        }
+        break;
+
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case DPUSB_ID_REFRESH:
@@ -3130,8 +3689,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         case DPUSB_ID_LOCK:
             RunLockFromUi();
             return 0;
+        case DPUSB_ID_SAFE_EJECT:
+            RunSafeEjectFromUi();
+            return 0;
         case DPUSB_ID_PLAN:
             ShowProvisioningPlan();
+            return 0;
+        case DPUSB_ID_TRAY_SHOW:
+            ShowMainWindowFromTray();
+            return 0;
+        case DPUSB_ID_TRAY_EXIT:
+            DestroyWindow(hwnd);
             return 0;
         default:
             break;
@@ -3149,6 +3717,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         break;
 
     case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED) {
+            ShowWindow(hwnd, SW_HIDE);
+            AppendLog(L"Window minimized to tray.");
+            return 0;
+        }
         LayoutControls(hwnd);
         InvalidateRect(hwnd, NULL, TRUE);
         return 0;
@@ -3161,7 +3734,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
                         MB_ICONINFORMATION | MB_OK);
             return 0;
         }
-        DestroyWindow(hwnd);
+        ShowWindow(hwnd, SW_HIDE);
+        AppendLog(L"Window hidden. DataProtector Secure USB is still running in the tray.");
         return 0;
 
     case WM_ERASEBKGND:
@@ -3276,11 +3850,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previousInstance, PWSTR comman
         return 1;
     }
 
-    if (argc > 1) {
+    if (argc == 3 && _wcsicmp(argv[1], L"--usb-root") == 0) {
+        (VOID)SetUsbSourceRoot(argv[2]);
+        result = RunGui(instance, showCommand);
+    } else if (argc > 1) {
         AttachConsole(ATTACH_PARENT_PROCESS);
         result = DispatchCli(argc, argv);
         FreeConsole();
     } else {
+        if (RelaunchGuiFromLocalCacheIfNeeded(showCommand)) {
+            LocalFree(argv);
+            return 0;
+        }
         result = RunGui(instance, showCommand);
     }
 
