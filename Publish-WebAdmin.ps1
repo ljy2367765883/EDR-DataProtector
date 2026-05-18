@@ -17,6 +17,7 @@ $cSignTool = Join-Path $dSignToolRoot "CSignTool.exe"
 $dSignRule = "gz"
 $usbRuntimeSignerThumbprint = "FF6E2D78C38944B9F3454AA33648BB15186FFC1C"
 $usbRuntimeSignerSubject = "Guangzhou Tianmu Yidong Communication Development Co., Ltd"
+$signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x64\signtool.exe"
 
 function Invoke-Checked {
     param(
@@ -52,7 +53,7 @@ function Invoke-UsbRuntimeSigning {
 
     Push-Location $dSignToolRoot
     try {
-        & $cSignTool sign /r $dSignRule /f $FilePath
+        & $cSignTool sign /r $dSignRule /f $FilePath /ac
         if ($LASTEXITCODE -ne 0) {
             throw "USB runtime signing failed with exit code $LASTEXITCODE for: $FilePath"
         }
@@ -72,6 +73,22 @@ function Invoke-UsbRuntimeSigning {
 
     if ($signature.SignerCertificate.Subject -notlike "*$usbRuntimeSignerSubject*") {
         throw "USB runtime signing verification failed; unexpected signer subject '$($signature.SignerCertificate.Subject)' for: $FilePath"
+    }
+}
+
+function Invoke-UsbRuntimeKernelSigningVerification {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+
+    if (-not (Test-Path -LiteralPath $signtool)) {
+        throw "signtool was not found at: $signtool"
+    }
+
+    & $signtool verify /v /kp $FilePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "USB runtime kernel-mode signature verification failed for: $FilePath. Windows will reject this driver at load time, usually as Win32=577. Use a currently valid kernel-mode signing certificate or Microsoft attestation/WHQL signing for release builds."
     }
 }
 
@@ -168,17 +185,25 @@ try {
     }
 
     $runtimeStaging = Join-Path $env:TEMP ("DataProtectorUsbRuntime-" + [guid]::NewGuid().ToString("N"))
-    $runtimeDriverStaging = Join-Path $runtimeStaging "driver"
-    New-Item -ItemType Directory -Force -Path $runtimeDriverStaging | Out-Null
-    Copy-Item -LiteralPath $usbToolOutput -Destination $runtimeStaging -Force
-    Copy-Item -Path (Join-Path $usbCryptDriverPackage "*") -Destination $runtimeDriverStaging -Recurse -Force
-    if (Test-Path -LiteralPath $usbCryptDriverCertificate) {
-        Copy-Item -LiteralPath $usbCryptDriverCertificate -Destination $runtimeDriverStaging -Force
+    try {
+        $runtimeDriverStaging = Join-Path $runtimeStaging "driver"
+        New-Item -ItemType Directory -Force -Path $runtimeDriverStaging | Out-Null
+        Copy-Item -LiteralPath $usbToolOutput -Destination $runtimeStaging -Force
+        Copy-Item -Path (Join-Path $usbCryptDriverPackage "*") -Destination $runtimeDriverStaging -Recurse -Force
+        if (Test-Path -LiteralPath $usbCryptDriverCertificate) {
+            Copy-Item -LiteralPath $usbCryptDriverCertificate -Destination $runtimeDriverStaging -Force
+        }
+        Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
+        Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
+        Invoke-UsbRuntimeKernelSigningVerification (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
+        Invoke-UsbRuntimeKernelSigningVerification (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
+        Compress-Archive -Path (Join-Path $runtimeStaging "*") -DestinationPath (Join-Path $serverUsbRuntimePublish "DataProtectorUsbRuntime.zip") -Force
     }
-    Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
-    Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
-    Compress-Archive -Path (Join-Path $runtimeStaging "*") -DestinationPath (Join-Path $serverUsbRuntimePublish "DataProtectorUsbRuntime.zip") -Force
-    Remove-Item -LiteralPath $runtimeStaging -Recurse -Force
+    finally {
+        if (Test-Path -LiteralPath $runtimeStaging) {
+            Remove-Item -LiteralPath $runtimeStaging -Recurse -Force
+        }
+    }
 
     $notes = @"
 DataProtector Central Web Admin
