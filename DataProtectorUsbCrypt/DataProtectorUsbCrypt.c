@@ -575,6 +575,8 @@ DpUsbQueryStatus(
 
     RtlZeroMemory(Status, sizeof(*Status));
     Status->Version = 1;
+    Status->RuntimeVersion = DPUSB_RUNTIME_VERSION;
+    Status->Capabilities = DPUSB_CAP_SPLIT_VOLUME_DEVICE | DPUSB_CAP_ALIGNED_KERNEL_BACKING_IO;
 
     ExAcquirePushLockShared(&gDpUsbSession.Lock);
     Status->SessionOpen = gDpUsbSession.SessionOpen;

@@ -36,6 +36,9 @@
 #define DPUSB_UNLOCK_METADATA_OFFSET_BYTES (1024ull * 1024ull)
 #define DPUSB_PUBLIC_TOOL_BYTES (5ull * 1024ull * 1024ull)
 #define DPUSB_DATA_OFFSET_BYTES (DPUSB_RAW_METADATA_RESERVED_BYTES + DPUSB_PUBLIC_TOOL_BYTES)
+#define DPUSB_RUNTIME_VERSION 0x20260518UL
+#define DPUSB_CAP_SPLIT_VOLUME_DEVICE 0x00000001UL
+#define DPUSB_CAP_ALIGNED_KERNEL_BACKING_IO 0x00000002UL
 #define DPUSB_UNLOCK_METADATA_DEVICE_ID_BYTES 128
 #define DPUSB_UNLOCK_METADATA_PACKAGE_VERSION_BYTES 64
 #define DPUSB_UNLOCK_METADATA_PACKAGE_SHA256_BYTES 64
@@ -89,6 +92,9 @@ typedef struct _DPUSB_OPEN_SESSION {
 typedef struct _DPUSB_STATUS {
     ULONG Version;
     BOOLEAN SessionOpen;
+    BYTE Reserved0[3];
+    ULONG RuntimeVersion;
+    ULONG Capabilities;
     ULONG Algorithm;
     ULONGLONG ToolAreaBytes;
     ULONGLONG DataOffsetBytes;
@@ -229,6 +235,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, wc
 static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
 static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
 static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Error);
+static void AppendLog(const wchar_t *format, ...);
 static BOOL IsProcessElevated(void);
 static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error);
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
@@ -352,6 +359,46 @@ static BOOL QueryStatusData(DPUSB_STATUS *status, DWORD *win32Error)
     return TRUE;
 }
 
+static BOOL IsExpectedRuntimeStatus(const DPUSB_STATUS *status)
+{
+    if (status == NULL) {
+        return FALSE;
+    }
+
+    return status->Version == 1 &&
+           status->RuntimeVersion == DPUSB_RUNTIME_VERSION &&
+           (status->Capabilities & DPUSB_CAP_SPLIT_VOLUME_DEVICE) != 0 &&
+           (status->Capabilities & DPUSB_CAP_ALIGNED_KERNEL_BACKING_IO) != 0;
+}
+
+static BOOL QueryExpectedRuntimeStatus(DPUSB_STATUS *status, DWORD *win32Error)
+{
+    DWORD error = ERROR_SUCCESS;
+
+    if (!QueryStatusData(status, &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    if (!IsExpectedRuntimeStatus(status)) {
+        AppendLog(L"Loaded USB crypt driver is stale or incompatible. version=0x%08lX capabilities=0x%08lX expected=0x%08lX.",
+                  status->RuntimeVersion,
+                  status->Capabilities,
+                  DPUSB_RUNTIME_VERSION);
+        if (win32Error != NULL) {
+            *win32Error = ERROR_REVISION_MISMATCH;
+        }
+        return FALSE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
 static BOOL CloseSessionData(DWORD *win32Error)
 {
     HANDLE device;
@@ -395,7 +442,9 @@ static int QueryStatus(void)
         return PrintLastError(L"Query status");
     }
 
-    wprintf(L"session=%s algorithm=%lu toolArea=%I64u dataOffset=%I64u dataLength=%I64u device=%s\n",
+    wprintf(L"version=0x%08lX capabilities=0x%08lX session=%s algorithm=%lu toolArea=%I64u dataOffset=%I64u dataLength=%I64u device=%s\n",
+            status.RuntimeVersion,
+            status.Capabilities,
             status.SessionOpen ? L"open" : L"closed",
             status.Algorithm,
             status.ToolAreaBytes,
@@ -1521,6 +1570,45 @@ static BOOL GetSystemDriverPath(wchar_t *path, DWORD pathChars)
     return TRUE;
 }
 
+static BOOL ForceCopyPackagedDriverToSystem(const wchar_t *packageDriverPath,
+                                            const wchar_t *systemDriverPath,
+                                            DWORD *win32Error)
+{
+    DWORD attributes;
+
+    if (packageDriverPath == NULL || packageDriverPath[0] == L'\0' ||
+        systemDriverPath == NULL || systemDriverPath[0] == L'\0') {
+
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    attributes = GetFileAttributesW(systemDriverPath);
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        (VOID)SetFileAttributesW(systemDriverPath, FILE_ATTRIBUTE_NORMAL);
+    }
+
+    if (!CopyFileW(packageDriverPath, systemDriverPath, FALSE)) {
+        DWORD error = GetLastError();
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    (VOID)SetFileAttributesW(systemDriverPath, FILE_ATTRIBUTE_ARCHIVE);
+    AppendLog(L"Runtime driver copied into System32 drivers: %s -> %s",
+              packageDriverPath,
+              systemDriverPath);
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
 static BOOL InstallDriverServicePath(const wchar_t *path,
                                      DPUSB_SERVICE_PATH_MODE mode,
                                      wchar_t *installedServicePath,
@@ -1813,6 +1901,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
     wchar_t packageInfPath[MAX_PATH];
     wchar_t systemDriverPath[MAX_PATH];
     wchar_t systemServicePath[MAX_PATH + 8];
+    BOOL serviceStarted = FALSE;
 
     if (deployedPath == NULL || deployedPathChars == 0) {
         if (win32Error != NULL) {
@@ -1844,11 +1933,23 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
 
     UnmountAllPrivateWorkspaces();
     (VOID)CloseSessionData(NULL);
-    (VOID)StopDriverService(NULL);
+    if (!StopAndDeleteDriverService(&error) && error != ERROR_SERVICE_DOES_NOT_EXIST) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
     (VOID)StopAndDeleteNamedDriverService(DPUSB_LEGACY_SERVICE_NAME, NULL);
 
     AppendLog(L"Installing USB crypt driver package from INF: %s", packageInfPath);
     if (!InstallDriverPackageFromInf(packageInfPath, &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    if (!ForceCopyPackagedDriverToSystem(deployedPath, systemDriverPath, &error)) {
         if (win32Error != NULL) {
             *win32Error = error;
         }
@@ -1878,42 +1979,27 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
         wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
     }
 
-    if (!StartDriverService(&error)) {
-        DPUSB_STATUS existingStatus;
-
-        ZeroMemory(&existingStatus, sizeof(existingStatus));
-        if (QueryStatusData(&existingStatus, NULL)) {
-            if (servicePath != NULL && servicePathChars > 0) {
-                wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
-            }
-            if (win32Error != NULL) {
-                *win32Error = ERROR_SUCCESS;
-            }
-            AppendLog(L"USB crypt driver device is already responding; reusing the loaded runtime.");
-            return TRUE;
-        }
-
+    serviceStarted = StartDriverService(&error);
+    if (!serviceStarted) {
         if (IsExpectedDriverNotLoadedError(error)) {
             (VOID)StopDriverService(NULL);
             if (!InstallDriverServicePath(systemDriverPath,
                                           DpUsbServicePathWin32,
                                           systemServicePath,
                                           sizeof(systemServicePath) / sizeof(systemServicePath[0]),
-                                          &error) ||
-                !StartDriverService(&error)) {
+                                          &error)) {
 
-                ZeroMemory(&existingStatus, sizeof(existingStatus));
-                if (QueryStatusData(&existingStatus, NULL)) {
-                    if (servicePath != NULL && servicePathChars > 0 && systemServicePath[0] != L'\0') {
-                        wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
-                    }
-                    if (win32Error != NULL) {
-                        *win32Error = ERROR_SUCCESS;
-                    }
-                    AppendLog(L"USB crypt driver device is already responding; reusing the loaded runtime.");
-                    return TRUE;
+                if (servicePath != NULL && servicePathChars > 0 && systemServicePath[0] != L'\0') {
+                    wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
                 }
+                if (win32Error != NULL) {
+                    *win32Error = error;
+                }
+                return FALSE;
+            }
 
+            serviceStarted = StartDriverService(&error);
+            if (!serviceStarted) {
                 if (servicePath != NULL && servicePathChars > 0 && systemServicePath[0] != L'\0') {
                     wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
                 }
@@ -1926,16 +2012,32 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
             if (servicePath != NULL && servicePathChars > 0) {
                 wcsncpy_s(servicePath, servicePathChars, systemServicePath, _TRUNCATE);
             }
-            if (win32Error != NULL) {
-                *win32Error = ERROR_SUCCESS;
-            }
-            return TRUE;
         }
 
-        if (win32Error != NULL) {
+        if (!serviceStarted && win32Error != NULL) {
             *win32Error = error;
         }
-        return FALSE;
+        if (!serviceStarted) {
+            return FALSE;
+        }
+    }
+
+    {
+        DPUSB_STATUS loadedStatus;
+
+        ZeroMemory(&loadedStatus, sizeof(loadedStatus));
+        if (!QueryExpectedRuntimeStatus(&loadedStatus, &error)) {
+            AppendLog(L"USB crypt driver started but runtime capability check failed.");
+            (VOID)StopAndDeleteDriverService(NULL);
+            if (win32Error != NULL) {
+                *win32Error = error != ERROR_SUCCESS ? error : ERROR_REVISION_MISMATCH;
+            }
+            return FALSE;
+        }
+
+        AppendLog(L"USB crypt runtime verified. version=0x%08lX capabilities=0x%08lX",
+                  loadedStatus.RuntimeVersion,
+                  loadedStatus.Capabilities);
     }
 
     if (win32Error != NULL) {
@@ -3368,11 +3470,16 @@ static void UpdateStatusUi(void)
     wchar_t message[256];
     wchar_t detail[512];
 
-    if (QueryStatusData(&status, &error)) {
+    if (QueryExpectedRuntimeStatus(&status, &error)) {
         g_Ui.DriverReady = TRUE;
         g_Ui.SessionOpen = status.SessionOpen != FALSE;
         SetTextBuffer(g_Ui.DriverBadgeText, sizeof(g_Ui.DriverBadgeText) / sizeof(g_Ui.DriverBadgeText[0]), L"Driver Ready");
-        SetTextBuffer(g_Ui.ServiceStateText, sizeof(g_Ui.ServiceStateText) / sizeof(g_Ui.ServiceStateText[0]), L"Loaded and responding");
+        swprintf_s(detail,
+                   sizeof(detail) / sizeof(detail[0]),
+                   L"Loaded and verified\r\nRuntime: 0x%08lX\r\nCapabilities: 0x%08lX",
+                   status.RuntimeVersion,
+                   status.Capabilities);
+        SetTextBuffer(g_Ui.ServiceStateText, sizeof(g_Ui.ServiceStateText) / sizeof(g_Ui.ServiceStateText[0]), detail);
         if (g_Ui.SessionOpen) {
             SetTextBuffer(g_Ui.SessionBadgeText, sizeof(g_Ui.SessionBadgeText) / sizeof(g_Ui.SessionBadgeText[0]), L"Session Unlocked");
             swprintf_s(detail,
@@ -3419,7 +3526,7 @@ static void RunAutoDriverInitialization(void)
 
     ZeroMemory(servicePath, sizeof(servicePath));
 
-    if (QueryStatusData(&status, &error)) {
+    if (QueryExpectedRuntimeStatus(&status, &error)) {
         AppendLog(L"Driver is already loaded and responding.");
         UpdateStatusUi();
         return;
