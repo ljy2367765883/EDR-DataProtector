@@ -129,6 +129,18 @@ DpUsbIsControlDevice(
 }
 
 static
+NTSTATUS
+DpUsbCreateVolumeDevice(
+    _In_ PDRIVER_OBJECT DriverObject
+    );
+
+static
+VOID
+DpUsbDestroyVolumeDevice(
+    VOID
+    );
+
+static
 VOID
 DpUsbReadWriteWorker(
     _In_ PVOID Context
@@ -259,8 +271,16 @@ DpUsbIoctlName(
         return "IOCTL_DISK_GET_PARTITION_INFO";
     case IOCTL_DISK_GET_PARTITION_INFO_EX:
         return "IOCTL_DISK_GET_PARTITION_INFO_EX";
+#ifdef IOCTL_DISK_GET_DRIVE_LAYOUT
+    case IOCTL_DISK_GET_DRIVE_LAYOUT:
+        return "IOCTL_DISK_GET_DRIVE_LAYOUT";
+#endif
     case IOCTL_DISK_GET_MEDIA_TYPES:
         return "IOCTL_DISK_GET_MEDIA_TYPES";
+#ifdef IOCTL_STORAGE_GET_MEDIA_TYPES
+    case IOCTL_STORAGE_GET_MEDIA_TYPES:
+        return "IOCTL_STORAGE_GET_MEDIA_TYPES";
+#endif
     case IOCTL_DISK_CHECK_VERIFY:
         return "IOCTL_DISK_CHECK_VERIFY";
     case IOCTL_STORAGE_CHECK_VERIFY:
@@ -287,6 +307,10 @@ DpUsbIoctlName(
         return "IOCTL_STORAGE_GET_MEDIA_TYPES_EX";
     case IOCTL_STORAGE_QUERY_PROPERTY:
         return "IOCTL_STORAGE_QUERY_PROPERTY";
+#ifdef IOCTL_STORAGE_READ_CAPACITY
+    case IOCTL_STORAGE_READ_CAPACITY:
+        return "IOCTL_STORAGE_READ_CAPACITY";
+#endif
     case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
         return "IOCTL_MOUNTDEV_QUERY_UNIQUE_ID";
     case IOCTL_MOUNTDEV_QUERY_DEVICE_NAME:
@@ -315,6 +339,14 @@ DpUsbIoctlName(
         return "IOCTL_VOLUME_IS_DYNAMIC";
     case IOCTL_VOLUME_UPDATE_PROPERTIES:
         return "IOCTL_VOLUME_UPDATE_PROPERTIES";
+#ifdef IOCTL_VOLUME_ONLINE
+    case IOCTL_VOLUME_ONLINE:
+        return "IOCTL_VOLUME_ONLINE";
+#endif
+#ifdef IOCTL_VOLUME_POST_ONLINE
+    case IOCTL_VOLUME_POST_ONLINE:
+        return "IOCTL_VOLUME_POST_ONLINE";
+#endif
     case IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER:
         return "IOCTL_STORAGE_GET_MEDIA_SERIAL_NUMBER";
     default:
@@ -739,6 +771,15 @@ DpUsbBuildGeometry(
 }
 
 static
+ULONGLONG
+DpUsbReportedDiskLength(
+    _In_ ULONGLONG LengthBytes
+    )
+{
+    return LengthBytes + DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES;
+}
+
+static
 NTSTATUS
 DpUsbQueryDriveGeometry(
     _Out_ PDISK_GEOMETRY Geometry,
@@ -753,7 +794,7 @@ DpUsbQueryDriveGeometry(
     }
 
     DpUsbQueryLengthValue(&lengthBytes);
-    DpUsbBuildGeometry(lengthBytes, Geometry);
+    DpUsbBuildGeometry(DpUsbReportedDiskLength(lengthBytes), Geometry);
 
     DPUSB_TRACE("Query",
                 "geometry length=%I64u cylinders=%I64d tracks=%lu sectors=%lu bytesPerSector=%lu\n",
@@ -776,6 +817,7 @@ DpUsbQueryDriveGeometryEx(
 {
     ULONGLONG lengthBytes;
     ULONG requiredBytes;
+    ULONG fullBytes;
 
     if (Geometry == NULL || BytesReturned == NULL || OutputLength < sizeof(DISK_GEOMETRY_EX)) {
         if (BytesReturned != NULL) {
@@ -787,9 +829,21 @@ DpUsbQueryDriveGeometryEx(
     requiredBytes = sizeof(DISK_GEOMETRY_EX);
     DpUsbQueryLengthValue(&lengthBytes);
     RtlZeroMemory(Geometry, OutputLength);
-    DpUsbBuildGeometry(lengthBytes, &Geometry->Geometry);
-    Geometry->DiskSize.QuadPart = (LONGLONG)lengthBytes;
+    DpUsbBuildGeometry(DpUsbReportedDiskLength(lengthBytes), &Geometry->Geometry);
+    Geometry->DiskSize.QuadPart = (LONGLONG)DpUsbReportedDiskLength(lengthBytes);
     Geometry->Data[0] = 0;
+    fullBytes = sizeof(DISK_GEOMETRY) + sizeof(LARGE_INTEGER) + sizeof(DISK_PARTITION_INFO) + sizeof(DISK_DETECTION_INFO);
+    if (OutputLength >= fullBytes) {
+        PDISK_PARTITION_INFO partitionInfo = DiskGeometryGetPartition(Geometry);
+        PDISK_DETECTION_INFO detectionInfo = DiskGeometryGetDetect(Geometry);
+
+        partitionInfo->SizeOfPartitionInfo = sizeof(DISK_PARTITION_INFO);
+        partitionInfo->PartitionStyle = PARTITION_STYLE_MBR;
+        partitionInfo->Mbr.Signature = 0x44505543;
+        detectionInfo->SizeOfDetectInfo = sizeof(DISK_DETECTION_INFO);
+        detectionInfo->DetectionType = DetectNone;
+        requiredBytes = fullBytes;
+    }
     DPUSB_TRACE("Query",
                 "geometry ex length=%I64u cylinders=%I64d bytesReturned=%lu\n",
                 lengthBytes,
@@ -812,13 +866,14 @@ DpUsbBuildPartitionInfo(
 
     RtlZeroMemory(Partition, sizeof(*Partition));
     Partition->PartitionStyle = PARTITION_STYLE_MBR;
-    Partition->StartingOffset.QuadPart = 0;
+    Partition->StartingOffset.QuadPart = DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES;
     Partition->PartitionLength.QuadPart = (LONGLONG)LengthBytes;
     Partition->PartitionNumber = 1;
     Partition->RewritePartition = FALSE;
     Partition->Mbr.PartitionType = PARTITION_FAT32;
     Partition->Mbr.BootIndicator = FALSE;
     Partition->Mbr.RecognizedPartition = TRUE;
+    Partition->Mbr.HiddenSectors = (ULONG)(DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES / DPUSB_SECTOR_BYTES);
 
     return STATUS_SUCCESS;
 }
@@ -842,9 +897,9 @@ DpUsbQueryPartitionInfoLegacy(
 
     DpUsbQueryLengthValue(&lengthBytes);
     RtlZeroMemory(Partition, sizeof(*Partition));
-    Partition->StartingOffset.QuadPart = 0;
+    Partition->StartingOffset.QuadPart = DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES;
     Partition->PartitionLength.QuadPart = (LONGLONG)lengthBytes;
-    Partition->HiddenSectors = 0;
+    Partition->HiddenSectors = (ULONG)(DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES / DPUSB_SECTOR_BYTES);
     Partition->PartitionNumber = 1;
     Partition->PartitionType = PARTITION_FAT32;
     Partition->BootIndicator = FALSE;
@@ -878,6 +933,52 @@ DpUsbQueryPartitionInfo(
 
     DPUSB_TRACE("Query", "partition length=%I64u number=%lu\n", lengthBytes, Partition->PartitionNumber);
     *BytesReturned = sizeof(*Partition);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbQueryDriveLayoutLegacy(
+    _Out_writes_bytes_(OutputLength) PDRIVE_LAYOUT_INFORMATION Layout,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    ULONGLONG lengthBytes;
+    ULONG requiredBytes;
+    BOOLEAN fullLayout;
+
+    if (Layout == NULL || BytesReturned == NULL || OutputLength < sizeof(DRIVE_LAYOUT_INFORMATION)) {
+        if (BytesReturned != NULL) {
+            *BytesReturned = sizeof(DRIVE_LAYOUT_INFORMATION);
+        }
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    DpUsbQueryLengthValue(&lengthBytes);
+    fullLayout = OutputLength >= (sizeof(DRIVE_LAYOUT_INFORMATION) + (3 * sizeof(PARTITION_INFORMATION)));
+    requiredBytes = fullLayout ?
+        (sizeof(DRIVE_LAYOUT_INFORMATION) + (3 * sizeof(PARTITION_INFORMATION))) :
+        sizeof(DRIVE_LAYOUT_INFORMATION);
+
+    RtlZeroMemory(Layout, OutputLength);
+    Layout->PartitionCount = fullLayout ? 4 : 1;
+    Layout->Signature = 0x44505543;
+    Layout->PartitionEntry[0].StartingOffset.QuadPart = DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES;
+    Layout->PartitionEntry[0].PartitionLength.QuadPart = (LONGLONG)lengthBytes;
+    Layout->PartitionEntry[0].HiddenSectors = (ULONG)(DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES / DPUSB_SECTOR_BYTES);
+    Layout->PartitionEntry[0].PartitionNumber = 1;
+    Layout->PartitionEntry[0].PartitionType = PARTITION_FAT32;
+    Layout->PartitionEntry[0].BootIndicator = FALSE;
+    Layout->PartitionEntry[0].RecognizedPartition = TRUE;
+    Layout->PartitionEntry[0].RewritePartition = FALSE;
+
+    *BytesReturned = requiredBytes;
+    DPUSB_TRACE("Query",
+                "layout legacy partitions=%lu length=%I64u bytes=%lu\n",
+                Layout->PartitionCount,
+                lengthBytes,
+                requiredBytes);
     return STATUS_SUCCESS;
 }
 
@@ -1014,6 +1115,8 @@ DpUsbQueryDriveLayout(
     )
 {
     ULONGLONG lengthBytes;
+    ULONG requiredBytes;
+    BOOLEAN fullLayout;
 
     if (Layout == NULL ||
         BytesReturned == NULL ||
@@ -1023,13 +1126,22 @@ DpUsbQueryDriveLayout(
     }
 
     DpUsbQueryLengthValue(&lengthBytes);
+    fullLayout = OutputLength >= (ULONG)FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) +
+        (4 * sizeof(PARTITION_INFORMATION_EX));
+    requiredBytes = (ULONG)FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) +
+        ((fullLayout ? 4 : 1) * sizeof(PARTITION_INFORMATION_EX));
+
     RtlZeroMemory(Layout, OutputLength);
     Layout->PartitionStyle = PARTITION_STYLE_MBR;
-    Layout->PartitionCount = 1;
+    Layout->PartitionCount = fullLayout ? 4 : 1;
     Layout->Mbr.Signature = 0x44505543;
     DpUsbBuildPartitionInfo(lengthBytes, &Layout->PartitionEntry[0]);
-    DPUSB_TRACE("Query", "layout partitions=%lu length=%I64u\n", Layout->PartitionCount, lengthBytes);
-    *BytesReturned = (ULONG)FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) + sizeof(PARTITION_INFORMATION_EX);
+    DPUSB_TRACE("Query",
+                "layout partitions=%lu length=%I64u bytes=%lu\n",
+                Layout->PartitionCount,
+                lengthBytes,
+                requiredBytes);
+    *BytesReturned = requiredBytes;
     return STATUS_SUCCESS;
 }
 
@@ -1049,7 +1161,7 @@ DpUsbQueryStorageMediaTypes(
     }
 
     DpUsbQueryLengthValue(&lengthBytes);
-    DpUsbBuildGeometry(lengthBytes, &geometry);
+    DpUsbBuildGeometry(DpUsbReportedDiskLength(lengthBytes), &geometry);
     RtlZeroMemory(MediaTypes, OutputLength);
     MediaTypes->DeviceType = FILE_DEVICE_DISK;
     MediaTypes->MediaInfoCount = 1;
@@ -1061,6 +1173,34 @@ DpUsbQueryStorageMediaTypes(
     MediaTypes->MediaInfo[0].DeviceSpecific.DiskInfo.NumberMediaSides = 1;
     MediaTypes->MediaInfo[0].DeviceSpecific.DiskInfo.MediaCharacteristics = MEDIA_CURRENTLY_MOUNTED;
     *BytesReturned = sizeof(GET_MEDIA_TYPES);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbWriteDescriptorHeader(
+    _Out_writes_bytes_(OutputLength) VOID *OutputBuffer,
+    _In_ ULONG OutputLength,
+    _In_ ULONG DescriptorBytes,
+    _Out_ PULONG BytesReturned
+    )
+{
+    PSTORAGE_DESCRIPTOR_HEADER header;
+
+    if (OutputBuffer == NULL || BytesReturned == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *BytesReturned = DescriptorBytes;
+    if (OutputLength < sizeof(STORAGE_DESCRIPTOR_HEADER)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    header = (PSTORAGE_DESCRIPTOR_HEADER)OutputBuffer;
+    RtlZeroMemory(header, sizeof(*header));
+    header->Version = DescriptorBytes;
+    header->Size = DescriptorBytes;
+    *BytesReturned = sizeof(*header);
     return STATUS_SUCCESS;
 }
 
@@ -1091,11 +1231,38 @@ DpUsbQueryStorageProperty(
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
+    switch (query->PropertyId) {
+    case StorageDeviceProperty:
+    case StorageAdapterProperty:
+    case StorageAccessAlignmentProperty:
+    case StorageDeviceSeekPenaltyProperty:
+    case StorageDeviceTrimProperty:
+    case StorageDeviceWriteCacheProperty:
+        break;
+
+    default:
+        DPUSB_TRACE("Query",
+                    "storage property unsupported id=%lu type=%lu input=%lu output=%lu\n",
+                    query->PropertyId,
+                    query->QueryType,
+                    InputLength,
+                    OutputLength);
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    if (query->QueryType == PropertyExistsQuery) {
+        *BytesReturned = 0;
+        return STATUS_SUCCESS;
+    }
+
     if (query->PropertyId == StorageDeviceProperty) {
         STORAGE_DEVICE_DESCRIPTOR *descriptor;
 
         if (OutputLength < sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
-            return STATUS_BUFFER_TOO_SMALL;
+            return DpUsbWriteDescriptorHeader(OutputBuffer,
+                                              OutputLength,
+                                              sizeof(STORAGE_DEVICE_DESCRIPTOR),
+                                              BytesReturned);
         }
 
         descriptor = (STORAGE_DEVICE_DESCRIPTOR *)OutputBuffer;
@@ -1112,11 +1279,66 @@ DpUsbQueryStorageProperty(
         return STATUS_SUCCESS;
     }
 
+    if (query->PropertyId == StorageAdapterProperty) {
+        STORAGE_ADAPTER_DESCRIPTOR *descriptor;
+
+        if (OutputLength < sizeof(STORAGE_ADAPTER_DESCRIPTOR)) {
+            return DpUsbWriteDescriptorHeader(OutputBuffer,
+                                              OutputLength,
+                                              sizeof(STORAGE_ADAPTER_DESCRIPTOR),
+                                              BytesReturned);
+        }
+
+        descriptor = (STORAGE_ADAPTER_DESCRIPTOR *)OutputBuffer;
+        RtlZeroMemory(descriptor, sizeof(*descriptor));
+        descriptor->Version = sizeof(*descriptor);
+        descriptor->Size = sizeof(*descriptor);
+        descriptor->MaximumTransferLength = DPUSB_RAW_WRITE_MAX_BYTES;
+        descriptor->MaximumPhysicalPages = (DPUSB_RAW_WRITE_MAX_BYTES / PAGE_SIZE) + 2;
+        descriptor->AlignmentMask = DPUSB_SECTOR_BYTES - 1;
+        descriptor->AdapterUsesPio = FALSE;
+        descriptor->CommandQueueing = FALSE;
+        descriptor->AcceleratedTransfer = TRUE;
+        descriptor->BusType = BusTypeVirtual;
+        *BytesReturned = sizeof(*descriptor);
+        DPUSB_TRACE("Query",
+                    "storage property adapter maxTransfer=%lu alignMask=0x%08X\n",
+                    descriptor->MaximumTransferLength,
+                    descriptor->AlignmentMask);
+        return STATUS_SUCCESS;
+    }
+
+    if (query->PropertyId == StorageAccessAlignmentProperty) {
+        STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR *descriptor;
+
+        if (OutputLength < sizeof(STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR)) {
+            return DpUsbWriteDescriptorHeader(OutputBuffer,
+                                              OutputLength,
+                                              sizeof(STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR),
+                                              BytesReturned);
+        }
+
+        descriptor = (STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR *)OutputBuffer;
+        RtlZeroMemory(descriptor, sizeof(*descriptor));
+        descriptor->Version = sizeof(*descriptor);
+        descriptor->Size = sizeof(*descriptor);
+        descriptor->BytesPerLogicalSector = DPUSB_SECTOR_BYTES;
+        descriptor->BytesPerPhysicalSector = DPUSB_SECTOR_BYTES;
+        descriptor->BytesOffsetForCacheAlignment = 0;
+        descriptor->BytesOffsetForSectorAlignment = 0;
+        *BytesReturned = sizeof(*descriptor);
+        DPUSB_TRACE("Query", "storage property access alignment sector=%lu\n", DPUSB_SECTOR_BYTES);
+        return STATUS_SUCCESS;
+    }
+
     if (query->PropertyId == StorageDeviceSeekPenaltyProperty) {
         DEVICE_SEEK_PENALTY_DESCRIPTOR *descriptor;
 
         if (OutputLength < sizeof(DEVICE_SEEK_PENALTY_DESCRIPTOR)) {
-            return STATUS_BUFFER_TOO_SMALL;
+            return DpUsbWriteDescriptorHeader(OutputBuffer,
+                                              OutputLength,
+                                              sizeof(DEVICE_SEEK_PENALTY_DESCRIPTOR),
+                                              BytesReturned);
         }
 
         descriptor = (DEVICE_SEEK_PENALTY_DESCRIPTOR *)OutputBuffer;
@@ -1129,13 +1351,85 @@ DpUsbQueryStorageProperty(
         return STATUS_SUCCESS;
     }
 
-    DPUSB_TRACE("Query",
-                "storage property unsupported id=%lu type=%lu input=%lu output=%lu\n",
-                query->PropertyId,
-                query->QueryType,
-                InputLength,
-                OutputLength);
+    if (query->PropertyId == StorageDeviceTrimProperty) {
+        DEVICE_TRIM_DESCRIPTOR *descriptor;
+
+        if (OutputLength < sizeof(DEVICE_TRIM_DESCRIPTOR)) {
+            return DpUsbWriteDescriptorHeader(OutputBuffer,
+                                              OutputLength,
+                                              sizeof(DEVICE_TRIM_DESCRIPTOR),
+                                              BytesReturned);
+        }
+
+        descriptor = (DEVICE_TRIM_DESCRIPTOR *)OutputBuffer;
+        RtlZeroMemory(descriptor, sizeof(*descriptor));
+        descriptor->Version = sizeof(*descriptor);
+        descriptor->Size = sizeof(*descriptor);
+        descriptor->TrimEnabled = FALSE;
+        *BytesReturned = sizeof(*descriptor);
+        DPUSB_TRACE("Query", "storage property trim disabled\n");
+        return STATUS_SUCCESS;
+    }
+
+    if (query->PropertyId == StorageDeviceWriteCacheProperty) {
+        STORAGE_WRITE_CACHE_PROPERTY *descriptor;
+
+        if (OutputLength < sizeof(STORAGE_WRITE_CACHE_PROPERTY)) {
+            return DpUsbWriteDescriptorHeader(OutputBuffer,
+                                              OutputLength,
+                                              sizeof(STORAGE_WRITE_CACHE_PROPERTY),
+                                              BytesReturned);
+        }
+
+        descriptor = (STORAGE_WRITE_CACHE_PROPERTY *)OutputBuffer;
+        RtlZeroMemory(descriptor, sizeof(*descriptor));
+        descriptor->Version = sizeof(*descriptor);
+        descriptor->Size = sizeof(*descriptor);
+        descriptor->WriteCacheType = WriteCacheTypeWriteThrough;
+        descriptor->WriteCacheEnabled = WriteCacheDisabled;
+        descriptor->WriteCacheChangeable = WriteCacheNotChangeable;
+        descriptor->WriteThroughSupported = WriteThroughSupported;
+        *BytesReturned = sizeof(*descriptor);
+        DPUSB_TRACE("Query", "storage property write cache disabled writeThrough=1\n");
+        return STATUS_SUCCESS;
+    }
+
     return STATUS_INVALID_DEVICE_REQUEST;
+}
+
+static
+NTSTATUS
+DpUsbQueryStorageReadCapacity(
+    _Out_ PSTORAGE_READ_CAPACITY Capacity,
+    _In_ ULONG OutputLength,
+    _Out_ PULONG BytesReturned
+    )
+{
+    ULONGLONG lengthBytes;
+    ULONGLONG reportedLength;
+
+    if (Capacity == NULL || BytesReturned == NULL || OutputLength < sizeof(STORAGE_READ_CAPACITY)) {
+        if (BytesReturned != NULL) {
+            *BytesReturned = sizeof(STORAGE_READ_CAPACITY);
+        }
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    DpUsbQueryLengthValue(&lengthBytes);
+    reportedLength = DpUsbReportedDiskLength(lengthBytes);
+    RtlZeroMemory(Capacity, sizeof(*Capacity));
+    Capacity->Version = sizeof(*Capacity);
+    Capacity->Size = sizeof(*Capacity);
+    Capacity->BlockLength = DPUSB_SECTOR_BYTES;
+    Capacity->DiskLength.QuadPart = (LONGLONG)reportedLength;
+    Capacity->NumberOfBlocks.QuadPart = (LONGLONG)(reportedLength / DPUSB_SECTOR_BYTES);
+    *BytesReturned = sizeof(*Capacity);
+    DPUSB_TRACE("Query",
+                "storage read capacity length=%I64u block=%lu blocks=%I64d\n",
+                reportedLength,
+                Capacity->BlockLength,
+                Capacity->NumberOfBlocks.QuadPart);
+    return STATUS_SUCCESS;
 }
 
 static
@@ -1375,7 +1669,7 @@ DpUsbQueryVolumeDiskExtents(
     RtlZeroMemory(Extents, OutputLength);
     Extents->NumberOfDiskExtents = 1;
     Extents->Extents[0].DiskNumber = 0x44505543;
-    Extents->Extents[0].StartingOffset.QuadPart = 0;
+    Extents->Extents[0].StartingOffset.QuadPart = DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES;
     Extents->Extents[0].ExtentLength.QuadPart = (LONGLONG)lengthBytes;
     DPUSB_TRACE("Query",
                 "volume extents disk=0x%08X length=%I64u\n",
@@ -1456,6 +1750,66 @@ DpUsbBuildDefaultDriveName(
 
     RtlInitUnicodeString(DriveName, DriveNameBuffer);
     return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbCreateVolumeDevice(
+    _In_ PDRIVER_OBJECT DriverObject
+    )
+{
+    UNICODE_STRING volumeDeviceName;
+    PDEVICE_OBJECT volumeDeviceObject = NULL;
+    NTSTATUS status;
+
+    if (DriverObject == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (gDpUsbVolumeDeviceObject != NULL) {
+        return STATUS_SUCCESS;
+    }
+
+    RtlInitUnicodeString(&volumeDeviceName, DPUSB_VOLUME_DEVICE_NAME);
+    status = IoCreateDevice(DriverObject,
+                            0,
+                            &volumeDeviceName,
+                            FILE_DEVICE_DISK,
+                            FILE_DEVICE_SECURE_OPEN | FILE_REMOVABLE_MEDIA,
+                            FALSE,
+                            &volumeDeviceObject);
+    if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("Driver", "create volume device failed status=0x%08X\n", status);
+        return status;
+    }
+
+    volumeDeviceObject->Flags |= DO_DIRECT_IO;
+    volumeDeviceObject->StackSize += 6;
+    volumeDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+    gDpUsbVolumeDeviceObject = volumeDeviceObject;
+
+    DPUSB_TRACE("Driver",
+                "volume device created object=%p flags=0x%08X stack=%u\n",
+                volumeDeviceObject,
+                volumeDeviceObject->Flags,
+                volumeDeviceObject->StackSize);
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+DpUsbDestroyVolumeDevice(
+    VOID
+    )
+{
+    PDEVICE_OBJECT volumeDeviceObject;
+
+    volumeDeviceObject = gDpUsbVolumeDeviceObject;
+    gDpUsbVolumeDeviceObject = NULL;
+    if (volumeDeviceObject != NULL) {
+        DPUSB_TRACE("Driver", "volume device deleted object=%p\n", volumeDeviceObject);
+        IoDeleteDevice(volumeDeviceObject);
+    }
 }
 
 static
@@ -1680,6 +2034,11 @@ DpUsbMountDriveLetter(
         return STATUS_INVALID_PARAMETER;
     }
 
+    status = DpUsbCreateVolumeDevice(gDpUsbDeviceObject != NULL ? gDpUsbDeviceObject->DriverObject : NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
     driveLetter = Request->DriveLetter;
     if (driveLetter >= L'a' && driveLetter <= L'z') {
         driveLetter = (WCHAR)(driveLetter - L'a' + L'A');
@@ -1706,6 +2065,13 @@ DpUsbMountDriveLetter(
                 mountMgrStatus,
                 deleteStatus,
                 status);
+    if (!NT_SUCCESS(status)) {
+        (VOID)DpUsbMountManagerUnmount(driveLetter);
+        DpUsbDestroyVolumeDevice();
+        if (gDpUsbMountedDriveLetter == driveLetter) {
+            gDpUsbMountedDriveLetter = L'\0';
+        }
+    }
     return status;
 }
 
@@ -1745,6 +2111,9 @@ DpUsbUnmountDriveLetter(
     }
     if (NT_SUCCESS(status) && gDpUsbMountedDriveLetter == driveLetter) {
         gDpUsbMountedDriveLetter = L'\0';
+    }
+    if (NT_SUCCESS(status)) {
+        DpUsbDestroyVolumeDevice();
     }
 
     DPUSB_TRACE("Mount", "unmount drive=%wZ status=0x%08X\n", &driveName, status);
@@ -2940,6 +3309,9 @@ DpUsbDeviceControl(
         break;
 
     case IOCTL_DISK_GET_MEDIA_TYPES:
+#ifdef IOCTL_STORAGE_GET_MEDIA_TYPES
+    case IOCTL_STORAGE_GET_MEDIA_TYPES:
+#endif
         status = DpUsbQueryMediaTypes((PDISK_GEOMETRY)buffer, outputLength, &bytesReturned);
         break;
 
@@ -2952,6 +3324,12 @@ DpUsbDeviceControl(
     case IOCTL_VOLUME_SUPPORTS_ONLINE_OFFLINE:
     case IOCTL_VOLUME_IS_IO_CAPABLE:
     case IOCTL_VOLUME_UPDATE_PROPERTIES:
+#ifdef IOCTL_VOLUME_ONLINE
+    case IOCTL_VOLUME_ONLINE:
+#endif
+#ifdef IOCTL_VOLUME_POST_ONLINE
+    case IOCTL_VOLUME_POST_ONLINE:
+#endif
         bytesReturned = 0;
         status = STATUS_SUCCESS;
         break;
@@ -2992,6 +3370,12 @@ DpUsbDeviceControl(
         status = DpUsbQueryHotplugInfo((PSTORAGE_HOTPLUG_INFO)buffer, outputLength, &bytesReturned);
         break;
 
+#ifdef IOCTL_DISK_GET_DRIVE_LAYOUT
+    case IOCTL_DISK_GET_DRIVE_LAYOUT:
+        status = DpUsbQueryDriveLayoutLegacy((PDRIVE_LAYOUT_INFORMATION)buffer, outputLength, &bytesReturned);
+        break;
+#endif
+
     case IOCTL_DISK_GET_DRIVE_LAYOUT_EX:
         status = DpUsbQueryDriveLayout((PDRIVE_LAYOUT_INFORMATION_EX)buffer, outputLength, &bytesReturned);
         break;
@@ -3007,6 +3391,12 @@ DpUsbDeviceControl(
                                            outputLength,
                                            &bytesReturned);
         break;
+
+#ifdef IOCTL_STORAGE_READ_CAPACITY
+    case IOCTL_STORAGE_READ_CAPACITY:
+        status = DpUsbQueryStorageReadCapacity((PSTORAGE_READ_CAPACITY)buffer, outputLength, &bytesReturned);
+        break;
+#endif
 
     case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
         status = DpUsbQueryMountUniqueId((PMOUNTDEV_UNIQUE_ID)buffer,
@@ -3115,6 +3505,43 @@ DpUsbFileSystemControl(
     return status;
 }
 
+NTSTATUS
+DpUsbPnp(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    PIO_STACK_LOCATION stack;
+    NTSTATUS status;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    stack = IoGetCurrentIrpStackLocation(Irp);
+    DPUSB_TRACE("Pnp",
+                "enter irp=%p minor=0x%02X pid=%p\n",
+                Irp,
+                stack->MinorFunction,
+                PsGetCurrentProcessId());
+
+    if (DpUsbIsVolumeDevice(DeviceObject) &&
+        stack->MinorFunction == IRP_MN_DEVICE_USAGE_NOTIFICATION &&
+        stack->Parameters.UsageNotification.Type == DeviceUsageTypePaging &&
+        stack->Parameters.UsageNotification.InPath) {
+
+        status = STATUS_UNSUCCESSFUL;
+    } else {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    DPUSB_TRACE("Pnp",
+                "leave irp=%p minor=0x%02X status=0x%08X\n",
+                Irp,
+                stack->MinorFunction,
+                status);
+    DpUsbComplete(Irp, status, 0);
+    return status;
+}
+
 VOID
 DpUsbUnload(
     _In_ PDRIVER_OBJECT DriverObject
@@ -3132,8 +3559,7 @@ DpUsbUnload(
     IoDeleteSymbolicLink(&gDpUsbDosName);
 
     if (gDpUsbVolumeDeviceObject != NULL) {
-        IoDeleteDevice(gDpUsbVolumeDeviceObject);
-        gDpUsbVolumeDeviceObject = NULL;
+        DpUsbDestroyVolumeDevice();
     }
 
     if (gDpUsbDeviceObject != NULL) {
@@ -3153,7 +3579,6 @@ DriverEntry(
 {
     NTSTATUS status;
     UNICODE_STRING deviceName;
-    UNICODE_STRING volumeDeviceName;
     ULONG index;
 
     UNREFERENCED_PARAMETER(RegistryPath);
@@ -3167,7 +3592,6 @@ DriverEntry(
     KeInitializeEvent(&gDpUsbNoActiveWorkers, NotificationEvent, TRUE);
 
     RtlInitUnicodeString(&deviceName, DPUSB_DEVICE_NAME);
-    RtlInitUnicodeString(&volumeDeviceName, DPUSB_VOLUME_DEVICE_NAME);
     RtlInitUnicodeString(&gDpUsbDosName, DPUSB_DOS_DEVICE_NAME);
 
     status = IoCreateDevice(DriverObject,
@@ -3190,21 +3614,6 @@ DriverEntry(
         return status;
     }
 
-    status = IoCreateDevice(DriverObject,
-                            0,
-                            &volumeDeviceName,
-                            FILE_DEVICE_DISK,
-                            FILE_REMOVABLE_MEDIA | FILE_DEVICE_SECURE_OPEN,
-                            FALSE,
-                            &gDpUsbVolumeDeviceObject);
-    if (!NT_SUCCESS(status)) {
-        DPUSB_TRACE("Driver", "IoCreateDevice volume failed status=0x%08X\n", status);
-        IoDeleteSymbolicLink(&gDpUsbDosName);
-        IoDeleteDevice(gDpUsbDeviceObject);
-        gDpUsbDeviceObject = NULL;
-        return status;
-    }
-
     for (index = 0; index <= IRP_MJ_MAXIMUM_FUNCTION; index++) {
         DriverObject->MajorFunction[index] = DpUsbUnsupported;
     }
@@ -3217,20 +3626,17 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS] = DpUsbFlushBuffers;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DpUsbDeviceControl;
     DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = DpUsbFileSystemControl;
+    DriverObject->MajorFunction[IRP_MJ_PNP] = DpUsbPnp;
     DriverObject->MajorFunction[IRP_MJ_READ] = DpUsbReadWrite;
     DriverObject->MajorFunction[IRP_MJ_WRITE] = DpUsbReadWrite;
     DriverObject->DriverUnload = DpUsbUnload;
 
     gDpUsbDeviceObject->Flags |= DO_DIRECT_IO;
     gDpUsbDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
-    gDpUsbVolumeDeviceObject->Flags |= DO_DIRECT_IO;
-    gDpUsbVolumeDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
     DPUSB_TRACE("Driver",
-                "entry complete control=%p controlFlags=0x%08X volume=%p volumeFlags=0x%08X trace=%u\n",
+                "entry complete control=%p controlFlags=0x%08X trace=%u\n",
                 gDpUsbDeviceObject,
                 gDpUsbDeviceObject->Flags,
-                gDpUsbVolumeDeviceObject,
-                gDpUsbVolumeDeviceObject->Flags,
                 DPUSB_TRACE_ENABLED);
     return STATUS_SUCCESS;
 }

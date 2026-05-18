@@ -7,6 +7,8 @@ param(
 
     [string]$OutputDirectory = "",
 
+    [switch]$UsbCryptTrace,
+
     [switch]$AllowInvalidUsbRuntimeKernelSignature
 )
 
@@ -120,7 +122,12 @@ Push-Location $root
 try {
     Invoke-Checked $msBuild @(".\DataProtector\DataProtector.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtector driver build"
     Invoke-Checked $msBuild @(".\DataProtectorPolicyApi\DataProtectorPolicyApi.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorPolicyApi build"
-    Invoke-Checked $msBuild @(".\DataProtectorUsbCrypt\DataProtectorUsbCrypt.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbCrypt driver build"
+    $usbCryptBuildArguments = @(".\DataProtectorUsbCrypt\DataProtectorUsbCrypt.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform")
+    if ($UsbCryptTrace) {
+        $usbCryptBuildArguments += "/t:Rebuild"
+        $usbCryptBuildArguments += "/p:DpUsbTrace=true"
+    }
+    Invoke-Checked $msBuild $usbCryptBuildArguments "DataProtectorUsbCrypt driver build"
     Invoke-Checked $msBuild @(".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbTool build"
     Invoke-Checked $msBuild @(".\DataProtectorWebBridge\DataProtectorWebBridge.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorWebBridge build"
 
