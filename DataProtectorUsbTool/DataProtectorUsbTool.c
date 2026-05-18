@@ -254,7 +254,8 @@ static void AppendLog(const wchar_t *format, ...);
 static BOOL IsProcessElevated(void);
 static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error);
 static BOOL MountPrivateWorkspace(DPUSB_PRIVATE_MOUNT *mount, DWORD *win32Error);
-static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLONG expectedDataLengthBytes, DWORD *win32Error);
+static BOOL EnsurePrivateWorkspaceFileSystem(ULONGLONG expectedDataLengthBytes, DWORD *win32Error);
+static void NotifyWorkspaceDriveArrived(const DPUSB_PRIVATE_MOUNT *mount);
 static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error);
 static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
@@ -535,6 +536,13 @@ static int UnlockPassword(int argc, wchar_t **argv)
         return PrintLastError(L"Open session");
     }
 
+    if (!EnsurePrivateWorkspaceFileSystem(secret.DataLengthBytes, &error)) {
+        CloseSessionData(NULL);
+        SecureZeroMemory(&secret, sizeof(secret));
+        SetLastError(error);
+        return PrintLastError(L"Initialize private workspace file system");
+    }
+
     if (!MountPrivateWorkspace(&mount, &error)) {
         CloseSessionData(NULL);
         SecureZeroMemory(&secret, sizeof(secret));
@@ -542,14 +550,7 @@ static int UnlockPassword(int argc, wchar_t **argv)
         return PrintLastError(L"Mount private workspace");
     }
 
-    if (!EnsurePrivateWorkspaceFileSystem(&mount, secret.DataLengthBytes, &error)) {
-        UnmountPrivateWorkspace(&mount);
-        CloseSessionData(NULL);
-        SecureZeroMemory(&secret, sizeof(secret));
-        SetLastError(error);
-        return PrintLastError(L"Initialize private workspace file system");
-    }
-
+    NotifyWorkspaceDriveArrived(&mount);
     SecureZeroMemory(&secret, sizeof(secret));
     wprintf(L"USB crypt session opened from raw metadata. Private workspace: %s\n", mount.Path);
     return 0;
@@ -3148,14 +3149,11 @@ static BOOL RefreshPrivateWorkspaceMount(DPUSB_PRIVATE_MOUNT *mount, DWORD *win3
     return FALSE;
 }
 
-static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLONG expectedDataLengthBytes, DWORD *win32Error)
+static BOOL EnsurePrivateWorkspaceFileSystem(ULONGLONG expectedDataLengthBytes, DWORD *win32Error)
 {
-    WCHAR fileSystem[32];
     WCHAR message[256];
     DWORD error = ERROR_SUCCESS;
-    DWORD attempt;
     HANDLE volume = INVALID_HANDLE_VALUE;
-    DWORD returned = 0;
     ULONGLONG dataLengthBytes;
     BYTE bootSector[512];
 
@@ -3209,52 +3207,25 @@ static BOOL EnsurePrivateWorkspaceFileSystem(DPUSB_PRIVATE_MOUNT *mount, ULONGLO
         }
     }
 
-    if (!DeviceIoControl(volume, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL)) {
-        AppendLog(L"Private workspace disk property refresh returned Win32=%lu.", GetLastError());
-    }
-    if (!DeviceIoControl(volume, IOCTL_VOLUME_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &returned, NULL)) {
-        AppendLog(L"Private workspace volume property refresh returned Win32=%lu.", GetLastError());
-    }
     CloseHandle(volume);
-    if (!RefreshPrivateWorkspaceMount(mount, &error)) {
-        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Private workspace drive-letter refresh after initialization failed: %s (Win32=%lu)",
-                  message,
-                  error);
-        if (win32Error != NULL) {
-            *win32Error = error;
-        }
-        return FALSE;
-    }
-
-    if (!ValidateMountedWorkspaceDevice(mount, &error)) {
-        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Private workspace drive validation through %s failed after refresh: %s (Win32=%lu).",
-                  mount != NULL ? mount->Path : L"(null)",
-                  message,
-                  error);
-    }
-
-    for (attempt = 0; attempt < 12; attempt++) {
-        if (QueryWorkspaceFileSystem(mount, fileSystem, sizeof(fileSystem) / sizeof(fileSystem[0]), &error) &&
-            (_wcsicmp(fileSystem, L"FAT32") == 0 ||
-             _wcsicmp(fileSystem, L"NTFS") == 0 ||
-             _wcsicmp(fileSystem, L"exFAT") == 0)) {
-
-            (VOID)SetVolumeLabelW(mount->Path, DPUSB_PRIVATE_VOLUME_LABEL);
-            if (win32Error != NULL) {
-                *win32Error = ERROR_SUCCESS;
-            }
-            return TRUE;
-        }
-
-        Sleep(500);
-    }
 
     if (win32Error != NULL) {
-        *win32Error = error != ERROR_SUCCESS ? error : ERROR_UNRECOGNIZED_VOLUME;
+        *win32Error = ERROR_SUCCESS;
     }
-    return FALSE;
+    return TRUE;
+}
+
+static void NotifyWorkspaceDriveArrived(const DPUSB_PRIVATE_MOUNT *mount)
+{
+    DWORD driveMask;
+
+    if (mount == NULL || mount->Letter < L'A' || mount->Letter > L'Z') {
+        return;
+    }
+
+    driveMask = 1UL << (mount->Letter - L'A');
+    SHChangeNotify(SHCNE_DRIVEADD, SHCNF_DWORD, (LPCVOID)(ULONG_PTR)driveMask, NULL);
+    SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, mount->Path, NULL);
 }
 
 static DWORD ReadFixedUtf8(const CHAR *source, DWORD sourceBytes, wchar_t *target, DWORD targetChars)
@@ -3818,6 +3789,15 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
         return 0;
     }
 
+    if (!EnsurePrivateWorkspaceFileSystem(secret.DataLengthBytes, &error)) {
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        AppendLog(L"Private workspace file system initialization failed: %s", message);
+        CloseSessionData(NULL);
+        SecureZeroMemory(&secret, sizeof(secret));
+        PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
+        return 0;
+    }
+
     if (!MountPrivateWorkspace(&mount, &error)) {
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"Private workspace mount failed: %s", message);
@@ -3827,16 +3807,7 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
         return 0;
     }
 
-    if (!EnsurePrivateWorkspaceFileSystem(&mount, secret.DataLengthBytes, &error)) {
-        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-        AppendLog(L"Private workspace file system initialization failed: %s", message);
-        UnmountPrivateWorkspace(&mount);
-        CloseSessionData(NULL);
-        SecureZeroMemory(&secret, sizeof(secret));
-        PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
-        return 0;
-    }
-
+    NotifyWorkspaceDriveArrived(&mount);
     SecureZeroMemory(&secret, sizeof(secret));
     AppendLog(L"Secure USB session opened. Private workspace mounted at %s", mount.Path);
     wcsncpy_s(result->MountPath, sizeof(result->MountPath) / sizeof(result->MountPath[0]), mount.Path, _TRUNCATE);
