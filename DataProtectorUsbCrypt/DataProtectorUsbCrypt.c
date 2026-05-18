@@ -2464,7 +2464,8 @@ DpUsbValidateRange(
 
 static
 NTSTATUS
-DpUsbForwardBackingReadWriteLocked(
+DpUsbForwardBackingReadWrite(
+    _In_ const DPUSB_SESSION_SNAPSHOT *Snapshot,
     _In_ BOOLEAN IsWrite,
     _Inout_updates_bytes_(Length) PVOID Buffer,
     _In_ ULONG Length,
@@ -2474,13 +2475,23 @@ DpUsbForwardBackingReadWriteLocked(
 {
     IO_STATUS_BLOCK ioStatus;
     LARGE_INTEGER byteOffset;
+    KEVENT event;
+    PIRP irp;
     NTSTATUS status;
+    PDEVICE_OBJECT deviceObject;
+    PFILE_OBJECT fileObject;
+    PIO_STACK_LOCATION nextStack;
+    ULONG majorFunction;
 
     if (Information != NULL) {
         *Information = 0;
     }
 
-    if (Buffer == NULL || Length == 0 || gDpUsbSession.BackingHandle == NULL) {
+    if (Snapshot == NULL ||
+        Buffer == NULL ||
+        Length == 0 ||
+        Snapshot->BackingFileObject == NULL ||
+        Snapshot->BackingDeviceObject == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -2496,40 +2507,59 @@ DpUsbForwardBackingReadWriteLocked(
 
     RtlZeroMemory(&ioStatus, sizeof(ioStatus));
     byteOffset.QuadPart = (LONGLONG)PhysicalOffset;
+    KeInitializeEvent(&event, NotificationEvent, FALSE);
+    deviceObject = Snapshot->BackingDeviceObject;
+    fileObject = Snapshot->BackingFileObject;
+    majorFunction = IsWrite ? IRP_MJ_WRITE : IRP_MJ_READ;
 
     DPUSB_TRACE("Backing",
-                "%s zw begin handle=%p physical=%I64u length=%lu buffer=%p\n",
+                "%s irp begin device=%p file=%p physical=%I64u length=%lu buffer=%p\n",
                 IsWrite ? "write" : "read",
-                gDpUsbSession.BackingHandle,
+                deviceObject,
+                fileObject,
                 PhysicalOffset,
                 Length,
                 Buffer);
-    if (IsWrite) {
-        status = ZwWriteFile(gDpUsbSession.BackingHandle,
-                             NULL,
-                             NULL,
-                             NULL,
-                             &ioStatus,
-                             Buffer,
-                             Length,
-                             &byteOffset,
-                             NULL);
-    } else {
-        status = ZwReadFile(gDpUsbSession.BackingHandle,
-                            NULL,
-                            NULL,
-                            NULL,
-                            &ioStatus,
-                            Buffer,
-                            Length,
-                            &byteOffset,
-                            NULL);
+
+    irp = IoBuildSynchronousFsdRequest(majorFunction,
+                                       deviceObject,
+                                       Buffer,
+                                       Length,
+                                       &byteOffset,
+                                       &event,
+                                       &ioStatus);
+    if (irp == NULL) {
+        DPUSB_TRACE("Backing",
+                    "%s irp build failed device=%p file=%p physical=%I64u length=%lu\n",
+                    IsWrite ? "write" : "read",
+                    deviceObject,
+                    fileObject,
+                    PhysicalOffset,
+                    Length);
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    nextStack = IoGetNextIrpStackLocation(irp);
+    nextStack->FileObject = fileObject;
+    if (IsWrite) {
+        nextStack->Parameters.Write.ByteOffset = byteOffset;
+        nextStack->Parameters.Write.Length = Length;
+    } else {
+        nextStack->Parameters.Read.ByteOffset = byteOffset;
+        nextStack->Parameters.Read.Length = Length;
+    }
+
+    status = IoCallDriver(deviceObject, irp);
+    if (status == STATUS_PENDING) {
+        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+        status = ioStatus.Status;
+    }
+
     if (NT_SUCCESS(status)) {
         status = ioStatus.Status;
     }
     DPUSB_TRACE("Backing",
-                "%s zw end status=0x%08X iosb=0x%08X information=%Iu physical=%I64u length=%lu\n",
+                "%s irp end status=0x%08X iosb=0x%08X information=%Iu physical=%I64u length=%lu\n",
                 IsWrite ? "write" : "read",
                 status,
                 ioStatus.Status,
@@ -2907,13 +2937,6 @@ DpUsbReadWrite(
         return STATUS_DELETE_PENDING;
     }
 
-    if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-        status = DpUsbProcessReadWriteIrp(Irp, isWrite, TRUE);
-        DpUsbReleaseActiveIo();
-        DPUSB_TRACE("ReadWrite", "direct complete irp=%p status=0x%08X\n", Irp, status);
-        return status;
-    }
-
     workItem = (PDPUSB_IO_WORK_ITEM)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*workItem), DPUSB_TAG_WORK);
     if (workItem == NULL) {
         DpUsbReleaseActiveIo();
@@ -2929,7 +2952,11 @@ DpUsbReadWrite(
     IoMarkIrpPending(Irp);
     ExInitializeWorkItem(&workItem->WorkItem, DpUsbReadWriteWorker, workItem);
     ExQueueWorkItem(&workItem->WorkItem, DelayedWorkQueue);
-    DPUSB_TRACE("ReadWrite", "queued worker irp=%p work=%p\n", Irp, workItem);
+    DPUSB_TRACE("ReadWrite",
+                "queued worker irp=%p work=%p originalIrql=%lu\n",
+                Irp,
+                workItem,
+                (ULONG)KeGetCurrentIrql());
     return STATUS_PENDING;
 }
 
@@ -3049,30 +3076,18 @@ DpUsbProcessReadWriteIrp(
         RtlZeroMemory(ioBuffer, length);
     }
 
-    ExAcquirePushLockShared(&gDpUsbSession.Lock);
-    if (!gDpUsbSession.SessionOpen ||
-        gDpUsbSession.BackingHandle == NULL ||
-        gDpUsbSession.BackingFileObject != snapshot.BackingFileObject) {
-
-        DPUSB_TRACE("ReadWrite",
-                    "session changed irp=%p open=%u handle=%p liveFile=%p snapshotFile=%p\n",
-                    Irp,
-                    gDpUsbSession.SessionOpen,
-                    gDpUsbSession.BackingHandle,
-                    gDpUsbSession.BackingFileObject,
-                    snapshot.BackingFileObject);
-        status = STATUS_DEVICE_NOT_READY;
-    } else if (IsWrite) {
+    if (IsWrite) {
         DPUSB_TRACE("ReadWrite",
                     "forward write begin irp=%p physical=%I64u length=%lu\n",
                     Irp,
                     physicalOffset,
                     length);
-        status = DpUsbForwardBackingReadWriteLocked(TRUE,
-                                                    ioBuffer,
-                                                    length,
-                                                    physicalOffset,
-                                                    &information);
+        status = DpUsbForwardBackingReadWrite(&snapshot,
+                                              TRUE,
+                                              ioBuffer,
+                                              length,
+                                              physicalOffset,
+                                              &information);
         DPUSB_TRACE("ReadWrite",
                     "forward write end irp=%p status=0x%08X information=%Iu\n",
                     Irp,
@@ -3084,11 +3099,12 @@ DpUsbProcessReadWriteIrp(
                     Irp,
                     physicalOffset,
                     length);
-        status = DpUsbForwardBackingReadWriteLocked(FALSE,
-                                                    ioBuffer,
-                                                    length,
-                                                    physicalOffset,
-                                                    &information);
+        status = DpUsbForwardBackingReadWrite(&snapshot,
+                                              FALSE,
+                                              ioBuffer,
+                                              length,
+                                              physicalOffset,
+                                              &information);
         DPUSB_TRACE("ReadWrite",
                     "forward read end irp=%p status=0x%08X information=%Iu\n",
                     Irp,
@@ -3104,7 +3120,6 @@ DpUsbProcessReadWriteIrp(
             RtlCopyMemory(systemAddress, ioBuffer, (SIZE_T)information);
         }
     }
-    ExReleasePushLockShared(&gDpUsbSession.Lock);
 
     RtlSecureZeroMemory(allocation, allocationLength);
     ExFreePoolWithTag(allocation, DPUSB_TAG_IO);
