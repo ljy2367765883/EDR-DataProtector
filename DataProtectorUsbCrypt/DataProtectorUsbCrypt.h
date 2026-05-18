@@ -6,6 +6,7 @@
 #include <ntddstor.h>
 #include <ntddvol.h>
 #include <mountdev.h>
+#include <mountmgr.h>
 #include <ntstrsafe.h>
 
 #define DPUSB_DEVICE_NAME L"\\Device\\DataProtectorUsbCrypt"

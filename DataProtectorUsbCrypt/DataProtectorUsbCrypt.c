@@ -22,6 +22,7 @@ static PDEVICE_OBJECT gDpUsbDeviceObject = NULL;
 static PDEVICE_OBJECT gDpUsbVolumeDeviceObject = NULL;
 static UNICODE_STRING gDpUsbDosName;
 static DPUSB_SESSION_STATE gDpUsbSession;
+static WCHAR gDpUsbMountedDriveLetter = L'\0';
 static volatile LONG gDpUsbUnloading = 0;
 static volatile LONG gDpUsbActiveWorkers = 0;
 static KEVENT gDpUsbNoActiveWorkers;
@@ -157,6 +158,15 @@ DpUsbReadAlignedBuffer(
     _Out_writes_bytes_(Length) VOID *Buffer,
     _In_ ULONG Length,
     _Out_ PULONG_PTR Information
+    );
+
+static
+NTSTATUS
+DpUsbBuildDefaultDriveName(
+    _In_ WCHAR DriveLetter,
+    _Out_ PUNICODE_STRING DriveName,
+    _Out_writes_(DriveNameChars) PWCHAR DriveNameBuffer,
+    _In_ ULONG DriveNameChars
     );
 
 static
@@ -1243,7 +1253,10 @@ DpUsbQueryMountSuggestedLinkName(
     _Out_ PULONG BytesReturned
     )
 {
-    static const WCHAR suggestedName[] = L"\\DosDevices\\Z:";
+    WCHAR suggestedNameBuffer[32];
+    UNICODE_STRING suggestedName;
+    WCHAR driveLetter;
+    NTSTATUS status;
     USHORT nameBytes;
     ULONG requiredBytes;
 
@@ -1251,7 +1264,16 @@ DpUsbQueryMountSuggestedLinkName(
         return STATUS_INVALID_PARAMETER;
     }
 
-    nameBytes = (USHORT)((RTL_NUMBER_OF(suggestedName) - 1) * sizeof(WCHAR));
+    driveLetter = gDpUsbMountedDriveLetter != L'\0' ? gDpUsbMountedDriveLetter : L'Z';
+    status = DpUsbBuildDefaultDriveName(driveLetter,
+                                        &suggestedName,
+                                        suggestedNameBuffer,
+                                        RTL_NUMBER_OF(suggestedNameBuffer));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    nameBytes = suggestedName.Length;
     requiredBytes = (ULONG)FIELD_OFFSET(MOUNTDEV_SUGGESTED_LINK_NAME, Name) + nameBytes;
     *BytesReturned = requiredBytes;
 
@@ -1267,10 +1289,10 @@ DpUsbQueryMountSuggestedLinkName(
     }
 
     RtlZeroMemory(LinkName, OutputLength);
-    LinkName->UseOnlyIfThereAreNoOtherLinks = TRUE;
+    LinkName->UseOnlyIfThereAreNoOtherLinks = FALSE;
     LinkName->NameLength = nameBytes;
-    RtlCopyMemory(LinkName->Name, suggestedName, nameBytes);
-    DPUSB_TRACE("Query", "mountdev suggested link=%ws bytes=%lu\n", suggestedName, requiredBytes);
+    RtlCopyMemory(LinkName->Name, suggestedName.Buffer, nameBytes);
+    DPUSB_TRACE("Query", "mountdev suggested link=%wZ bytes=%lu\n", &suggestedName, requiredBytes);
     return STATUS_SUCCESS;
 }
 
@@ -1401,6 +1423,246 @@ DpUsbBuildGlobalDriveName(
 
 static
 NTSTATUS
+DpUsbBuildDefaultDriveName(
+    _In_ WCHAR DriveLetter,
+    _Out_ PUNICODE_STRING DriveName,
+    _Out_writes_(DriveNameChars) PWCHAR DriveNameBuffer,
+    _In_ ULONG DriveNameChars
+    )
+{
+    NTSTATUS status;
+    WCHAR letter;
+
+    if (DriveName == NULL || DriveNameBuffer == NULL || DriveNameChars < 16) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    letter = DriveLetter;
+    if (letter >= L'a' && letter <= L'z') {
+        letter = (WCHAR)(letter - L'a' + L'A');
+    }
+
+    if (letter < L'A' || letter > L'Z') {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    status = RtlStringCchPrintfW(DriveNameBuffer,
+                                 DriveNameChars,
+                                 L"\\DosDevices\\%wc:",
+                                 letter);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(DriveName, DriveNameBuffer);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+DpUsbSendDeviceIoControlByName(
+    _In_ PCWSTR DeviceName,
+    _In_ ULONG IoControlCode,
+    _In_reads_bytes_opt_(InputLength) PVOID InputBuffer,
+    _In_ ULONG InputLength,
+    _Out_writes_bytes_opt_(OutputLength) PVOID OutputBuffer,
+    _In_ ULONG OutputLength
+    )
+{
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attributes;
+    IO_STATUS_BLOCK ioStatus;
+    HANDLE handle;
+    NTSTATUS status;
+
+    if (DeviceName == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlInitUnicodeString(&name, DeviceName);
+    InitializeObjectAttributes(&attributes,
+                               &name,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    status = ZwCreateFile(&handle,
+                          SYNCHRONIZE | FILE_READ_DATA | FILE_WRITE_DATA,
+                          &attributes,
+                          &ioStatus,
+                          NULL,
+                          FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          FILE_OPEN,
+                          FILE_SYNCHRONOUS_IO_NONALERT,
+                          NULL,
+                          0);
+    if (!NT_SUCCESS(status)) {
+        DPUSB_TRACE("MountMgr",
+                    "open %ws failed status=0x%08X ioctl=0x%08X\n",
+                    DeviceName,
+                    status,
+                    IoControlCode);
+        return status;
+    }
+
+    status = ZwDeviceIoControlFile(handle,
+                                   NULL,
+                                   NULL,
+                                   NULL,
+                                   &ioStatus,
+                                   IoControlCode,
+                                   InputBuffer,
+                                   InputLength,
+                                   OutputBuffer,
+                                   OutputLength);
+    if (status == STATUS_PENDING) {
+        status = ioStatus.Status;
+    }
+
+    DPUSB_TRACE("MountMgr",
+                "ioctl %ws code=0x%08X status=0x%08X information=%Iu\n",
+                DeviceName,
+                IoControlCode,
+                status,
+                ioStatus.Information);
+
+    ZwClose(handle);
+    return status;
+}
+
+static
+NTSTATUS
+DpUsbMountManagerMount(
+    _In_ WCHAR DriveLetter
+    )
+{
+    UCHAR arrivalBuffer[FIELD_OFFSET(MOUNTMGR_TARGET_NAME, DeviceName) + sizeof(DPUSB_VOLUME_DEVICE_NAME)];
+    UCHAR pointBuffer[sizeof(MOUNTMGR_CREATE_POINT_INPUT) + 96];
+    PMOUNTMGR_TARGET_NAME arrival;
+    PMOUNTMGR_CREATE_POINT_INPUT point;
+    WCHAR driveNameBuffer[32];
+    UNICODE_STRING driveName;
+    UNICODE_STRING deviceName;
+    NTSTATUS arrivalStatus;
+    NTSTATUS pointStatus;
+    ULONG deviceNameBytes;
+    ULONG driveNameBytes;
+
+    RtlInitUnicodeString(&deviceName, DPUSB_VOLUME_DEVICE_NAME);
+    deviceNameBytes = deviceName.Length;
+
+    RtlZeroMemory(arrivalBuffer, sizeof(arrivalBuffer));
+    arrival = (PMOUNTMGR_TARGET_NAME)arrivalBuffer;
+    arrival->DeviceNameLength = (USHORT)deviceNameBytes;
+    RtlCopyMemory(arrival->DeviceName, deviceName.Buffer, deviceNameBytes);
+
+    arrivalStatus = DpUsbSendDeviceIoControlByName(MOUNTMGR_DEVICE_NAME,
+                                                   IOCTL_MOUNTMGR_VOLUME_ARRIVAL_NOTIFICATION,
+                                                   arrival,
+                                                   (ULONG)FIELD_OFFSET(MOUNTMGR_TARGET_NAME, DeviceName) + deviceNameBytes,
+                                                   NULL,
+                                                   0);
+
+    pointStatus = DpUsbBuildDefaultDriveName(DriveLetter,
+                                             &driveName,
+                                             driveNameBuffer,
+                                             RTL_NUMBER_OF(driveNameBuffer));
+    if (!NT_SUCCESS(pointStatus)) {
+        return pointStatus;
+    }
+
+    driveNameBytes = driveName.Length;
+    if (sizeof(MOUNTMGR_CREATE_POINT_INPUT) + driveNameBytes + deviceNameBytes > sizeof(pointBuffer)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(pointBuffer, sizeof(pointBuffer));
+    point = (PMOUNTMGR_CREATE_POINT_INPUT)pointBuffer;
+    point->SymbolicLinkNameOffset = sizeof(MOUNTMGR_CREATE_POINT_INPUT);
+    point->SymbolicLinkNameLength = (USHORT)driveNameBytes;
+    RtlCopyMemory(pointBuffer + point->SymbolicLinkNameOffset,
+                  driveName.Buffer,
+                  driveNameBytes);
+
+    point->DeviceNameOffset = point->SymbolicLinkNameOffset + point->SymbolicLinkNameLength;
+    point->DeviceNameLength = (USHORT)deviceNameBytes;
+    RtlCopyMemory(pointBuffer + point->DeviceNameOffset,
+                  deviceName.Buffer,
+                  deviceNameBytes);
+
+    pointStatus = DpUsbSendDeviceIoControlByName(MOUNTMGR_DEVICE_NAME,
+                                                 IOCTL_MOUNTMGR_CREATE_POINT,
+                                                 point,
+                                                 point->DeviceNameOffset + point->DeviceNameLength,
+                                                 NULL,
+                                                 0);
+    DPUSB_TRACE("MountMgr",
+                "mount letter=%wc arrival=0x%08X createPoint=0x%08X device=%wZ link=%wZ\n",
+                DriveLetter,
+                arrivalStatus,
+                pointStatus,
+                &deviceName,
+                &driveName);
+
+    return NT_SUCCESS(pointStatus) ? pointStatus : arrivalStatus;
+}
+
+static
+NTSTATUS
+DpUsbMountManagerUnmount(
+    _In_ WCHAR DriveLetter
+    )
+{
+    UCHAR inputBuffer[sizeof(MOUNTMGR_MOUNT_POINT) + 64];
+    UCHAR outputBuffer[sizeof(MOUNTMGR_MOUNT_POINTS) + 256];
+    PMOUNTMGR_MOUNT_POINT point;
+    WCHAR driveNameBuffer[32];
+    UNICODE_STRING driveName;
+    NTSTATUS status;
+
+    status = DpUsbBuildDefaultDriveName(DriveLetter,
+                                        &driveName,
+                                        driveNameBuffer,
+                                        RTL_NUMBER_OF(driveNameBuffer));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (sizeof(MOUNTMGR_MOUNT_POINT) + driveName.Length > sizeof(inputBuffer)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlZeroMemory(inputBuffer, sizeof(inputBuffer));
+    point = (PMOUNTMGR_MOUNT_POINT)inputBuffer;
+    point->SymbolicLinkNameOffset = sizeof(MOUNTMGR_MOUNT_POINT);
+    point->SymbolicLinkNameLength = driveName.Length;
+    RtlCopyMemory(inputBuffer + point->SymbolicLinkNameOffset,
+                  driveName.Buffer,
+                  driveName.Length);
+
+    RtlZeroMemory(outputBuffer, sizeof(outputBuffer));
+    status = DpUsbSendDeviceIoControlByName(MOUNTMGR_DEVICE_NAME,
+                                            IOCTL_MOUNTMGR_DELETE_POINTS,
+                                            point,
+                                            (ULONG)sizeof(MOUNTMGR_MOUNT_POINT) + driveName.Length,
+                                            outputBuffer,
+                                            sizeof(outputBuffer));
+
+    DPUSB_TRACE("MountMgr",
+                "unmount letter=%wc link=%wZ status=0x%08X\n",
+                DriveLetter,
+                &driveName,
+                status);
+
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NOT_FOUND) {
+        status = STATUS_SUCCESS;
+    }
+    return status;
+}
+
+static
+NTSTATUS
 DpUsbMountDriveLetter(
     _In_ PDPUSB_DRIVE_MOUNT Request,
     _In_ ULONG InputLength
@@ -1411,12 +1673,19 @@ DpUsbMountDriveLetter(
     UNICODE_STRING deviceName;
     NTSTATUS status;
     NTSTATUS deleteStatus;
+    NTSTATUS mountMgrStatus;
+    WCHAR driveLetter;
 
     if (Request == NULL || InputLength < sizeof(DPUSB_DRIVE_MOUNT) || Request->Version != 1) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    status = DpUsbBuildGlobalDriveName(Request->DriveLetter,
+    driveLetter = Request->DriveLetter;
+    if (driveLetter >= L'a' && driveLetter <= L'z') {
+        driveLetter = (WCHAR)(driveLetter - L'a' + L'A');
+    }
+
+    status = DpUsbBuildGlobalDriveName(driveLetter,
                                        &driveName,
                                        driveNameBuffer,
                                        RTL_NUMBER_OF(driveNameBuffer));
@@ -1425,12 +1694,16 @@ DpUsbMountDriveLetter(
     }
 
     RtlInitUnicodeString(&deviceName, DPUSB_VOLUME_DEVICE_NAME);
+    gDpUsbMountedDriveLetter = driveLetter;
+    (VOID)DpUsbMountManagerUnmount(driveLetter);
+    mountMgrStatus = DpUsbMountManagerMount(driveLetter);
     deleteStatus = IoDeleteSymbolicLink(&driveName);
     status = IoCreateSymbolicLink(&driveName, &deviceName);
     DPUSB_TRACE("Mount",
-                "mount drive=%wZ target=%wZ delete=0x%08X create=0x%08X\n",
+                "mount drive=%wZ target=%wZ mountMgr=0x%08X delete=0x%08X create=0x%08X\n",
                 &driveName,
                 &deviceName,
+                mountMgrStatus,
                 deleteStatus,
                 status);
     return status;
@@ -1446,12 +1719,18 @@ DpUsbUnmountDriveLetter(
     WCHAR driveNameBuffer[32];
     UNICODE_STRING driveName;
     NTSTATUS status;
+    WCHAR driveLetter;
 
     if (Request == NULL || InputLength < sizeof(DPUSB_DRIVE_MOUNT) || Request->Version != 1) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    status = DpUsbBuildGlobalDriveName(Request->DriveLetter,
+    driveLetter = Request->DriveLetter;
+    if (driveLetter >= L'a' && driveLetter <= L'z') {
+        driveLetter = (WCHAR)(driveLetter - L'a' + L'A');
+    }
+
+    status = DpUsbBuildGlobalDriveName(driveLetter,
                                        &driveName,
                                        driveNameBuffer,
                                        RTL_NUMBER_OF(driveNameBuffer));
@@ -1459,9 +1738,13 @@ DpUsbUnmountDriveLetter(
         return status;
     }
 
+    (VOID)DpUsbMountManagerUnmount(driveLetter);
     status = IoDeleteSymbolicLink(&driveName);
     if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND) {
         status = STATUS_SUCCESS;
+    }
+    if (NT_SUCCESS(status) && gDpUsbMountedDriveLetter == driveLetter) {
+        gDpUsbMountedDriveLetter = L'\0';
     }
 
     DPUSB_TRACE("Mount", "unmount drive=%wZ status=0x%08X\n", &driveName, status);
