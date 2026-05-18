@@ -16,6 +16,7 @@ namespace DataProtectorWebBridge.Services
         private readonly Uri serverSyncUri;
         private readonly TimeSpan interval;
         private readonly PolicyBridgeService policyService;
+        private readonly DlpProtectionService dlpProtectionService;
         private readonly string statePath;
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly RemoteTaskExecutor taskExecutor;
@@ -37,6 +38,7 @@ namespace DataProtectorWebBridge.Services
 
             this.interval = interval <= TimeSpan.Zero ? TimeSpan.FromSeconds(15) : interval;
             this.policyService = policyService ?? throw new ArgumentNullException("policyService");
+            dlpProtectionService = new DlpProtectionService();
             serverSyncUri = BuildSyncUri(serverBaseUrl);
             taskExecutor = new RemoteTaskExecutor(BuildServerBaseUri(serverBaseUrl));
 
@@ -46,6 +48,7 @@ namespace DataProtectorWebBridge.Services
             usbCryptPolicyPath = Path.Combine(directory, "UsbCryptPolicy.json");
             Directory.CreateDirectory(directory);
             LoadState();
+            dlpProtectionService.UpdatePolicy(PolicyBridgeService.DefaultDlpProtectionPolicy());
         }
 
         public void Run()
@@ -125,6 +128,7 @@ namespace DataProtectorWebBridge.Services
                     response.hashProtectPolicy ?? PolicyBridgeService.DefaultHashProtectPolicy(),
                     response.lateralDefensePolicy ?? PolicyBridgeService.DefaultLateralDefensePolicy(),
                     response.usbCryptPolicy ?? PolicyBridgeService.DefaultUsbCryptPolicy(),
+                    response.dlpProtectionPolicy ?? PolicyBridgeService.DefaultDlpProtectionPolicy(),
                     response.policyVersion);
             }
 
@@ -188,16 +192,18 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
             AuditLog.AuditRecord[] hashProtectRecords = DrainAuditSource("hashprotect", policyService.DrainHashProtectAuditRecords);
             AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
-            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0)
+            AuditLog.AuditRecord[] dlpRecords = DrainAuditSource("dlp", dlpProtectionService.DrainAuditRecords);
+            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0 || dlpRecords.Length > 0)
             {
-                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ".");
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ", dlp=" + dlpRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length + lateralRecords.Length);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length + lateralRecords.Length + dlpRecords.Length);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
             records.AddRange(hashProtectRecords);
             records.AddRange(lateralRecords);
+            records.AddRange(dlpRecords);
             return records.ToArray();
         }
 
@@ -284,6 +290,7 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy,
             PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy,
             PolicyBridgeService.UsbCryptPolicyDto usbCryptPolicy,
+            PolicyBridgeService.DlpProtectionPolicyDto dlpProtectionPolicy,
             long policyVersion)
         {
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
@@ -440,10 +447,11 @@ namespace DataProtectorWebBridge.Services
             }
 
             PersistUsbCryptPolicy(usbCryptPolicy);
+            dlpProtectionService.UpdatePolicy(dlpProtectionPolicy);
 
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy);
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
             SaveState();
         }
 

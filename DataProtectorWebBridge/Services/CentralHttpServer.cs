@@ -322,6 +322,21 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/dlp/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryDlpProtectionPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/dlp/policy")
+                {
+                    PolicyBridgeService.DlpProtectionPolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.DlpProtectionPolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.UpdateDlpProtectionPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/usbcrypt/driver-package")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", store.QueryUsbCryptDriverPackage());

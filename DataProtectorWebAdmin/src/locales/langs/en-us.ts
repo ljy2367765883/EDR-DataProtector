@@ -531,6 +531,7 @@ const local: App.I18n.Schema = {
       webshell: 'WebShell',
       hashdump: 'Hash dump',
       lateral: 'Lateral movement',
+      dlp: 'Data leak prevention',
       remoteOps: 'Remote ops',
       agentSync: 'Agent sync',
       system: 'System',
@@ -724,6 +725,7 @@ const local: App.I18n.Schema = {
         file: 'File Policy',
         network: 'Network Defense',
         lateral: 'IPC / SMB Defense',
+        dlp: 'Screenshot / Clipboard DLP',
         webshell: 'WebShell Defense',
         hashprotect: 'Anti-Dump / Hash Protection',
         device: 'Device Control'
@@ -811,6 +813,46 @@ const local: App.I18n.Schema = {
         remoteAdminLaunch: 'Remote admin tool launch',
         remoteAdminLaunchDesc: 'Blocks schtasks, at, sc, wmic and PowerShell remoting launch patterns before execution.',
         saved: 'Lateral movement defense policy saved to central policy.'
+      },
+      dlp: {
+        title: 'Screenshot and Clipboard DLP',
+        enforcement: 'Endpoint DLP enforcement',
+        enforcementDesc: 'Agent-side controls for clipboard transfer and common screenshot capture paths.',
+        clipboard: 'Clipboard protection',
+        clipboardDesc: 'Monitors clipboard updates and clears selected object types from untrusted processes.',
+        screenshots: 'Screenshot protection',
+        screenshotsDesc: 'Blocks common screenshot hotkeys and clears screenshot images copied into the clipboard.',
+        clipboardMode: 'Clipboard mode',
+        screenshotMode: 'Screenshot mode',
+        modes: {
+          audit: 'Audit only',
+          clear: 'Clear clipboard',
+          block: 'Block / clear'
+        },
+        text: 'Text',
+        images: 'Images',
+        files: 'Files',
+        clearScreenshotClipboard: 'Clear screenshot image clipboard',
+        blockHotkeys: 'Block PrintScreen and Win+Shift+S',
+        trustedProcesses: 'Trusted process names',
+        trustedProcessPlaceholder: 'One process per line, e.g. SnippingTool.exe',
+        trustedDirectories: 'Trusted process directories',
+        trustedDirectoryPlaceholder: 'One directory per line, e.g. C:\\Program Files\\TrustedApp',
+        activeControls: 'Active controls: {count}',
+        trustedEntries: 'Trusted entries: {count}',
+        save: 'Save DLP Policy',
+        saved: 'Screenshot and clipboard DLP policy saved to central policy.',
+        surfaces: 'Protected Data Movement Surfaces',
+        surfacesList: {
+          hotkeysTitle: 'Screenshot hotkeys',
+          hotkeysDetail: 'Prevents PrintScreen and Win+Shift+S before screen bitmap data is created for untrusted sessions.',
+          clipboardImageTitle: 'Clipboard images',
+          clipboardImageDetail: 'Detects bitmap, DIB, PNG and enhanced metafile formats and clears them when policy requires prevention.',
+          clipboardTextTitle: 'Clipboard text',
+          clipboardTextDetail: 'Controls plain text, Unicode text, HTML and RTF clipboard formats from untrusted processes.',
+          clipboardFilesTitle: 'Clipboard file drop',
+          clipboardFilesDetail: 'Controls CF_HDROP file transfer data to reduce copy-out leakage paths.'
+        }
       },
       webshell: {
         addTitle: 'Add Protected Web Directory',

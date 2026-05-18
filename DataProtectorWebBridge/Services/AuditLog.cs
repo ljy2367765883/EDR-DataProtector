@@ -71,6 +71,14 @@ namespace DataProtectorWebBridge.Services
                 return "lateral";
             }
 
+            if (action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("policy.dlp", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("central.policy.dlp", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".dlp.", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "dlp";
+            }
+
             if (action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase) ||
                 action.EndsWith(".smtp", StringComparison.OrdinalIgnoreCase))
             {
@@ -132,6 +140,8 @@ namespace DataProtectorWebBridge.Services
             if (action.StartsWith("webshell.danger", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("hashdump.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.blocked", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("dlp.clipboard.blocked", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("dlp.screenshot.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.IndexOf(".blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 status.Equals("0xC0000022", StringComparison.OrdinalIgnoreCase))
             {
@@ -176,6 +186,7 @@ namespace DataProtectorWebBridge.Services
             if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
             {
                 return "observed";

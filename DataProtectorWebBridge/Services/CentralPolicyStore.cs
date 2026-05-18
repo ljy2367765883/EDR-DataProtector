@@ -61,7 +61,8 @@ namespace DataProtectorWebBridge.Services
                     usbCryptEnabled = QueryUsbCryptPolicy().enabled,
                     deviceCount = state.Devices.Count,
                     onlineDeviceCount = state.Devices.Values.Count(IsOnline),
-                    pendingTaskCount = state.Tasks.Count(task => task.status == "queued" || task.status == "sent")
+                    pendingTaskCount = state.Tasks.Count(task => task.status == "queued" || task.status == "sent"),
+                    dlpProtectionEnabled = QueryDlpProtectionPolicy().enabled
                 };
             }
         }
@@ -136,6 +137,15 @@ namespace DataProtectorWebBridge.Services
             {
                 EnsureUsbCryptPolicy();
                 return PolicyBridgeService.CloneUsbCryptPolicy(state.UsbCryptPolicy);
+            }
+        }
+
+        public PolicyBridgeService.DlpProtectionPolicyDto QueryDlpProtectionPolicy()
+        {
+            lock (syncRoot)
+            {
+                EnsureDlpProtectionPolicy();
+                return PolicyBridgeService.CloneDlpProtectionPolicy(state.DlpProtectionPolicy);
             }
         }
 
@@ -638,6 +648,36 @@ namespace DataProtectorWebBridge.Services
             return Success("USB encryption policy stored on central server.");
         }
 
+        public PolicyBridgeService.OperationResult UpdateDlpProtectionPolicy(PolicyBridgeService.DlpProtectionPolicyRequest request)
+        {
+            PolicyBridgeService.DlpProtectionPolicyDto normalized = PolicyBridgeService.NormalizeDlpProtectionPolicy(request);
+            lock (syncRoot)
+            {
+                EnsureDlpProtectionPolicy();
+                if (!PolicyBridgeService.SameDlpProtectionPolicy(state.DlpProtectionPolicy, normalized))
+                {
+                    state.DlpProtectionPolicy = PolicyBridgeService.CloneDlpProtectionPolicy(normalized);
+                    state.PolicyVersion++;
+                }
+                else
+                {
+                    state.DlpProtectionPolicy = PolicyBridgeService.CloneDlpProtectionPolicy(normalized);
+                }
+
+                AppendAudit(
+                    normalized.actor,
+                    "central.policy.dlp.update",
+                    "dlp-protection",
+                    PolicyBridgeService.DlpProtectionPolicySummary(normalized),
+                    true,
+                    "0x00000000",
+                    "Screenshot and clipboard DLP policy stored on central server.");
+                Save();
+            }
+
+            return Success("Screenshot and clipboard DLP policy stored on central server.");
+        }
+
         public AuditLog.AuditRecord[] ReadRecentAudit(int limit)
         {
             return QueryAudit(new AuditLog.AuditQueryOptions { Limit = limit }).items;
@@ -1098,6 +1138,7 @@ namespace DataProtectorWebBridge.Services
                     hashProtectPolicy = QueryHashProtectPolicy(),
                     lateralDefensePolicy = QueryLateralDefensePolicy(),
                     usbCryptPolicy = QueryUsbCryptPolicy(),
+                    dlpProtectionPolicy = QueryDlpProtectionPolicy(),
                     tasks = assignedTasks
                 };
             }
@@ -1155,6 +1196,10 @@ namespace DataProtectorWebBridge.Services
                     if (loaded != null && loaded.UsbCryptPolicy == null)
                     {
                         loaded.UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
+                    }
+                    if (loaded != null && loaded.DlpProtectionPolicy == null)
+                    {
+                        loaded.DlpProtectionPolicy = PolicyBridgeService.DefaultDlpProtectionPolicy();
                     }
                     if (loaded != null && loaded.UsbCryptDriverPackage == null)
                     {
@@ -1230,6 +1275,18 @@ namespace DataProtectorWebBridge.Services
             else
             {
                 state.UsbCryptPolicy = PolicyBridgeService.CloneUsbCryptPolicy(state.UsbCryptPolicy);
+            }
+        }
+
+        private void EnsureDlpProtectionPolicy()
+        {
+            if (state.DlpProtectionPolicy == null)
+            {
+                state.DlpProtectionPolicy = PolicyBridgeService.DefaultDlpProtectionPolicy();
+            }
+            else
+            {
+                state.DlpProtectionPolicy = PolicyBridgeService.CloneDlpProtectionPolicy(state.DlpProtectionPolicy);
             }
         }
 
@@ -3402,6 +3459,7 @@ namespace DataProtectorWebBridge.Services
                 HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
                 LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
                 UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
+                DlpProtectionPolicy = PolicyBridgeService.DefaultDlpProtectionPolicy();
                 UsbCryptDriverPackage = new UsbCryptDriverPackageInfo();
                 Devices = new Dictionary<string, CentralDeviceState>(StringComparer.OrdinalIgnoreCase);
                 RemovableDevices = new Dictionary<string, RemovableDeviceState>(StringComparer.OrdinalIgnoreCase);
@@ -3420,6 +3478,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.HashProtectPolicyDto HashProtectPolicy { get; set; }
             public PolicyBridgeService.LateralDefensePolicyDto LateralDefensePolicy { get; set; }
             public PolicyBridgeService.UsbCryptPolicyDto UsbCryptPolicy { get; set; }
+            public PolicyBridgeService.DlpProtectionPolicyDto DlpProtectionPolicy { get; set; }
             public UsbCryptDriverPackageInfo UsbCryptDriverPackage { get; set; }
             public Dictionary<string, CentralDeviceState> Devices { get; set; }
             public Dictionary<string, RemovableDeviceState> RemovableDevices { get; set; }
@@ -3803,6 +3862,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy { get; set; }
             public PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy { get; set; }
             public PolicyBridgeService.UsbCryptPolicyDto usbCryptPolicy { get; set; }
+            public PolicyBridgeService.DlpProtectionPolicyDto dlpProtectionPolicy { get; set; }
             public RemoteTaskDto[] tasks { get; set; }
         }
 

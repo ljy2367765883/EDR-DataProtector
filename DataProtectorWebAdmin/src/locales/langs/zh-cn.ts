@@ -527,6 +527,7 @@ const local: App.I18n.Schema = {
       webshell: 'WebShell',
       hashdump: 'Hash Dump',
       lateral: '横向移动',
+      dlp: '数据防泄密',
       remoteOps: '远程操作',
       agentSync: 'Agent 同步',
       system: '系统',
@@ -720,6 +721,7 @@ const local: App.I18n.Schema = {
         file: '文件策略',
         network: '网络防御',
         lateral: 'IPC / SMB 防御',
+        dlp: '截图 / 剪贴板防泄密',
         webshell: 'WebShell 防御',
         hashprotect: '反 Dump / Hash 防护',
         device: '设备管控'
@@ -807,6 +809,46 @@ const local: App.I18n.Schema = {
         remoteAdminLaunch: '远程管理工具启动',
         remoteAdminLaunchDesc: '在执行前阻止 schtasks、at、sc、wmic 和 PowerShell Remoting 启动模式。',
         saved: '横向移动防御策略已保存到中央策略。'
+      },
+      dlp: {
+        title: '截图和剪贴板防泄密',
+        enforcement: '终端 DLP 防护',
+        enforcementDesc: '通过 Agent 控制剪贴板流转和常见截图入口。',
+        clipboard: '剪贴板防护',
+        clipboardDesc: '监听剪贴板更新，并按策略清除非可信进程写入的敏感对象。',
+        screenshots: '截图防护',
+        screenshotsDesc: '阻断常见截图热键，并清除截图进入剪贴板后的图片数据。',
+        clipboardMode: '剪贴板模式',
+        screenshotMode: '截图模式',
+        modes: {
+          audit: '仅审计',
+          clear: '清除剪贴板',
+          block: '阻断 / 清除'
+        },
+        text: '文本',
+        images: '图片',
+        files: '文件',
+        clearScreenshotClipboard: '清除截图图片剪贴板',
+        blockHotkeys: '阻断 PrintScreen 和 Win+Shift+S',
+        trustedProcesses: '可信进程名',
+        trustedProcessPlaceholder: '每行一个进程，例如 SnippingTool.exe',
+        trustedDirectories: '可信进程目录',
+        trustedDirectoryPlaceholder: '每行一个目录，例如 C:\\Program Files\\TrustedApp',
+        activeControls: '生效控制：{count}',
+        trustedEntries: '可信项：{count}',
+        save: '保存 DLP 策略',
+        saved: '截图和剪贴板防泄密策略已保存到中央策略。',
+        surfaces: '受保护的数据流转面',
+        surfacesList: {
+          hotkeysTitle: '截图热键',
+          hotkeysDetail: '在非可信会话创建屏幕位图前阻断 PrintScreen 和 Win+Shift+S。',
+          clipboardImageTitle: '剪贴板图片',
+          clipboardImageDetail: '识别 Bitmap、DIB、PNG、增强型图元文件等图片格式，并按策略清除。',
+          clipboardTextTitle: '剪贴板文本',
+          clipboardTextDetail: '控制纯文本、Unicode 文本、HTML 和 RTF 等文本格式。',
+          clipboardFilesTitle: '剪贴板文件拖放',
+          clipboardFilesDetail: '控制 CF_HDROP 文件转移数据，降低复制外泄路径。'
+        }
       },
       webshell: {
         addTitle: '添加受保护 Web 目录',

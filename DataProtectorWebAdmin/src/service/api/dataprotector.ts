@@ -233,6 +233,21 @@ export function fetchUpdateUsbCryptPolicy(data: Api.DataProtector.UsbCryptPolicy
   });
 }
 
+export function fetchDlpProtectionPolicy() {
+  return request<Api.DataProtector.DlpProtectionPolicy>({
+    url: '/dlp/policy',
+    method: 'get'
+  });
+}
+
+export function fetchUpdateDlpProtectionPolicy(data: Api.DataProtector.DlpProtectionPolicyRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/dlp/policy',
+    method: 'post',
+    data
+  });
+}
+
 export function fetchUsbCryptDriverPackage() {
   return request<Api.DataProtector.UsbCryptDriverPackageInfo>({
     url: '/usbcrypt/driver-package',

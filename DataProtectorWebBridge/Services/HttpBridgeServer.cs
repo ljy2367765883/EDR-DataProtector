@@ -11,6 +11,7 @@ namespace DataProtectorWebBridge.Services
         private readonly PolicyBridgeService policyService;
         private readonly AuditLog auditLog;
         private readonly StaticWebContent staticWebContent;
+        private readonly DlpProtectionService dlpProtectionService = new DlpProtectionService();
         private bool disposed;
 
         public HttpBridgeServer(string prefix, PolicyBridgeService policyService, AuditLog auditLog, string webRoot)
@@ -185,11 +186,38 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/dlp/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", dlpProtectionService.QueryPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/dlp/policy")
+                {
+                    PolicyBridgeService.DlpProtectionPolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.DlpProtectionPolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = dlpProtectionService.SetPolicy(request);
+                    auditLog.Append(
+                        string.IsNullOrWhiteSpace(request == null ? string.Empty : request.actor) ? context.Request.UserHostAddress : request.actor,
+                        "policy.dlp.update",
+                        "dlp-protection",
+                        PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionService.QueryPolicy()),
+                        result.succeeded,
+                        result.status,
+                        result.message);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/audit/events")
                 {
                     try
                     {
                         policyService.DrainSecurityAuditRecords();
+                        foreach (AuditLog.AuditRecord record in dlpProtectionService.DrainAuditRecords())
+                        {
+                            auditLog.AppendRecord(record);
+                        }
                     }
                     catch
                     {
@@ -320,6 +348,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             disposed = true;
+            dlpProtectionService.Dispose();
             listener.Close();
         }
     }

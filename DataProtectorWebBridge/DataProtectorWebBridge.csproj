@@ -44,6 +44,7 @@
     <Reference Include="System.Management" />
     <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Windows.Forms" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Native\DataProtectorPolicyNative.cs" />
@@ -52,6 +53,7 @@
     <Compile Include="Services\AuditLog.cs" />
     <Compile Include="Services\CentralHttpServer.cs" />
     <Compile Include="Services\CentralPolicyStore.cs" />
+    <Compile Include="Services\DlpProtectionService.cs" />
     <Compile Include="Services\HttpBridgeServer.cs" />
     <Compile Include="Services\JsonResponse.cs" />
     <Compile Include="Services\PolicyBridgeService.cs" />

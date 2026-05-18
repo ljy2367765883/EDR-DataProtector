@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from 'vue';
-import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules } from 'naive-ui';
+import { NButton, NTag, type DataTableColumns, type FormInst, type FormRules, type UploadCustomRequestOptions } from 'naive-ui';
 import {
   fetchAddDeviceRule,
   fetchAddNetworkRule,
@@ -12,6 +12,7 @@ import {
   fetchClearPolicyRules,
   fetchClearWebShellRules,
   fetchDeviceRules,
+  fetchDlpProtectionPolicy,
   fetchHashProtectPolicy,
   fetchInitializeUsbCrypt,
   fetchLateralDefensePolicy,
@@ -28,6 +29,7 @@ import {
   fetchRemoveWebShellRule,
   fetchUpdateHashProtectPolicy,
   fetchUpdateLateralDefensePolicy,
+  fetchUpdateDlpProtectionPolicy,
   fetchUploadUsbCryptDriverPackage,
   fetchUsbCryptDriverPackage,
   fetchUpdateUsbCryptPolicy,
@@ -48,6 +50,7 @@ const usbCryptInitSubmitting = ref(false);
 const hashProtectSubmitting = ref(false);
 const lateralDefenseSubmitting = ref(false);
 const usbCryptSubmitting = ref(false);
+const dlpSubmitting = ref(false);
 const usbCryptPackageUploading = ref(false);
 const connected = ref(false);
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
@@ -92,6 +95,23 @@ const usbCryptPolicy = reactive<Api.DataProtector.UsbCryptPolicy>({
   keyMaterialId: '',
   actor: 'web-admin'
 });
+const dlpProtectionPolicy = reactive<Api.DataProtector.DlpProtectionPolicy>({
+  enabled: false,
+  protectClipboard: true,
+  protectScreenshots: true,
+  clipboardMode: 'clear',
+  screenshotMode: 'block',
+  clearClipboardText: true,
+  clearClipboardImages: true,
+  clearClipboardFiles: true,
+  clearScreenshotClipboard: true,
+  blockPrintScreenHotkeys: true,
+  trustedProcessNames: [],
+  trustedProcessDirectories: [],
+  actor: 'web-admin'
+});
+const dlpTrustedProcessesText = ref('');
+const dlpTrustedDirectoriesText = ref('');
 const formRef = ref<FormInst | null>(null);
 const networkFormRef = ref<FormInst | null>(null);
 const webShellFormRef = ref<FormInst | null>(null);
@@ -315,6 +335,64 @@ const usbCryptGroups = computed(() => ({
   provisioning: usbCryptPolicy.allowClientProvisioning ? $t('dataprotector.common.enabled') : $t('dataprotector.common.disabled'),
   runtimeReady: usbCryptDriverPackage.value.configured ? $t('dataprotector.policy.usbcrypt.packageReady') : $t('dataprotector.policy.usbcrypt.packageMissing')
 }));
+
+const dlpModeOptions = computed(() => [
+  { label: $t('dataprotector.policy.dlp.modes.audit'), value: 'audit' },
+  { label: $t('dataprotector.policy.dlp.modes.clear'), value: 'clear' },
+  { label: $t('dataprotector.policy.dlp.modes.block'), value: 'block' }
+]);
+
+const dlpGroups = computed(() => {
+  const activeControls = [
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.protectClipboard,
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.protectScreenshots,
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.clearClipboardText,
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.clearClipboardImages,
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.clearClipboardFiles,
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.clearScreenshotClipboard,
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.blockPrintScreenHotkeys
+  ].filter(Boolean).length;
+
+  return {
+    mode: dlpProtectionPolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
+    activeControls,
+    trustedEntries: dlpProtectionPolicy.trustedProcessNames.length + dlpProtectionPolicy.trustedProcessDirectories.length
+  };
+});
+
+const dlpSurfaces = computed(() => [
+  {
+    key: 'hotkeys',
+    title: $t('dataprotector.policy.dlp.surfacesList.hotkeysTitle'),
+    detail: $t('dataprotector.policy.dlp.surfacesList.hotkeysDetail'),
+    enabled: dlpProtectionPolicy.enabled && dlpProtectionPolicy.protectScreenshots && dlpProtectionPolicy.blockPrintScreenHotkeys,
+    icon: 'mdi:keyboard-outline'
+  },
+  {
+    key: 'clipboard-images',
+    title: $t('dataprotector.policy.dlp.surfacesList.clipboardImageTitle'),
+    detail: $t('dataprotector.policy.dlp.surfacesList.clipboardImageDetail'),
+    enabled:
+      dlpProtectionPolicy.enabled &&
+      ((dlpProtectionPolicy.protectScreenshots && dlpProtectionPolicy.clearScreenshotClipboard) ||
+        (dlpProtectionPolicy.protectClipboard && dlpProtectionPolicy.clearClipboardImages)),
+    icon: 'mdi:image-lock-outline'
+  },
+  {
+    key: 'clipboard-text',
+    title: $t('dataprotector.policy.dlp.surfacesList.clipboardTextTitle'),
+    detail: $t('dataprotector.policy.dlp.surfacesList.clipboardTextDetail'),
+    enabled: dlpProtectionPolicy.enabled && dlpProtectionPolicy.protectClipboard && dlpProtectionPolicy.clearClipboardText,
+    icon: 'mdi:clipboard-text-lock-outline'
+  },
+  {
+    key: 'clipboard-files',
+    title: $t('dataprotector.policy.dlp.surfacesList.clipboardFilesTitle'),
+    detail: $t('dataprotector.policy.dlp.surfacesList.clipboardFilesDetail'),
+    enabled: dlpProtectionPolicy.enabled && dlpProtectionPolicy.protectClipboard && dlpProtectionPolicy.clearClipboardFiles,
+    icon: 'mdi:file-lock-outline'
+  }
+]);
 
 const usbCryptInitReady = computed(() => {
   return (
@@ -806,6 +884,37 @@ function applyUsbCryptPolicy(policy?: Api.DataProtector.UsbCryptPolicy) {
   usbCryptPolicy.actor = 'web-admin';
 }
 
+function linesToList(value: string) {
+  return Array.from(
+    new Set(
+      value
+        .split(/\r?\n/)
+        .map(item => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function applyDlpProtectionPolicy(policy?: Api.DataProtector.DlpProtectionPolicy) {
+  if (!policy) return;
+
+  dlpProtectionPolicy.enabled = Boolean(policy.enabled);
+  dlpProtectionPolicy.protectClipboard = Boolean(policy.protectClipboard);
+  dlpProtectionPolicy.protectScreenshots = Boolean(policy.protectScreenshots);
+  dlpProtectionPolicy.clipboardMode = policy.clipboardMode || 'clear';
+  dlpProtectionPolicy.screenshotMode = policy.screenshotMode || 'block';
+  dlpProtectionPolicy.clearClipboardText = Boolean(policy.clearClipboardText);
+  dlpProtectionPolicy.clearClipboardImages = Boolean(policy.clearClipboardImages);
+  dlpProtectionPolicy.clearClipboardFiles = Boolean(policy.clearClipboardFiles);
+  dlpProtectionPolicy.clearScreenshotClipboard = Boolean(policy.clearScreenshotClipboard);
+  dlpProtectionPolicy.blockPrintScreenHotkeys = Boolean(policy.blockPrintScreenHotkeys);
+  dlpProtectionPolicy.trustedProcessNames = policy.trustedProcessNames || [];
+  dlpProtectionPolicy.trustedProcessDirectories = policy.trustedProcessDirectories || [];
+  dlpProtectionPolicy.actor = 'web-admin';
+  dlpTrustedProcessesText.value = dlpProtectionPolicy.trustedProcessNames.join('\n');
+  dlpTrustedDirectoriesText.value = dlpProtectionPolicy.trustedProcessDirectories.join('\n');
+}
+
 async function refresh() {
   loading.value = true;
   try {
@@ -819,6 +928,7 @@ async function refresh() {
       hashProtectPolicyResult,
       lateralDefensePolicyResult,
       usbCryptPolicyResult,
+      dlpProtectionPolicyResult,
       usbCryptPackageResult
     ] = await Promise.all([
       fetchBridgeStatus(),
@@ -830,6 +940,7 @@ async function refresh() {
       fetchHashProtectPolicy(),
       fetchLateralDefensePolicy(),
       fetchUsbCryptPolicy(),
+      fetchDlpProtectionPolicy(),
       fetchUsbCryptDriverPackage()
     ]);
     connected.value = Boolean(statusResult.data?.connected);
@@ -841,6 +952,7 @@ async function refresh() {
     if (!hashProtectPolicyResult.error) applyHashProtectPolicy(hashProtectPolicyResult.data);
     if (!lateralDefensePolicyResult.error) applyLateralDefensePolicy(lateralDefensePolicyResult.data);
     if (!usbCryptPolicyResult.error) applyUsbCryptPolicy(usbCryptPolicyResult.data);
+    if (!dlpProtectionPolicyResult.error) applyDlpProtectionPolicy(dlpProtectionPolicyResult.data);
     if (!usbCryptPackageResult.error) usbCryptDriverPackage.value = usbCryptPackageResult.data;
   } finally {
     loading.value = false;
@@ -1119,6 +1231,36 @@ async function saveUsbCryptPolicy() {
   }
 }
 
+async function saveDlpProtectionPolicy() {
+  dlpSubmitting.value = true;
+  try {
+    const trustedProcessNames = linesToList(dlpTrustedProcessesText.value);
+    const trustedProcessDirectories = linesToList(dlpTrustedDirectoriesText.value);
+    const { error, data } = await fetchUpdateDlpProtectionPolicy({
+      enabled: dlpProtectionPolicy.enabled,
+      protectClipboard: dlpProtectionPolicy.protectClipboard,
+      protectScreenshots: dlpProtectionPolicy.protectScreenshots,
+      clipboardMode: dlpProtectionPolicy.clipboardMode,
+      screenshotMode: dlpProtectionPolicy.screenshotMode,
+      clearClipboardText: dlpProtectionPolicy.clearClipboardText,
+      clearClipboardImages: dlpProtectionPolicy.clearClipboardImages,
+      clearClipboardFiles: dlpProtectionPolicy.clearClipboardFiles,
+      clearScreenshotClipboard: dlpProtectionPolicy.clearScreenshotClipboard,
+      blockPrintScreenHotkeys: dlpProtectionPolicy.blockPrintScreenHotkeys,
+      trustedProcessNames,
+      trustedProcessDirectories,
+      actor: 'web-admin'
+    });
+
+    if (!error && data.succeeded) {
+      window.$message?.success($t('dataprotector.policy.dlp.saved'));
+      await refresh();
+    }
+  } finally {
+    dlpSubmitting.value = false;
+  }
+}
+
 function fileToBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -1132,7 +1274,7 @@ function fileToBase64(file: File) {
   });
 }
 
-async function handleUsbCryptPackageUpload(options: { file: { file?: File; name?: string }; onFinish?: () => void; onError?: () => void }) {
+async function handleUsbCryptPackageUpload(options: UploadCustomRequestOptions) {
   const file = options.file.file;
   if (!file) {
     options.onError?.();
@@ -1602,6 +1744,149 @@ onMounted(refresh);
                       </NTag>
                     </div>
                   </div>
+                </NGi>
+              </NGrid>
+            </NCard>
+          </NGi>
+        </NGrid>
+      </NTabPane>
+
+      <NTabPane name="dlp" :tab="$t('dataprotector.policy.tabs.dlp')">
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 m:9">
+            <NCard :title="$t('dataprotector.policy.dlp.title')" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NTag :type="dlpProtectionPolicy.enabled ? 'success' : 'error'" :bordered="false">
+                  {{ dlpGroups.mode }}
+                </NTag>
+              </template>
+
+              <NSpace vertical :size="18">
+                <div class="flex items-center justify-between gap-16px rounded-8px bg-gray-50 p-14px dark:bg-dark-3">
+                  <div class="min-w-0">
+                    <div class="text-15px font-700">{{ $t('dataprotector.policy.dlp.enforcement') }}</div>
+                    <div class="m-t-4px text-12px text-gray-500">{{ $t('dataprotector.policy.dlp.enforcementDesc') }}</div>
+                  </div>
+                  <NSwitch v-model:value="dlpProtectionPolicy.enabled">
+                    <template #checked>{{ $t('dataprotector.common.enabled') }}</template>
+                    <template #unchecked>{{ $t('dataprotector.common.disabled') }}</template>
+                  </NSwitch>
+                </div>
+
+                <NGrid :x-gap="12" :y-gap="12" cols="1 l:2">
+                  <NGi>
+                    <div class="h-full rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="min-w-0">
+                          <div class="font-700">{{ $t('dataprotector.policy.dlp.clipboard') }}</div>
+                          <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.dlp.clipboardDesc') }}</div>
+                        </div>
+                        <NSwitch v-model:value="dlpProtectionPolicy.protectClipboard" :disabled="!dlpProtectionPolicy.enabled" />
+                      </div>
+                      <NFormItem class="m-t-12px" :label="$t('dataprotector.policy.dlp.clipboardMode')">
+                        <NSelect
+                          v-model:value="dlpProtectionPolicy.clipboardMode"
+                          :disabled="!dlpProtectionPolicy.enabled || !dlpProtectionPolicy.protectClipboard"
+                          :options="dlpModeOptions"
+                        />
+                      </NFormItem>
+                      <NSpace>
+                        <NCheckbox v-model:checked="dlpProtectionPolicy.clearClipboardText" :disabled="!dlpProtectionPolicy.enabled || !dlpProtectionPolicy.protectClipboard">
+                          {{ $t('dataprotector.policy.dlp.text') }}
+                        </NCheckbox>
+                        <NCheckbox v-model:checked="dlpProtectionPolicy.clearClipboardImages" :disabled="!dlpProtectionPolicy.enabled || !dlpProtectionPolicy.protectClipboard">
+                          {{ $t('dataprotector.policy.dlp.images') }}
+                        </NCheckbox>
+                        <NCheckbox v-model:checked="dlpProtectionPolicy.clearClipboardFiles" :disabled="!dlpProtectionPolicy.enabled || !dlpProtectionPolicy.protectClipboard">
+                          {{ $t('dataprotector.policy.dlp.files') }}
+                        </NCheckbox>
+                      </NSpace>
+                    </div>
+                  </NGi>
+
+                  <NGi>
+                    <div class="h-full rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="min-w-0">
+                          <div class="font-700">{{ $t('dataprotector.policy.dlp.screenshots') }}</div>
+                          <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.dlp.screenshotsDesc') }}</div>
+                        </div>
+                        <NSwitch v-model:value="dlpProtectionPolicy.protectScreenshots" :disabled="!dlpProtectionPolicy.enabled" />
+                      </div>
+                      <NFormItem class="m-t-12px" :label="$t('dataprotector.policy.dlp.screenshotMode')">
+                        <NSelect
+                          v-model:value="dlpProtectionPolicy.screenshotMode"
+                          :disabled="!dlpProtectionPolicy.enabled || !dlpProtectionPolicy.protectScreenshots"
+                          :options="dlpModeOptions"
+                        />
+                      </NFormItem>
+                      <NSpace vertical :size="10">
+                        <NCheckbox v-model:checked="dlpProtectionPolicy.blockPrintScreenHotkeys" :disabled="!dlpProtectionPolicy.enabled || !dlpProtectionPolicy.protectScreenshots">
+                          {{ $t('dataprotector.policy.dlp.blockHotkeys') }}
+                        </NCheckbox>
+                        <NCheckbox v-model:checked="dlpProtectionPolicy.clearScreenshotClipboard" :disabled="!dlpProtectionPolicy.enabled || !dlpProtectionPolicy.protectScreenshots">
+                          {{ $t('dataprotector.policy.dlp.clearScreenshotClipboard') }}
+                        </NCheckbox>
+                      </NSpace>
+                    </div>
+                  </NGi>
+                </NGrid>
+
+                <div class="flex flex-wrap items-center justify-between gap-12px">
+                  <NSpace>
+                    <NTag type="info">{{ $t('dataprotector.policy.dlp.activeControls', { count: dlpGroups.activeControls }) }}</NTag>
+                    <NTag type="warning">{{ $t('dataprotector.policy.dlp.trustedEntries', { count: dlpGroups.trustedEntries }) }}</NTag>
+                  </NSpace>
+                  <NButton type="primary" :loading="dlpSubmitting" @click="saveDlpProtectionPolicy">
+                    <template #icon><SvgIcon icon="mdi:content-save-lock-outline" /></template>
+                    {{ $t('dataprotector.policy.dlp.save') }}
+                  </NButton>
+                </div>
+              </NSpace>
+            </NCard>
+          </NGi>
+
+          <NGi span="24 m:15">
+            <NCard :title="$t('dataprotector.policy.dlp.surfaces')" :bordered="false" class="card-wrapper">
+              <NGrid :x-gap="12" :y-gap="12" cols="1 l:2">
+                <NGi v-for="surface in dlpSurfaces" :key="surface.key">
+                  <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
+                    <div class="flex items-start justify-between gap-12px">
+                      <div class="flex min-w-0 items-center gap-10px">
+                        <SvgIcon :icon="surface.icon" class="text-22px text-primary" />
+                        <div class="min-w-0">
+                          <div class="truncate text-15px font-700">{{ surface.title }}</div>
+                          <div class="m-t-6px text-12px leading-5 text-gray-500">{{ surface.detail }}</div>
+                        </div>
+                      </div>
+                      <NTag :type="surface.enabled ? 'success' : 'default'" :bordered="false">
+                        {{ surface.enabled ? $t('dataprotector.common.active') : $t('dataprotector.common.inactiveState') }}
+                      </NTag>
+                    </div>
+                  </div>
+                </NGi>
+              </NGrid>
+
+              <NGrid class="m-t-14px" :x-gap="12" :y-gap="12" cols="1 l:2">
+                <NGi>
+                  <NFormItem :label="$t('dataprotector.policy.dlp.trustedProcesses')">
+                    <NInput
+                      v-model:value="dlpTrustedProcessesText"
+                      type="textarea"
+                      :autosize="{ minRows: 5, maxRows: 8 }"
+                      :placeholder="$t('dataprotector.policy.dlp.trustedProcessPlaceholder')"
+                    />
+                  </NFormItem>
+                </NGi>
+                <NGi>
+                  <NFormItem :label="$t('dataprotector.policy.dlp.trustedDirectories')">
+                    <NInput
+                      v-model:value="dlpTrustedDirectoriesText"
+                      type="textarea"
+                      :autosize="{ minRows: 5, maxRows: 8 }"
+                      :placeholder="$t('dataprotector.policy.dlp.trustedDirectoryPlaceholder')"
+                    />
+                  </NFormItem>
                 </NGi>
               </NGrid>
             </NCard>

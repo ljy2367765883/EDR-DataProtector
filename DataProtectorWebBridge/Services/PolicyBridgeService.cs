@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -1663,6 +1664,153 @@ namespace DataProtectorWebBridge.Services
                 string.IsNullOrWhiteSpace(normalized.keyMaterialId) ? "(none)" : normalized.keyMaterialId);
         }
 
+        internal static DlpProtectionPolicyDto DefaultDlpProtectionPolicy()
+        {
+            return new DlpProtectionPolicyDto
+            {
+                enabled = false,
+                protectClipboard = true,
+                protectScreenshots = true,
+                clipboardMode = "clear",
+                screenshotMode = "block",
+                clearClipboardText = true,
+                clearClipboardImages = true,
+                clearClipboardFiles = true,
+                clearScreenshotClipboard = true,
+                blockPrintScreenHotkeys = true,
+                trustedProcessNames = new string[0],
+                trustedProcessDirectories = new string[0],
+                actor = "system"
+            };
+        }
+
+        internal static DlpProtectionPolicyDto CloneDlpProtectionPolicy(DlpProtectionPolicyDto policy)
+        {
+            DlpProtectionPolicyDto source = policy ?? DefaultDlpProtectionPolicy();
+            return new DlpProtectionPolicyDto
+            {
+                enabled = source.enabled,
+                protectClipboard = source.protectClipboard,
+                protectScreenshots = source.protectScreenshots,
+                clipboardMode = NormalizeDlpMode(source.clipboardMode, "clear"),
+                screenshotMode = NormalizeDlpMode(source.screenshotMode, "block"),
+                clearClipboardText = source.clearClipboardText,
+                clearClipboardImages = source.clearClipboardImages,
+                clearClipboardFiles = source.clearClipboardFiles,
+                clearScreenshotClipboard = source.clearScreenshotClipboard,
+                blockPrintScreenHotkeys = source.blockPrintScreenHotkeys,
+                trustedProcessNames = NormalizeDlpStringList(source.trustedProcessNames),
+                trustedProcessDirectories = NormalizeDlpStringList(source.trustedProcessDirectories),
+                actor = string.IsNullOrWhiteSpace(source.actor) ? "system" : source.actor.Trim()
+            };
+        }
+
+        internal static DlpProtectionPolicyDto NormalizeDlpProtectionPolicy(DlpProtectionPolicyRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(1, "DLP protection policy body is required.");
+            }
+
+            return new DlpProtectionPolicyDto
+            {
+                enabled = request.enabled,
+                protectClipboard = request.protectClipboard,
+                protectScreenshots = request.protectScreenshots,
+                clipboardMode = NormalizeDlpMode(request.clipboardMode, "clear"),
+                screenshotMode = NormalizeDlpMode(request.screenshotMode, "block"),
+                clearClipboardText = request.clearClipboardText,
+                clearClipboardImages = request.clearClipboardImages,
+                clearClipboardFiles = request.clearClipboardFiles,
+                clearScreenshotClipboard = request.clearScreenshotClipboard,
+                blockPrintScreenHotkeys = request.blockPrintScreenHotkeys,
+                trustedProcessNames = NormalizeDlpStringList(request.trustedProcessNames),
+                trustedProcessDirectories = NormalizeDlpStringList(request.trustedProcessDirectories),
+                actor = string.IsNullOrWhiteSpace(request.actor) ? "web-admin" : request.actor.Trim()
+            };
+        }
+
+        internal static string DlpProtectionPolicySummary(DlpProtectionPolicyDto policy)
+        {
+            DlpProtectionPolicyDto normalized = CloneDlpProtectionPolicy(policy);
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "enabled={0};clipboard={1};clipboardMode={2};screenshots={3};screenshotMode={4};hotkeys={5};trustedProcesses={6};trustedDirectories={7}",
+                normalized.enabled,
+                normalized.protectClipboard,
+                normalized.clipboardMode,
+                normalized.protectScreenshots,
+                normalized.screenshotMode,
+                normalized.blockPrintScreenHotkeys,
+                normalized.trustedProcessNames.Length,
+                normalized.trustedProcessDirectories.Length);
+        }
+
+        internal static bool SameDlpProtectionPolicy(DlpProtectionPolicyDto left, DlpProtectionPolicyDto right)
+        {
+            DlpProtectionPolicyDto a = CloneDlpProtectionPolicy(left);
+            DlpProtectionPolicyDto b = CloneDlpProtectionPolicy(right);
+            return a.enabled == b.enabled &&
+                   a.protectClipboard == b.protectClipboard &&
+                   a.protectScreenshots == b.protectScreenshots &&
+                   string.Equals(a.clipboardMode, b.clipboardMode, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(a.screenshotMode, b.screenshotMode, StringComparison.OrdinalIgnoreCase) &&
+                   a.clearClipboardText == b.clearClipboardText &&
+                   a.clearClipboardImages == b.clearClipboardImages &&
+                   a.clearClipboardFiles == b.clearClipboardFiles &&
+                   a.clearScreenshotClipboard == b.clearScreenshotClipboard &&
+                   a.blockPrintScreenHotkeys == b.blockPrintScreenHotkeys &&
+                   SameStringSet(a.trustedProcessNames, b.trustedProcessNames) &&
+                   SameStringSet(a.trustedProcessDirectories, b.trustedProcessDirectories);
+        }
+
+        private static string NormalizeDlpMode(string value, string fallback)
+        {
+            string mode = (value ?? string.Empty).Trim().ToLowerInvariant();
+            if (mode == "audit" || mode == "clear" || mode == "block")
+            {
+                return mode;
+            }
+
+            return fallback;
+        }
+
+        private static string[] NormalizeDlpStringList(string[] values)
+        {
+            if (values == null)
+            {
+                return new string[0];
+            }
+
+            return values
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+                .Take(512)
+                .ToArray();
+        }
+
+        private static bool SameStringSet(string[] left, string[] right)
+        {
+            string[] a = NormalizeDlpStringList(left);
+            string[] b = NormalizeDlpStringList(right);
+            if (a.Length != b.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < a.Length; index++)
+            {
+                if (!string.Equals(a[index], b[index], StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private static unsafe string DecodeWebShellSample(DataProtectorPolicyNative.SampleBuffer sample, int length)
         {
             if (length <= 0)
@@ -2320,6 +2468,27 @@ namespace DataProtectorWebBridge.Services
         }
 
         public sealed class UsbCryptPolicyDto : UsbCryptPolicyRequest
+        {
+        }
+
+        public class DlpProtectionPolicyRequest
+        {
+            public bool enabled { get; set; }
+            public bool protectClipboard { get; set; }
+            public bool protectScreenshots { get; set; }
+            public string clipboardMode { get; set; }
+            public string screenshotMode { get; set; }
+            public bool clearClipboardText { get; set; }
+            public bool clearClipboardImages { get; set; }
+            public bool clearClipboardFiles { get; set; }
+            public bool clearScreenshotClipboard { get; set; }
+            public bool blockPrintScreenHotkeys { get; set; }
+            public string[] trustedProcessNames { get; set; }
+            public string[] trustedProcessDirectories { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class DlpProtectionPolicyDto : DlpProtectionPolicyRequest
         {
         }
 

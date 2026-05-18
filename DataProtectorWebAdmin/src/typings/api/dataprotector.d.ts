@@ -215,6 +215,26 @@ declare namespace Api {
 
     interface UsbCryptPolicyRequest extends UsbCryptPolicy {}
 
+    type DlpProtectionMode = 'audit' | 'clear' | 'block';
+
+    interface DlpProtectionPolicy {
+      enabled: boolean;
+      protectClipboard: boolean;
+      protectScreenshots: boolean;
+      clipboardMode: DlpProtectionMode;
+      screenshotMode: DlpProtectionMode;
+      clearClipboardText: boolean;
+      clearClipboardImages: boolean;
+      clearClipboardFiles: boolean;
+      clearScreenshotClipboard: boolean;
+      blockPrintScreenHotkeys: boolean;
+      trustedProcessNames: string[];
+      trustedProcessDirectories: string[];
+      actor?: string;
+    }
+
+    interface DlpProtectionPolicyRequest extends DlpProtectionPolicy {}
+
     interface UsbCryptDriverPackageInfo {
       configured: boolean;
       version: string;
@@ -335,7 +355,7 @@ declare namespace Api {
       Message: string;
     }
 
-    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'hashdump' | 'lateral' | 'remote' | 'agent' | 'system';
+    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'hashdump' | 'lateral' | 'dlp' | 'remote' | 'agent' | 'system';
     type AuditResult = 'all' | 'success' | 'failed';
     type AuditSeverity = 'all' | 'critical' | 'warning' | 'info' | 'operational';
     type AuditDisposition = 'all' | 'blocked' | 'observed' | 'completed' | 'failed';
