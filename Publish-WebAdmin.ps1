@@ -112,6 +112,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $webRoot = Join-Path $root "DataProtectorWebAdmin"
 $webDist = Join-Path $webRoot "dist"
 $bridgeOutput = Join-Path $root "DataProtectorWebBridge\bin\$Platform\$Configuration"
+$agentClientOutput = Join-Path $root "DataProtectorAgentClient\bin\$Platform\$Configuration"
 $driverPackage = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector"
 $driverCertificate = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector.cer"
 $usbCryptDriverPackage = Join-Path $root "DataProtectorUsbCrypt\$Platform\$Configuration\DataProtectorUsbCrypt"
@@ -130,6 +131,7 @@ try {
     Invoke-Checked $msBuild $usbCryptBuildArguments "DataProtectorUsbCrypt driver build"
     Invoke-Checked $msBuild @(".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbTool build"
     Invoke-Checked $msBuild @(".\DataProtectorWebBridge\DataProtectorWebBridge.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorWebBridge build"
+    Invoke-Checked $msBuild @(".\DataProtectorAgentClient\DataProtectorAgentClient.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorAgentClient build"
 
     Push-Location $webRoot
     try {
@@ -146,6 +148,10 @@ try {
 
     if (-not (Test-Path -LiteralPath $bridgeOutput)) {
         throw "Bridge build output was not found: $bridgeOutput"
+    }
+
+    if (-not (Test-Path -LiteralPath $agentClientOutput)) {
+        throw "Agent client build output was not found: $agentClientOutput"
     }
 
     if (-not (Test-Path -LiteralPath $driverPackage)) {
@@ -193,6 +199,21 @@ try {
         }
     }
 
+    $agentClientFiles = @(
+        "DataProtectorAgentClient.exe",
+        "DataProtectorAgentClient.exe.config",
+        "Wpf.Ui.dll"
+    )
+
+    foreach ($file in $agentClientFiles) {
+        $source = Join-Path $agentClientOutput $file
+        if (-not (Test-Path -LiteralPath $source)) {
+            throw "Required agent client publish file is missing: $source"
+        }
+
+        Copy-Item -LiteralPath $source -Destination $agentPublish -Force
+    }
+
     Copy-Item -Path (Join-Path $driverPackage "*") -Destination $agentDriverPublish -Recurse -Force
     if (Test-Path -LiteralPath $driverCertificate) {
         Copy-Item -LiteralPath $driverCertificate -Destination $agentDriverPublish -Force
@@ -236,6 +257,9 @@ http://<server-ip>:17643/
 
 Run the endpoint agent on every protected client:
 agent\DataProtectorWebBridge.exe agent http://<server-ip>:17643/ 15
+
+Open the endpoint WPF-UI client:
+agent\DataProtectorAgentClient.exe
 
 Endpoint driver package:
 agent\driver\DataProtector.inf

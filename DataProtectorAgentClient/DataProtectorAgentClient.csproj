@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" Condition="false" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <ProjectGuid>{A3E192C4-162B-4CE0-9F69-C9F2DD6400D5}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>DataProtectorAgentClient</RootNamespace>
+    <AssemblyName>DataProtectorAgentClient</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <ProjectTypeGuids>{60DC8134-EBA5-43B8-BCC9-BB4BC16C2548};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
+    <WarningLevel>4</WarningLevel>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+    <LangVersion>7.3</LangVersion>
+    <ApplicationIcon>AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x64' ">
+    <PlatformTarget>x64</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\x64\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x64' ">
+    <PlatformTarget>x64</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\x64\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="Wpf.Ui">
+      <HintPath>$(UserProfile)\.nuget\packages\wpf-ui\4.3.0\lib\net472\Wpf.Ui.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <ApplicationDefinition Include="App.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </ApplicationDefinition>
+    <Page Include="MainWindow.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="App.xaml.cs">
+      <DependentUpon>App.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="Infrastructure\BoolToVisibilityConverter.cs" />
+    <Compile Include="Infrastructure\ObservableObject.cs" />
+    <Compile Include="Infrastructure\RelayCommand.cs" />
+    <Compile Include="Infrastructure\ResourceBrushConverter.cs" />
+    <Compile Include="Infrastructure\StringEqualsToVisibilityConverter.cs" />
+    <Compile Include="Infrastructure\WindowsAcrylicFallback.cs" />
+    <Compile Include="MainWindow.xaml.cs">
+      <DependentUpon>MainWindow.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="Models\AgentClientSnapshot.cs" />
+    <Compile Include="Models\AgentStateModel.cs" />
+    <Compile Include="Models\AuditRecord.cs" />
+    <Compile Include="Models\ProtectionFeatureViewItem.cs" />
+    <Compile Include="Models\RuleViewItem.cs" />
+    <Compile Include="Models\SecurityEventViewItem.cs" />
+    <Compile Include="Native\DataProtectorPolicyNative.cs" />
+    <Compile Include="Services\AgentClientSnapshotService.cs" />
+    <Compile Include="Services\AuditLogReader.cs" />
+    <Compile Include="Services\LocalPolicyReader.cs" />
+    <Compile Include="ViewModels\MainViewModel.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="App.config" />
+    <Resource Include="AppIcon.ico" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <PropertyGroup>
+    <NativePolicyApiProjectPath>$(MSBuildThisFileDirectory)..\DataProtectorPolicyApi\x64\$(Configuration)\DataProtectorPolicyApi.dll</NativePolicyApiProjectPath>
+  </PropertyGroup>
+  <Target Name="CopyNativePolicyApi" AfterTargets="Build">
+    <Copy SourceFiles="$(NativePolicyApiProjectPath)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" Condition="Exists('$(NativePolicyApiProjectPath)')" />
+    <Error Text="DataProtectorPolicyApi.dll was not found. Build DataProtectorPolicyApi before DataProtectorAgentClient." Condition="!Exists('$(NativePolicyApiProjectPath)')" />
+  </Target>
+</Project>
