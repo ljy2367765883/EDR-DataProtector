@@ -3468,50 +3468,41 @@ static void UpdateStatusUi(void)
     DPUSB_STATUS status;
     DWORD error = ERROR_SUCCESS;
     wchar_t message[256];
-    wchar_t detail[512];
+    wchar_t detail[256];
 
     if (QueryExpectedRuntimeStatus(&status, &error)) {
         g_Ui.DriverReady = TRUE;
         g_Ui.SessionOpen = status.SessionOpen != FALSE;
-        SetTextBuffer(g_Ui.DriverBadgeText, sizeof(g_Ui.DriverBadgeText) / sizeof(g_Ui.DriverBadgeText[0]), L"Driver Ready");
-        swprintf_s(detail,
-                   sizeof(detail) / sizeof(detail[0]),
-                   L"Loaded and verified\r\nRuntime: 0x%08lX\r\nCapabilities: 0x%08lX",
-                   status.RuntimeVersion,
-                   status.Capabilities);
-        SetTextBuffer(g_Ui.ServiceStateText, sizeof(g_Ui.ServiceStateText) / sizeof(g_Ui.ServiceStateText[0]), detail);
         if (g_Ui.SessionOpen) {
-            SetTextBuffer(g_Ui.SessionBadgeText, sizeof(g_Ui.SessionBadgeText) / sizeof(g_Ui.SessionBadgeText[0]), L"Session Unlocked");
-            swprintf_s(detail,
-                       sizeof(detail) / sizeof(detail[0]),
-                       L"Device: %s\r\nAlgorithm: RC4\r\nData offset: %I64u bytes\r\nData length: %I64u bytes",
-                       status.DeviceId,
-                       status.DataOffsetBytes,
-                       status.DataLengthBytes);
+            SetTextBuffer(g_Ui.DriverBadgeText, sizeof(g_Ui.DriverBadgeText) / sizeof(g_Ui.DriverBadgeText[0]), L"Unlocked");
+            SetTextBuffer(g_Ui.SessionBadgeText, sizeof(g_Ui.SessionBadgeText) / sizeof(g_Ui.SessionBadgeText[0]), L"Unlocked");
+            swprintf_s(detail, sizeof(detail) / sizeof(detail[0]), L"Private workspace is ready.");
         } else {
+            SetTextBuffer(g_Ui.DriverBadgeText, sizeof(g_Ui.DriverBadgeText) / sizeof(g_Ui.DriverBadgeText[0]), L"Ready");
             SetTextBuffer(g_Ui.SessionBadgeText, sizeof(g_Ui.SessionBadgeText) / sizeof(g_Ui.SessionBadgeText[0]), L"Session Locked");
-            swprintf_s(detail, sizeof(detail) / sizeof(detail[0]), L"No secure USB session is currently open.");
+            swprintf_s(detail, sizeof(detail) / sizeof(detail[0]), L"Driver is ready. Enter password to unlock.");
         }
+        SetTextBuffer(g_Ui.ServiceStateText, sizeof(g_Ui.ServiceStateText) / sizeof(g_Ui.ServiceStateText[0]), detail);
         SetTextBuffer(g_Ui.SessionStateText, sizeof(g_Ui.SessionStateText) / sizeof(g_Ui.SessionStateText[0]), detail);
     } else {
         g_Ui.DriverReady = FALSE;
         g_Ui.SessionOpen = FALSE;
-        SetTextBuffer(g_Ui.DriverBadgeText, sizeof(g_Ui.DriverBadgeText) / sizeof(g_Ui.DriverBadgeText[0]), L"Driver Offline");
+        SetTextBuffer(g_Ui.DriverBadgeText, sizeof(g_Ui.DriverBadgeText) / sizeof(g_Ui.DriverBadgeText[0]), L"Locked");
         SetTextBuffer(g_Ui.SessionBadgeText, sizeof(g_Ui.SessionBadgeText) / sizeof(g_Ui.SessionBadgeText[0]), L"Session Locked");
 
         if (IsExpectedDriverNotLoadedError(error)) {
             swprintf_s(detail,
                        sizeof(detail) / sizeof(detail[0]),
-                       L"Waiting for password verification. The USB driver will be loaded from this USB package only after Unlock is pressed.");
+                       L"Enter password to unlock this USB.");
         } else {
             FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-            swprintf_s(detail, sizeof(detail) / sizeof(detail[0]), L"Not responding: %s", message);
+            swprintf_s(detail, sizeof(detail) / sizeof(detail[0]), L"Driver unavailable: %s", message);
         }
 
         SetTextBuffer(g_Ui.ServiceStateText, sizeof(g_Ui.ServiceStateText) / sizeof(g_Ui.ServiceStateText[0]), detail);
         SetTextBuffer(g_Ui.SessionStateText,
                       sizeof(g_Ui.SessionStateText) / sizeof(g_Ui.SessionStateText[0]),
-                      L"Enter the initialization password and press Unlock. A wrong password will not load the driver.");
+                      detail);
     }
 
     InvalidateRect(g_Ui.Window, NULL, TRUE);
@@ -3612,7 +3603,7 @@ static void RunUnlockFromUi(void)
         EnableWindow(g_Ui.UnlockButton, TRUE);
         EnableWindow(g_Ui.RefreshButton, TRUE);
         EnableWindow(g_Ui.LockButton, TRUE);
-        SetWindowTextSafe(g_Ui.UnlockButton, L"Unlock Workspace");
+        SetWindowTextSafe(g_Ui.UnlockButton, L"Unlock");
         AppendLog(L"Unlock failed: unable to start worker thread.");
         return;
     }
@@ -3741,7 +3732,7 @@ static void CompleteSafeEjectFromWorker(DPUSB_SAFE_EJECT_WORK_RESULT *result)
     EnableWindow(g_Ui.RefreshButton, TRUE);
     EnableWindow(g_Ui.LockButton, TRUE);
     EnableWindow(g_Ui.SafeEjectButton, TRUE);
-    SetWindowTextSafe(g_Ui.SafeEjectButton, L"Safe Eject");
+    SetWindowTextSafe(g_Ui.SafeEjectButton, L"Eject");
 
     if (result == NULL) {
         AppendLog(L"Safe eject failed before returning a result.");
@@ -3853,7 +3844,7 @@ static void CompleteUnlockFromWorker(DPUSB_UNLOCK_WORK_RESULT *result)
     EnableWindow(g_Ui.RefreshButton, TRUE);
     EnableWindow(g_Ui.LockButton, TRUE);
     EnableWindow(g_Ui.SafeEjectButton, TRUE);
-    SetWindowTextSafe(g_Ui.UnlockButton, L"Unlock Workspace");
+    SetWindowTextSafe(g_Ui.UnlockButton, L"Unlock");
 
     if (result != NULL) {
         if (result->DeployedDriverPath[0] != L'\0') {
@@ -3928,7 +3919,7 @@ static void RunSafeEjectFromUi(void)
         EnableWindow(g_Ui.RefreshButton, TRUE);
         EnableWindow(g_Ui.LockButton, TRUE);
         EnableWindow(g_Ui.SafeEjectButton, TRUE);
-        SetWindowTextSafe(g_Ui.SafeEjectButton, L"Safe Eject");
+        SetWindowTextSafe(g_Ui.SafeEjectButton, L"Eject");
         AppendLog(L"Safe eject failed: unable to start worker thread.");
         return;
     }
@@ -4012,39 +4003,38 @@ static void ComputeLayout(HWND hwnd, DPUSB_UI_LAYOUT *layout)
     RECT client;
     int width;
     int height;
-    int margin = 28;
-    int gap = 18;
-    int headerBottom = 104;
-    int leftWidth = 332;
-    int rightX;
-    int rightWidth;
-    int contentBottom;
+    int margin = 22;
+    int buttonWidth;
+    int buttonTop;
 
     GetClientRect(hwnd, &client);
     width = RectWidth(&client);
     height = RectHeight(&client);
-    contentBottom = height - margin;
-    rightX = margin + leftWidth + gap;
-    rightWidth = width - rightX - margin;
-    if (rightWidth < 548) {
-        rightWidth = 548;
+    if (width < 420) {
+        width = 420;
+    }
+    if (height < 250) {
+        height = 250;
     }
 
-    SetRectSize(&layout->DriverCard, margin, headerBottom + 22, leftWidth, 236);
-    SetRectSize(&layout->SessionCard, margin, layout->DriverCard.bottom + gap, leftWidth, 172);
-    SetRectSize(&layout->ControlCard, rightX, headerBottom + 22, rightWidth, 334);
-    SetRectSize(&layout->LogCard,
-                rightX,
-                layout->ControlCard.bottom + gap,
-                rightWidth,
-                contentBottom - layout->ControlCard.bottom - gap);
+    SetRectSize(&layout->ControlCard, margin, 70, width - (margin * 2), 152);
+    SetRectSize(&layout->PasswordEdit, layout->ControlCard.left + 18, layout->ControlCard.top + 58, RectWidth(&layout->ControlCard) - 36, 32);
 
-    SetRectSize(&layout->RefreshButton, layout->DriverCard.left + 22, layout->DriverCard.bottom - 58, 110, 36);
-    SetRectSize(&layout->PasswordEdit, layout->ControlCard.left + 28, layout->ControlCard.top + 116, rightWidth - 56, 34);
-    SetRectSize(&layout->UnlockButton, layout->ControlCard.left + 28, layout->ControlCard.bottom - 58, 168, 38);
-    SetRectSize(&layout->LockButton, layout->UnlockButton.right + 12, layout->ControlCard.bottom - 58, 82, 38);
-    SetRectSize(&layout->SafeEjectButton, layout->LockButton.right + 12, layout->ControlCard.bottom - 58, 118, 38);
-    SetRectSize(&layout->PlanButton, layout->SafeEjectButton.right + 12, layout->ControlCard.bottom - 58, 122, 38);
+    buttonTop = layout->PasswordEdit.bottom + 18;
+    buttonWidth = (RectWidth(&layout->ControlCard) - 36 - 16) / 3;
+    if (buttonWidth < 92) {
+        buttonWidth = 92;
+    }
+
+    SetRectSize(&layout->UnlockButton, layout->ControlCard.left + 18, buttonTop, buttonWidth, 34);
+    SetRectSize(&layout->LockButton, layout->UnlockButton.right + 8, buttonTop, buttonWidth, 34);
+    SetRectSize(&layout->SafeEjectButton, layout->LockButton.right + 8, buttonTop, buttonWidth, 34);
+
+    SetRectSize(&layout->DriverCard, 0, 0, 0, 0);
+    SetRectSize(&layout->SessionCard, 0, 0, 0, 0);
+    SetRectSize(&layout->LogCard, margin, layout->ControlCard.bottom + 12, width - (margin * 2), height - layout->ControlCard.bottom - margin - 12);
+    SetRectSize(&layout->RefreshButton, 0, 0, 0, 0);
+    SetRectSize(&layout->PlanButton, 0, 0, 0, 0);
 }
 
 static void MoveControlToRect(HWND hwnd, const RECT *rect)
@@ -4057,25 +4047,22 @@ static void MoveControlToRect(HWND hwnd, const RECT *rect)
 static void LayoutControls(HWND hwnd)
 {
     DPUSB_UI_LAYOUT layout;
-    RECT logEdit;
 
     ComputeLayout(hwnd, &layout);
     MoveControlToRect(g_Ui.PasswordEdit, &layout.PasswordEdit);
-    MoveControlToRect(g_Ui.RefreshButton, &layout.RefreshButton);
     MoveControlToRect(g_Ui.UnlockButton, &layout.UnlockButton);
     MoveControlToRect(g_Ui.LockButton, &layout.LockButton);
     MoveControlToRect(g_Ui.SafeEjectButton, &layout.SafeEjectButton);
-    MoveControlToRect(g_Ui.PlanButton, &layout.PlanButton);
 
-    logEdit = layout.LogCard;
-    logEdit.left += 24;
-    logEdit.top += 70;
-    logEdit.right -= 24;
-    logEdit.bottom -= 24;
-    if (logEdit.bottom < logEdit.top + 96) {
-        logEdit.bottom = logEdit.top + 96;
+    if (g_Ui.RefreshButton != NULL) {
+        ShowWindow(g_Ui.RefreshButton, SW_HIDE);
     }
-    MoveControlToRect(g_Ui.LogEdit, &logEdit);
+    if (g_Ui.PlanButton != NULL) {
+        ShowWindow(g_Ui.PlanButton, SW_HIDE);
+    }
+    if (g_Ui.LogEdit != NULL) {
+        ShowWindow(g_Ui.LogEdit, SW_HIDE);
+    }
 }
 
 static void DrawRoundFill(HDC dc, const RECT *rect, COLORREF fill, COLORREF border, int radius)
@@ -4161,41 +4148,21 @@ static void DrawLabelAndValue(HDC dc,
 
 static void DrawHeader(HDC dc, const RECT *client)
 {
-    RECT header;
-    RECT brandMark;
-    RECT line;
-    HBRUSH headerBrush;
-    HBRUSH lineBrush;
+    RECT dot;
 
-    SetRectSize(&header, 0, 0, RectWidth(client), 104);
-    headerBrush = CreateSolidBrush(RGB(255, 255, 255));
-    FillRect(dc, &header, headerBrush);
-    DeleteObject(headerBrush);
-
-    SetRectSize(&line, 0, 103, RectWidth(client), 1);
-    lineBrush = CreateSolidBrush(g_Ui.BorderColor);
-    FillRect(dc, &line, lineBrush);
-    DeleteObject(lineBrush);
-
-    SetRectSize(&brandMark, 28, 26, 48, 48);
-    DrawRoundFill(dc, &brandMark, RGB(37, 99, 235), RGB(37, 99, 235), 12);
-    DrawTextBlock(dc, L"DP", &brandMark, g_Ui.HeaderFont, RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    DrawOneLine(dc, L"DataProtector Secure USB", 92, 25, 420, 30, g_Ui.TitleFont, g_Ui.TextColor);
-    DrawOneLine(dc, L"Removable media protection and encrypted workspace unlock", 94, 58, 520, 22, g_Ui.BodyFont, g_Ui.MutedColor);
-
+    SetRectSize(&dot, 24, 24, 10, 10);
+    DrawRoundFill(dc,
+                  &dot,
+                  g_Ui.SessionOpen ? g_Ui.SuccessColor : g_Ui.AccentColor,
+                  g_Ui.SessionOpen ? g_Ui.SuccessColor : g_Ui.AccentColor,
+                  10);
+    DrawOneLine(dc, L"DataProtector USB", 44, 15, RectWidth(client) - 188, 26, g_Ui.HeaderFont, g_Ui.TextColor);
     DrawBadge(dc,
               g_Ui.DriverBadgeText[0] != L'\0' ? g_Ui.DriverBadgeText : L"Driver Offline",
-              client->right - 298,
-              38,
-              132,
-              g_Ui.DriverReady ? g_Ui.SuccessColor : g_Ui.DangerColor);
-    DrawBadge(dc,
-              g_Ui.SessionBadgeText[0] != L'\0' ? g_Ui.SessionBadgeText : L"Session Locked",
-              client->right - 154,
-              38,
-              126,
-              g_Ui.SessionOpen ? g_Ui.SuccessColor : g_Ui.DangerColor);
+              client->right - 112,
+              14,
+              88,
+              g_Ui.SessionOpen ? g_Ui.SuccessColor : (g_Ui.DriverReady ? g_Ui.AccentColor : g_Ui.MutedColor));
 }
 
 static void DrawUi(HDC dc, HWND hwnd)
@@ -4209,54 +4176,19 @@ static void DrawUi(HDC dc, HWND hwnd)
     FillRect(dc, &client, g_Ui.WindowBrush);
     DrawHeader(dc, &client);
 
-    DrawRoundFill(dc, &layout.DriverCard, g_Ui.CardColor, g_Ui.BorderColor, 14);
-    DrawCardHeader(dc, &layout.DriverCard, L"Driver Runtime", L"Loaded only after password verification");
-    DrawLabelAndValue(dc,
-                      L"USB PACKAGE DRIVER",
-                      g_Ui.DriverPathText[0] != L'\0' ? g_Ui.DriverPathText : L"DataProtectorUsbRuntime\\driver\\DataProtectorUsbCrypt.sys",
-                      layout.DriverCard.left + 24,
-                      layout.DriverCard.top + 86,
-                      RectWidth(&layout.DriverCard) - 48,
-                      42);
-    DrawLabelAndValue(dc,
-                      L"SERVICE STATE",
-                      g_Ui.ServiceStateText[0] != L'\0' ? g_Ui.ServiceStateText : L"Waiting for initialization",
-                      layout.DriverCard.left + 24,
-                      layout.DriverCard.top + 150,
-                      RectWidth(&layout.DriverCard) - 48,
-                      34);
-
-    DrawRoundFill(dc, &layout.SessionCard, g_Ui.CardColor, g_Ui.BorderColor, 14);
-    DrawCardHeader(dc, &layout.SessionCard, L"Session Status", L"Current unlock state");
+    DrawRoundFill(dc, &layout.ControlCard, g_Ui.CardColor, g_Ui.BorderColor, 14);
     SetRectSize(&textRect,
-                layout.SessionCard.left + 24,
-                layout.SessionCard.top + 88,
-                RectWidth(&layout.SessionCard) - 48,
-                RectHeight(&layout.SessionCard) - 108);
+                layout.ControlCard.left + 18,
+                layout.ControlCard.top + 16,
+                RectWidth(&layout.ControlCard) - 36,
+                26);
     DrawTextBlock(dc,
-                  g_Ui.SessionStateText[0] != L'\0' ? g_Ui.SessionStateText : L"Initialize the driver before unlocking protected media.",
+                  g_Ui.SessionStateText[0] != L'\0' ? g_Ui.SessionStateText : L"Enter password to unlock this USB.",
                   &textRect,
                   g_Ui.BodyFont,
                   g_Ui.TextColor,
-                  DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS);
-
-    DrawRoundFill(dc, &layout.ControlCard, g_Ui.CardColor, g_Ui.BorderColor, 14);
-    DrawCardHeader(dc, &layout.ControlCard, L"Unlock Workspace", L"Enter the initialization password from the authorized USB package");
-    DrawOneLine(dc, L"INITIALIZATION PASSWORD", layout.PasswordEdit.left, layout.PasswordEdit.top - 24, RectWidth(&layout.PasswordEdit), 18, g_Ui.SmallFont, g_Ui.MutedColor);
-    SetRectSize(&textRect,
-                layout.ControlCard.left + 28,
-                layout.PasswordEdit.bottom + 22,
-                RectWidth(&layout.ControlCard) - 56,
-                84);
-    DrawTextBlock(dc,
-                  L"This tool reads DataProtector raw-disk metadata from the USB device. The driver is deployed and loaded only after the password validates that metadata.",
-                  &textRect,
-                  g_Ui.BodyFont,
-                  g_Ui.MutedColor,
-                  DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS);
-
-    DrawRoundFill(dc, &layout.LogCard, g_Ui.CardColor, g_Ui.BorderColor, 14);
-    DrawCardHeader(dc, &layout.LogCard, L"Operations Log", L"Local driver deployment and session activity");
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawOneLine(dc, L"Password", layout.PasswordEdit.left, layout.PasswordEdit.top - 20, RectWidth(&layout.PasswordEdit), 16, g_Ui.SmallFont, g_Ui.MutedColor);
 }
 
 static void PaintUi(HWND hwnd)
@@ -4450,9 +4382,9 @@ static void CreateUi(HWND hwnd)
 
     g_Ui.PasswordEdit = CreateEditBox(hwnd, DPUSB_ID_PASSWORD, L"", 0, 0, 10, 10, ES_PASSWORD);
     g_Ui.RefreshButton = CreateButton(hwnd, DPUSB_ID_REFRESH, L"Refresh", 0, 0, 10, 10);
-    g_Ui.UnlockButton = CreateButton(hwnd, DPUSB_ID_UNLOCK, L"Unlock Workspace", 0, 0, 10, 10);
+    g_Ui.UnlockButton = CreateButton(hwnd, DPUSB_ID_UNLOCK, L"Unlock", 0, 0, 10, 10);
     g_Ui.LockButton = CreateButton(hwnd, DPUSB_ID_LOCK, L"Lock", 0, 0, 10, 10);
-    g_Ui.SafeEjectButton = CreateButton(hwnd, DPUSB_ID_SAFE_EJECT, L"Safe Eject", 0, 0, 10, 10);
+    g_Ui.SafeEjectButton = CreateButton(hwnd, DPUSB_ID_SAFE_EJECT, L"Eject", 0, 0, 10, 10);
     g_Ui.PlanButton = CreateButton(hwnd, DPUSB_ID_PLAN, L"Metadata Info", 0, 0, 10, 10);
     g_Ui.LogEdit = CreateWindowExW(WS_EX_CLIENTEDGE,
                                    L"EDIT",
@@ -4595,8 +4527,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
     case WM_GETMINMAXINFO:
     {
         MINMAXINFO *info = (MINMAXINFO *)lParam;
-        info->ptMinTrackSize.x = 960;
-        info->ptMinTrackSize.y = 680;
+        info->ptMinTrackSize.x = 420;
+        info->ptMinTrackSize.y = 260;
         return 0;
     }
 
@@ -4647,8 +4579,8 @@ static int RunGui(HINSTANCE instance, int showCommand)
                            WS_OVERLAPPEDWINDOW,
                            CW_USEDEFAULT,
                            CW_USEDEFAULT,
-                           1060,
-                           720,
+                           460,
+                           300,
                            NULL,
                            NULL,
                            instance,
