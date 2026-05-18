@@ -7,5 +7,6 @@ namespace DataProtectorAgentClient.Models
         public string Target { get; set; }
         public string Detail { get; set; }
         public string State { get; set; }
+        public string StateBrushKey { get; set; }
     }
 }

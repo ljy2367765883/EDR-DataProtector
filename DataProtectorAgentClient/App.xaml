@@ -18,6 +18,8 @@
             <Color x:Key="DpLineColor">#38FFFFFF</Color>
             <Color x:Key="DpSideGlassColor">#57150D2C</Color>
             <Color x:Key="DpGlassStrongColor">#78372757</Color>
+            <Color x:Key="DpListItemColor">#3F2A1B47</Color>
+            <Color x:Key="DpListItemHoverColor">#5A3C2B68</Color>
             <Color x:Key="DpTableHeaderColor">#6639285D</Color>
             <Color x:Key="DpTableRowColor">#40271843</Color>
             <Color x:Key="DpTableAltRowColor">#4D21153A</Color>
@@ -42,6 +44,8 @@
             <SolidColorBrush x:Key="DpLineBrush" Color="{StaticResource DpLineColor}" />
             <SolidColorBrush x:Key="DpSideGlassBrush" Color="{StaticResource DpSideGlassColor}" />
             <SolidColorBrush x:Key="DpGlassStrongBrush" Color="{StaticResource DpGlassStrongColor}" />
+            <SolidColorBrush x:Key="DpListItemBrush" Color="{StaticResource DpListItemColor}" />
+            <SolidColorBrush x:Key="DpListItemHoverBrush" Color="{StaticResource DpListItemHoverColor}" />
             <SolidColorBrush x:Key="DpTableHeaderBrush" Color="{StaticResource DpTableHeaderColor}" />
             <SolidColorBrush x:Key="DpTableRowBrush" Color="{StaticResource DpTableRowColor}" />
             <SolidColorBrush x:Key="DpTableAltRowBrush" Color="{StaticResource DpTableAltRowColor}" />
@@ -78,14 +82,6 @@
                 <Setter Property="CornerRadius" Value="8" />
                 <Setter Property="Padding" Value="18" />
                 <Setter Property="SnapsToDevicePixels" Value="True" />
-                <Setter Property="Effect">
-                    <Setter.Value>
-                        <DropShadowEffect Color="#7A04020C"
-                                          BlurRadius="26"
-                                          ShadowDepth="1"
-                                          Opacity="0.38" />
-                    </Setter.Value>
-                </Setter>
             </Style>
 
             <Style x:Key="DpCaptionStyle" TargetType="{x:Type TextBlock}">
@@ -225,6 +221,67 @@
                 <Setter Property="CanUserDeleteRows" Value="False" />
                 <Setter Property="IsReadOnly" Value="True" />
                 <Setter Property="AutoGenerateColumns" Value="False" />
+            </Style>
+
+            <Style x:Key="DpListBoxStyle" TargetType="{x:Type ListBox}">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderBrush" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+                <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+                <Setter Property="VirtualizingStackPanel.IsVirtualizing" Value="True" />
+                <Setter Property="VirtualizingStackPanel.VirtualizationMode" Value="Recycling" />
+                <Setter Property="FontFamily" Value="Microsoft YaHei UI" />
+            </Style>
+
+            <Style x:Key="DpListBoxItemStyle" TargetType="{x:Type ListBoxItem}">
+                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                <Setter Property="Padding" Value="0" />
+                <Setter Property="Margin" Value="0,0,0,10" />
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                            <Border x:Name="ItemBorder"
+                                    Background="{StaticResource DpListItemBrush}"
+                                    BorderBrush="{StaticResource DpLineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8"
+                                    Padding="{TemplateBinding Padding}"
+                                    SnapsToDevicePixels="True">
+                                <ContentPresenter />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="ItemBorder" Property="Background" Value="{StaticResource DpListItemHoverBrush}" />
+                                    <Setter TargetName="ItemBorder" Property="BorderBrush" Value="{StaticResource DpCommandSoftBrush}" />
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter TargetName="ItemBorder" Property="Background" Value="{StaticResource DpTableSelectedBrush}" />
+                                    <Setter TargetName="ItemBorder" Property="BorderBrush" Value="{StaticResource DpCommandBrush}" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="DpStatusBadgeStyle" TargetType="{x:Type Border}">
+                <Setter Property="BorderBrush" Value="{StaticResource DpLineBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="7" />
+                <Setter Property="Padding" Value="9,4" />
+                <Setter Property="MinWidth" Value="58" />
+                <Setter Property="HorizontalAlignment" Value="Right" />
+                <Setter Property="VerticalAlignment" Value="Top" />
+            </Style>
+
+            <Style x:Key="DpMetaTextStyle" TargetType="{x:Type TextBlock}" BasedOn="{StaticResource DpCaptionStyle}">
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="Foreground" Value="{StaticResource DpSubtleBrush}" />
+                <Setter Property="TextWrapping" Value="NoWrap" />
+                <Setter Property="TextTrimming" Value="CharacterEllipsis" />
             </Style>
 
             <Style TargetType="{x:Type ui:InfoBar}">

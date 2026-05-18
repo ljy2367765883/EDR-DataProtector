@@ -21,7 +21,7 @@ namespace DataProtectorAgentClient.ViewModels
         private string driverStatusText = "检测中";
         private string driverStatusCaption = "正在读取本机防护状态";
         private string driverStatusBrushKey = "DpMutedBrush";
-        private string statusMessage = "正在加载 DataProtector Agent 状态";
+        private string statusMessage = "正在加载 DataProtector 终端状态";
         private string lastUpdatedText = string.Empty;
         private string machineText = string.Empty;
         private string userText = string.Empty;
@@ -36,7 +36,7 @@ namespace DataProtectorAgentClient.ViewModels
         private string urgentEventCountText = "0";
         private string enabledFeatureCountText = "0";
         private string overviewTitle = "防护状态检测中";
-        private string overviewCaption = "正在汇总本机策略、事件和 Agent 同步状态";
+        private string overviewCaption = "正在汇总本机策略、事件和客户端同步状态";
 
         public MainViewModel(AgentClientSnapshotService snapshotService)
         {
@@ -287,15 +287,16 @@ namespace DataProtectorAgentClient.ViewModels
                 ? "本机驱动通信正常，策略与事件已就绪。"
                 : "未能连接 DataProtector 驱动，请检查驱动服务或权限。";
             StatusMessage = snapshot.DriverConnected
-                ? "已刷新本机只读视图，UI 不会消费内核事件队列。"
+                ? "已刷新本机只读视图，客户端不会影响事件上报。"
                 : "已读取本机状态，但驱动接口当前不可用。";
             LastUpdatedText = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
             MachineText = snapshot.MachineName;
             UserText = snapshot.UserName;
             DeviceIdText = snapshot.AgentState == null ? string.Empty : (snapshot.AgentState.DeviceId ?? string.Empty);
             PolicyVersionText = snapshot.AgentState == null ? "0" : snapshot.AgentState.AppliedPolicyVersion.ToString(CultureInfo.InvariantCulture);
-            LastApplyStatusText = snapshot.AgentState == null ? string.Empty : (snapshot.AgentState.LastApplyStatus ?? string.Empty);
-            LastApplyMessageText = snapshot.AgentState == null ? string.Empty : (snapshot.AgentState.LastApplyMessage ?? string.Empty);
+            string rawApplyStatus = snapshot.AgentState == null ? string.Empty : (snapshot.AgentState.LastApplyStatus ?? string.Empty);
+            LastApplyStatusText = TranslateApplyStatus(rawApplyStatus);
+            LastApplyMessageText = BuildApplySummary(snapshot, rawApplyStatus);
             LastStateWriteText = ResolveLastWriteText(snapshot.StatePath);
             AuditPathText = snapshot.AuditPath ?? string.Empty;
 
@@ -338,6 +339,42 @@ namespace DataProtectorAgentClient.ViewModels
             {
                 return "不可用";
             }
+        }
+
+        private static string TranslateApplyStatus(string status)
+        {
+            if (string.IsNullOrWhiteSpace(status))
+            {
+                return "未同步";
+            }
+
+            if (string.Equals(status, "0x00000000", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(status, "0", StringComparison.OrdinalIgnoreCase))
+            {
+                return "已应用";
+            }
+
+            return "需要关注";
+        }
+
+        private static string BuildApplySummary(AgentClientSnapshot snapshot, string status)
+        {
+            if (snapshot == null || snapshot.AgentState == null)
+            {
+                return "暂未读取到本机策略同步状态。";
+            }
+
+            if (string.Equals(status, "0x00000000", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(status, "0", StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Format(
+                    CultureInfo.CurrentCulture,
+                    "最近一次策略已成功应用，当前展示 {0} 条规则、{1} 个防护模块。",
+                    snapshot.Rules == null ? 0 : snapshot.Rules.Count,
+                    snapshot.Features == null ? 0 : snapshot.Features.Count);
+            }
+
+            return "策略应用存在异常，请检查客户端服务、驱动状态或服务器连接。";
         }
     }
 }

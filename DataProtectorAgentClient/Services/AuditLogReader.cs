@@ -227,8 +227,8 @@ namespace DataProtectorAgentClient.Services
 
         private static string TranslateCategory(string category)
         {
-            if (category == "webshell") return "WebShell";
-            if (category == "hashdump") return "反 Dump";
+            if (category == "webshell") return "脚本木马";
+            if (category == "hashdump") return "凭据抓取";
             if (category == "lateral") return "横向移动";
             if (category == "dlp") return "防泄密";
             if (category == "smtp") return "邮件外发";

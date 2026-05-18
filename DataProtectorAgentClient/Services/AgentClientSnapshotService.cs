@@ -70,7 +70,7 @@ namespace DataProtectorAgentClient.Services
                     return new AgentStateModel
                     {
                         DeviceId = "未注册",
-                        LastApplyStatus = "N/A",
+                    LastApplyStatus = "未同步",
                         LastApplyMessage = "未找到本机 AgentState.json"
                     };
                 }
@@ -102,7 +102,7 @@ namespace DataProtectorAgentClient.Services
                 snapshot.Features.Add(new ProtectionFeatureViewItem
                 {
                     Name = "U 盘加密",
-                    Description = "未读取到本机 USB 加密策略",
+                    Description = "未读取到本机移动存储加密策略",
                     State = "未配置",
                     AccentBrushKey = "DpMutedBrush"
                 });
@@ -112,12 +112,7 @@ namespace DataProtectorAgentClient.Services
             snapshot.Features.Add(new ProtectionFeatureViewItem
             {
                 Name = "U 盘加密",
-                Description = string.Format(
-                    "算法={0}  工具区={1}MB  客户端初始化={2}  硬件授权={3}",
-                    string.IsNullOrWhiteSpace(policy.algorithm) ? "rc4" : policy.algorithm,
-                    Math.Max(0, policy.publicToolAreaBytes / 1024 / 1024),
-                    policy.allowClientProvisioning ? "开" : "关",
-                    policy.requireHardwareAuthorization ? "开" : "关"),
+                Description = BuildUsbCryptDescription(policy),
                 State = policy.enabled ? "已开启" : "未开启",
                 AccentBrushKey = policy.enabled ? "DpSuccessBrush" : "DpMutedBrush"
             });
@@ -130,10 +125,55 @@ namespace DataProtectorAgentClient.Services
             snapshot.Features.Add(new ProtectionFeatureViewItem
             {
                 Name = "截图与剪贴板防泄密",
-                Description = string.IsNullOrWhiteSpace(summary) ? "等待 Agent 下发并运行策略" : summary,
+                Description = BuildDlpDescription(summary),
                 State = enabled ? "已开启" : "未开启",
                 AccentBrushKey = enabled ? "DpSuccessBrush" : "DpMutedBrush"
             });
+        }
+
+        private static string BuildUsbCryptDescription(UsbCryptPolicyFile policy)
+        {
+            if (policy == null)
+            {
+                return "等待服务器下发加密策略。";
+            }
+
+            string provisioning = policy.allowClientProvisioning ? "允许初始化" : "仅允许使用";
+            string authorization = policy.requireHardwareAuthorization ? "需要硬件授权" : "无需额外授权";
+            long toolAreaMb = Math.Max(0, policy.publicToolAreaBytes / 1024 / 1024);
+            return string.Format(
+                "加密工作区已配置，公开工具区 {0} MB，{1}，{2}。",
+                toolAreaMb,
+                provisioning,
+                authorization);
+        }
+
+        private static string BuildDlpDescription(string summary)
+        {
+            if (string.IsNullOrWhiteSpace(summary))
+            {
+                return "等待服务器下发截图与剪贴板防护策略。";
+            }
+
+            bool clipboard = ContainsEnabled(summary, "clipboard");
+            bool screenshot = ContainsEnabled(summary, "screenshots") || ContainsEnabled(summary, "screenshot");
+            bool hotkeys = ContainsEnabled(summary, "hotkeys");
+            return string.Format(
+                "剪贴板防护{0}，截图防护{1}，快捷键防护{2}。",
+                clipboard ? "已启用" : "未启用",
+                screenshot ? "已启用" : "未启用",
+                hotkeys ? "已启用" : "未启用");
+        }
+
+        private static bool ContainsEnabled(string text, string key)
+        {
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(key))
+            {
+                return false;
+            }
+
+            return text.IndexOf(key + "=True", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   text.IndexOf(key + "s=True", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private string ResolveDlpPolicySummary()

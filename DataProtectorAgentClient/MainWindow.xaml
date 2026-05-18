@@ -3,7 +3,7 @@
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:infra="clr-namespace:DataProtectorAgentClient.Infrastructure"
-                 Title="DataProtector Agent"
+                 Title="DataProtector 终端客户端"
                  Icon="AppIcon.ico"
                  Width="1180"
                  Height="760"
@@ -28,7 +28,7 @@
         </Grid.RowDefinitions>
 
         <ui:TitleBar Grid.Row="0"
-                     Title="DataProtector Agent"
+                     Title="DataProtector 终端客户端"
                      Height="48"
                      Padding="16,0,0,0"
                      Background="Transparent"
@@ -76,7 +76,7 @@
                                            FontSize="18"
                                            FontWeight="SemiBold"
                                            Foreground="{StaticResource DpInkBrush}" />
-                                <TextBlock Text="Agent Security Center"
+                                <TextBlock Text="终端安全中心"
                                            Style="{StaticResource DpCaptionStyle}"
                                            Margin="0,2,0,0" />
                             </StackPanel>
@@ -329,7 +329,7 @@
                             <Border Grid.Column="1" Style="{StaticResource DpPanelStyle}">
                                 <StackPanel>
                                     <TextBlock Text="终端信息" Style="{StaticResource DpSectionTitleStyle}" />
-                                    <TextBlock Text="只展示本机 Agent 运行与同步信息" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,16" />
+                                    <TextBlock Text="只展示本机客户端运行与同步信息" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,16" />
                                     <TextBlock Text="主机名" Style="{StaticResource DpCaptionStyle}" />
                                     <TextBlock Text="{Binding MachineText}" Foreground="{StaticResource DpInkBrush}" FontWeight="SemiBold" Margin="0,3,0,12" />
                                     <TextBlock Text="当前用户" Style="{StaticResource DpCaptionStyle}" />
@@ -355,17 +355,80 @@
                                     <TextBlock Text="当前规则" Style="{StaticResource DpSectionTitleStyle}" />
                                     <TextBlock Text="此处为只读视图，展示本机驱动已经加载的策略。" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,0" />
                                 </StackPanel>
-                                <DataGrid Grid.Row="1"
-                                          ItemsSource="{Binding Rules}"
-                                          Style="{StaticResource DpDataGridStyle}">
-                                    <DataGrid.Columns>
-                                        <DataGridTextColumn Header="类型" Binding="{Binding Category}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="130" />
-                                        <DataGridTextColumn Header="规则" Binding="{Binding Name}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="120" />
-                                        <DataGridTextColumn Header="对象" Binding="{Binding Target}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="2.1*" MinWidth="260" />
-                                        <DataGridTextColumn Header="说明" Binding="{Binding Detail}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="1.45*" MinWidth="220" />
-                                        <DataGridTextColumn Header="状态" Binding="{Binding State}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="90" />
-                                    </DataGrid.Columns>
-                                </DataGrid>
+                                <ListBox Grid.Row="1"
+                                         ItemsSource="{Binding Rules}"
+                                         Style="{StaticResource DpListBoxStyle}"
+                                         ItemContainerStyle="{StaticResource DpListBoxItemStyle}">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="16,14" MinHeight="74">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="160" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="92" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <Grid Grid.Column="0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="38" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Width="30"
+                                                            Height="30"
+                                                            CornerRadius="8"
+                                                            Background="{Binding StateBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                            VerticalAlignment="Top">
+                                                        <ui:SymbolIcon Symbol="ShieldTask24"
+                                                                       Foreground="#10091F"
+                                                                       FontSize="16"
+                                                                       HorizontalAlignment="Center"
+                                                                       VerticalAlignment="Center" />
+                                                    </Border>
+                                                    <StackPanel Grid.Column="1" Margin="10,0,10,0">
+                                                        <TextBlock Text="{Binding Category}"
+                                                                   FontWeight="SemiBold"
+                                                                   FontSize="15"
+                                                                   Foreground="{StaticResource DpInkBrush}"
+                                                                   TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{Binding Name}"
+                                                                   Style="{StaticResource DpMetaTextStyle}"
+                                                                   Margin="0,5,0,0" />
+                                                    </StackPanel>
+                                                </Grid>
+
+                                                <StackPanel Grid.Column="1" Margin="6,0,18,0">
+                                                    <TextBlock Text="{Binding Target}"
+                                                               FontSize="14"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{StaticResource DpInkBrush}"
+                                                               TextWrapping="Wrap"
+                                                               LineHeight="20" />
+                                                    <Border Background="{StaticResource DpGlassStrongBrush}"
+                                                            BorderBrush="{StaticResource DpLineBrush}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="7"
+                                                            Padding="9,5"
+                                                            HorizontalAlignment="Left"
+                                                            Margin="0,10,0,0">
+                                                        <TextBlock Text="{Binding Detail}"
+                                                                   Style="{StaticResource DpMetaTextStyle}"
+                                                                   TextWrapping="Wrap" />
+                                                    </Border>
+                                                </StackPanel>
+
+                                                <Border Grid.Column="2"
+                                                        Style="{StaticResource DpStatusBadgeStyle}"
+                                                        Background="{StaticResource DpGlassStrongBrush}">
+                                                    <TextBlock Text="{Binding State}"
+                                                               Foreground="{Binding StateBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                               FontSize="13"
+                                                               FontWeight="SemiBold"
+                                                               HorizontalAlignment="Center" />
+                                                </Border>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
                             </Grid>
                         </Border>
                     </Grid>
@@ -382,19 +445,85 @@
                                     <TextBlock Text="危险事件" Style="{StaticResource DpSectionTitleStyle}" />
                                     <TextBlock Text="读取本机审计文件中的最近安全事件，不消费内核事件队列。" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,0" />
                                 </StackPanel>
-                                <DataGrid Grid.Row="1"
-                                          ItemsSource="{Binding SecurityEvents}"
-                                          Style="{StaticResource DpDataGridStyle}">
-                                    <DataGrid.Columns>
-                                        <DataGridTextColumn Header="时间" Binding="{Binding TimeText}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="116" />
-                                        <DataGridTextColumn Header="类型" Binding="{Binding Category}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="96" />
-                                        <DataGridTextColumn Header="紧急性" Binding="{Binding Severity}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="78" />
-                                        <DataGridTextColumn Header="处置" Binding="{Binding Disposition}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="78" />
-                                        <DataGridTextColumn Header="对象" Binding="{Binding Target}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="2*" MinWidth="260" />
-                                        <DataGridTextColumn Header="来源" Binding="{Binding Source}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="1.1*" MinWidth="130" />
-                                        <DataGridTextColumn Header="状态" Binding="{Binding Status}" ElementStyle="{StaticResource DpDataGridTextStyle}" Width="112" />
-                                    </DataGrid.Columns>
-                                </DataGrid>
+                                <ListBox Grid.Row="1"
+                                         ItemsSource="{Binding SecurityEvents}"
+                                         Style="{StaticResource DpListBoxStyle}"
+                                         ItemContainerStyle="{StaticResource DpListBoxItemStyle}">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="16,14" MinHeight="86">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="118" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="170" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <Grid Grid.Column="0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="6" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Width="4"
+                                                            CornerRadius="4"
+                                                            Background="{Binding SeverityBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                            HorizontalAlignment="Left" />
+                                                    <StackPanel Grid.Column="1" Margin="14,0,8,0">
+                                                        <TextBlock Text="{Binding Category}"
+                                                                   FontWeight="SemiBold"
+                                                                   FontSize="15"
+                                                                   Foreground="{StaticResource DpInkBrush}" />
+                                                        <TextBlock Text="{Binding TimeText}"
+                                                                   Style="{StaticResource DpMetaTextStyle}"
+                                                                   Margin="0,6,0,0" />
+                                                    </StackPanel>
+                                                </Grid>
+
+                                                <StackPanel Grid.Column="1" Margin="10,0,18,0">
+                                                    <TextBlock Text="{Binding Target}"
+                                                               FontSize="14"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{StaticResource DpInkBrush}"
+                                                               TextWrapping="Wrap"
+                                                               LineHeight="20" />
+                                                    <TextBlock Text="{Binding Message}"
+                                                               Style="{StaticResource DpCaptionStyle}"
+                                                               Margin="0,7,0,0"
+                                                               MaxHeight="40"
+                                                               TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding Source, StringFormat=来源：{0}}"
+                                                               Style="{StaticResource DpMetaTextStyle}"
+                                                               Margin="0,9,0,0" />
+                                                </StackPanel>
+
+                                                <StackPanel Grid.Column="2" HorizontalAlignment="Right">
+                                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                                        <Border Style="{StaticResource DpStatusBadgeStyle}"
+                                                                Background="{StaticResource DpGlassStrongBrush}"
+                                                                Margin="0,0,8,0">
+                                                            <TextBlock Text="{Binding Severity}"
+                                                                       Foreground="{Binding SeverityBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                                       FontSize="13"
+                                                                       FontWeight="SemiBold"
+                                                                       HorizontalAlignment="Center" />
+                                                        </Border>
+                                                        <Border Style="{StaticResource DpStatusBadgeStyle}"
+                                                                Background="{StaticResource DpGlassStrongBrush}">
+                                                            <TextBlock Text="{Binding Disposition}"
+                                                                       Foreground="{StaticResource DpInkBrush}"
+                                                                       FontSize="13"
+                                                                       FontWeight="SemiBold"
+                                                                       HorizontalAlignment="Center" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <TextBlock Text="{Binding Status}"
+                                                               Style="{StaticResource DpMetaTextStyle}"
+                                                               HorizontalAlignment="Right"
+                                                               Margin="0,11,0,0" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
                                 <TextBlock Grid.Row="2"
                                            Text="{Binding AuditPathText}"
                                            Style="{StaticResource DpCaptionStyle}"

@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
+using DataProtectorAgentClient.Infrastructure;
 using DataProtectorAgentClient.Services;
 using DataProtectorAgentClient.ViewModels;
 using Wpf.Ui.Appearance;
@@ -20,7 +21,10 @@ namespace DataProtectorAgentClient
         {
             RegisterExceptionHandlers();
             base.OnStartup(e);
-            ApplicationThemeManager.Apply(ApplicationTheme.Dark, WindowBackdropType.Acrylic, true);
+            ApplicationThemeManager.Apply(
+                ApplicationTheme.Dark,
+                WindowsAcrylicFallback.IsWindows10Before11() ? WindowBackdropType.None : WindowBackdropType.Acrylic,
+                true);
 
             MainViewModel viewModel = new MainViewModel(new AgentClientSnapshotService());
             MainWindow window = new MainWindow
@@ -57,8 +61,8 @@ namespace DataProtectorAgentClient
         {
             e.Handled = true;
             System.Windows.MessageBox.Show(
-                "DataProtector Agent 客户端运行异常：" + Environment.NewLine + e.Exception.Message,
-                "DataProtector Agent",
+                "DataProtector 终端客户端运行异常：" + Environment.NewLine + e.Exception.Message,
+                "DataProtector 终端客户端",
                 System.Windows.MessageBoxButton.OK,
                 System.Windows.MessageBoxImage.Error);
         }
@@ -75,7 +79,7 @@ namespace DataProtectorAgentClient
         private void InitializeTrayIcon(Window window)
         {
             Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
-            Forms.ToolStripMenuItem showItem = new Forms.ToolStripMenuItem("打开 DataProtector Agent");
+            Forms.ToolStripMenuItem showItem = new Forms.ToolStripMenuItem("打开 DataProtector 终端客户端");
             Forms.ToolStripMenuItem exitItem = new Forms.ToolStripMenuItem("退出");
 
             showItem.Click += delegate { ShowMainWindow(window); };
@@ -92,7 +96,7 @@ namespace DataProtectorAgentClient
             notifyIcon = new Forms.NotifyIcon
             {
                 Icon = LoadTrayIcon(),
-                Text = "DataProtector Agent",
+                Text = "DataProtector 终端客户端",
                 ContextMenuStrip = menu,
                 Visible = true
             };
@@ -108,7 +112,7 @@ namespace DataProtectorAgentClient
 
                 args.Cancel = true;
                 window.Hide();
-                notifyIcon.ShowBalloonTip(1800, "DataProtector Agent", "客户端已最小化到托盘。", Forms.ToolTipIcon.Info);
+                notifyIcon.ShowBalloonTip(1800, "DataProtector 终端客户端", "客户端已最小化到托盘。", Forms.ToolTipIcon.Info);
             };
         }
 

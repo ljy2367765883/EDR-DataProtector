@@ -129,7 +129,8 @@ namespace DataProtectorAgentClient.Services
                                 Name = ConvertProcessRuleName(item.RuleType),
                                 Target = Marshal.PtrToStringUni(item.Value) ?? string.Empty,
                                 Detail = "扩展名 " + (Marshal.PtrToStringUni(item.Extension) ?? ".dpf"),
-                                State = "已生效"
+                                State = "已生效",
+                                StateBrushKey = "DpSuccessBrush"
                             });
                         }
 
@@ -215,7 +216,8 @@ namespace DataProtectorAgentClient.Services
                                     FromProtocol(item.Protocol).ToUpperInvariant(),
                                     FromDirection(item.Direction),
                                     item.RemotePort == 0 ? "*" : item.RemotePort.ToString(CultureInfo.InvariantCulture)),
-                                State = "已生效"
+                                State = "已生效",
+                                StateBrushKey = "DpSuccessBrush"
                             });
                         }
 
@@ -256,7 +258,7 @@ namespace DataProtectorAgentClient.Services
 
                 if (status != SuccessStatus && status != BufferTooSmallStatus)
                 {
-                    AddQueryError(rules, "WebShell 防护", status);
+                    AddQueryError(rules, "脚本木马防护", status);
                     return;
                 }
 
@@ -286,11 +288,12 @@ namespace DataProtectorAgentClient.Services
                         {
                             rules.Add(new RuleViewItem
                             {
-                                Category = "WebShell 防护",
+                                Category = "脚本木马防护",
                                 Name = "受保护目录",
                                 Target = Marshal.PtrToStringUni(nativeRules[index].Directory) ?? string.Empty,
                                 Detail = "脚本写入与高危样本检测",
-                                State = "已生效"
+                                State = "已生效",
+                                StateBrushKey = "DpSuccessBrush"
                             });
                         }
 
@@ -299,7 +302,7 @@ namespace DataProtectorAgentClient.Services
 
                     if (status != BufferTooSmallStatus)
                     {
-                        AddQueryError(rules, "WebShell 防护", status);
+                        AddQueryError(rules, "脚本木马防护", status);
                         return;
                     }
                 }
@@ -368,7 +371,8 @@ namespace DataProtectorAgentClient.Services
                                 Name = allowInsert ? (allowWrite ? "允许读写" : "只读授权") : "禁止插入",
                                 Target = Marshal.PtrToStringUni(item.DeviceId) ?? string.Empty,
                                 Detail = "插入：" + (allowInsert ? "允许" : "阻止") + " / 写入：" + (allowWrite ? "允许" : "阻止"),
-                                State = "已生效"
+                                State = "已生效",
+                                StateBrushKey = "DpSuccessBrush"
                             });
                         }
 
@@ -399,14 +403,14 @@ namespace DataProtectorAgentClient.Services
                 uint status = DataProtectorPolicyNative.DpPolicyQueryHashProtectPolicy(out policy);
                 if (status != SuccessStatus)
                 {
-                    features.Add(BuildFeatureError("反 Dump Hash", status));
+                    features.Add(BuildFeatureError("凭据抓取防护", status));
                     return;
                 }
 
                 uint flags = policy.Flags;
                 features.Add(new ProtectionFeatureViewItem
                 {
-                    Name = "反 Dump Hash",
+                    Name = "凭据抓取防护",
                     Description = BuildHashProtectDescription(flags),
                     State = (flags & HashProtectFlagEnabled) != 0 ? "已开启" : "未开启",
                     AccentBrushKey = (flags & HashProtectFlagEnabled) != 0 ? "DpSuccessBrush" : "DpMutedBrush"
@@ -414,7 +418,7 @@ namespace DataProtectorAgentClient.Services
             }
             catch (Exception ex)
             {
-                features.Add(BuildFeatureException("反 Dump Hash", ex));
+                features.Add(BuildFeatureException("凭据抓取防护", ex));
             }
         }
 
@@ -458,18 +462,20 @@ namespace DataProtectorAgentClient.Services
 
         private static string BuildHashProtectDescription(uint flags)
         {
-            return "LSASS " + IsOn(flags, HashProtectFlagLsassHandles) +
-                   " / 凭据文件 " + IsOn(flags, HashProtectFlagCredentialFiles) +
-                   " / 注册表 Hive " + IsOn(flags, HashProtectFlagRegistryHives) +
-                   " / 原始磁盘区域 " + IsOn(flags, HashProtectFlagRawExtents);
+            return JoinCapabilities(
+                "内存转储防护" + IsEnabled(flags, HashProtectFlagLsassHandles),
+                "凭据文件防护" + IsEnabled(flags, HashProtectFlagCredentialFiles),
+                "注册表导出防护" + IsEnabled(flags, HashProtectFlagRegistryHives),
+                "磁盘原始读取防护" + IsEnabled(flags, HashProtectFlagRawExtents));
         }
 
         private static string BuildLateralDefenseDescription(uint flags)
         {
-            return "SMB 可执行文件 " + IsOn(flags, LateralDefenseFlagSmbExecutables) +
-                   " / IPC 计划任务 " + IsOn(flags, LateralDefenseFlagIpcTasks) +
-                   " / 服务创建 " + IsOn(flags, LateralDefenseFlagIpcServices) +
-                   " / 远程工具 " + IsOn(flags, LateralDefenseFlagProcessTools);
+            return JoinCapabilities(
+                "共享目录投递防护" + IsEnabled(flags, LateralDefenseFlagSmbExecutables),
+                "远程计划任务防护" + IsEnabled(flags, LateralDefenseFlagIpcTasks),
+                "远程服务创建防护" + IsEnabled(flags, LateralDefenseFlagIpcServices),
+                "横向工具调用防护" + IsEnabled(flags, LateralDefenseFlagProcessTools));
         }
 
         private static ProtectionFeatureViewItem BuildFeatureException(string name, Exception ex)
@@ -483,9 +489,14 @@ namespace DataProtectorAgentClient.Services
             };
         }
 
-        private static string IsOn(uint flags, uint bit)
+        private static string IsEnabled(uint flags, uint bit)
         {
-            return (flags & bit) != 0 ? "开" : "关";
+            return (flags & bit) != 0 ? "已启用" : "未启用";
+        }
+
+        private static string JoinCapabilities(params string[] items)
+        {
+            return string.Join("  ·  ", items);
         }
 
         private static string ConvertProcessRuleName(uint ruleType)
@@ -516,7 +527,8 @@ namespace DataProtectorAgentClient.Services
                 Name = "读取失败",
                 Target = BuildDriverUnavailableSummary(status),
                 Detail = ToStatusText(status),
-                State = "未读取"
+                State = "未读取",
+                StateBrushKey = "DpWarningBrush"
             });
         }
 
