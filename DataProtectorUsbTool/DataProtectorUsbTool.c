@@ -1420,7 +1420,6 @@ static BOOL InstallDriverPackageFromInf(const wchar_t *infPath, DWORD *win32Erro
 {
     HINF infHandle;
     wchar_t infDirectory[MAX_PATH];
-    BOOL rebootRequired = FALSE;
     BOOL ok;
 
     if (infPath == NULL || infPath[0] == L'\0') {
@@ -1470,7 +1469,7 @@ static BOOL InstallDriverPackageFromInf(const wchar_t *infPath, DWORD *win32Erro
                                                NULL,
                                                NULL,
                                                NULL,
-                                               &rebootRequired);
+                                               NULL);
     if (!ok) {
         if (win32Error != NULL) {
             *win32Error = GetLastError();
