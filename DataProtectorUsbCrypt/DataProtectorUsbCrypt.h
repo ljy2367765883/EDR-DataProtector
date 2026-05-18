@@ -18,9 +18,9 @@
 #define DPUSB_TAG_WORK  'wUpD'
 
 // Compile-time investigation switch for Secure USB virtual disk hangs.
-// Set to 0 for quiet production builds after the I/O path is validated.
+// Set to 1 only when investigating I/O hangs; per-IRP tracing is very expensive.
 #ifndef DPUSB_TRACE_ENABLED
-#define DPUSB_TRACE_ENABLED 1
+#define DPUSB_TRACE_ENABLED 0
 #endif
 
 #define DPUSB_IOCTL_INDEX 0x900
@@ -51,13 +51,15 @@
 #define DPUSB_MAX_KEY_BYTES 64
 #define DPUSB_ALGORITHM_RC4 1
 #define DPUSB_SECTOR_BYTES 512
-#define DPUSB_RAW_WRITE_MAX_BYTES (64 * 1024)
+#define DPUSB_CRYPTO_BLOCK_BYTES (4 * 1024)
+#define DPUSB_RAW_WRITE_MAX_BYTES (1024 * 1024)
 #define DPUSB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
 #define DPUSB_MIN_TOOL_BYTES (5ull * 1024ull * 1024ull)
 #define DPUSB_DATA_OFFSET_BYTES (DPUSB_METADATA_RESERVED_BYTES + DPUSB_MIN_TOOL_BYTES)
-#define DPUSB_RUNTIME_VERSION 0x20260518u
+#define DPUSB_RUNTIME_VERSION 0x20260519u
 #define DPUSB_CAP_SPLIT_VOLUME_DEVICE 0x00000001u
 #define DPUSB_CAP_ALIGNED_KERNEL_BACKING_IO 0x00000002u
+#define DPUSB_CAP_FAST_RANDOM_ACCESS_CRYPTO 0x00000004u
 #define DPUSB_HEADER_SIGNATURE 'CPUDP001'
 #ifndef PARTITION_FAT32
 #define PARTITION_FAT32 0x0B

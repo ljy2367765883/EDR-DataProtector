@@ -29,7 +29,7 @@ namespace DataProtectorWebBridge.Services
         private const int DefaultKeyBytes = 32;
         private const int KdfIterations = 200000;
         private const uint MetadataMagic = 0x32535544u;
-        private const uint MetadataVersion = 2;
+        private const uint MetadataVersion = 3;
         private const uint AlgorithmRc4 = 1;
         private const string RuntimeDirectoryName = "DataProtectorUsbRuntime";
         private const string ToolFileName = "DataProtectorUsbTool.exe";

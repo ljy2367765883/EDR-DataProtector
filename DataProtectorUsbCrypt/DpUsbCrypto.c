@@ -70,22 +70,54 @@ DpUsbRc4CryptAtOffset(
     )
 {
     DPUSB_RC4_STATE state;
+    UCHAR blockKey[DPUSB_MAX_KEY_BYTES + sizeof(ULONGLONG)];
     UCHAR discard[256];
-    ULONGLONG remaining;
+    ULONGLONG blockIndex;
+    ULONG blockOffset;
+    ULONG remaining;
 
     if (Key == NULL || KeyLength == 0 || Buffer == NULL || Length == 0) {
         return;
     }
 
-    DpUsbRc4Initialize(&state, Key, KeyLength);
+    if (KeyLength > DPUSB_MAX_KEY_BYTES) {
+        return;
+    }
 
-    remaining = Offset;
+    remaining = Length;
     while (remaining != 0) {
-        ULONG chunk = remaining > sizeof(discard) ? (ULONG)sizeof(discard) : (ULONG)remaining;
-        RtlZeroMemory(discard, chunk);
-        DpUsbRc4Apply(&state, discard, chunk);
+        ULONG chunk;
+
+        blockIndex = Offset / DPUSB_CRYPTO_BLOCK_BYTES;
+        blockOffset = (ULONG)(Offset % DPUSB_CRYPTO_BLOCK_BYTES);
+        chunk = DPUSB_CRYPTO_BLOCK_BYTES - blockOffset;
+        if (chunk > remaining) {
+            chunk = remaining;
+        }
+
+        RtlCopyMemory(blockKey, Key, KeyLength);
+        RtlCopyMemory(blockKey + KeyLength, &blockIndex, sizeof(blockIndex));
+        DpUsbRc4Initialize(&state, blockKey, KeyLength + (ULONG)sizeof(blockIndex));
+
+        if (blockOffset != 0) {
+            ULONG discardRemaining = blockOffset;
+            while (discardRemaining != 0) {
+                ULONG discardChunk = discardRemaining > sizeof(discard) ?
+                    (ULONG)sizeof(discard) :
+                    discardRemaining;
+                RtlZeroMemory(discard, discardChunk);
+                DpUsbRc4Apply(&state, discard, discardChunk);
+                discardRemaining -= discardChunk;
+            }
+        }
+
+        DpUsbRc4Apply(&state, Buffer, chunk);
+        Buffer += chunk;
+        Offset += chunk;
         remaining -= chunk;
     }
 
-    DpUsbRc4Apply(&state, Buffer, Length);
+    RtlSecureZeroMemory(blockKey, sizeof(blockKey));
+    RtlSecureZeroMemory(discard, sizeof(discard));
+    RtlSecureZeroMemory(&state, sizeof(state));
 }
