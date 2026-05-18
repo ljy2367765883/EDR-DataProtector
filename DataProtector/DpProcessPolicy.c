@@ -282,6 +282,154 @@ DpProcessPolicyRuleExistsLocked(
 }
 
 static
+BOOLEAN
+DpProcessPolicyIsDriveLetter(
+    _In_ WCHAR Character
+    )
+{
+    return (Character >= L'A' && Character <= L'Z') ||
+           (Character >= L'a' && Character <= L'z');
+}
+
+static
+BOOLEAN
+DpProcessPolicyGetDosDrivePrefix(
+    _In_ PCUNICODE_STRING Path,
+    _Out_ WCHAR *DriveLetter,
+    _Out_ PUSHORT TailOffset
+    )
+{
+    USHORT chars;
+
+    if (DriveLetter == NULL || TailOffset == NULL) {
+        return FALSE;
+    }
+
+    *DriveLetter = L'\0';
+    *TailOffset = 0;
+
+    if (Path == NULL || Path->Buffer == NULL || Path->Length < 2 * sizeof(WCHAR)) {
+        return FALSE;
+    }
+
+    chars = Path->Length / sizeof(WCHAR);
+
+    if (chars >= 6 &&
+        Path->Buffer[0] == L'\\' &&
+        Path->Buffer[1] == L'?' &&
+        Path->Buffer[2] == L'?' &&
+        Path->Buffer[3] == L'\\' &&
+        DpProcessPolicyIsDriveLetter(Path->Buffer[4]) &&
+        Path->Buffer[5] == L':') {
+
+        *DriveLetter = Path->Buffer[4];
+        *TailOffset = 6 * sizeof(WCHAR);
+        return TRUE;
+    }
+
+    if (DpProcessPolicyIsDriveLetter(Path->Buffer[0]) &&
+        Path->Buffer[1] == L':') {
+
+        *DriveLetter = Path->Buffer[0];
+        *TailOffset = 2 * sizeof(WCHAR);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static
+NTSTATUS
+DpProcessPolicyCanonicalizeDosDrivePath(
+    _In_ PCUNICODE_STRING Source,
+    _Out_ PUNICODE_STRING Canonical
+    )
+{
+    WCHAR driveLetter;
+    USHORT tailOffset;
+    WCHAR linkBuffer[] = L"\\??\\C:";
+    WCHAR targetBuffer[512];
+    UNICODE_STRING linkName;
+    UNICODE_STRING targetName;
+    OBJECT_ATTRIBUTES objectAttributes;
+    HANDLE linkHandle = NULL;
+    USHORT tailLength;
+    USHORT totalLength;
+    NTSTATUS status;
+
+    Canonical->Buffer = NULL;
+    Canonical->Length = 0;
+    Canonical->MaximumLength = 0;
+
+    if (!DpProcessPolicyGetDosDrivePrefix(Source, &driveLetter, &tailOffset)) {
+        return STATUS_NOT_FOUND;
+    }
+
+    linkBuffer[4] = driveLetter;
+    RtlInitUnicodeString(&linkName, linkBuffer);
+    InitializeObjectAttributes(&objectAttributes,
+                               &linkName,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    status = ZwOpenSymbolicLinkObject(&linkHandle,
+                                      GENERIC_READ,
+                                      &objectAttributes);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    targetName.Buffer = targetBuffer;
+    targetName.Length = 0;
+    targetName.MaximumLength = sizeof(targetBuffer);
+
+    status = ZwQuerySymbolicLinkObject(linkHandle,
+                                       &targetName,
+                                       NULL);
+
+    ZwClose(linkHandle);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (targetName.Length == 0 || tailOffset > Source->Length) {
+        return STATUS_OBJECT_PATH_INVALID;
+    }
+
+    tailLength = Source->Length - tailOffset;
+    if (targetName.Length > DP_POLICY_MAX_RULE_BYTES ||
+        tailLength > DP_POLICY_MAX_RULE_BYTES - targetName.Length) {
+
+        return STATUS_NAME_TOO_LONG;
+    }
+
+    totalLength = targetName.Length + tailLength;
+    Canonical->Buffer = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                              totalLength,
+                                              DP_TAG_POLICY_RULE);
+    if (Canonical->Buffer == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlCopyMemory(Canonical->Buffer,
+                  targetName.Buffer,
+                  targetName.Length);
+
+    if (tailLength != 0) {
+        RtlCopyMemory((PUCHAR)Canonical->Buffer + targetName.Length,
+                      (PUCHAR)Source->Buffer + tailOffset,
+                      tailLength);
+    }
+
+    Canonical->Length = totalLength;
+    Canonical->MaximumLength = totalLength;
+
+    return STATUS_SUCCESS;
+}
+
+static
 CHAR
 DpProcessPolicyToLowerAscii(
     _In_ CHAR Character
@@ -527,6 +675,17 @@ DpProcessPolicyCreateEntry(
     if (!NT_SUCCESS(status)) {
         DpProcessPolicyFreeProcessEntry(entry);
         return status;
+    }
+
+    {
+        UNICODE_STRING canonicalPath;
+
+        status = DpProcessPolicyCanonicalizeDosDrivePath(&entry->ImagePath,
+                                                         &canonicalPath);
+        if (NT_SUCCESS(status)) {
+            DpProcessPolicyFreeUnicodeString(&entry->ImagePath);
+            entry->ImagePath = canonicalPath;
+        }
     }
 
     DpProcessPolicyDeriveImageParts(entry);
@@ -994,11 +1153,13 @@ DpProcessPolicyIsTrusted(
     )
 {
     BOOLEAN trusted = FALSE;
+    BOOLEAN cached = FALSE;
     HANDLE processId;
     PDP_PROCESS_ENTRY entry;
+    PDP_PROCESS_ENTRY onDemandEntry = NULL;
+    PDP_PROCESS_ENTRY oldEntry;
     PEPROCESS process;
     const CHAR *fallbackImageName;
-    DP_PROCESS_ENTRY fallbackEntry;
 
     if (FileName == NULL || FileName->Buffer == NULL || FileName->Length == 0) {
         return FALSE;
@@ -1013,12 +1174,13 @@ DpProcessPolicyIsTrusted(
 
     entry = DpProcessPolicyFindEntryLocked(processId);
     if (entry != NULL) {
+        cached = TRUE;
         trusted = DpProcessPolicyEntryTrustedLocked(entry, FileName);
     }
 
     FltReleasePushLock(&gDpProcessPolicyLock);
 
-    if (entry != NULL) {
+    if (cached || trusted) {
         return trusted;
     }
 
@@ -1038,19 +1200,30 @@ DpProcessPolicyIsTrusted(
         return trusted;
     }
 
-    if (gDpProcessNotifyRegistered) {
-        return FALSE;
-    }
-
-    RtlZeroMemory(&fallbackEntry, sizeof(fallbackEntry));
-    if (NT_SUCCESS(DpProcessPolicyCreateEntry(processId, process, NULL, &entry))) {
-        fallbackEntry = *entry;
-
+    if (NT_SUCCESS(DpProcessPolicyCreateEntry(processId,
+                                              process,
+                                              NULL,
+                                              &onDemandEntry))) {
         FltAcquirePushLockShared(&gDpProcessPolicyLock);
-        trusted = DpProcessPolicyEntryTrustedLocked(&fallbackEntry, FileName);
+        trusted = DpProcessPolicyEntryTrustedLocked(onDemandEntry, FileName);
         FltReleasePushLock(&gDpProcessPolicyLock);
 
-        DpProcessPolicyFreeProcessEntry(entry);
+        if (trusted || !cached) {
+            FltAcquirePushLockExclusive(&gDpProcessPolicyLock);
+
+            oldEntry = DpProcessPolicyFindEntryLocked(processId);
+            if (oldEntry != NULL) {
+                RemoveEntryList(&oldEntry->Link);
+                DpProcessPolicyFreeProcessEntry(oldEntry);
+            }
+
+            InsertTailList(&gDpProcessEntries, &onDemandEntry->Link);
+            onDemandEntry = NULL;
+
+            FltReleasePushLock(&gDpProcessPolicyLock);
+        }
+
+        DpProcessPolicyFreeProcessEntry(onDemandEntry);
     }
 
     return trusted;
