@@ -870,25 +870,46 @@ static BOOL InstallDriverServicePath(const wchar_t *path,
     return ok;
 }
 
-static void StopAndDeleteDriverService(void)
+static BOOL StopAndDeleteDriverService(DWORD *win32Error)
 {
     SC_HANDLE scm;
     SC_HANDLE service;
     SERVICE_STATUS status;
+    DWORD lastError = ERROR_SUCCESS;
+    BOOL ok = TRUE;
 
     scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (scm == NULL) {
-        return;
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
     }
 
     service = OpenServiceW(scm, DPUSB_SERVICE_NAME, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
     if (service != NULL) {
-        (VOID)ControlService(service, SERVICE_CONTROL_STOP, &status);
-        (VOID)DeleteService(service);
+        if (QueryServiceStatus(service, &status) && status.dwCurrentState != SERVICE_STOPPED) {
+            if (!ControlService(service, SERVICE_CONTROL_STOP, &status) && GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
+                lastError = GetLastError();
+                ok = FALSE;
+            }
+        }
+
+        if (!DeleteService(service) && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE) {
+            lastError = GetLastError();
+            ok = FALSE;
+        }
         CloseServiceHandle(service);
+    } else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST) {
+        lastError = GetLastError();
+        ok = FALSE;
     }
 
     CloseServiceHandle(scm);
+    if (win32Error != NULL) {
+        *win32Error = ok ? ERROR_SUCCESS : lastError;
+    }
+    return ok;
 }
 
 static BOOL StartDriverService(DWORD *win32Error)
@@ -955,6 +976,10 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
         return FALSE;
     }
 
+    UnmountAllPrivateWorkspaces();
+    (VOID)CloseSessionData(NULL);
+    (VOID)StopAndDeleteDriverService(NULL);
+
     ZeroMemory(attemptedServicePath, sizeof(attemptedServicePath));
     if (!InstallDriverServicePath(deployedPath,
                                   DpUsbServicePathNativeDos,
@@ -973,7 +998,7 @@ static BOOL AutoPrepareDriver(wchar_t *deployedPath,
 
     if (!StartDriverService(&error)) {
         if (IsExpectedDriverNotLoadedError(error)) {
-            StopAndDeleteDriverService();
+            (VOID)StopAndDeleteDriverService(NULL);
             if (!InstallDriverServicePath(deployedPath,
                                           DpUsbServicePathWin32,
                                           attemptedServicePath,
@@ -1627,7 +1652,6 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
     wchar_t message[256];
     DPUSB_UNLOCK_SECRET secret;
     DPUSB_PRIVATE_MOUNT mount;
-    DPUSB_STATUS status;
     wchar_t servicePath[MAX_PATH + 8];
     DWORD error = ERROR_SUCCESS;
 
@@ -1643,7 +1667,6 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
 
     ZeroMemory(&secret, sizeof(secret));
     ZeroMemory(&mount, sizeof(mount));
-    ZeroMemory(&status, sizeof(status));
     ZeroMemory(servicePath, sizeof(servicePath));
 
     AppendLog(L"Validating USB unlock password...");
@@ -1667,39 +1690,37 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
     SecureZeroMemory(workItem, sizeof(*workItem));
     LocalFree(workItem);
 
-    if (!QueryStatusData(&status, &error)) {
-        if (!IsProcessElevated()) {
-            AppendLog(L"Administrator privileges are required. Restart this tool as Administrator. The driver has not been loaded.");
-            SecureZeroMemory(&secret, sizeof(secret));
-            PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
-            return 0;
+    if (!IsProcessElevated()) {
+        AppendLog(L"Administrator privileges are required. Restart this tool as Administrator. The driver has not been loaded.");
+        SecureZeroMemory(&secret, sizeof(secret));
+        PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
+        return 0;
+    }
+
+    AppendLog(L"Preparing USB package driver...");
+    if (!AutoPrepareDriver(result->DeployedDriverPath,
+                           sizeof(result->DeployedDriverPath) / sizeof(result->DeployedDriverPath[0]),
+                           servicePath,
+                           sizeof(servicePath) / sizeof(servicePath[0]),
+                           &error)) {
+
+        FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
+        if (result->DeployedDriverPath[0] != L'\0') {
+            AppendLog(L"Driver file found: %s", result->DeployedDriverPath);
         }
-
-        AppendLog(L"Preparing USB package driver...");
-        if (!AutoPrepareDriver(result->DeployedDriverPath,
-                               sizeof(result->DeployedDriverPath) / sizeof(result->DeployedDriverPath[0]),
-                               servicePath,
-                               sizeof(servicePath) / sizeof(servicePath[0]),
-                               &error)) {
-
-            FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
-            if (result->DeployedDriverPath[0] != L'\0') {
-                AppendLog(L"Driver file found: %s", result->DeployedDriverPath);
-            }
-            if (servicePath[0] != L'\0') {
-                AppendLog(L"Driver service ImagePath attempted: %s", servicePath);
-            }
-            AppendLog(L"Driver initialization failed: %s (Win32=%lu)", message, error);
-            SecureZeroMemory(&secret, sizeof(secret));
-            PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
-            return 0;
-        }
-
-        wcsncpy_s(result->ServicePath, sizeof(result->ServicePath) / sizeof(result->ServicePath[0]), servicePath, _TRUNCATE);
-        AppendLog(L"USB package driver installed and started: %s", result->DeployedDriverPath);
         if (servicePath[0] != L'\0') {
-            AppendLog(L"Driver service ImagePath: %s", servicePath);
+            AppendLog(L"Driver service ImagePath attempted: %s", servicePath);
         }
+        AppendLog(L"Driver initialization failed: %s (Win32=%lu)", message, error);
+        SecureZeroMemory(&secret, sizeof(secret));
+        PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
+        return 0;
+    }
+
+    wcsncpy_s(result->ServicePath, sizeof(result->ServicePath) / sizeof(result->ServicePath[0]), servicePath, _TRUNCATE);
+    AppendLog(L"USB package driver installed and started: %s", result->DeployedDriverPath);
+    if (servicePath[0] != L'\0') {
+        AppendLog(L"Driver service ImagePath: %s", servicePath);
     }
 
     AppendLog(L"Opening secure USB session for %s...", secret.DeviceId);
