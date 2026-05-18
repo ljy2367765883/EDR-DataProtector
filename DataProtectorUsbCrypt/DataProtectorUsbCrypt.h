@@ -10,6 +10,7 @@
 
 #define DPUSB_DEVICE_NAME L"\\Device\\DataProtectorUsbCrypt"
 #define DPUSB_DOS_DEVICE_NAME L"\\DosDevices\\DataProtectorUsbCrypt"
+#define DPUSB_VOLUME_DEVICE_NAME L"\\Device\\DataProtectorUsbCryptVolume0"
 
 #define DPUSB_TAG_STATE 'sUpD'
 #define DPUSB_TAG_TEXT  'tUpD'

@@ -15,6 +15,7 @@
 
 #define DPUSB_DOS_NAME L"\\\\.\\DataProtectorUsbCrypt"
 #define DPUSB_NT_DEVICE_NAME L"\\Device\\DataProtectorUsbCrypt"
+#define DPUSB_NT_VOLUME_DEVICE_NAME L"\\Device\\DataProtectorUsbCryptVolume0"
 #define DPUSB_SERVICE_NAME L"DataProtectorUsbCryptRuntime"
 #define DPUSB_LEGACY_SERVICE_NAME L"DataProtectorUsbCrypt"
 #define DPUSB_DRIVER_FILE_NAME L"DataProtectorUsbCrypt.sys"
@@ -2026,8 +2027,8 @@ static BOOL TryCreatePrivateWorkspaceLink(WCHAR letter, BOOL globalLink, DPUSB_P
     }
 
     swprintf_s(path, sizeof(path) / sizeof(path[0]), L"%c:\\", letter);
-    (VOID)RemoveDosDeviceDefinition(dosName, DPUSB_NT_DEVICE_NAME);
-    if (DefineDosDeviceW(DDD_RAW_TARGET_PATH, dosName, DPUSB_NT_DEVICE_NAME)) {
+    (VOID)RemoveDosDeviceDefinition(dosName, DPUSB_NT_VOLUME_DEVICE_NAME);
+    if (DefineDosDeviceW(DDD_RAW_TARGET_PATH, dosName, DPUSB_NT_VOLUME_DEVICE_NAME)) {
         mount->Letter = letter;
         wcsncpy_s(mount->DosName, sizeof(mount->DosName) / sizeof(mount->DosName[0]), dosName, _TRUNCATE);
         wcsncpy_s(mount->Path, sizeof(mount->Path) / sizeof(mount->Path[0]), path, _TRUNCATE);
@@ -2202,7 +2203,7 @@ static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount)
     }
 
     RequestKernelDriveUnmount(mount->Letter);
-    (VOID)RemoveDosDeviceDefinition(mount->DosName, DPUSB_NT_DEVICE_NAME);
+    (VOID)RemoveDosDeviceDefinition(mount->DosName, DPUSB_NT_VOLUME_DEVICE_NAME);
 }
 
 static void UnmountAllPrivateWorkspaces(void)
@@ -2226,10 +2227,11 @@ static void UnmountAllPrivateWorkspaces(void)
             }
         }
 
-        if (_wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
-            (VOID)RemoveDosDeviceDefinition(dosName, DPUSB_NT_DEVICE_NAME);
+        if (_wcsicmp(target, DPUSB_NT_VOLUME_DEVICE_NAME) == 0 ||
+            _wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
+            (VOID)RemoveDosDeviceDefinition(dosName, target);
             swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
-            (VOID)RemoveDosDeviceDefinition(localDosName, DPUSB_NT_DEVICE_NAME);
+            (VOID)RemoveDosDeviceDefinition(localDosName, target);
         }
     }
 }
@@ -2348,7 +2350,8 @@ static BOOL FlushDismountPrivateWorkspace(DWORD *win32Error)
             }
         }
 
-        if (_wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
+        if (_wcsicmp(target, DPUSB_NT_VOLUME_DEVICE_NAME) == 0 ||
+            _wcsicmp(target, DPUSB_NT_DEVICE_NAME) == 0) {
             DWORD error = ERROR_SUCCESS;
             BOOL unmounted;
 
@@ -2360,9 +2363,9 @@ static BOOL FlushDismountPrivateWorkspace(DWORD *win32Error)
 
             if (unmounted) {
                 RequestKernelDriveUnmount(letter);
-                (VOID)RemoveDosDeviceDefinition(dosName, DPUSB_NT_DEVICE_NAME);
+                (VOID)RemoveDosDeviceDefinition(dosName, target);
                 swprintf_s(localDosName, sizeof(localDosName) / sizeof(localDosName[0]), L"%c:", letter);
-                (VOID)RemoveDosDeviceDefinition(localDosName, DPUSB_NT_DEVICE_NAME);
+                (VOID)RemoveDosDeviceDefinition(localDosName, target);
             }
         }
     }
@@ -2859,7 +2862,7 @@ static BOOL RefreshPrivateWorkspaceMount(DPUSB_PRIVATE_MOUNT *mount, DWORD *win3
 
     RequestKernelDriveUnmount(letter);
     if (mount->DosName[0] != L'\0') {
-        (VOID)RemoveDosDeviceDefinition(mount->DosName, DPUSB_NT_DEVICE_NAME);
+        (VOID)RemoveDosDeviceDefinition(mount->DosName, DPUSB_NT_VOLUME_DEVICE_NAME);
     }
 
     Sleep(300);
