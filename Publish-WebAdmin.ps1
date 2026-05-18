@@ -12,6 +12,11 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $msBuild = "D:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"
+$dSignToolRoot = "D:\Program Files (x86)\DSignTool"
+$cSignTool = Join-Path $dSignToolRoot "CSignTool.exe"
+$dSignRule = "gz"
+$usbRuntimeSignerThumbprint = "FF6E2D78C38944B9F3454AA33648BB15186FFC1C"
+$usbRuntimeSignerSubject = "Guangzhou Tianmu Yidong Communication Development Co., Ltd"
 
 function Invoke-Checked {
     param(
@@ -28,6 +33,45 @@ function Invoke-Checked {
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "$Description failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Invoke-UsbRuntimeSigning {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+
+    if (-not (Test-Path -LiteralPath $cSignTool)) {
+        throw "CSignTool was not found at: $cSignTool"
+    }
+
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        throw "USB runtime signing target was not found: $FilePath"
+    }
+
+    Push-Location $dSignToolRoot
+    try {
+        & $cSignTool sign /r $dSignRule /f $FilePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "USB runtime signing failed with exit code $LASTEXITCODE for: $FilePath"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $FilePath
+    if ($null -eq $signature.SignerCertificate) {
+        throw "USB runtime signing verification failed; no signer certificate was found for: $FilePath"
+    }
+
+    if (-not [string]::Equals($signature.SignerCertificate.Thumbprint, $usbRuntimeSignerThumbprint, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "USB runtime signing verification failed; unexpected signer thumbprint '$($signature.SignerCertificate.Thumbprint)' for: $FilePath"
+    }
+
+    if ($signature.SignerCertificate.Subject -notlike "*$usbRuntimeSignerSubject*") {
+        throw "USB runtime signing verification failed; unexpected signer subject '$($signature.SignerCertificate.Subject)' for: $FilePath"
     }
 }
 
@@ -131,6 +175,8 @@ try {
     if (Test-Path -LiteralPath $usbCryptDriverCertificate) {
         Copy-Item -LiteralPath $usbCryptDriverCertificate -Destination $runtimeDriverStaging -Force
     }
+    Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
+    Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
     Compress-Archive -Path (Join-Path $runtimeStaging "*") -DestinationPath (Join-Path $serverUsbRuntimePublish "DataProtectorUsbRuntime.zip") -Force
     Remove-Item -LiteralPath $runtimeStaging -Recurse -Force
 
