@@ -218,6 +218,7 @@ static BOOL RequestKernelDriveMount(WCHAR letter, DWORD *win32Error);
 static void RequestKernelDriveUnmount(WCHAR letter);
 static void UnmountPrivateWorkspace(const DPUSB_PRIVATE_MOUNT *mount);
 static void UnmountAllPrivateWorkspaces(void);
+static DWORD Crc32Bytes(const BYTE *bytes, DWORD count);
 static DWORD WINAPI UnlockWorkerThread(LPVOID parameter);
 static DWORD WINAPI SafeEjectWorkerThread(LPVOID parameter);
 
@@ -691,52 +692,12 @@ static BOOL GetModuleDriveRoot(wchar_t *root, DWORD rootChars)
     return TRUE;
 }
 
-static BOOL NormalizeUsbRootArgument(const wchar_t *source, wchar_t *root, DWORD rootChars)
-{
-    size_t length;
-
-    if (source == NULL || source[0] == L'\0' || root == NULL || rootChars < 4) {
-        return FALSE;
-    }
-
-    wcsncpy_s(root, rootChars, source, _TRUNCATE);
-    length = wcslen(root);
-    if (length == 2 && root[1] == L':') {
-        root[2] = L'\\';
-        root[3] = L'\0';
-        return TRUE;
-    }
-
-    if (length > 0 && root[length - 1] != L'\\') {
-        if (length + 1 >= rootChars) {
-            return FALSE;
-        }
-        root[length] = L'\\';
-        root[length + 1] = L'\0';
-    }
-
-    return TRUE;
-}
-
-static BOOL SetUsbSourceRoot(const wchar_t *source)
-{
-    if (!NormalizeUsbRootArgument(source, g_UsbSourceRoot, sizeof(g_UsbSourceRoot) / sizeof(g_UsbSourceRoot[0]))) {
-        g_UsbSourceRootSet = FALSE;
-        g_UsbSourceRoot[0] = L'\0';
-        return FALSE;
-    }
-
-    g_UsbSourceRootSet = TRUE;
-    return TRUE;
-}
-
 static BOOL RelaunchGuiFromLocalCacheIfNeeded(int showCommand)
 {
     wchar_t modulePath[MAX_PATH];
     wchar_t moduleRoot[MAX_PATH];
     wchar_t targetDir[MAX_PATH];
     wchar_t targetPath[MAX_PATH];
-    wchar_t commandLine[2048];
     SHELLEXECUTEINFOW executeInfo;
     UINT driveType;
 
@@ -774,18 +735,10 @@ static BOOL RelaunchGuiFromLocalCacheIfNeeded(int showCommand)
         return FALSE;
     }
 
-    if (FAILED(StringCchPrintfW(commandLine,
-                                sizeof(commandLine) / sizeof(commandLine[0]),
-                                L"--usb-root \"%s\"",
-                                moduleRoot))) {
-        return FALSE;
-    }
-
     ZeroMemory(&executeInfo, sizeof(executeInfo));
     executeInfo.cbSize = sizeof(executeInfo);
     executeInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
     executeInfo.lpFile = targetPath;
-    executeInfo.lpParameters = commandLine;
     executeInfo.nShow = showCommand;
 
     if (!ShellExecuteExW(&executeInfo)) {
@@ -798,57 +751,50 @@ static BOOL RelaunchGuiFromLocalCacheIfNeeded(int showCommand)
     return TRUE;
 }
 
-static BOOL GetUsbSourceRoot(wchar_t *root, DWORD rootChars)
+static BOOL RootContainsUsbRuntime(const wchar_t *root)
 {
-    if (root == NULL || rootChars == 0) {
+    wchar_t candidate[MAX_PATH];
+
+    if (root == NULL || root[0] == L'\0') {
         return FALSE;
     }
 
-    if (g_UsbSourceRootSet && g_UsbSourceRoot[0] != L'\0') {
-        wcsncpy_s(root, rootChars, g_UsbSourceRoot, _TRUNCATE);
-        return TRUE;
+    if (swprintf_s(candidate,
+                  sizeof(candidate) / sizeof(candidate[0]),
+                  L"%sDataProtectorUsbRuntime\\driver\\%s",
+                  root,
+                  DPUSB_DRIVER_FILE_NAME) <= 0) {
+        return FALSE;
     }
 
-    return GetModuleDriveRoot(root, rootChars);
+    return GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES;
 }
 
-static BOOL GetPhysicalDriveForVolume(wchar_t *physicalPath, DWORD physicalPathChars, DWORD *win32Error)
+static BOOL PhysicalPathForRoot(const wchar_t *root,
+                                wchar_t *physicalPath,
+                                DWORD physicalPathChars,
+                                DWORD *win32Error)
 {
-    wchar_t root[MAX_PATH];
     wchar_t volumePath[MAX_PATH];
     HANDLE volume;
     VOLUME_DISK_EXTENTS extents;
     DWORD returned = 0;
 
-    if (physicalPath == NULL || physicalPathChars == 0) {
+    if (root == NULL || root[0] == L'\0' || root[1] != L':' || physicalPath == NULL || physicalPathChars == 0) {
         if (win32Error != NULL) {
             *win32Error = ERROR_INVALID_PARAMETER;
         }
         return FALSE;
     }
 
-    if (!GetUsbSourceRoot(root, sizeof(root) / sizeof(root[0]))) {
+    if (swprintf_s(volumePath,
+                   sizeof(volumePath) / sizeof(volumePath[0]),
+                   L"\\\\.\\%c:",
+                   root[0]) <= 0) {
         if (win32Error != NULL) {
-            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_PATH_NOT_FOUND;
+            *win32Error = ERROR_INSUFFICIENT_BUFFER;
         }
         return FALSE;
-    }
-
-    if (wcslen(root) >= 2 && root[1] == L':') {
-        if (swprintf_s(volumePath,
-                       sizeof(volumePath) / sizeof(volumePath[0]),
-                       L"\\\\.\\%c:",
-                       root[0]) <= 0) {
-            if (win32Error != NULL) {
-                *win32Error = ERROR_INSUFFICIENT_BUFFER;
-            }
-            return FALSE;
-        }
-    } else {
-        wcsncpy_s(volumePath, sizeof(volumePath) / sizeof(volumePath[0]), root, _TRUNCATE);
-        while (wcslen(volumePath) > 0 && volumePath[wcslen(volumePath) - 1] == L'\\') {
-            volumePath[wcslen(volumePath) - 1] = L'\0';
-        }
     }
 
     volume = CreateFileW(volumePath,
@@ -899,70 +845,317 @@ static BOOL GetPhysicalDriveForVolume(wchar_t *physicalPath, DWORD physicalPathC
     return TRUE;
 }
 
-static BOOL FindPackagedDriver(wchar_t *path, DWORD pathChars)
+static BOOL IsUsbBackedPhysicalDisk(const wchar_t *physicalPath)
 {
-    wchar_t moduleDir[MAX_PATH];
-    wchar_t parentDir[MAX_PATH];
-    wchar_t candidate[MAX_PATH];
-    wchar_t *slash;
+    HANDLE disk;
+    STORAGE_PROPERTY_QUERY query;
+    BYTE buffer[1024];
+    DWORD returned = 0;
+    STORAGE_DEVICE_DESCRIPTOR *descriptor;
 
-    if (path == NULL || pathChars == 0 || !GetModuleDirectory(moduleDir, sizeof(moduleDir) / sizeof(moduleDir[0]))) {
+    if (physicalPath == NULL || physicalPath[0] == L'\0') {
+        return FALSE;
+    }
+
+    disk = CreateFileW(physicalPath,
+                       0,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       NULL,
+                       OPEN_EXISTING,
+                       0,
+                       NULL);
+    if (disk == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+
+    ZeroMemory(&query, sizeof(query));
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType = PropertyStandardQuery;
+    ZeroMemory(buffer, sizeof(buffer));
+    if (!DeviceIoControl(disk,
+                         IOCTL_STORAGE_QUERY_PROPERTY,
+                         &query,
+                         sizeof(query),
+                         buffer,
+                         sizeof(buffer),
+                         &returned,
+                         NULL)) {
+        CloseHandle(disk);
+        return FALSE;
+    }
+
+    CloseHandle(disk);
+    if (returned < sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
+        return FALSE;
+    }
+
+    descriptor = (STORAGE_DEVICE_DESCRIPTOR *)buffer;
+    return descriptor->BusType == BusTypeUsb || descriptor->RemovableMedia != FALSE;
+}
+
+static BOOL ReadManifestFromPhysicalPath(const wchar_t *physicalPath,
+                                         DPUSB_UNLOCK_MANIFEST *manifest,
+                                         DWORD *win32Error)
+{
+    HANDLE disk;
+    DWORD readBytes = 0;
+    BYTE raw[DPUSB_UNLOCK_METADATA_BYTES];
+    DWORD storedCrc;
+    DWORD actualCrc;
+    LARGE_INTEGER offset;
+
+    if (physicalPath == NULL || physicalPath[0] == L'\0' || manifest == NULL) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    disk = CreateFileW(physicalPath,
+                       GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       NULL,
+                       OPEN_EXISTING,
+                       0,
+                       NULL);
+    if (disk == INVALID_HANDLE_VALUE) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    ZeroMemory(manifest, sizeof(*manifest));
+    ZeroMemory(raw, sizeof(raw));
+    offset.QuadPart = (LONGLONG)DPUSB_UNLOCK_METADATA_OFFSET_BYTES;
+    if (SetFilePointerEx(disk, offset, NULL, FILE_BEGIN) == 0) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        CloseHandle(disk);
+        return FALSE;
+    }
+
+    if (!ReadFile(disk, raw, sizeof(raw), &readBytes, NULL) || readBytes != sizeof(raw)) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError() == ERROR_SUCCESS ? ERROR_INVALID_DATA : GetLastError();
+        }
+        CloseHandle(disk);
+        return FALSE;
+    }
+
+    CloseHandle(disk);
+    CopyMemory(manifest, raw, sizeof(*manifest));
+    CopyMemory(&storedCrc, raw + DPUSB_UNLOCK_METADATA_BYTES - sizeof(DWORD), sizeof(storedCrc));
+    actualCrc = Crc32Bytes(raw, DPUSB_UNLOCK_METADATA_BYTES - sizeof(DWORD));
+
+    if (manifest->Magic != DPUSB_UNLOCK_METADATA_MAGIC ||
+        manifest->Version != DPUSB_UNLOCK_METADATA_VERSION ||
+        manifest->MetadataBytes != DPUSB_UNLOCK_METADATA_BYTES ||
+        manifest->Algorithm != DPUSB_ALGORITHM_RC4 ||
+        manifest->KeyLength == 0 ||
+        manifest->KeyLength > DPUSB_MAX_KEY_BYTES ||
+        manifest->KdfIterations != 200000 ||
+        storedCrc != actualCrc ||
+        manifest->DeviceId[0] == '\0') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_DATA;
+        }
+        SecureZeroMemory(manifest, sizeof(*manifest));
+        return FALSE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL ValidateUsbSourceRoot(const wchar_t *root, DWORD *win32Error)
+{
+    wchar_t physicalPath[MAX_PATH];
+    DPUSB_UNLOCK_MANIFEST manifest;
+    DWORD error = ERROR_SUCCESS;
+
+    if (root == NULL || root[0] == L'\0') {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (!RootContainsUsbRuntime(root)) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_FILE_NOT_FOUND;
+        }
+        return FALSE;
+    }
+
+    if (!PhysicalPathForRoot(root, physicalPath, sizeof(physicalPath) / sizeof(physicalPath[0]), &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    if (GetDriveTypeW(root) != DRIVE_REMOVABLE && !IsUsbBackedPhysicalDisk(physicalPath)) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_NOT_SUPPORTED;
+        }
+        return FALSE;
+    }
+
+    ZeroMemory(&manifest, sizeof(manifest));
+    if (!ReadManifestFromPhysicalPath(physicalPath, &manifest, &error)) {
+        if (win32Error != NULL) {
+            *win32Error = error;
+        }
+        return FALSE;
+    }
+
+    SecureZeroMemory(&manifest, sizeof(manifest));
+    if (win32Error != NULL) {
+        *win32Error = ERROR_SUCCESS;
+    }
+    return TRUE;
+}
+
+static BOOL LocateUsbSourceRootByApi(wchar_t *root, DWORD rootChars, DWORD *win32Error)
+{
+    DWORD drives;
+    DWORD index;
+    DWORD lastError = ERROR_NOT_FOUND;
+
+    if (root == NULL || rootChars < 4) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    drives = GetLogicalDrives();
+    if (drives == 0) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError();
+        }
+        return FALSE;
+    }
+
+    for (index = 0; index < 26; index++) {
+        wchar_t candidateRoot[4];
+        DWORD error = ERROR_SUCCESS;
+        UINT driveType;
+
+        if ((drives & (1u << index)) == 0) {
+            continue;
+        }
+
+        candidateRoot[0] = (wchar_t)(L'A' + index);
+        candidateRoot[1] = L':';
+        candidateRoot[2] = L'\\';
+        candidateRoot[3] = L'\0';
+
+        driveType = GetDriveTypeW(candidateRoot);
+        if (driveType != DRIVE_REMOVABLE && driveType != DRIVE_FIXED) {
+            continue;
+        }
+
+        if (!ValidateUsbSourceRoot(candidateRoot, &error)) {
+            lastError = error;
+            continue;
+        }
+
+        wcsncpy_s(root, rootChars, candidateRoot, _TRUNCATE);
+        if (win32Error != NULL) {
+            *win32Error = ERROR_SUCCESS;
+        }
+        return TRUE;
+    }
+
+    if (win32Error != NULL) {
+        *win32Error = lastError;
+    }
+    return FALSE;
+}
+
+static BOOL GetUsbSourceRoot(wchar_t *root, DWORD rootChars)
+{
+    DWORD error = ERROR_SUCCESS;
+
+    if (root == NULL || rootChars == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
     if (g_UsbSourceRootSet && g_UsbSourceRoot[0] != L'\0') {
-        if (swprintf_s(candidate,
-                      sizeof(candidate) / sizeof(candidate[0]),
-                      L"%sDataProtectorUsbRuntime\\driver\\%s",
-                      g_UsbSourceRoot,
-                      DPUSB_DRIVER_FILE_NAME) > 0 &&
-            GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-            wcsncpy_s(path, pathChars, candidate, _TRUNCATE);
+        if (ValidateUsbSourceRoot(g_UsbSourceRoot, &error)) {
+            wcsncpy_s(root, rootChars, g_UsbSourceRoot, _TRUNCATE);
+            SetLastError(ERROR_SUCCESS);
             return TRUE;
         }
+
+        g_UsbSourceRootSet = FALSE;
+        g_UsbSourceRoot[0] = L'\0';
     }
 
-    if (CombinePath(candidate, sizeof(candidate) / sizeof(candidate[0]), moduleDir, DPUSB_DRIVER_FILE_NAME) &&
-        GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-        wcsncpy_s(path, pathChars, candidate, _TRUNCATE);
+    if (LocateUsbSourceRootByApi(root, rootChars, &error)) {
+        wcsncpy_s(g_UsbSourceRoot, sizeof(g_UsbSourceRoot) / sizeof(g_UsbSourceRoot[0]), root, _TRUNCATE);
+        g_UsbSourceRootSet = TRUE;
+        SetLastError(ERROR_SUCCESS);
         return TRUE;
+    }
+
+    SetLastError(error != ERROR_SUCCESS ? error : ERROR_NOT_FOUND);
+    return FALSE;
+}
+
+static BOOL GetPhysicalDriveForVolume(wchar_t *physicalPath, DWORD physicalPathChars, DWORD *win32Error)
+{
+    wchar_t root[MAX_PATH];
+
+    if (physicalPath == NULL || physicalPathChars == 0) {
+        if (win32Error != NULL) {
+            *win32Error = ERROR_INVALID_PARAMETER;
+        }
+        return FALSE;
+    }
+
+    if (!GetUsbSourceRoot(root, sizeof(root) / sizeof(root[0]))) {
+        if (win32Error != NULL) {
+            *win32Error = GetLastError() != ERROR_SUCCESS ? GetLastError() : ERROR_PATH_NOT_FOUND;
+        }
+        return FALSE;
+    }
+
+    return PhysicalPathForRoot(root, physicalPath, physicalPathChars, win32Error);
+}
+
+static BOOL FindPackagedDriver(wchar_t *path, DWORD pathChars)
+{
+    wchar_t usbRoot[MAX_PATH];
+    wchar_t candidate[MAX_PATH];
+
+    if (path == NULL || pathChars == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!GetUsbSourceRoot(usbRoot, sizeof(usbRoot) / sizeof(usbRoot[0]))) {
+        return FALSE;
     }
 
     if (swprintf_s(candidate,
                   sizeof(candidate) / sizeof(candidate[0]),
-                  L"%s\\driver\\%s",
-                  moduleDir,
+                  L"%sDataProtectorUsbRuntime\\driver\\%s",
+                  usbRoot,
                   DPUSB_DRIVER_FILE_NAME) > 0 &&
         GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
         wcsncpy_s(path, pathChars, candidate, _TRUNCATE);
+        SetLastError(ERROR_SUCCESS);
         return TRUE;
     }
 
-    if (swprintf_s(candidate,
-                  sizeof(candidate) / sizeof(candidate[0]),
-                  L"%s\\DataProtectorUsbRuntime\\driver\\%s",
-                  moduleDir,
-                  DPUSB_DRIVER_FILE_NAME) > 0 &&
-        GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-        wcsncpy_s(path, pathChars, candidate, _TRUNCATE);
-        return TRUE;
-    }
-
-    wcsncpy_s(parentDir, sizeof(parentDir) / sizeof(parentDir[0]), moduleDir, _TRUNCATE);
-    slash = wcsrchr(parentDir, L'\\');
-    if (slash != NULL) {
-        *slash = L'\0';
-        if (swprintf_s(candidate,
-                      sizeof(candidate) / sizeof(candidate[0]),
-                      L"%s\\DataProtectorUsbRuntime\\driver\\%s",
-                      parentDir,
-                      DPUSB_DRIVER_FILE_NAME) > 0 &&
-            GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
-            wcsncpy_s(path, pathChars, candidate, _TRUNCATE);
-            return TRUE;
-        }
-    }
-
+    SetLastError(ERROR_FILE_NOT_FOUND);
     return FALSE;
 }
 
@@ -2291,12 +2484,6 @@ static DWORD Crc32Bytes(const BYTE *bytes, DWORD count)
 static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Error)
 {
     wchar_t physicalPath[MAX_PATH];
-    HANDLE disk;
-    DWORD readBytes = 0;
-    BYTE raw[DPUSB_UNLOCK_METADATA_BYTES];
-    DWORD storedCrc;
-    DWORD actualCrc;
-    LARGE_INTEGER offset;
 
     if (manifest == NULL) {
         if (win32Error != NULL) {
@@ -2309,64 +2496,7 @@ static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Erro
         return FALSE;
     }
 
-    disk = CreateFileW(physicalPath,
-                       GENERIC_READ,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE,
-                       NULL,
-                       OPEN_EXISTING,
-                       0,
-                       NULL);
-    if (disk == INVALID_HANDLE_VALUE) {
-        if (win32Error != NULL) {
-            *win32Error = GetLastError();
-        }
-        return FALSE;
-    }
-
-    ZeroMemory(manifest, sizeof(*manifest));
-    ZeroMemory(raw, sizeof(raw));
-    offset.QuadPart = (LONGLONG)DPUSB_UNLOCK_METADATA_OFFSET_BYTES;
-    if (SetFilePointerEx(disk, offset, NULL, FILE_BEGIN) == 0) {
-        if (win32Error != NULL) {
-            *win32Error = GetLastError();
-        }
-        CloseHandle(disk);
-        return FALSE;
-    }
-
-    if (!ReadFile(disk, raw, sizeof(raw), &readBytes, NULL) || readBytes != sizeof(raw)) {
-        if (win32Error != NULL) {
-            *win32Error = GetLastError() == ERROR_SUCCESS ? ERROR_INVALID_DATA : GetLastError();
-        }
-        CloseHandle(disk);
-        return FALSE;
-    }
-
-    CloseHandle(disk);
-    CopyMemory(manifest, raw, sizeof(*manifest));
-    CopyMemory(&storedCrc, raw + DPUSB_UNLOCK_METADATA_BYTES - sizeof(DWORD), sizeof(storedCrc));
-    actualCrc = Crc32Bytes(raw, DPUSB_UNLOCK_METADATA_BYTES - sizeof(DWORD));
-
-    if (manifest->Magic != DPUSB_UNLOCK_METADATA_MAGIC ||
-        manifest->Version != DPUSB_UNLOCK_METADATA_VERSION ||
-        manifest->MetadataBytes != DPUSB_UNLOCK_METADATA_BYTES ||
-        manifest->Algorithm != DPUSB_ALGORITHM_RC4 ||
-        manifest->KeyLength == 0 ||
-        manifest->KeyLength > DPUSB_MAX_KEY_BYTES ||
-        manifest->KdfIterations != 200000 ||
-        storedCrc != actualCrc ||
-        manifest->DeviceId[0] == '\0') {
-        if (win32Error != NULL) {
-            *win32Error = ERROR_INVALID_DATA;
-        }
-        SecureZeroMemory(manifest, sizeof(*manifest));
-        return FALSE;
-    }
-
-    if (win32Error != NULL) {
-        *win32Error = ERROR_SUCCESS;
-    }
-    return TRUE;
+    return ReadManifestFromPhysicalPath(physicalPath, manifest, win32Error);
 }
 
 static BOOL DeriveUnlockBytes(const wchar_t *password,
@@ -3625,8 +3755,9 @@ static void CreateUi(HWND hwnd)
     SendMessageW(g_Ui.PasswordEdit, EM_SETPASSWORDCHAR, (WPARAM)L'*', 0);
     LayoutControls(hwnd);
 
-    if (g_UsbSourceRootSet) {
-        AppendLog(L"UI started from local cache for USB source %s", g_UsbSourceRoot);
+    if (GetUsbSourceRoot(g_UsbSourceRoot, sizeof(g_UsbSourceRoot) / sizeof(g_UsbSourceRoot[0]))) {
+        g_UsbSourceRootSet = TRUE;
+        AppendLog(L"UI started. DataProtector USB source detected by Windows API: %s", g_UsbSourceRoot);
     } else {
         AppendLog(L"UI started. Enter the initialization password to unlock this USB workspace.");
     }
@@ -3850,10 +3981,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previousInstance, PWSTR comman
         return 1;
     }
 
-    if (argc == 3 && _wcsicmp(argv[1], L"--usb-root") == 0) {
-        (VOID)SetUsbSourceRoot(argv[2]);
-        result = RunGui(instance, showCommand);
-    } else if (argc > 1) {
+    if (argc > 1) {
         AttachConsole(ATTACH_PARENT_PROCESS);
         result = DispatchCli(argc, argv);
         FreeConsole();
