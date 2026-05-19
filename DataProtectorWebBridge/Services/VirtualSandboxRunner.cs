@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Management;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -31,12 +32,13 @@ namespace DataProtectorWebBridge.Services
                 throw new FileNotFoundException("Sandbox sample was not found.", samplePath);
             }
 
-            string sandboxExe = FindWindowsSandboxExecutable();
-            if (string.IsNullOrWhiteSpace(sandboxExe))
+            SandboxAvailability sandboxAvailability = GetWindowsSandboxAvailability();
+            if (!sandboxAvailability.IsAvailable)
             {
-                throw new InvalidOperationException("Windows Sandbox is not available on this endpoint. Enable Windows Sandbox/Hyper-V before running isolated analysis.");
+                throw new InvalidOperationException(sandboxAvailability.Message);
             }
 
+            string sandboxExe = sandboxAvailability.ExecutablePath;
             int timeoutSeconds = Clamp(ParseInt(GetArg(args, "timeoutSeconds", DefaultTimeoutSeconds.ToString(CultureInfo.InvariantCulture)), DefaultTimeoutSeconds), MinimumTimeoutSeconds, MaximumTimeoutSeconds);
             bool networkEnabled = ParseBool(GetArg(args, "networkEnabled", "false"), false);
             bool copyInputDirectory = ParseBool(GetArg(args, "copyInputDirectory", "false"), false);
@@ -425,21 +427,216 @@ namespace DataProtectorWebBridge.Services
         private static string FindWindowsSandboxExecutable()
         {
             string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            string[] candidates =
+            List<string> candidates = new List<string>
             {
                 Path.Combine(windows, "System32", "WindowsSandbox.exe"),
-                Path.Combine(windows, "Sysnative", "WindowsSandbox.exe")
+                Path.Combine(windows, "Sysnative", "WindowsSandbox.exe"),
+                FindExecutableInPath("WindowsSandbox.exe")
             };
 
             foreach (string candidate in candidates)
             {
-                if (File.Exists(candidate))
+                if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
                 {
                     return candidate;
                 }
             }
 
             return string.Empty;
+        }
+
+        private static SandboxAvailability GetWindowsSandboxAvailability()
+        {
+            string sandboxExe = FindWindowsSandboxExecutable();
+            string sandboxFeature = GetOptionalFeatureState("Containers-DisposableClientVM");
+            string containersFeature = GetOptionalFeatureState("Containers");
+            string hyperVFeature = GetOptionalFeatureState("Microsoft-Hyper-V-All");
+            string virtualMachinePlatformFeature = GetOptionalFeatureState("VirtualMachinePlatform");
+            bool hypervisorPresent = IsHypervisorPresent();
+            bool rebootPending = IsWindowsRebootPending();
+
+            List<string> blockers = new List<string>();
+            if (!IsFeatureEnabled(sandboxFeature))
+            {
+                blockers.Add("Windows Sandbox feature Containers-DisposableClientVM is " + sandboxFeature + ".");
+            }
+
+            if (!hypervisorPresent)
+            {
+                blockers.Add("The Windows hypervisor is not active. Reboot after enabling virtualization features and confirm BIOS/UEFI virtualization is enabled.");
+            }
+
+            if (string.IsNullOrWhiteSpace(sandboxExe))
+            {
+                if (rebootPending && IsFeatureEnabled(sandboxFeature))
+                {
+                    blockers.Add("WindowsSandbox.exe was not found yet, and a Windows component reboot is pending; restart Windows so the Sandbox feature can finish installing.");
+                }
+                else
+                {
+                    blockers.Add("WindowsSandbox.exe was not found in System32, Sysnative, or PATH.");
+                }
+            }
+
+            if (blockers.Count == 0)
+            {
+                return new SandboxAvailability
+                {
+                    IsAvailable = true,
+                    ExecutablePath = sandboxExe,
+                    Message = string.Empty
+                };
+            }
+
+            string enableCommand = "Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart";
+            return new SandboxAvailability
+            {
+                IsAvailable = false,
+                ExecutablePath = sandboxExe,
+                Message = "Windows Sandbox is not available on this endpoint. " +
+                    string.Join(" ", blockers.ToArray()) +
+                    " Current states: Containers-DisposableClientVM=" + sandboxFeature +
+                    ", Containers=" + containersFeature +
+                    ", Microsoft-Hyper-V-All=" + hyperVFeature +
+                    ", VirtualMachinePlatform=" + virtualMachinePlatformFeature +
+                    ", HypervisorPresent=" + (hypervisorPresent ? "true" : "false") +
+                    ", RebootPending=" + (rebootPending ? "true" : "false") +
+                    ". Run PowerShell as administrator: " + enableCommand + ", then restart Windows if requested."
+            };
+        }
+
+        private static string FindExecutableInPath(string fileName)
+        {
+            string pathValue = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            string[] directories = pathValue.Split(new[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string directory in directories)
+            {
+                try
+                {
+                    string normalized = directory.Trim().Trim('"');
+                    if (string.IsNullOrWhiteSpace(normalized))
+                    {
+                        continue;
+                    }
+
+                    string candidate = Path.Combine(Environment.ExpandEnvironmentVariables(normalized), fileName);
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string GetOptionalFeatureState(string featureName)
+        {
+            try
+            {
+                string query = "SELECT InstallState FROM Win32_OptionalFeature WHERE Name='" + featureName.Replace("'", "''") + "'";
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("root\\cimv2", query))
+                using (ManagementObjectCollection results = searcher.Get())
+                {
+                    foreach (ManagementObject result in results)
+                    {
+                        object value = result["InstallState"];
+                        if (value == null)
+                        {
+                            return "Unknown";
+                        }
+
+                        return FormatOptionalFeatureState(Convert.ToInt32(value, CultureInfo.InvariantCulture));
+                    }
+                }
+
+                return "NotFound";
+            }
+            catch (Exception ex)
+            {
+                return "Unknown(" + ex.GetType().Name + ")";
+            }
+        }
+
+        private static string FormatOptionalFeatureState(int installState)
+        {
+            switch (installState)
+            {
+                case 1:
+                    return "Enabled";
+                case 2:
+                    return "Disabled";
+                case 3:
+                    return "Absent";
+                case 4:
+                    return "Unknown";
+                default:
+                    return "State" + installState.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        private static bool IsFeatureEnabled(string state)
+        {
+            return string.Equals(state, "Enabled", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsHypervisorPresent()
+        {
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("root\\cimv2", "SELECT HypervisorPresent FROM Win32_ComputerSystem"))
+                using (ManagementObjectCollection results = searcher.Get())
+                {
+                    foreach (ManagementObject result in results)
+                    {
+                        object value = result["HypervisorPresent"];
+                        return value != null && Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private static bool IsWindowsRebootPending()
+        {
+            try
+            {
+                if (RegistryKeyExists(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") ||
+                    RegistryKeyExists(@"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"))
+                {
+                    return true;
+                }
+
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager"))
+                {
+                    if (key == null)
+                    {
+                        return false;
+                    }
+
+                    object pendingRenames = key.GetValue("PendingFileRenameOperations");
+                    return pendingRenames != null;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool RegistryKeyExists(string subKey)
+        {
+            using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(subKey))
+            {
+                return key != null;
+            }
         }
 
         private static string ComputeSha256(string path)
@@ -601,6 +798,13 @@ namespace DataProtectorWebBridge.Services
         {
             public int ExitCode { get; set; }
             public string Output { get; set; }
+        }
+
+        private sealed class SandboxAvailability
+        {
+            public bool IsAvailable { get; set; }
+            public string ExecutablePath { get; set; }
+            public string Message { get; set; }
         }
     }
 }
