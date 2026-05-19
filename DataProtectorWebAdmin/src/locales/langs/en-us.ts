@@ -842,6 +842,28 @@ const local: App.I18n.Schema = {
         services: 'Services/Drivers',
         tasks: 'Tasks'
       },
+      attackFlow: {
+        eyebrow: 'Attack Flow',
+        title: 'Attack Flow Graph',
+        active: '{count} stage(s) hit',
+        stages: {
+          launch: 'Sample Launch',
+          process: 'Process Chain',
+          apiMemory: 'API / Memory',
+          network: 'Network',
+          persistence: 'Persistence',
+          artifact: 'Files / Drivers'
+        },
+        details: {
+          launch: 'Sample entered the isolated workspace',
+          process: '{count} child process or high-risk command hit(s)',
+          apiMemory: '{count} hook, syscall, or executable-memory hit(s)',
+          network: '{count} remote connection or network API hit(s)',
+          persistence: '{count} registry, service, or task change(s)',
+          artifact: '{count} dropped file, driver, or service change(s)',
+          idle: 'No hit'
+        }
+      },
       columns: {
         sample: 'Sample',
         status: 'Status',

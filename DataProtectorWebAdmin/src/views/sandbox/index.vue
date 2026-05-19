@@ -141,6 +141,16 @@ type SandboxReport = {
   error?: string;
 };
 
+type AttackFlowStage = {
+  key: string;
+  label: string;
+  detail: string;
+  active: boolean;
+  severity: string;
+  count: number;
+  icon: string;
+};
+
 const message = useMessage();
 const loading = ref(false);
 const uploading = ref(false);
@@ -188,7 +198,10 @@ const pagination = reactive<PaginationProps>({
 
 const samples = computed(() => response.value?.items ?? []);
 const selectedSample = computed(() => samples.value.find(item => item.sampleId === selectedSampleId.value) || samples.value[0] || null);
-const report = computed(() => parseJson<SandboxReport | null>(selectedSample.value?.reportJson, null));
+const rawReport = computed(() => parseJson<SandboxReport | null>(selectedSample.value?.reportJson, null));
+const report = computed(() => sanitizeSandboxReport(rawReport.value));
+const attackFlowStages = computed(() => buildAttackFlowStages(report.value));
+const activeAttackFlowStageCount = computed(() => attackFlowStages.value.filter(item => item.active).length);
 const stats = computed(() => ({
   total: response.value?.total ?? 0,
   queued: response.value?.queuedTotal ?? 0,
@@ -580,6 +593,183 @@ function parseJson<T>(value: string | undefined, fallback: T): T {
   }
 }
 
+function sanitizeSandboxReport(value: SandboxReport | null) {
+  if (!value) return null;
+
+  const reportClone: SandboxReport = {
+    ...value,
+    behaviors: [...(value.behaviors || [])],
+    processes: [...(value.processes || [])],
+    network: [...(value.network || [])],
+    fileArtifacts: [...(value.fileArtifacts || [])],
+    runtimeEvents: [...(value.runtimeEvents || [])],
+    kernelEvents: [...(value.kernelEvents || [])],
+    services: [...(value.services || [])],
+    scheduledTasks: [...(value.scheduledTasks || [])]
+  };
+
+  const internalPids = new Set(
+    reportClone.processes
+      .filter(process => isInternalProcess(process))
+      .map(process => process.pid)
+      .filter(pid => Number.isFinite(pid))
+  );
+
+  reportClone.behaviors = reportClone.behaviors?.filter(
+    item =>
+      item &&
+      !internalPids.has(item.pid) &&
+      !isInternalTelemetryText(item.type) &&
+      !isInternalTelemetryText(item.detail)
+  );
+  reportClone.processes = reportClone.processes?.filter(item => item && !internalPids.has(item.pid) && !isInternalProcess(item));
+  reportClone.network = reportClone.network?.filter(item => item && !internalPids.has(item.pid));
+  reportClone.fileArtifacts = reportClone.fileArtifacts?.filter(item => item && !isInternalTelemetryText(item.path));
+  reportClone.runtimeEvents = reportClone.runtimeEvents?.filter(
+    item =>
+      item &&
+      !internalPids.has(item.pid) &&
+      !isInternalTelemetryText(item.action) &&
+      !isInternalTelemetryText(item.target) &&
+      !isInternalTelemetryText(item.processImage)
+  );
+  reportClone.kernelEvents = reportClone.kernelEvents?.filter(
+    item =>
+      item &&
+      !internalPids.has(item.pid) &&
+      !isInternalTelemetryText(item.operationName) &&
+      !isInternalTelemetryText(item.target) &&
+      !isInternalTelemetryText(item.processImage) &&
+      !isInternalTelemetryText(item.description)
+  );
+  reportClone.services = reportClone.services?.filter(
+    item =>
+      item &&
+      !isInternalTelemetryText(item.name) &&
+      !isInternalTelemetryText(item.displayName) &&
+      !isInternalTelemetryText(item.pathName)
+  );
+  reportClone.scheduledTasks = reportClone.scheduledTasks?.filter(
+    item => item && !isInternalTelemetryText(item.name) && !isInternalTelemetryText(item.command)
+  );
+
+  return reportClone;
+}
+
+function isInternalProcess(process: SandboxProcess) {
+  return (
+    isInternalTelemetryText(process.name) ||
+    isInternalTelemetryText(process.path) ||
+    isInternalTelemetryText(process.commandLine)
+  );
+}
+
+function isInternalTelemetryText(value?: string) {
+  const text = String(value || '').toLowerCase();
+  if (!text) return false;
+
+  return [
+    'dataprotectorsandboxtelemetry',
+    'dataprotectorsandbox',
+    'dataprotectoruserhookruntime',
+    'dataprotectorpolicyapi',
+    'dataprotector.sys',
+    'dataprotectorsandbox.sys',
+    'dataprotector\\sandbox',
+    '\\dataprotector\\userhook',
+    'userhook.observed',
+    'sandbox-kernel-sensor',
+    'kernel-early-injection-policy'
+  ].some(token => text.includes(token));
+}
+
+function buildAttackFlowStages(value: SandboxReport | null): AttackFlowStage[] {
+  const behaviors = value?.behaviors || [];
+  const processes = value?.processes || [];
+  const network = value?.network || [];
+  const artifacts = value?.fileArtifacts || [];
+  const runtimeEvents = value?.runtimeEvents || [];
+  const kernelEvents = value?.kernelEvents || [];
+  const services = value?.services || [];
+  const tasks = value?.scheduledTasks || [];
+
+  const childProcessCount = processes.filter(process => process.parentPid && process.pid !== value?.execution?.pid).length;
+  const commandCount = countTextMatches(
+    [...behaviors.map(item => `${item.type} ${item.detail}`), ...processes.map(item => item.commandLine)],
+    ['process', 'command', 'powershell', 'cmd.exe', 'rundll32', 'regsvr32', 'wscript', 'cscript', 'mshta']
+  );
+  const memoryCount = countTextMatches(
+    [
+      ...behaviors.map(item => `${item.type} ${item.detail}`),
+      ...runtimeEvents.map(item => `${item.action} ${item.target}`),
+      ...kernelEvents.map(item => `${item.operationName} ${item.description} ${item.target}`)
+    ],
+    ['virtualalloc', 'writeprocessmemory', 'createremotethread', 'syscall', 'unhook', 'executable memory', 'module reload', 'native-module']
+  );
+  const persistenceCount =
+    services.length +
+    tasks.length +
+    countTextMatches(
+      [...behaviors.map(item => `${item.type} ${item.detail}`), ...runtimeEvents.map(item => `${item.action} ${item.target}`)],
+      ['registry', 'autorun', 'run key', 'scheduled task', 'service', 'driver']
+    );
+  const artifactCount =
+    artifacts.length +
+    countTextMatches(
+      [...behaviors.map(item => `${item.type} ${item.detail}`), ...kernelEvents.map(item => `${item.operationName} ${item.target}`)],
+      ['file-artifacts', 'drop', 'write-file', 'driver']
+    );
+
+  return [
+    createAttackFlowStage('launch', true, 1, 'medium', 'mdi:rocket-launch-outline'),
+    createAttackFlowStage('process', childProcessCount > 0 || commandCount > 0, childProcessCount + commandCount, 'high', 'mdi:family-tree'),
+    createAttackFlowStage('apiMemory', memoryCount > 0, memoryCount, 'critical', 'mdi:memory'),
+    createAttackFlowStage('network', network.length > 0, network.length, 'medium', 'mdi:access-point-network'),
+    createAttackFlowStage('persistence', persistenceCount > 0, persistenceCount, 'critical', 'mdi:shield-key-outline'),
+    createAttackFlowStage('artifact', artifactCount > 0, artifactCount, 'high', 'mdi:file-cog-outline')
+  ];
+}
+
+function createAttackFlowStage(key: string, active: boolean, count: number, severity: string, icon: string) {
+  const stageKey = key as keyof typeof attackFlowStageLabelKeys;
+  return {
+    key,
+    label: $t(attackFlowStageLabelKeys[stageKey]),
+    detail: active
+      ? $t(attackFlowStageDetailKeys[stageKey], { count: Math.max(count, 1) })
+      : $t('dataprotector.sandbox.attackFlow.details.idle'),
+    active,
+    severity,
+    count,
+    icon
+  };
+}
+
+const attackFlowStageLabelKeys = {
+  launch: 'dataprotector.sandbox.attackFlow.stages.launch',
+  process: 'dataprotector.sandbox.attackFlow.stages.process',
+  apiMemory: 'dataprotector.sandbox.attackFlow.stages.apiMemory',
+  network: 'dataprotector.sandbox.attackFlow.stages.network',
+  persistence: 'dataprotector.sandbox.attackFlow.stages.persistence',
+  artifact: 'dataprotector.sandbox.attackFlow.stages.artifact'
+};
+
+const attackFlowStageDetailKeys = {
+  launch: 'dataprotector.sandbox.attackFlow.details.launch',
+  process: 'dataprotector.sandbox.attackFlow.details.process',
+  apiMemory: 'dataprotector.sandbox.attackFlow.details.apiMemory',
+  network: 'dataprotector.sandbox.attackFlow.details.network',
+  persistence: 'dataprotector.sandbox.attackFlow.details.persistence',
+  artifact: 'dataprotector.sandbox.attackFlow.details.artifact'
+};
+
+function countTextMatches(values: string[], tokens: string[]) {
+  return values.reduce((count, value) => {
+    const text = String(value || '').toLowerCase();
+    return count + (tokens.some(token => text.includes(token)) ? 1 : 0);
+  }, 0);
+}
+
 function statusTagType(status: string) {
   if (status === 'completed') return 'success';
   if (status === 'running') return 'info';
@@ -837,6 +1027,36 @@ onBeforeUnmount(stopPolling);
           </div>
         </div>
 
+        <div class="attack-flow-panel">
+          <div class="attack-flow-header">
+            <div>
+              <div class="eyebrow">{{ $t('dataprotector.sandbox.attackFlow.eyebrow') }}</div>
+              <h3>{{ $t('dataprotector.sandbox.attackFlow.title') }}</h3>
+            </div>
+            <NTag type="info" :bordered="false">
+              {{ $t('dataprotector.sandbox.attackFlow.active', { count: activeAttackFlowStageCount }) }}
+            </NTag>
+          </div>
+          <div class="attack-flow">
+            <template v-for="(stage, index) in attackFlowStages" :key="stage.key">
+              <div class="flow-node" :class="[{ active: stage.active }, `severity-${stage.severity}`]">
+                <div class="flow-icon">
+                  <SvgIcon :icon="stage.icon" />
+                </div>
+                <div class="flow-body">
+                  <div class="flow-label">{{ stage.label }}</div>
+                  <div class="flow-detail">{{ stage.detail }}</div>
+                </div>
+              </div>
+              <div
+                v-if="index < attackFlowStages.length - 1"
+                class="flow-link"
+                :class="{ active: stage.active || attackFlowStages[index + 1]?.active }"
+              />
+            </template>
+          </div>
+        </div>
+
         <NAlert v-if="report.error || report.errors?.length" type="warning" :bordered="false" class="m-b-12px">
           {{ report.error || report.errors?.join('; ') }}
         </NAlert>
@@ -1036,6 +1256,136 @@ onBeforeUnmount(stopPolling);
   font-size: 22px;
 }
 
+.attack-flow-panel {
+  position: relative;
+  padding: 16px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgb(45 23 82 / 92%), rgb(17 24 39 / 96%)),
+    radial-gradient(circle at 18% 20%, rgb(125 92 255 / 34%), transparent 34%);
+  border: 1px solid rgb(167 139 250 / 26%);
+  border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%), 0 18px 42px rgb(30 21 54 / 18%);
+  margin-bottom: 14px;
+}
+
+.attack-flow-panel::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: '';
+  background: linear-gradient(110deg, transparent 0%, rgb(255 255 255 / 8%) 46%, transparent 62%);
+  opacity: 0.7;
+  transform: translateX(-120%);
+  animation: flow-sheen 6s ease-in-out infinite;
+}
+
+.attack-flow-header {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.attack-flow-header h3 {
+  margin: 3px 0 0;
+  color: #ffffff;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.attack-flow {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr);
+  gap: 0;
+  align-items: stretch;
+}
+
+.flow-node {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 96px;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 13px;
+  color: rgb(226 232 240);
+  background: rgb(15 23 42 / 58%);
+  border: 1px solid rgb(148 163 184 / 22%);
+  border-radius: 8px;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.flow-node.active {
+  background: linear-gradient(145deg, rgb(79 70 229 / 42%), rgb(14 165 233 / 18%));
+  border-color: rgb(103 232 249 / 54%);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 8%), 0 12px 28px rgb(14 165 233 / 14%);
+  animation: flow-node-pulse 2.8s ease-in-out infinite;
+}
+
+.flow-icon {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: rgb(216 180 254);
+  font-size: 21px;
+  background: rgb(255 255 255 / 8%);
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 8px;
+}
+
+.flow-node.active .flow-icon {
+  color: #ffffff;
+  background: rgb(34 211 238 / 18%);
+  border-color: rgb(103 232 249 / 48%);
+}
+
+.flow-body {
+  min-width: 0;
+}
+
+.flow-label {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.flow-detail {
+  margin-top: 5px;
+  color: rgb(203 213 225);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.flow-link {
+  position: relative;
+  align-self: center;
+  height: 2px;
+  margin: 0 6px;
+  overflow: hidden;
+  background: rgb(148 163 184 / 26%);
+  border-radius: 99px;
+}
+
+.flow-link::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background: linear-gradient(90deg, transparent, rgb(103 232 249), rgb(167 139 250), transparent);
+  opacity: 0;
+  transform: translateX(-100%);
+}
+
+.flow-link.active::after {
+  opacity: 1;
+  animation: flow-link-move 1.7s linear infinite;
+}
+
 .sandbox-output {
   max-height: 360px;
   padding: 14px;
@@ -1061,7 +1411,72 @@ onBeforeUnmount(stopPolling);
   }
 
   .report-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .attack-flow {
     grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .flow-link {
+    width: 2px;
+    height: 22px;
+    margin: 0 0 0 29px;
+  }
+
+  .flow-link::after {
+    background: linear-gradient(180deg, transparent, rgb(103 232 249), rgb(167 139 250), transparent);
+    transform: translateY(-100%);
+  }
+
+  .flow-link.active::after {
+    animation-name: flow-link-move-y;
+  }
+}
+
+@media (max-width: 560px) {
+  .report-summary {
+    grid-template-columns: 1fr;
+  }
+}
+
+@keyframes flow-sheen {
+  0%,
+  42% {
+    transform: translateX(-120%);
+  }
+  72%,
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+@keyframes flow-node-pulse {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes flow-link-move {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes flow-link-move-y {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(100%);
   }
 }
 </style>

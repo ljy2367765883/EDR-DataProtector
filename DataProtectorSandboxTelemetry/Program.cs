@@ -125,7 +125,9 @@ namespace DataProtectorSandboxTelemetry
             List<RuntimeEventRecord> runtimeEvents = ReadRuntimeEvents(RuntimeEventPath, behaviors, errors);
             List<KernelSensorEventRecord> kernelEvents = DrainKernelSensorEvents(kernelSensor, behaviors, errors);
 
+            RemoveInternalTelemetryNoise(behaviors, processes, network, artifacts, runtimeEvents, kernelEvents, services, tasks);
             AddRuleDetections(processes, network, runtimeEvents, kernelEvents, services, tasks, behaviors);
+            RemoveInternalTelemetryNoise(behaviors, processes, network, artifacts, runtimeEvents, kernelEvents, services, tasks);
             Report report = new Report
             {
                 schema = "dataprotector.sandbox.report.v2",
@@ -731,7 +733,7 @@ namespace DataProtectorSandboxTelemetry
 
         private static void AddKernelBehavior(KernelSensorEventRecord record, List<BehaviorRecord> behaviors)
         {
-            if (record == null)
+            if (record == null || IsInternalTelemetryText(record.processImage) || IsInternalTelemetryText(record.target) || IsInternalTelemetryText(record.description))
             {
                 return;
             }
@@ -807,7 +809,11 @@ namespace DataProtectorSandboxTelemetry
 
         private static void AddRuntimeBehavior(RuntimeEventRecord record, List<BehaviorRecord> behaviors)
         {
-            if (record == null || string.IsNullOrWhiteSpace(record.action))
+            if (record == null ||
+                string.IsNullOrWhiteSpace(record.action) ||
+                IsInternalTelemetryText(record.action) ||
+                IsInternalTelemetryText(record.processImage) ||
+                IsInternalTelemetryText(record.target))
             {
                 return;
             }
@@ -1118,6 +1124,11 @@ namespace DataProtectorSandboxTelemetry
 
         private static void AddBehavior(List<BehaviorRecord> behaviors, string type, string severity, string detail, int pid)
         {
+            if (IsInternalTelemetryText(detail))
+            {
+                return;
+            }
+
             behaviors.Add(new BehaviorRecord
             {
                 type = type,
@@ -1126,6 +1137,80 @@ namespace DataProtectorSandboxTelemetry
                 pid = pid,
                 timeUtc = DateTime.UtcNow.ToString("o")
             });
+        }
+
+        private static void RemoveInternalTelemetryNoise(
+            List<BehaviorRecord> behaviors,
+            List<ProcessRecord> processes,
+            List<NetworkRecord> network,
+            List<FileArtifactRecord> artifacts,
+            List<RuntimeEventRecord> runtimeEvents,
+            List<KernelSensorEventRecord> kernelEvents,
+            List<ServiceRecord> services,
+            List<TaskRecord> tasks)
+        {
+            HashSet<int> internalPids = new HashSet<int>(
+                processes.Where(IsInternalProcess).Select(item => item.pid));
+
+            behaviors.RemoveAll(item =>
+                item == null ||
+                internalPids.Contains(item.pid) ||
+                IsInternalTelemetryText(item.type) ||
+                IsInternalTelemetryText(item.detail));
+            network.RemoveAll(item => item == null || internalPids.Contains(item.pid));
+            runtimeEvents.RemoveAll(item =>
+                item == null ||
+                internalPids.Contains(item.pid) ||
+                IsInternalTelemetryText(item.processImage) ||
+                IsInternalTelemetryText(item.target) ||
+                IsInternalTelemetryText(item.action));
+            kernelEvents.RemoveAll(item =>
+                item == null ||
+                internalPids.Contains(item.pid) ||
+                IsInternalTelemetryText(item.processImage) ||
+                IsInternalTelemetryText(item.target) ||
+                IsInternalTelemetryText(item.description));
+            artifacts.RemoveAll(item => item == null || IsInternalTelemetryText(item.path));
+            services.RemoveAll(item =>
+                item == null ||
+                IsInternalTelemetryText(item.name) ||
+                IsInternalTelemetryText(item.displayName) ||
+                IsInternalTelemetryText(item.pathName));
+            tasks.RemoveAll(item => item == null || IsInternalTelemetryText(item.command));
+            processes.RemoveAll(item => item == null || internalPids.Contains(item.pid) || IsInternalProcess(item));
+        }
+
+        private static bool IsInternalProcess(ProcessRecord process)
+        {
+            if (process == null)
+            {
+                return false;
+            }
+
+            return IsInternalTelemetryText(process.name) ||
+                   IsInternalTelemetryText(process.path) ||
+                   IsInternalTelemetryText(process.commandLine);
+        }
+
+        private static bool IsInternalTelemetryText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            string text = value.ToLowerInvariant();
+            return text.Contains("dataprotectorsandboxtelemetry") ||
+                   text.Contains("dataprotectorsandbox") ||
+                   text.Contains("dataprotectoruserhookruntime") ||
+                   text.Contains("dataprotectorpolicyapi") ||
+                   text.Contains("dataprotector.sys") ||
+                   text.Contains("dataprotectorsandbox.sys") ||
+                   text.Contains("dataprotector\\sandbox") ||
+                   text.Contains("\\dataprotector\\userhook") ||
+                   text.Contains("userhook.observed") ||
+                   text.Contains("sandbox-kernel-sensor") ||
+                   text.Contains("kernel-early-injection-policy");
         }
 
         private static SignatureRecord GetSignature(string path)

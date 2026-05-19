@@ -838,6 +838,28 @@
         services: '服务/驱动',
         tasks: '计划任务'
       },
+      attackFlow: {
+        eyebrow: 'Attack Flow',
+        title: '攻击流程图',
+        active: '{count} 个阶段命中',
+        stages: {
+          launch: '样本启动',
+          process: '进程链',
+          apiMemory: 'API / 内存',
+          network: '网络通信',
+          persistence: '持久化',
+          artifact: '文件 / 驱动'
+        },
+        details: {
+          launch: '样本已进入隔离工作区',
+          process: '命中 {count} 条子进程或高危命令链',
+          apiMemory: '命中 {count} 条 Hook、syscall 或可执行内存行为',
+          network: '命中 {count} 条远端连接或网络 API',
+          persistence: '命中 {count} 条注册表、服务或计划任务变化',
+          artifact: '命中 {count} 条落地文件、驱动或服务变化',
+          idle: '未命中'
+        }
+      },
       columns: {
         sample: '样本',
         status: '状态',
