@@ -832,7 +832,11 @@
         behaviors: '行为',
         processes: '进程',
         network: '连接',
-        artifacts: '文件'
+        artifacts: '文件',
+        runtime: 'Runtime',
+        kernel: '内核事件',
+        services: '服务/驱动',
+        tasks: '计划任务'
       },
       columns: {
         sample: '样本',
@@ -854,15 +858,33 @@
         remote: '远端',
         local: '本地',
         state: '状态',
-        size: '大小'
+        size: '大小',
+        action: '动作',
+        target: '目标',
+        statusText: '状态码',
+        blocked: '阻断',
+        change: '变化',
+        service: '服务',
+        task: '任务',
+        sequence: '序号',
+        operation: '操作',
+        message: '消息'
       },
       sections: {
         behaviors: '危险行为',
         processes: '进程链',
         network: '网络连接',
         artifacts: '文件变化',
+        runtime: 'API Hook / 内存遥测',
+        kernel: '内核传感器',
+        services: '服务与驱动变化',
+        tasks: '计划任务变化',
         output: '输出'
       },
+      telemetryMode: '遥测模式',
+      runtimeHook: 'Runtime Hook',
+      kernelSensor: '内核传感器',
+      kernelPolicy: '内核策略',
       severity: {
         critical: '严重',
         high: '高危',

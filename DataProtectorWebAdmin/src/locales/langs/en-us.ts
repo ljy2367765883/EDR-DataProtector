@@ -836,7 +836,11 @@ const local: App.I18n.Schema = {
         behaviors: 'Behaviors',
         processes: 'Processes',
         network: 'Connections',
-        artifacts: 'Files'
+        artifacts: 'Files',
+        runtime: 'Runtime',
+        kernel: 'Kernel Events',
+        services: 'Services/Drivers',
+        tasks: 'Tasks'
       },
       columns: {
         sample: 'Sample',
@@ -858,15 +862,33 @@ const local: App.I18n.Schema = {
         remote: 'Remote',
         local: 'Local',
         state: 'State',
-        size: 'Size'
+        size: 'Size',
+        action: 'Action',
+        target: 'Target',
+        statusText: 'Status',
+        blocked: 'Blocked',
+        change: 'Change',
+        service: 'Service',
+        task: 'Task',
+        sequence: 'Sequence',
+        operation: 'Operation',
+        message: 'Message'
       },
       sections: {
         behaviors: 'Risk Behaviors',
         processes: 'Process Tree',
         network: 'Network Connections',
         artifacts: 'File Changes',
+        runtime: 'API Hook / Memory Telemetry',
+        kernel: 'Kernel Sensor',
+        services: 'Service and Driver Changes',
+        tasks: 'Scheduled Task Changes',
         output: 'Output'
       },
+      telemetryMode: 'Telemetry Mode',
+      runtimeHook: 'Runtime Hook',
+      kernelSensor: 'Kernel Sensor',
+      kernelPolicy: 'Kernel Policy',
       severity: {
         critical: 'Critical',
         high: 'High',

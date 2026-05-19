@@ -115,15 +115,20 @@ $bridgeOutput = Join-Path $root "DataProtectorWebBridge\bin\$Platform\$Configura
 $agentClientOutput = Join-Path $root "DataProtectorAgentClient\bin\$Platform\$Configuration"
 $driverPackage = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector"
 $driverCertificate = Join-Path $root "DataProtector\$Platform\$Configuration\DataProtector.cer"
+$policyApiX86Output = Join-Path $root "DataProtectorPolicyApi\Win32\$Configuration\DataProtectorPolicyApi.dll"
 $usbCryptDriverPackage = Join-Path $root "DataProtectorUsbCrypt\$Platform\$Configuration\DataProtectorUsbCrypt"
 $usbCryptDriverCertificate = Join-Path $root "DataProtectorUsbCrypt\$Platform\$Configuration\DataProtectorUsbCrypt.cer"
 $usbToolOutput = Join-Path $root "DataProtectorUsbTool\$Platform\$Configuration\DataProtectorUsbTool.exe"
 $userHookRuntimeOutput = Join-Path $root "DataProtectorUserHookRuntime\$Platform\$Configuration\DataProtectorUserHookRuntime.dll"
+$userHookRuntimeX86Output = Join-Path $root "DataProtectorUserHookRuntime\Win32\$Configuration\DataProtectorUserHookRuntime.dll"
+$sandboxTelemetryOutput = Join-Path $root "DataProtectorSandboxTelemetry\bin\$Platform\$Configuration\DataProtectorSandboxTelemetry.exe"
+$sandboxTelemetryX86Output = Join-Path $root "DataProtectorSandboxTelemetry\bin\x86\$Configuration\DataProtectorSandboxTelemetry.exe"
 
 Push-Location $root
 try {
     Invoke-Checked $msBuild @(".\DataProtector\DataProtector.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtector driver build"
     Invoke-Checked $msBuild @(".\DataProtectorPolicyApi\DataProtectorPolicyApi.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorPolicyApi build"
+    Invoke-Checked $msBuild @(".\DataProtectorPolicyApi\DataProtectorPolicyApi.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=Win32") "DataProtectorPolicyApi x86 build"
     $usbCryptBuildArguments = @(".\DataProtectorUsbCrypt\DataProtectorUsbCrypt.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform")
     if ($UsbCryptTrace) {
         $usbCryptBuildArguments += "/t:Rebuild"
@@ -132,6 +137,9 @@ try {
     Invoke-Checked $msBuild $usbCryptBuildArguments "DataProtectorUsbCrypt driver build"
     Invoke-Checked $msBuild @(".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbTool build"
     Invoke-Checked $msBuild @(".\DataProtectorUserHookRuntime\DataProtectorUserHookRuntime.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUserHookRuntime build"
+    Invoke-Checked $msBuild @(".\DataProtectorUserHookRuntime\DataProtectorUserHookRuntime.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=Win32") "DataProtectorUserHookRuntime x86 build"
+    Invoke-Checked $msBuild @(".\DataProtectorSandboxTelemetry\DataProtectorSandboxTelemetry.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorSandboxTelemetry build"
+    Invoke-Checked $msBuild @(".\DataProtectorSandboxTelemetry\DataProtectorSandboxTelemetry.csproj", "/p:Configuration=$Configuration", "/p:Platform=x86") "DataProtectorSandboxTelemetry x86 build"
     Invoke-Checked $msBuild @(".\DataProtectorWebBridge\DataProtectorWebBridge.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorWebBridge build"
     Invoke-Checked $msBuild @(".\DataProtectorAgentClient\DataProtectorAgentClient.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorAgentClient build"
 
@@ -172,6 +180,22 @@ try {
         throw "User hook runtime output was not found: $userHookRuntimeOutput"
     }
 
+    if (-not (Test-Path -LiteralPath $userHookRuntimeX86Output)) {
+        throw "User hook runtime x86 output was not found: $userHookRuntimeX86Output"
+    }
+
+    if (-not (Test-Path -LiteralPath $sandboxTelemetryOutput)) {
+        throw "Sandbox telemetry output was not found: $sandboxTelemetryOutput"
+    }
+
+    if (-not (Test-Path -LiteralPath $sandboxTelemetryX86Output)) {
+        throw "Sandbox telemetry x86 output was not found: $sandboxTelemetryX86Output"
+    }
+
+    if (-not (Test-Path -LiteralPath $policyApiX86Output)) {
+        throw "Policy API x86 output was not found: $policyApiX86Output"
+    }
+
     if (Test-Path -LiteralPath $OutputDirectory) {
         $resolvedOutput = (Resolve-Path -LiteralPath $OutputDirectory).Path
         $resolvedRoot = (Resolve-Path -LiteralPath $root).Path
@@ -207,6 +231,27 @@ try {
 
     Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $agentPublish -Force
     Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $serverPublish -Force
+    Copy-Item -LiteralPath $sandboxTelemetryOutput -Destination $serverPublish -Force
+
+    $serverSandboxX64Publish = Join-Path $serverPublish "sandbox-telemetry\x64"
+    $serverSandboxX86Publish = Join-Path $serverPublish "sandbox-telemetry\x86"
+    $serverSandboxKernelPublish = Join-Path $serverPublish "sandbox-telemetry\kernel"
+    $serverSandboxKernelX86Publish = Join-Path $serverSandboxKernelPublish "x86"
+    New-Item -ItemType Directory -Force -Path $serverSandboxX64Publish, $serverSandboxX86Publish, $serverSandboxKernelPublish, $serverSandboxKernelX86Publish | Out-Null
+    Copy-Item -LiteralPath $sandboxTelemetryOutput -Destination (Join-Path $serverPublish "sandbox-telemetry") -Force
+    Copy-Item -LiteralPath $sandboxTelemetryOutput -Destination $serverSandboxX64Publish -Force
+    Copy-Item -LiteralPath $sandboxTelemetryX86Output -Destination $serverSandboxX86Publish -Force
+    Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $serverSandboxX64Publish -Force
+    Copy-Item -LiteralPath $userHookRuntimeX86Output -Destination $serverSandboxX86Publish -Force
+    Copy-Item -LiteralPath (Join-Path $driverPackage "DataProtector.sys") -Destination $serverSandboxKernelPublish -Force
+    Copy-Item -LiteralPath (Join-Path $bridgeOutput "DataProtectorPolicyApi.dll") -Destination $serverSandboxKernelPublish -Force
+    Copy-Item -LiteralPath $policyApiX86Output -Destination $serverSandboxKernelX86Publish -Force
+    if (Test-Path -LiteralPath (Join-Path $driverPackage "dataprotector.cat")) {
+        Copy-Item -LiteralPath (Join-Path $driverPackage "dataprotector.cat") -Destination $serverSandboxKernelPublish -Force
+    }
+    if (Test-Path -LiteralPath (Join-Path $driverPackage "DataProtector.inf")) {
+        Copy-Item -LiteralPath (Join-Path $driverPackage "DataProtector.inf") -Destination $serverSandboxKernelPublish -Force
+    }
 
     $agentClientFiles = @(
         "DataProtectorAgentClient.exe",

@@ -52,6 +52,56 @@ type SandboxFileArtifact = {
   sha256: string;
 };
 
+type SandboxRuntimeEvent = {
+  timestampUtc: string;
+  pid: number;
+  action: string;
+  target: string;
+  processImage: string;
+  status: string;
+  blocked: boolean;
+};
+
+type SandboxKernelSensor = {
+  enabled: boolean;
+  status: string;
+  serviceName: string;
+  driverPath: string;
+  policyStatus: string;
+  win32: number;
+  message: string;
+};
+
+type SandboxKernelEvent = {
+  sequence: number;
+  pid: number;
+  parentPid: number;
+  operation: number;
+  operationName: string;
+  status: string;
+  flags: string;
+  target: string;
+  processImage: string;
+  description: string;
+};
+
+type SandboxService = {
+  name: string;
+  displayName: string;
+  pathName: string;
+  serviceType: string;
+  startMode: string;
+  state: string;
+  change: string;
+};
+
+type SandboxScheduledTask = {
+  name: string;
+  command: string;
+  state: string;
+  change: string;
+};
+
 type SandboxReport = {
   schema: string;
   isolation: string;
@@ -79,6 +129,12 @@ type SandboxReport = {
   processes?: SandboxProcess[];
   network?: SandboxNetwork[];
   fileArtifacts?: SandboxFileArtifact[];
+  runtimeEvents?: SandboxRuntimeEvent[];
+  services?: SandboxService[];
+  scheduledTasks?: SandboxScheduledTask[];
+  telemetry?: Record<string, string | boolean>;
+  kernelSensor?: SandboxKernelSensor;
+  kernelEvents?: SandboxKernelEvent[];
   stdout?: string;
   stderr?: string;
   errors?: string[];
@@ -317,6 +373,47 @@ const fileColumns = computed<DataTableColumns<SandboxFileArtifact>>(() => [
     }
   },
   { title: 'SHA256', key: 'sha256', minWidth: 320, ellipsis: { tooltip: true } }
+]);
+
+const runtimeColumns = computed<DataTableColumns<SandboxRuntimeEvent>>(() => [
+  { title: 'PID', key: 'pid', width: 90 },
+  { title: $t('dataprotector.sandbox.columns.action'), key: 'action', minWidth: 260, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.sandbox.columns.target'), key: 'target', minWidth: 280, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.sandbox.columns.statusText'), key: 'status', width: 130 },
+  {
+    title: $t('dataprotector.sandbox.columns.blocked'),
+    key: 'blocked',
+    width: 110,
+    render(row) {
+      return <NTag type={row.blocked ? 'error' : 'success'} bordered={false}>{row.blocked ? 'Yes' : 'No'}</NTag>;
+    }
+  },
+  { title: $t('dataprotector.sandbox.columns.process'), key: 'processImage', minWidth: 300, ellipsis: { tooltip: true } }
+]);
+
+const kernelColumns = computed<DataTableColumns<SandboxKernelEvent>>(() => [
+  { title: $t('dataprotector.sandbox.columns.sequence'), key: 'sequence', width: 110 },
+  { title: 'PID', key: 'pid', width: 90 },
+  { title: 'PPID', key: 'parentPid', width: 90 },
+  { title: $t('dataprotector.sandbox.columns.operation'), key: 'operationName', minWidth: 220, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.sandbox.columns.statusText'), key: 'status', width: 130 },
+  { title: $t('dataprotector.sandbox.columns.target'), key: 'target', minWidth: 360, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.sandbox.columns.process'), key: 'processImage', minWidth: 300, ellipsis: { tooltip: true } }
+]);
+
+const serviceColumns = computed<DataTableColumns<SandboxService>>(() => [
+  { title: $t('dataprotector.sandbox.columns.change'), key: 'change', width: 120 },
+  { title: $t('dataprotector.sandbox.columns.service'), key: 'name', width: 180, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.sandbox.columns.type'), key: 'serviceType', width: 160, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.sandbox.columns.state'), key: 'state', width: 120 },
+  { title: $t('dataprotector.sandbox.columns.path'), key: 'pathName', minWidth: 420, ellipsis: { tooltip: true } }
+]);
+
+const taskColumns = computed<DataTableColumns<SandboxScheduledTask>>(() => [
+  { title: $t('dataprotector.sandbox.columns.change'), key: 'change', width: 120 },
+  { title: $t('dataprotector.sandbox.columns.task'), key: 'name', minWidth: 260, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.sandbox.columns.state'), key: 'state', width: 120 },
+  { title: $t('dataprotector.sandbox.columns.command'), key: 'command', minWidth: 420, ellipsis: { tooltip: true } }
 ]);
 
 async function refresh(resetPage = false) {
@@ -722,6 +819,22 @@ onBeforeUnmount(stopPolling);
             <span>{{ $t('dataprotector.sandbox.reportMetrics.artifacts') }}</span>
             <strong>{{ report.fileArtifacts?.length || 0 }}</strong>
           </div>
+          <div class="report-metric">
+            <span>{{ $t('dataprotector.sandbox.reportMetrics.runtime') }}</span>
+            <strong>{{ report.runtimeEvents?.length || 0 }}</strong>
+          </div>
+          <div class="report-metric">
+            <span>{{ $t('dataprotector.sandbox.reportMetrics.kernel') }}</span>
+            <strong>{{ report.kernelEvents?.length || 0 }}</strong>
+          </div>
+          <div class="report-metric">
+            <span>{{ $t('dataprotector.sandbox.reportMetrics.services') }}</span>
+            <strong>{{ report.services?.length || 0 }}</strong>
+          </div>
+          <div class="report-metric">
+            <span>{{ $t('dataprotector.sandbox.reportMetrics.tasks') }}</span>
+            <strong>{{ report.scheduledTasks?.length || 0 }}</strong>
+          </div>
         </div>
 
         <NAlert v-if="report.error || report.errors?.length" type="warning" :bordered="false" class="m-b-12px">
@@ -741,6 +854,18 @@ onBeforeUnmount(stopPolling);
           <NDescriptionsItem :label="$t('dataprotector.sandbox.duration')">
             {{ formatTime(report.startedUtc) }} - {{ formatTime(report.completedUtc) }}
           </NDescriptionsItem>
+          <NDescriptionsItem :label="$t('dataprotector.sandbox.telemetryMode')">
+            {{ report.telemetry?.mode || report.schema || '-' }}
+          </NDescriptionsItem>
+          <NDescriptionsItem :label="$t('dataprotector.sandbox.runtimeHook')">
+            {{ report.telemetry?.runtimeHook || '-' }}
+          </NDescriptionsItem>
+          <NDescriptionsItem :label="$t('dataprotector.sandbox.kernelSensor')">
+            {{ report.kernelSensor?.status || report.telemetry?.kernelSensor || '-' }}
+          </NDescriptionsItem>
+          <NDescriptionsItem :label="$t('dataprotector.sandbox.kernelPolicy')">
+            {{ report.kernelSensor?.policyStatus || '-' }}
+          </NDescriptionsItem>
         </NDescriptions>
 
         <NCollapse>
@@ -755,6 +880,24 @@ onBeforeUnmount(stopPolling);
           </NCollapseItem>
           <NCollapseItem :title="$t('dataprotector.sandbox.sections.artifacts')" name="artifacts">
             <NDataTable :columns="fileColumns" :data="report.fileArtifacts || []" :scroll-x="860" :pagination="{ pageSize: 8 }" />
+          </NCollapseItem>
+          <NCollapseItem :title="$t('dataprotector.sandbox.sections.runtime')" name="runtime">
+            <NDataTable :columns="runtimeColumns" :data="report.runtimeEvents || []" :scroll-x="1260" :pagination="{ pageSize: 8 }" />
+          </NCollapseItem>
+          <NCollapseItem :title="$t('dataprotector.sandbox.sections.kernel')" name="kernel">
+            <NDescriptions v-if="report.kernelSensor" :column="2" bordered size="small" class="m-b-12px">
+              <NDescriptionsItem :label="$t('dataprotector.sandbox.columns.status')">{{ report.kernelSensor.status }}</NDescriptionsItem>
+              <NDescriptionsItem label="Win32">{{ report.kernelSensor.win32 || 0 }}</NDescriptionsItem>
+              <NDescriptionsItem :label="$t('dataprotector.sandbox.columns.service')">{{ report.kernelSensor.serviceName || '-' }}</NDescriptionsItem>
+              <NDescriptionsItem :label="$t('dataprotector.sandbox.columns.message')">{{ report.kernelSensor.message || '-' }}</NDescriptionsItem>
+            </NDescriptions>
+            <NDataTable :columns="kernelColumns" :data="report.kernelEvents || []" :scroll-x="1360" :pagination="{ pageSize: 8 }" />
+          </NCollapseItem>
+          <NCollapseItem :title="$t('dataprotector.sandbox.sections.services')" name="services">
+            <NDataTable :columns="serviceColumns" :data="report.services || []" :scroll-x="1200" :pagination="{ pageSize: 8 }" />
+          </NCollapseItem>
+          <NCollapseItem :title="$t('dataprotector.sandbox.sections.tasks')" name="tasks">
+            <NDataTable :columns="taskColumns" :data="report.scheduledTasks || []" :scroll-x="1100" :pagination="{ pageSize: 8 }" />
           </NCollapseItem>
           <NCollapseItem :title="$t('dataprotector.sandbox.sections.output')" name="output">
             <pre class="sandbox-output">{{ report.stdout || report.stderr || selectedSample.reportJson }}</pre>

@@ -66,11 +66,13 @@
   <PropertyGroup>
     <NativePolicyApiProjectPath>$(MSBuildThisFileDirectory)..\DataProtectorPolicyApi\x64\$(Configuration)\DataProtectorPolicyApi.dll</NativePolicyApiProjectPath>
     <UserHookRuntimeProjectPath>$(MSBuildThisFileDirectory)..\x64\$(Configuration)\DataProtectorUserHookRuntime.dll</UserHookRuntimeProjectPath>
+    <SandboxTelemetryProjectPath>$(MSBuildThisFileDirectory)..\DataProtectorSandboxTelemetry\bin\x64\$(Configuration)\DataProtectorSandboxTelemetry.exe</SandboxTelemetryProjectPath>
   </PropertyGroup>
   <Target Name="CopyNativePolicyApi" AfterTargets="Build">
     <Copy SourceFiles="$(NativePolicyApiProjectPath)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" Condition="Exists('$(NativePolicyApiProjectPath)')" />
     <Error Text="DataProtectorPolicyApi.dll was not found. Build DataProtectorPolicyApi before DataProtectorWebBridge." Condition="!Exists('$(NativePolicyApiProjectPath)')" />
     <Copy SourceFiles="$(UserHookRuntimeProjectPath)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" Condition="Exists('$(UserHookRuntimeProjectPath)')" />
+    <Copy SourceFiles="$(SandboxTelemetryProjectPath)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="false" Condition="Exists('$(SandboxTelemetryProjectPath)')" />
   </Target>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

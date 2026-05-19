@@ -48,6 +48,7 @@ namespace DataProtectorWebBridge.Services
             string root = Path.Combine(dataRoot, "DataProtector", "Sandbox", runId);
             string controlHost = Path.Combine(root, "control");
             string reportHost = Path.Combine(root, "report");
+            string telemetryHost = Path.Combine(root, "telemetry");
             string configPath = Path.Combine(root, "DataProtectorSandbox.wsb");
             string scriptPath = Path.Combine(controlHost, "run.ps1");
             string reportPath = Path.Combine(reportHost, "report.json");
@@ -58,18 +59,22 @@ namespace DataProtectorWebBridge.Services
             string sandboxInput = sandboxRoot + @"\Input";
             string sandboxControl = sandboxRoot + @"\Control";
             string sandboxReport = sandboxRoot + @"\Report";
+            string sandboxTelemetry = sandboxRoot + @"\Telemetry";
 
             Directory.CreateDirectory(controlHost);
             Directory.CreateDirectory(reportHost);
+            Directory.CreateDirectory(telemetryHost);
 
             string sampleHash = ComputeSha256(samplePath);
             string sampleArchitecture = ReadPeArchitecture(samplePath);
             string signer = TryReadSignerSubject(samplePath);
+            PrepareTelemetryPackage(telemetryHost);
             string script = BuildSandboxScript(
                 runId,
                 sandboxInput,
                 sandboxControl,
                 sandboxReport,
+                sandboxTelemetry,
                 sampleName,
                 arguments,
                 timeoutSeconds,
@@ -85,9 +90,11 @@ namespace DataProtectorWebBridge.Services
                 sampleDirectory,
                 controlHost,
                 reportHost,
+                telemetryHost,
                 sandboxInput,
                 sandboxControl,
                 sandboxReport,
+                sandboxTelemetry,
                 networkEnabled);
             File.WriteAllText(configPath, config, new UTF8Encoding(false));
 
@@ -188,13 +195,134 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        private static void PrepareTelemetryPackage(string telemetryHost)
+        {
+            string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            string runnerSource = FindExistingFile(
+                Path.Combine(baseDirectory, "DataProtectorSandboxTelemetry.exe"),
+                Path.Combine(baseDirectory, "sandbox-telemetry", "DataProtectorSandboxTelemetry.exe"),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "DataProtectorSandboxTelemetry", "bin", "x64", "Release", "DataProtectorSandboxTelemetry.exe")),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "DataProtectorSandboxTelemetry", "bin", "x64", "Release", "DataProtectorSandboxTelemetry.exe")));
+            if (string.IsNullOrWhiteSpace(runnerSource))
+            {
+                throw new FileNotFoundException("Sandbox telemetry runner was not found. Build DataProtectorSandboxTelemetry before running server-side sandbox analysis.");
+            }
+
+            Directory.CreateDirectory(telemetryHost);
+            File.Copy(runnerSource, Path.Combine(telemetryHost, "DataProtectorSandboxTelemetry.exe"), true);
+            CopyIfExists(Path.ChangeExtension(runnerSource, ".pdb"), Path.Combine(telemetryHost, "DataProtectorSandboxTelemetry.pdb"));
+
+            string runtimeSource = FindExistingFile(
+                Path.Combine(baseDirectory, "DataProtectorUserHookRuntime.dll"),
+                Path.Combine(baseDirectory, "x64", "DataProtectorUserHookRuntime.dll"),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "x64", "Release", "DataProtectorUserHookRuntime.dll")),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "x64", "Release", "DataProtectorUserHookRuntime.dll")));
+            if (string.IsNullOrWhiteSpace(runtimeSource))
+            {
+                throw new FileNotFoundException("Sandbox hook runtime was not found. Build DataProtectorUserHookRuntime before running server-side sandbox analysis.");
+            }
+
+            string x64Directory = Path.Combine(telemetryHost, "x64");
+            Directory.CreateDirectory(x64Directory);
+            File.Copy(runtimeSource, Path.Combine(x64Directory, "DataProtectorUserHookRuntime.dll"), true);
+            CopyIfExists(Path.ChangeExtension(runtimeSource, ".pdb"), Path.Combine(x64Directory, "DataProtectorUserHookRuntime.pdb"));
+
+            PrepareKernelSensorPackage(telemetryHost, baseDirectory);
+
+            string x86RuntimeSource = FindExistingFile(
+                Path.Combine(baseDirectory, "x86", "DataProtectorUserHookRuntime.dll"),
+                Path.Combine(baseDirectory, "sandbox-telemetry", "x86", "DataProtectorUserHookRuntime.dll"),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "Win32", "Release", "DataProtectorUserHookRuntime.dll")),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "Win32", "Release", "DataProtectorUserHookRuntime.dll")));
+            if (!string.IsNullOrWhiteSpace(x86RuntimeSource))
+            {
+                string x86Directory = Path.Combine(telemetryHost, "x86");
+                Directory.CreateDirectory(x86Directory);
+                File.Copy(x86RuntimeSource, Path.Combine(x86Directory, "DataProtectorUserHookRuntime.dll"), true);
+                CopyIfExists(Path.ChangeExtension(x86RuntimeSource, ".pdb"), Path.Combine(x86Directory, "DataProtectorUserHookRuntime.pdb"));
+                string x86KernelDirectory = Path.Combine(telemetryHost, "kernel", "x86");
+                Directory.CreateDirectory(x86KernelDirectory);
+
+                string x86RunnerSource = FindExistingFile(
+                    Path.Combine(baseDirectory, "sandbox-telemetry", "x86", "DataProtectorSandboxTelemetry.exe"),
+                    Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "DataProtectorSandboxTelemetry", "bin", "x86", "Release", "DataProtectorSandboxTelemetry.exe")),
+                    Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "DataProtectorSandboxTelemetry", "bin", "x86", "Release", "DataProtectorSandboxTelemetry.exe")));
+                if (!string.IsNullOrWhiteSpace(x86RunnerSource))
+                {
+                    File.Copy(x86RunnerSource, Path.Combine(x86Directory, "DataProtectorSandboxTelemetry.exe"), true);
+                    CopyIfExists(Path.ChangeExtension(x86RunnerSource, ".pdb"), Path.Combine(x86Directory, "DataProtectorSandboxTelemetry.pdb"));
+                }
+
+                string x86PolicyApiSource = FindExistingFile(
+                    Path.Combine(baseDirectory, "sandbox-telemetry", "kernel", "x86", "DataProtectorPolicyApi.dll"),
+                    Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "DataProtectorPolicyApi", "Win32", "Release", "DataProtectorPolicyApi.dll")),
+                    Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "DataProtectorPolicyApi", "Win32", "Release", "DataProtectorPolicyApi.dll")));
+                if (!string.IsNullOrWhiteSpace(x86PolicyApiSource))
+                {
+                    File.Copy(x86PolicyApiSource, Path.Combine(x86KernelDirectory, "DataProtectorPolicyApi.dll"), true);
+                    CopyIfExists(Path.ChangeExtension(x86PolicyApiSource, ".pdb"), Path.Combine(x86KernelDirectory, "DataProtectorPolicyApi.pdb"));
+                }
+            }
+        }
+
+        private static void PrepareKernelSensorPackage(string telemetryHost, string baseDirectory)
+        {
+            string kernelDirectory = Path.Combine(telemetryHost, "kernel");
+            Directory.CreateDirectory(kernelDirectory);
+
+            string driverSource = FindExistingFile(
+                Path.Combine(baseDirectory, "sandbox-telemetry", "kernel", "DataProtector.sys"),
+                Path.Combine(baseDirectory, "driver", "DataProtector.sys"),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "DataProtector", "x64", "Release", "DataProtector", "DataProtector.sys")),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "DataProtector", "x64", "Release", "DataProtector", "DataProtector.sys")));
+            if (!string.IsNullOrWhiteSpace(driverSource))
+            {
+                File.Copy(driverSource, Path.Combine(kernelDirectory, "DataProtector.sys"), true);
+                CopyIfExists(Path.ChangeExtension(driverSource, ".pdb"), Path.Combine(kernelDirectory, "DataProtector.pdb"));
+            }
+
+            string policyApiSource = FindExistingFile(
+                Path.Combine(baseDirectory, "DataProtectorPolicyApi.dll"),
+                Path.Combine(baseDirectory, "sandbox-telemetry", "kernel", "DataProtectorPolicyApi.dll"),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "DataProtectorPolicyApi", "x64", "Release", "DataProtectorPolicyApi.dll")),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "DataProtectorPolicyApi", "x64", "Release", "DataProtectorPolicyApi.dll")));
+            if (!string.IsNullOrWhiteSpace(policyApiSource))
+            {
+                File.Copy(policyApiSource, Path.Combine(kernelDirectory, "DataProtectorPolicyApi.dll"), true);
+                CopyIfExists(Path.ChangeExtension(policyApiSource, ".pdb"), Path.Combine(kernelDirectory, "DataProtectorPolicyApi.pdb"));
+            }
+        }
+
+        private static string FindExistingFile(params string[] paths)
+        {
+            foreach (string path in paths)
+            {
+                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                {
+                    return path;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static void CopyIfExists(string source, string destination)
+        {
+            if (!string.IsNullOrWhiteSpace(source) && File.Exists(source))
+            {
+                File.Copy(source, destination, true);
+            }
+        }
+
         private static string BuildWindowsSandboxConfig(
             string inputHost,
             string controlHost,
             string reportHost,
+            string telemetryHost,
             string sandboxInput,
             string sandboxControl,
             string sandboxReport,
+            string sandboxTelemetry,
             bool networkEnabled)
         {
             StringBuilder builder = new StringBuilder();
@@ -209,6 +337,7 @@ namespace DataProtectorWebBridge.Services
             AppendMappedFolder(builder, inputHost, sandboxInput, true);
             AppendMappedFolder(builder, controlHost, sandboxControl, true);
             AppendMappedFolder(builder, reportHost, sandboxReport, false);
+            AppendMappedFolder(builder, telemetryHost, sandboxTelemetry, true);
             builder.AppendLine("  </MappedFolders>");
             builder.AppendLine("  <LogonCommand>");
             builder.AppendLine("    <Command>powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File " + XmlEscape(sandboxControl + @"\run.ps1") + "</Command>");
@@ -231,6 +360,7 @@ namespace DataProtectorWebBridge.Services
             string sandboxInput,
             string sandboxControl,
             string sandboxReport,
+            string sandboxTelemetry,
             string sampleName,
             string arguments,
             int timeoutSeconds,
@@ -247,12 +377,10 @@ namespace DataProtectorWebBridge.Services
             script.AppendLine("$ProgressPreference = 'SilentlyContinue'");
             script.AppendLine("$runId = '" + PsQuote(runId) + "'");
             script.AppendLine("$inputRoot = '" + PsQuote(sandboxInput) + "'");
-            script.AppendLine("$controlRoot = '" + PsQuote(sandboxControl) + "'");
             script.AppendLine("$reportRoot = '" + PsQuote(sandboxReport) + "'");
+            script.AppendLine("$telemetryRoot = '" + PsQuote(sandboxTelemetry) + "'");
             script.AppendLine("$sampleName = '" + PsQuote(sampleName) + "'");
-            script.AppendLine("$sampleSha256 = '" + PsQuote(sampleHash) + "'");
             script.AppendLine("$sampleArchitecture = '" + PsQuote(sampleArchitecture) + "'");
-            script.AppendLine("$sampleSigner = '" + PsQuote(signer) + "'");
             script.AppendLine("$argumentText = @'");
             script.AppendLine((arguments ?? string.Empty).Replace("'@", "' @"));
             script.AppendLine("'@");
@@ -263,41 +391,16 @@ namespace DataProtectorWebBridge.Services
             script.AppendLine("$workspace = Join-Path $env:LOCALAPPDATA '" + PsQuote(workspaceName) + "'");
             script.AppendLine("$reportPath = Join-Path $reportRoot 'report.json'");
             script.AppendLine("$donePath = Join-Path $reportRoot 'report.done'");
-            script.AppendLine("$stdoutPath = Join-Path $reportRoot 'stdout.txt'");
-            script.AppendLine("$stderrPath = Join-Path $reportRoot 'stderr.txt'");
             script.AppendLine("New-Item -ItemType Directory -Force -Path $workspace, $reportRoot | Out-Null");
-            script.AppendLine("$startedUtc = (Get-Date).ToUniversalTime().ToString('o')");
-            script.AppendLine("$behaviors = New-Object System.Collections.ArrayList");
-            script.AppendLine("$processRecords = @{}");
-            script.AppendLine("$networkRecords = @{}");
-            script.AppendLine("$registryRecords = New-Object System.Collections.ArrayList");
-            script.AppendLine("$errors = New-Object System.Collections.ArrayList");
-            script.AppendLine("function Add-Behavior([string]$type,[string]$severity,[string]$detail,[int]$pid) { [void]$behaviors.Add([ordered]@{ type=$type; severity=$severity; detail=$detail; pid=$pid; timeUtc=(Get-Date).ToUniversalTime().ToString('o') }) }");
-            script.AppendLine("function Trunc([string]$value,[int]$max) { if ([string]::IsNullOrEmpty($value)) { return '' }; if ($value.Length -le $max) { return $value }; return $value.Substring(0,$max) + '...' }");
-            script.AppendLine("function Read-Text-Limited([string]$path,[int]$max) { try { if (!(Test-Path -LiteralPath $path)) { return '' }; $text = [System.IO.File]::ReadAllText($path); return Trunc $text $max } catch { return '' } }");
-            script.AppendLine("function Get-AuthInfo([string]$path) { try { $sig = Get-AuthenticodeSignature -LiteralPath $path; $subject = ''; if ($sig.SignerCertificate) { $subject = $sig.SignerCertificate.Subject }; return [ordered]@{ status=([string]$sig.Status); signer=$subject } } catch { return [ordered]@{ status='Unknown'; signer='' } } }");
-            script.AppendLine("function Snapshot-Autoruns { $paths = @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce'); $items=@{}; foreach($p in $paths){ if(Test-Path $p){ $props=(Get-ItemProperty $p).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' }; foreach($prop in $props){ $items[($p + '\\' + $prop.Name)] = [string]$prop.Value } } }; return $items }");
-            script.AppendLine("function Compare-Autoruns($before,$after){ foreach($key in $after.Keys){ if(!$before.ContainsKey($key) -or $before[$key] -ne $after[$key]){ [void]$registryRecords.Add([ordered]@{ path=$key; value=$after[$key]; change=($(if($before.ContainsKey($key)){'modified'}else{'created'})) }); Add-Behavior 'registry-persistence' 'high' ('Autorun value changed: ' + $key) 0 } } }");
-            script.AppendLine("function Get-TreePids([int]$rootPid,$procs){ $set=@{}; if($rootPid -gt 0){ $set[$rootPid]=$true }; $changed=$true; while($changed){ $changed=$false; foreach($p in $procs){ if($p.ParentProcessId -and $set.ContainsKey([int]$p.ParentProcessId) -and !$set.ContainsKey([int]$p.ProcessId)){ $set[[int]$p.ProcessId]=$true; $changed=$true } } }; return $set.Keys }");
-            script.AppendLine("function Add-ProcessRecord($p){ $pid=[int]$p.ProcessId; if(!$processRecords.ContainsKey([string]$pid)){ $path=[string]$p.ExecutablePath; $auth=Get-AuthInfo $path; $created=''; try { $created=([System.Management.ManagementDateTimeConverter]::ToDateTime($p.CreationDate).ToUniversalTime().ToString('o')) } catch {}; $processRecords[[string]$pid]=[ordered]@{ pid=$pid; parentPid=[int]$p.ParentProcessId; name=[string]$p.Name; path=$path; commandLine=Trunc ([string]$p.CommandLine) 2048; createdUtc=$created; signature=$auth } } }");
-            script.AppendLine("function Analyze-Process($p){ $name=([string]$p.Name).ToLowerInvariant(); $cmd=([string]$p.CommandLine).ToLowerInvariant(); $pid=[int]$p.ProcessId; if($name -match '^(powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32)\\.exe$'){ Add-Behavior 'script-or-lolbin-execution' 'medium' ('Interpreter or loader launched: ' + $p.Name) $pid }; if($name -match '^(schtasks|sc|reg|vssadmin|wbadmin|bcdedit|wevtutil|netsh|wmic|bitsadmin|certutil)\\.exe$'){ Add-Behavior 'system-abuse-tool' 'high' ('Administrative tool launched: ' + $p.Name) $pid }; if($cmd.Contains('shadowcopy') -or $cmd.Contains('hklm\\sam') -or $cmd.Contains('hklm\\system') -or $cmd.Contains('encodedcommand') -or $cmd.Contains('downloadstring')){ Add-Behavior 'high-risk-command-line' 'critical' (Trunc ([string]$p.CommandLine) 512) $pid }; if($cmd.Contains('vbox') -or $cmd.Contains('vmware') -or $cmd.Contains('sandbox') -or $cmd.Contains('qemu') -or $cmd.Contains('debug')){ Add-Behavior 'environment-probe' 'medium' (Trunc ([string]$p.CommandLine) 512) $pid } }");
-            script.AppendLine("function Add-NetworkRecords($tree){ try { $conns = Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object { $tree -contains [int]$_.OwningProcess -and $_.RemoteAddress -and $_.RemoteAddress -ne '0.0.0.0' -and $_.RemoteAddress -ne '::' }; foreach($c in $conns){ $key=('{0}:{1}>{2}:{3}/{4}/{5}' -f $c.LocalAddress,$c.LocalPort,$c.RemoteAddress,$c.RemotePort,$c.State,$c.OwningProcess); if(!$networkRecords.ContainsKey($key)){ $networkRecords[$key]=[ordered]@{ pid=[int]$c.OwningProcess; localAddress=[string]$c.LocalAddress; localPort=[int]$c.LocalPort; remoteAddress=[string]$c.RemoteAddress; remotePort=[int]$c.RemotePort; state=[string]$c.State; timeUtc=(Get-Date).ToUniversalTime().ToString('o') }; Add-Behavior 'network-connection' 'medium' ('Remote connection: ' + $c.RemoteAddress + ':' + $c.RemotePort) ([int]$c.OwningProcess) } } } catch {} }");
-            script.AppendLine("$autorunsBefore = Snapshot-Autoruns");
-            script.AppendLine("try { if($copyInputDirectory){ Copy-Item -Path (Join-Path $inputRoot '*') -Destination $workspace -Recurse -Force } else { Copy-Item -LiteralPath (Join-Path $inputRoot $sampleName) -Destination (Join-Path $workspace $sampleName) -Force } } catch { [void]$errors.Add('Input copy failed: ' + $_.Exception.Message) }");
+            script.AppendLine("try { if($copyInputDirectory){ Copy-Item -Path (Join-Path $inputRoot '*') -Destination $workspace -Recurse -Force } else { Copy-Item -LiteralPath (Join-Path $inputRoot $sampleName) -Destination (Join-Path $workspace $sampleName) -Force } } catch { [System.IO.File]::WriteAllText($reportPath, '{\"schema\":\"dataprotector.sandbox.report.v2\",\"error\":\"Input copy failed\"}', [System.Text.UTF8Encoding]::new($false)); [System.IO.File]::WriteAllText($donePath, 'done', [System.Text.UTF8Encoding]::new($false)); exit 1 }");
             script.AppendLine("$runPath = Join-Path $workspace $sampleName");
-            script.AppendLine("$exitCode = $null; $timedOut = $false; $rootPid = 0");
-            script.AppendLine("try { $proc = Start-Process -FilePath $runPath -ArgumentList $argumentText -WorkingDirectory $workspace -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath; $rootPid = [int]$proc.Id } catch { [void]$errors.Add('Sample start failed: ' + $_.Exception.Message); $proc=$null }");
-            script.AppendLine("$deadline = (Get-Date).AddSeconds($timeoutSeconds)");
-            script.AppendLine("if($proc -ne $null){ while((Get-Date) -lt $deadline){ $procs = @(Get-CimInstance Win32_Process); $tree = @(Get-TreePids $rootPid $procs); foreach($p in $procs){ if($tree -contains [int]$p.ProcessId){ Add-ProcessRecord $p; Analyze-Process $p } }; Add-NetworkRecords $tree; $liveTree = @(); foreach($pid in $tree){ if(Get-Process -Id $pid -ErrorAction SilentlyContinue){ $liveTree += $pid } }; if($liveTree.Count -eq 0){ break }; Start-Sleep -Milliseconds 500 }; try { $proc.Refresh(); if(!$proc.HasExited -or (Get-Process -Id $rootPid -ErrorAction SilentlyContinue)){ $timedOut = $true; Add-Behavior 'analysis-timeout' 'medium' 'Sample remained active until the sandbox deadline.' $rootPid; $procs = @(Get-CimInstance Win32_Process); $tree = @(Get-TreePids $rootPid $procs); foreach($pid in $tree){ Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } } else { $exitCode = $proc.ExitCode } } catch {} }");
-            script.AppendLine("$autorunsAfter = Snapshot-Autoruns");
-            script.AppendLine("Compare-Autoruns $autorunsBefore $autorunsAfter");
-            script.AppendLine("$artifactList = @(); try { $artifactList = Get-ChildItem -LiteralPath $workspace -Recurse -Force -File | Select-Object -First 256 | ForEach-Object { [ordered]@{ path=$_.FullName.Replace($workspace,'<workspace>'); size=$_.Length; modifiedUtc=$_.LastWriteTimeUtc.ToString('o'); sha256=$(try{(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash}catch{''}) } } } catch { [void]$errors.Add('Artifact enumeration failed: ' + $_.Exception.Message) }");
-            script.AppendLine("if($networkRecords.Count -eq 0 -and !$networkEnabled){ Add-Behavior 'network-contained' 'info' 'Sandbox networking was disabled for this run.' 0 }");
-            script.AppendLine("$completedUtc = (Get-Date).ToUniversalTime().ToString('o')");
-            script.AppendLine("$report = [ordered]@{ schema='dataprotector.sandbox.report.v1'; isolation='windows-sandbox'; runId=$runId; startedUtc=$startedUtc; completedUtc=$completedUtc; sample=[ordered]@{ hostPath=''; fileName=$sampleName; sha256=$sampleSha256; architecture=$sampleArchitecture; signer=$sampleSigner; sandboxPath=$runPath }; execution=[ordered]@{ pid=$rootPid; exitCode=$exitCode; timedOut=$timedOut; timeoutSeconds=$timeoutSeconds }; isolationControls=[ordered]@{ boundary='Windows Sandbox / Hyper-V'; hostExecution='disabled'; inputMapping='read-only'; reportExchange='empty writable exchange folder'; clipboard='disabled'; printer='disabled'; audioInput='disabled'; videoInput='disabled'; network=($(if($networkEnabled){'enabled'}else{'disabled'})); profile='ephemeral' }; analysisHardening=[ordered]@{ localWorkspace='enabled'; randomizedWorkspace='enabled'; hostPathHiddenFromExecution='enabled'; sandboxArtifactsDiscarded='enabled' }; behaviors=@($behaviors); processes=@($processRecords.Values); network=@($networkRecords.Values); registryChanges=@($registryRecords); fileArtifacts=@($artifactList); stdout=(Read-Text-Limited $stdoutPath 32768); stderr=(Read-Text-Limited $stderrPath 32768); errors=@($errors) }");
-            script.AppendLine("$json = $report | ConvertTo-Json -Depth 9");
-            script.AppendLine("[System.IO.File]::WriteAllText($reportPath, $json, [System.Text.UTF8Encoding]::new($false))");
-            script.AppendLine("[System.IO.File]::WriteAllText($donePath, 'done', [System.Text.UTF8Encoding]::new($false))");
+            script.AppendLine("$runner = Join-Path $telemetryRoot 'DataProtectorSandboxTelemetry.exe'");
+            script.AppendLine("$runtime = Join-Path $telemetryRoot 'x64\\DataProtectorUserHookRuntime.dll'");
+            script.AppendLine("$kernelDriver = Join-Path $telemetryRoot 'kernel\\DataProtector.sys'");
+            script.AppendLine("$policyApi = Join-Path $telemetryRoot 'kernel\\DataProtectorPolicyApi.dll'");
+            script.AppendLine("if($sampleArchitecture -eq 'x86'){ $runnerCandidate = Join-Path $telemetryRoot 'x86\\DataProtectorSandboxTelemetry.exe'; if(Test-Path -LiteralPath $runnerCandidate){ $runner = $runnerCandidate }; $runtime = Join-Path $telemetryRoot 'x86\\DataProtectorUserHookRuntime.dll'; $policyApiCandidate = Join-Path $telemetryRoot 'kernel\\x86\\DataProtectorPolicyApi.dll'; if(Test-Path -LiteralPath $policyApiCandidate){ $policyApi = $policyApiCandidate } }");
+            script.AppendLine("$runnerArgs = @('--run-id', $runId, '--sample', $runPath, '--report', $reportPath, '--runtime', $runtime, '--kernel-driver', $kernelDriver, '--policy-api', $policyApi, '--timeout', ([string]$timeoutSeconds), '--network', ([string]$networkEnabled), '--arguments', $argumentText)");
+            script.AppendLine("try { $runnerProcess = Start-Process -FilePath $runner -ArgumentList $runnerArgs -WorkingDirectory $workspace -Wait -PassThru; if(!(Test-Path -LiteralPath $donePath)){ [System.IO.File]::WriteAllText($donePath, 'done', [System.Text.UTF8Encoding]::new($false)) } } catch { [System.IO.File]::WriteAllText($reportPath, '{\"schema\":\"dataprotector.sandbox.report.v2\",\"error\":\"Telemetry runner failed\"}', [System.Text.UTF8Encoding]::new($false)); [System.IO.File]::WriteAllText($donePath, 'done', [System.Text.UTF8Encoding]::new($false)) }");
             script.AppendLine("if($closeWhenDone){ Start-Process -FilePath shutdown.exe -ArgumentList '/s /t 0 /f' -WindowStyle Hidden }");
             return script.ToString();
         }
