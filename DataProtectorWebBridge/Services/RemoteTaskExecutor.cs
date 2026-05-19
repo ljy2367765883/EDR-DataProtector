@@ -18,7 +18,6 @@ namespace DataProtectorWebBridge.Services
         private readonly object terminalSync = new object();
         private readonly Uri serverBaseUri;
         private readonly UsbCryptInitializer usbCryptInitializer = new UsbCryptInitializer();
-        private readonly VirtualSandboxRunner virtualSandboxRunner = new VirtualSandboxRunner();
         private Process terminalProcess;
         private StringBuilder terminalBuffer = new StringBuilder();
         private int terminalSequence;
@@ -97,11 +96,6 @@ namespace DataProtectorWebBridge.Services
                         break;
                     case "usbcrypt.initialize":
                         output = serializer.Serialize(InitializeUsbCrypt(task.argumentsJson));
-                        break;
-                    case "sandbox.run":
-                        VirtualSandboxRunner.SandboxTaskResult sandbox = virtualSandboxRunner.Run(ReadArgs(task.argumentsJson));
-                        output = sandbox.Output;
-                        exitCode = sandbox.ExitCode;
                         break;
                     default:
                         throw new InvalidOperationException("Unsupported remote task kind: " + kind);

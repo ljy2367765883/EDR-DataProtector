@@ -26,4 +26,5 @@ export const views: Record<LastLevelRouteKey, RouteComponent | (() => Promise<Ro
   "network-awareness": () => import("@/views/network-awareness/index.vue"),
   policy: () => import("@/views/policy/index.vue"),
   remote: () => import("@/views/remote/index.vue"),
+  sandbox: () => import("@/views/sandbox/index.vue"),
 };

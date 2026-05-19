@@ -173,7 +173,8 @@ const routeMap: RouteMap = {
   "login": "/login/:module(pwd-login|code-login|register|reset-pwd|bind-wechat)?",
   "network-awareness": "/network-awareness",
   "policy": "/policy",
-  "remote": "/remote"
+  "remote": "/remote",
+  "sandbox": "/sandbox"
 };
 
 /**

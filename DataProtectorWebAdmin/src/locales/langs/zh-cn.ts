@@ -230,6 +230,7 @@
     policy: '策略',
     'network-awareness': '网络感知',
     remote: '远程',
+    sandbox: '轻量沙箱',
     audit: '审计'
   },
   page: {
@@ -773,6 +774,101 @@
         queueFailed: '无法下发远程操作。',
         operationFailed: '{operation} 失败。',
         timeout: '{operation} 等待终端响应超时。'
+      }
+    },
+    sandbox: {
+      eyebrow: 'Server Sandbox',
+      title: '轻量沙箱分析',
+      subtitle: '样本统一提交到 Server，在服务器侧隔离环境中执行分析，Agent 只负责发现和上传可疑 EXE。',
+      serverOnly: '仅 Server 执行',
+      upload: '上传样本',
+      queue: '样本队列',
+      analysis: '分析控制',
+      analyze: '开始分析',
+      report: '分析报告',
+      empty: '暂无样本',
+      noReport: '当前样本还没有报告',
+      uploaded: '样本已提交到服务器。',
+      started: '沙箱分析已启动。',
+      deleted: '样本已删除。',
+      exeOnly: '目前仅支持 EXE 样本。',
+      webUploadReason: 'Web 管理端手动提交。',
+      deleteTitle: '删除沙箱样本',
+      deleteContent: '确认删除 {name} 的样本记录和服务器样本文件吗？',
+      arguments: '启动参数',
+      argumentsPlaceholder: '可选参数',
+      timeout: '分析时长（秒）',
+      options: '隔离选项',
+      enableNetwork: '允许沙箱联网',
+      closeWhenDone: '完成后关闭沙箱',
+      boundary: '隔离边界',
+      network: '网络',
+      exitCode: '退出码',
+      duration: '时间',
+      filters: {
+        allStatus: '全部状态',
+        allSources: '全部来源',
+        host: '主机',
+        search: '样本名、哈希、进程路径、签名者'
+      },
+      status: {
+        queued: '待分析',
+        running: '分析中',
+        completed: '已完成',
+        failed: '失败'
+      },
+      sources: {
+        web: 'Web 提交',
+        agent: 'Agent 上传'
+      },
+      metrics: {
+        total: '样本总数',
+        queued: '待分析',
+        running: '分析中',
+        completed: '已完成',
+        failed: '失败'
+      },
+      reportMetrics: {
+        behaviors: '行为',
+        processes: '进程',
+        network: '连接',
+        artifacts: '文件'
+      },
+      columns: {
+        sample: '样本',
+        status: '状态',
+        source: '来源',
+        fileInfo: '文件信息',
+        reason: '触发原因',
+        submitted: '提交时间',
+        host: '主机',
+        path: '路径',
+        error: '错误',
+        severity: '等级',
+        type: '类型',
+        detail: '详情',
+        time: '时间',
+        process: '进程',
+        signature: '签名',
+        command: '命令',
+        remote: '远端',
+        local: '本地',
+        state: '状态',
+        size: '大小'
+      },
+      sections: {
+        behaviors: '危险行为',
+        processes: '进程链',
+        network: '网络连接',
+        artifacts: '文件变化',
+        output: '输出'
+      },
+      severity: {
+        critical: '严重',
+        high: '高危',
+        medium: '中危',
+        low: '低危',
+        info: '信息'
       }
     },
     policy: {

@@ -285,6 +285,86 @@ declare namespace Api {
       actor?: string;
     }
 
+    type SandboxSampleStatus = 'queued' | 'running' | 'completed' | 'failed';
+    type SandboxSampleSource = 'web' | 'agent';
+
+    interface SandboxSampleQuery {
+      page?: number;
+      pageSize?: number;
+      status?: SandboxSampleStatus | 'all';
+      source?: SandboxSampleSource | 'all';
+      host?: string;
+      search?: string;
+    }
+
+    interface SandboxSampleQueryResponse {
+      page: number;
+      pageSize: number;
+      total: number;
+      queuedTotal: number;
+      runningTotal: number;
+      completedTotal: number;
+      failedTotal: number;
+      items: SandboxSample[];
+    }
+
+    interface SandboxSampleUploadRequest {
+      fileName: string;
+      contentBase64: string;
+      sha256?: string;
+      source?: SandboxSampleSource;
+      host?: string;
+      deviceId?: string;
+      processPath?: string;
+      suspicion?: string;
+      actor?: string;
+    }
+
+    interface SandboxAnalyzeRequest {
+      sampleId: string;
+      arguments?: string;
+      timeoutSeconds: number;
+      networkEnabled: boolean;
+      closeWhenDone: boolean;
+      actor?: string;
+    }
+
+    interface SandboxSampleDeleteRequest {
+      sampleId: string;
+      actor?: string;
+    }
+
+    interface SandboxSample {
+      sampleId: string;
+      sha256: string;
+      fileName: string;
+      sizeBytes: number;
+      source: SandboxSampleSource;
+      host: string;
+      deviceId: string;
+      processPath: string;
+      suspicion: string;
+      submittedUtc: string;
+      lastSubmittedUtc: string;
+      submitCount: number;
+      status: SandboxSampleStatus;
+      startedUtc: string;
+      completedUtc: string;
+      timeoutSeconds: number;
+      networkEnabled: boolean;
+      closeWhenDone: boolean;
+      exitCode: number;
+      error: string;
+      reportJson: string;
+      architecture: string;
+      signer: string;
+      signatureStatus: string;
+      productName: string;
+      companyName: string;
+      fileDescription: string;
+      fileVersion: string;
+    }
+
     type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
 
     interface RemovableVolume {

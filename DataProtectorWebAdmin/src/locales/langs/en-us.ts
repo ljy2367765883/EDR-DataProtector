@@ -234,6 +234,7 @@ const local: App.I18n.Schema = {
     policy: 'Policy',
     'network-awareness': 'Network Awareness',
     remote: 'Remote',
+    sandbox: 'Sandbox',
     audit: 'Audit'
   },
   page: {
@@ -777,6 +778,101 @@ const local: App.I18n.Schema = {
         queueFailed: 'Unable to queue remote operation.',
         operationFailed: '{operation} failed.',
         timeout: '{operation} timed out waiting for the endpoint.'
+      }
+    },
+    sandbox: {
+      eyebrow: 'Server Sandbox',
+      title: 'Lightweight Sandbox Analysis',
+      subtitle: 'Samples are submitted to the Server and executed only in the server-side isolated environment. Agents only discover and upload suspicious EXE files.',
+      serverOnly: 'Server execution only',
+      upload: 'Upload sample',
+      queue: 'Sample Queue',
+      analysis: 'Analysis Control',
+      analyze: 'Analyze',
+      report: 'Report',
+      empty: 'No samples',
+      noReport: 'No report for the selected sample yet',
+      uploaded: 'Sample submitted to the server.',
+      started: 'Sandbox analysis started.',
+      deleted: 'Sample deleted.',
+      exeOnly: 'Only EXE samples are supported for now.',
+      webUploadReason: 'Manual submission from Web Admin.',
+      deleteTitle: 'Delete sandbox sample',
+      deleteContent: 'Delete sample record and server-side sample file for {name}?',
+      arguments: 'Arguments',
+      argumentsPlaceholder: 'Optional arguments',
+      timeout: 'Analysis time (seconds)',
+      options: 'Isolation options',
+      enableNetwork: 'Allow sandbox network',
+      closeWhenDone: 'Close sandbox when done',
+      boundary: 'Boundary',
+      network: 'Network',
+      exitCode: 'Exit code',
+      duration: 'Time',
+      filters: {
+        allStatus: 'All status',
+        allSources: 'All sources',
+        host: 'Host',
+        search: 'Sample, hash, process path, signer'
+      },
+      status: {
+        queued: 'Queued',
+        running: 'Running',
+        completed: 'Completed',
+        failed: 'Failed'
+      },
+      sources: {
+        web: 'Web',
+        agent: 'Agent'
+      },
+      metrics: {
+        total: 'Total samples',
+        queued: 'Queued',
+        running: 'Running',
+        completed: 'Completed',
+        failed: 'Failed'
+      },
+      reportMetrics: {
+        behaviors: 'Behaviors',
+        processes: 'Processes',
+        network: 'Connections',
+        artifacts: 'Files'
+      },
+      columns: {
+        sample: 'Sample',
+        status: 'Status',
+        source: 'Source',
+        fileInfo: 'File Info',
+        reason: 'Reason',
+        submitted: 'Submitted',
+        host: 'Host',
+        path: 'Path',
+        error: 'Error',
+        severity: 'Severity',
+        type: 'Type',
+        detail: 'Detail',
+        time: 'Time',
+        process: 'Process',
+        signature: 'Signature',
+        command: 'Command',
+        remote: 'Remote',
+        local: 'Local',
+        state: 'State',
+        size: 'Size'
+      },
+      sections: {
+        behaviors: 'Risk Behaviors',
+        processes: 'Process Tree',
+        network: 'Network Connections',
+        artifacts: 'File Changes',
+        output: 'Output'
+      },
+      severity: {
+        critical: 'Critical',
+        high: 'High',
+        medium: 'Medium',
+        low: 'Low',
+        info: 'Info'
       }
     },
     policy: {

@@ -28,6 +28,7 @@ declare module "@elegant-router/types" {
     "network-awareness": "/network-awareness";
     "policy": "/policy";
     "remote": "/remote";
+    "sandbox": "/sandbox";
   };
 
   /**
@@ -70,6 +71,7 @@ declare module "@elegant-router/types" {
     | "network-awareness"
     | "policy"
     | "remote"
+    | "sandbox"
   >;
 
   /**
@@ -97,6 +99,7 @@ declare module "@elegant-router/types" {
     | "network-awareness"
     | "policy"
     | "remote"
+    | "sandbox"
   >;
 
   /**

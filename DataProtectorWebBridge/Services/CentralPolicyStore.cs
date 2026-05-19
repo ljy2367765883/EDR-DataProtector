@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 namespace DataProtectorWebBridge.Services
@@ -20,10 +22,14 @@ namespace DataProtectorWebBridge.Services
         private const string IpInfoTokenFileName = "IpInfoToken.txt";
         private const string UsbCryptPackageDirectoryName = "UsbCryptPackages";
         private const string UsbCryptPackageFileName = "current.zip";
+        private const string SandboxSampleDirectoryName = "SandboxSamples";
+        private const int MaxSandboxSampleBytes = 50 * 1024 * 1024;
+        private const int MaxSandboxSampleRecords = 1000;
         private readonly object syncRoot = new object();
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly string filePath;
         private readonly Dictionary<string, string> volatileTaskArguments = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly VirtualSandboxRunner sandboxRunner = new VirtualSandboxRunner();
         private CentralState state;
 
         public CentralPolicyStore()
@@ -781,6 +787,187 @@ namespace DataProtectorWebBridge.Services
             return Success("Central audit event delete request completed.");
         }
 
+        public SandboxSampleQueryResponse QuerySandboxSamples(SandboxSampleQuery query)
+        {
+            SandboxSampleQuery normalized = NormalizeSandboxSampleQuery(query);
+            lock (syncRoot)
+            {
+                IEnumerable<SandboxSampleState> rows = state.SandboxSamples ?? Enumerable.Empty<SandboxSampleState>();
+                if (!string.IsNullOrWhiteSpace(normalized.status) &&
+                    !string.Equals(normalized.status, "all", StringComparison.OrdinalIgnoreCase))
+                {
+                    rows = rows.Where(item => string.Equals(item.status, normalized.status, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (!string.IsNullOrWhiteSpace(normalized.source) &&
+                    !string.Equals(normalized.source, "all", StringComparison.OrdinalIgnoreCase))
+                {
+                    rows = rows.Where(item => string.Equals(item.source, normalized.source, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (!string.IsNullOrWhiteSpace(normalized.host))
+                {
+                    rows = rows.Where(item => (item.host ?? string.Empty).IndexOf(normalized.host, StringComparison.OrdinalIgnoreCase) >= 0);
+                }
+
+                if (!string.IsNullOrWhiteSpace(normalized.search))
+                {
+                    rows = rows.Where(item => SandboxSampleHaystack(item).IndexOf(normalized.search, StringComparison.OrdinalIgnoreCase) >= 0);
+                }
+
+                SandboxSampleDto[] all = rows
+                    .OrderByDescending(item => item.submittedUtc, StringComparer.OrdinalIgnoreCase)
+                    .Select(ToSandboxSampleDto)
+                    .ToArray();
+                int skip = Math.Max(0, (normalized.page - 1) * normalized.pageSize);
+                return new SandboxSampleQueryResponse
+                {
+                    page = normalized.page,
+                    pageSize = normalized.pageSize,
+                    total = all.Length,
+                    queuedTotal = all.Count(item => string.Equals(item.status, "queued", StringComparison.OrdinalIgnoreCase)),
+                    runningTotal = all.Count(item => string.Equals(item.status, "running", StringComparison.OrdinalIgnoreCase)),
+                    completedTotal = all.Count(item => string.Equals(item.status, "completed", StringComparison.OrdinalIgnoreCase)),
+                    failedTotal = all.Count(item => string.Equals(item.status, "failed", StringComparison.OrdinalIgnoreCase)),
+                    items = all.Skip(skip).Take(normalized.pageSize).ToArray()
+                };
+            }
+        }
+
+        public SandboxSampleDto SubmitSandboxSample(SandboxSampleUploadRequest request, string actor)
+        {
+            SandboxSampleUploadRequest normalized = NormalizeSandboxUpload(request);
+            byte[] sampleBytes;
+            try
+            {
+                sampleBytes = Convert.FromBase64String(normalized.contentBase64);
+            }
+            catch
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox sample must be valid base64 content.");
+            }
+
+            if (sampleBytes.Length <= 0)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox sample is empty.");
+            }
+
+            if (sampleBytes.Length > MaxSandboxSampleBytes)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox sample exceeds the 50 MB server limit.");
+            }
+
+            if (!IsExecutableImage(sampleBytes))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox currently accepts Windows PE executable samples only.");
+            }
+
+            SandboxSampleSubmission submission = new SandboxSampleSubmission
+            {
+                fileName = normalized.fileName,
+                contentBase64 = normalized.contentBase64,
+                sha256 = NormalizeSha256(normalized.sha256),
+                source = string.IsNullOrWhiteSpace(normalized.source) ? "web" : normalized.source,
+                host = string.IsNullOrWhiteSpace(normalized.host) ? Environment.MachineName : normalized.host,
+                deviceId = normalized.deviceId,
+                processPath = normalized.processPath,
+                suspicion = normalized.suspicion,
+                actor = string.IsNullOrWhiteSpace(actor) ? normalized.actor : actor
+            };
+
+            lock (syncRoot)
+            {
+                SandboxSampleState sample = IngestSandboxSample(submission, sampleBytes, DateTime.UtcNow, true);
+                Save();
+                return ToSandboxSampleDto(sample);
+            }
+        }
+
+        public SandboxSampleDto StartSandboxAnalysis(SandboxAnalyzeRequest request, string actor)
+        {
+            string sampleId = NormalizeDeviceText(request == null ? string.Empty : request.sampleId);
+            if (string.IsNullOrWhiteSpace(sampleId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox sample id is required.");
+            }
+
+            SandboxSampleState sample;
+            Dictionary<string, object> args;
+            lock (syncRoot)
+            {
+                EnsureSandboxState();
+                sample = state.SandboxSamples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase));
+                if (sample == null)
+                {
+                    throw new PolicyBridgeService.BridgeException(1, "Sandbox sample was not found.");
+                }
+
+                if (string.Equals(sample.status, "running", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ToSandboxSampleDto(sample);
+                }
+
+                if (string.IsNullOrWhiteSpace(sample.storagePath) || !File.Exists(sample.storagePath))
+                {
+                    sample.status = "failed";
+                    sample.error = "Sandbox sample file is missing from the server sample store.";
+                    sample.completedUtc = DateTime.UtcNow.ToString("o");
+                    AppendAudit(actor, "sandbox.analysis.failed", sample.sampleId, sample.fileName, false, "0x00000001", sample.error);
+                    Save();
+                    return ToSandboxSampleDto(sample);
+                }
+
+                sample.status = "running";
+                sample.startedUtc = DateTime.UtcNow.ToString("o");
+                sample.completedUtc = string.Empty;
+                sample.error = string.Empty;
+                sample.reportJson = string.Empty;
+                sample.timeoutSeconds = ClampInt(request == null ? 120 : request.timeoutSeconds, 15, 1800);
+                sample.networkEnabled = request != null && request.networkEnabled;
+                sample.closeWhenDone = request == null || request.closeWhenDone;
+                sample.arguments = request == null ? string.Empty : request.arguments ?? string.Empty;
+                AppendAudit(actor, "sandbox.analysis.started", sample.sampleId, sample.fileName, true, "0x00000000", "Server-side sandbox analysis started.");
+                args = BuildSandboxRunnerArgs(sample);
+                Save();
+            }
+
+            ThreadPool.QueueUserWorkItem(_ => RunSandboxAnalysisWorker(sampleId, args, actor));
+            lock (syncRoot)
+            {
+                SandboxSampleState refreshed = state.SandboxSamples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase));
+                return ToSandboxSampleDto(refreshed ?? sample);
+            }
+        }
+
+        public PolicyBridgeService.OperationResult RemoveSandboxSample(SandboxSampleDeleteRequest request)
+        {
+            string sampleId = NormalizeDeviceText(request == null ? string.Empty : request.sampleId);
+            if (string.IsNullOrWhiteSpace(sampleId))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox sample id is required.");
+            }
+
+            lock (syncRoot)
+            {
+                EnsureSandboxState();
+                SandboxSampleState sample = state.SandboxSamples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase));
+                if (sample != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(sample.storagePath) && File.Exists(sample.storagePath))
+                    {
+                        TryDeleteFile(sample.storagePath);
+                    }
+
+                    state.SandboxSamples.Remove(sample);
+                }
+
+                AppendAudit(request == null ? string.Empty : request.actor, "sandbox.sample.remove", sampleId, "sandbox", true, "0x00000000", "Sandbox sample record removed.");
+                Save();
+            }
+
+            return Success("Sandbox sample removed.");
+        }
+
         public NetworkInsightResponse QueryNetworkInsights(NetworkInsightQuery query)
         {
             NetworkInsightQuery normalized = NormalizeNetworkInsightQuery(query);
@@ -972,6 +1159,11 @@ namespace DataProtectorWebBridge.Services
                 throw new PolicyBridgeService.BridgeException(1, "USB encryption initialization must use the dedicated /api/usbcrypt/initialize endpoint.");
             }
 
+            if (string.Equals(kind, "sandbox.run", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox analysis is server-side only. Use /api/sandbox/samples and /api/sandbox/analyze.");
+            }
+
             lock (syncRoot)
             {
                 if (!state.Devices.ContainsKey(deviceId))
@@ -1136,6 +1328,23 @@ namespace DataProtectorWebBridge.Services
                     }
                 }
 
+                if (request.SandboxSamples != null)
+                {
+                    int sandboxSampleCount = 0;
+                    foreach (SandboxSampleSubmission submission in request.SandboxSamples)
+                    {
+                        if (TryIngestSandboxSampleFromAgent(deviceId, device, submission))
+                        {
+                            sandboxSampleCount++;
+                        }
+                    }
+
+                    if (sandboxSampleCount > 0)
+                    {
+                        Console.WriteLine(DateTime.Now.ToString("s") + " Central received " + sandboxSampleCount + " sandbox sample(s) from " + device.Machine + " (" + device.DeviceId + ").");
+                    }
+                }
+
                 if (request.Audit != null)
                 {
                     int acceptedAuditCount = 0;
@@ -1262,6 +1471,10 @@ namespace DataProtectorWebBridge.Services
                     {
                         loaded.UsbCryptDriverPackage = new UsbCryptDriverPackageInfo();
                     }
+                    if (loaded != null && loaded.SandboxSamples == null)
+                    {
+                        loaded.SandboxSamples = new List<SandboxSampleState>();
+                    }
                     return loaded ?? new CentralState();
                 }
                 catch
@@ -1279,6 +1492,7 @@ namespace DataProtectorWebBridge.Services
             TrimNetworkConnections();
             TrimRemovableDevices();
             TrimIpInfoCache();
+            TrimSandboxSamples();
             string json = serializer.Serialize(state);
             File.WriteAllText(filePath, json, Encoding.UTF8);
         }
@@ -1372,6 +1586,14 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        private void EnsureSandboxState()
+        {
+            if (state.SandboxSamples == null)
+            {
+                state.SandboxSamples = new List<SandboxSampleState>();
+            }
+        }
+
         private void TrimAudit()
         {
             const int maxAuditRecords = 10000;
@@ -1426,6 +1648,32 @@ namespace DataProtectorWebBridge.Services
                     .Where(item => !string.IsNullOrWhiteSpace(item.ip))
                     .ToDictionary(item => item.ip, item => item, StringComparer.OrdinalIgnoreCase);
             }
+        }
+
+        private void TrimSandboxSamples()
+        {
+            EnsureSandboxState();
+            if (state.SandboxSamples.Count <= MaxSandboxSampleRecords)
+            {
+                return;
+            }
+
+            List<SandboxSampleState> ordered = state.SandboxSamples
+                .OrderByDescending(item => item.submittedUtc, StringComparer.OrdinalIgnoreCase)
+                .Take(MaxSandboxSampleRecords)
+                .ToList();
+            HashSet<string> keep = new HashSet<string>(ordered.Select(item => item.sampleId), StringComparer.OrdinalIgnoreCase);
+            foreach (SandboxSampleState item in state.SandboxSamples)
+            {
+                if (!keep.Contains(item.sampleId) &&
+                    !string.IsNullOrWhiteSpace(item.storagePath) &&
+                    File.Exists(item.storagePath))
+                {
+                    TryDeleteFile(item.storagePath);
+                }
+            }
+
+            state.SandboxSamples = ordered;
         }
 
         private bool TryIngestNetworkObservation(string deviceId, CentralDeviceState device, AuditLog.AuditRecord record)
@@ -1552,6 +1800,123 @@ namespace DataProtectorWebBridge.Services
 
             TrimNetworkConnections();
             return true;
+        }
+
+        private bool TryIngestSandboxSampleFromAgent(string deviceId, CentralDeviceState device, SandboxSampleSubmission submission)
+        {
+            if (submission == null || string.IsNullOrWhiteSpace(submission.contentBase64))
+            {
+                return false;
+            }
+
+            byte[] sampleBytes;
+            try
+            {
+                sampleBytes = Convert.FromBase64String(submission.contentBase64);
+            }
+            catch
+            {
+                AppendAudit(device == null ? deviceId : device.Machine, "sandbox.sample.agent.rejected", deviceId, "sandbox", false, "0x00000001", "Agent submitted an invalid base64 sandbox sample.");
+                return false;
+            }
+
+            if (sampleBytes.Length <= 0 || sampleBytes.Length > MaxSandboxSampleBytes || !IsExecutableImage(sampleBytes))
+            {
+                AppendAudit(device == null ? deviceId : device.Machine, "sandbox.sample.agent.rejected", deviceId, "sandbox", false, "0x00000001", "Agent submitted a sandbox sample that is empty, too large, or not a PE executable.");
+                return false;
+            }
+
+            submission.deviceId = deviceId;
+            submission.host = device == null ? submission.host : device.Machine;
+            submission.source = "agent";
+            IngestSandboxSample(submission, sampleBytes, DateTime.UtcNow, false);
+            return true;
+        }
+
+        private SandboxSampleState IngestSandboxSample(SandboxSampleSubmission submission, byte[] sampleBytes, DateTime submittedUtc, bool queueAudit)
+        {
+            EnsureSandboxState();
+            string sha256 = NormalizeSha256(submission == null ? string.Empty : submission.sha256);
+            if (string.IsNullOrWhiteSpace(sha256))
+            {
+                sha256 = ComputeSha256Hex(sampleBytes);
+            }
+
+            string fileName = NormalizeFileName(submission == null ? string.Empty : submission.fileName);
+            string source = NormalizeSandboxSource(submission == null ? string.Empty : submission.source);
+            string host = NormalizeDeviceText(submission == null ? string.Empty : submission.host);
+            string deviceId = NormalizeDeviceText(submission == null ? string.Empty : submission.deviceId);
+            string processPath = submission == null ? string.Empty : submission.processPath ?? string.Empty;
+            string sampleId = "sbx-" + sha256.Substring(0, Math.Min(16, sha256.Length));
+            SandboxSampleState existing = state.SandboxSamples.FirstOrDefault(item =>
+                string.Equals(item.sha256, sha256, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(item.source, source, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(item.host, host, StringComparison.OrdinalIgnoreCase));
+
+            if (existing != null)
+            {
+                existing.fileName = string.IsNullOrWhiteSpace(existing.fileName) ? fileName : existing.fileName;
+                existing.deviceId = PreferNonEmpty(deviceId, existing.deviceId);
+                existing.processPath = PreferNonEmpty(processPath, existing.processPath);
+                existing.suspicion = PreferNonEmpty(submission == null ? string.Empty : submission.suspicion, existing.suspicion);
+                existing.lastSubmittedUtc = submittedUtc.ToString("o");
+                existing.submitCount++;
+                if (queueAudit)
+                {
+                    AppendAudit(submission == null ? string.Empty : submission.actor, "sandbox.sample.deduplicated", existing.sampleId, existing.fileName, true, "0x00000000", "Sandbox sample already exists on the server.");
+                }
+
+                return existing;
+            }
+
+            if (state.SandboxSamples.Any(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase)))
+            {
+                sampleId = sampleId + "-" + ComputeCrc32(source + "|" + host + "|" + deviceId + "|" + processPath).ToString("x8", CultureInfo.InvariantCulture);
+            }
+
+            string sampleDirectory = GetSandboxSampleDirectory();
+            Directory.CreateDirectory(sampleDirectory);
+            string storagePath = Path.Combine(sampleDirectory, sampleId + "-" + SafeStorageFileName(fileName));
+            int suffix = 1;
+            while (File.Exists(storagePath))
+            {
+                storagePath = Path.Combine(sampleDirectory, sampleId + "-" + suffix.ToString(CultureInfo.InvariantCulture) + "-" + SafeStorageFileName(fileName));
+                suffix++;
+            }
+
+            File.WriteAllBytes(storagePath, sampleBytes);
+
+            SandboxSampleState sample = new SandboxSampleState
+            {
+                sampleId = sampleId,
+                sha256 = sha256,
+                fileName = fileName,
+                sizeBytes = sampleBytes.Length,
+                source = source,
+                host = host,
+                deviceId = deviceId,
+                processPath = processPath,
+                suspicion = submission == null ? string.Empty : submission.suspicion ?? string.Empty,
+                submittedUtc = submittedUtc.ToString("o"),
+                lastSubmittedUtc = submittedUtc.ToString("o"),
+                submitCount = 1,
+                status = "queued",
+                storagePath = storagePath,
+                architecture = ReadPeArchitecture(storagePath),
+                signer = TryReadSignerSubject(storagePath),
+                signatureStatus = ReadSignatureStatus(storagePath),
+                productName = ReadVersionInfo(storagePath, "ProductName"),
+                companyName = ReadVersionInfo(storagePath, "CompanyName"),
+                fileDescription = ReadVersionInfo(storagePath, "FileDescription"),
+                fileVersion = ReadVersionInfo(storagePath, "FileVersion"),
+                timeoutSeconds = 120,
+                closeWhenDone = true
+            };
+
+            state.SandboxSamples.Add(sample);
+            AppendAudit(submission == null ? string.Empty : submission.actor, "sandbox.sample.submitted." + source, sample.sampleId, sample.fileName, true, "0x00000000", "Sandbox sample submitted to the server.");
+            TrimSandboxSamples();
+            return sample;
         }
 
         private bool IngestRemovableDevice(
@@ -2283,6 +2648,320 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        private static string ComputeSha256Hex(string path)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream stream = File.OpenRead(path))
+            {
+                return BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+            }
+        }
+
+        private string GetSandboxSampleDirectory()
+        {
+            return Path.Combine(DirectoryPath, SandboxSampleDirectoryName);
+        }
+
+        private void RunSandboxAnalysisWorker(string sampleId, Dictionary<string, object> args, string actor)
+        {
+            VirtualSandboxRunner.SandboxTaskResult result;
+            Exception failure = null;
+            try
+            {
+                result = sandboxRunner.Run(args);
+            }
+            catch (Exception ex)
+            {
+                result = null;
+                failure = ex;
+            }
+
+            lock (syncRoot)
+            {
+                EnsureSandboxState();
+                SandboxSampleState sample = state.SandboxSamples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase));
+                if (sample == null)
+                {
+                    return;
+                }
+
+                sample.completedUtc = DateTime.UtcNow.ToString("o");
+                if (failure != null)
+                {
+                    sample.status = "failed";
+                    sample.error = failure.Message;
+                    sample.exitCode = 1;
+                    AppendAudit(actor, "sandbox.analysis.failed", sample.sampleId, sample.fileName, false, "0x00000001", failure.Message);
+                }
+                else
+                {
+                    sample.exitCode = result.ExitCode;
+                    sample.reportJson = Truncate(result.Output, 4 * 1024 * 1024);
+                    sample.error = result.ExitCode == 0 ? string.Empty : "Sandbox analysis finished with exit code " + result.ExitCode.ToString(CultureInfo.InvariantCulture) + ".";
+                    sample.status = result.ExitCode == 0 ? "completed" : "failed";
+                    AppendAudit(actor, "sandbox.analysis." + sample.status, sample.sampleId, sample.fileName, result.ExitCode == 0, result.ExitCode == 0 ? "0x00000000" : "0x00000001", result.ExitCode == 0 ? "Server-side sandbox analysis completed." : sample.error);
+                }
+
+                Save();
+            }
+        }
+
+        private static Dictionary<string, object> BuildSandboxRunnerArgs(SandboxSampleState sample)
+        {
+            return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "path", sample.storagePath ?? string.Empty },
+                { "arguments", sample.arguments ?? string.Empty },
+                { "timeoutSeconds", sample.timeoutSeconds },
+                { "networkEnabled", sample.networkEnabled },
+                { "copyInputDirectory", false },
+                { "closeWhenDone", sample.closeWhenDone }
+            };
+        }
+
+        private static SandboxSampleDto ToSandboxSampleDto(SandboxSampleState sample)
+        {
+            if (sample == null)
+            {
+                return new SandboxSampleDto();
+            }
+
+            return new SandboxSampleDto
+            {
+                sampleId = sample.sampleId,
+                sha256 = sample.sha256,
+                fileName = sample.fileName,
+                sizeBytes = sample.sizeBytes,
+                source = sample.source,
+                host = sample.host,
+                deviceId = sample.deviceId,
+                processPath = sample.processPath,
+                suspicion = sample.suspicion,
+                submittedUtc = sample.submittedUtc,
+                lastSubmittedUtc = sample.lastSubmittedUtc,
+                submitCount = sample.submitCount,
+                status = sample.status,
+                startedUtc = sample.startedUtc,
+                completedUtc = sample.completedUtc,
+                timeoutSeconds = sample.timeoutSeconds,
+                networkEnabled = sample.networkEnabled,
+                closeWhenDone = sample.closeWhenDone,
+                exitCode = sample.exitCode,
+                error = sample.error,
+                reportJson = sample.reportJson,
+                architecture = sample.architecture,
+                signer = sample.signer,
+                signatureStatus = sample.signatureStatus,
+                productName = sample.productName,
+                companyName = sample.companyName,
+                fileDescription = sample.fileDescription,
+                fileVersion = sample.fileVersion
+            };
+        }
+
+        private static SandboxSampleQuery NormalizeSandboxSampleQuery(SandboxSampleQuery query)
+        {
+            SandboxSampleQuery source = query ?? new SandboxSampleQuery();
+            return new SandboxSampleQuery
+            {
+                page = ClampInt(source.page <= 0 ? 1 : source.page, 1, 1000000),
+                pageSize = ClampInt(source.pageSize <= 0 ? 30 : source.pageSize, 1, 100),
+                status = NormalizeDeviceText(source.status),
+                source = NormalizeDeviceText(source.source),
+                host = NormalizeDeviceText(source.host),
+                search = NormalizeDeviceText(source.search)
+            };
+        }
+
+        private static SandboxSampleUploadRequest NormalizeSandboxUpload(SandboxSampleUploadRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox sample upload body is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.contentBase64))
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox sample payload is required.");
+            }
+
+            return new SandboxSampleUploadRequest
+            {
+                fileName = NormalizeFileName(request.fileName),
+                contentBase64 = request.contentBase64.Trim(),
+                sha256 = NormalizeSha256(request.sha256),
+                source = string.IsNullOrWhiteSpace(request.source) ? "web" : NormalizeSandboxSource(request.source),
+                host = NormalizeDeviceText(request.host),
+                deviceId = NormalizeDeviceText(request.deviceId),
+                processPath = request.processPath ?? string.Empty,
+                suspicion = NormalizeDeviceText(request.suspicion),
+                actor = NormalizeDeviceText(request.actor)
+            };
+        }
+
+        private static string SandboxSampleHaystack(SandboxSampleState item)
+        {
+            return string.Join("\n", new[]
+            {
+                item.fileName ?? string.Empty,
+                item.sha256 ?? string.Empty,
+                item.source ?? string.Empty,
+                item.host ?? string.Empty,
+                item.deviceId ?? string.Empty,
+                item.processPath ?? string.Empty,
+                item.suspicion ?? string.Empty,
+                item.signer ?? string.Empty,
+                item.signatureStatus ?? string.Empty,
+                item.productName ?? string.Empty,
+                item.companyName ?? string.Empty,
+                item.fileDescription ?? string.Empty
+            });
+        }
+
+        private static string NormalizeSandboxSource(string value)
+        {
+            string normalized = NormalizeDeviceText(value).ToLowerInvariant();
+            return string.Equals(normalized, "agent", StringComparison.OrdinalIgnoreCase) ? "agent" : "web";
+        }
+
+        private static string NormalizeSha256(string value)
+        {
+            string normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
+            if (normalized.Length != 64 || normalized.Any(ch => !Uri.IsHexDigit(ch)))
+            {
+                return string.Empty;
+            }
+
+            return normalized;
+        }
+
+        private static string NormalizeFileName(string value)
+        {
+            string name = Path.GetFileName((value ?? string.Empty).Trim());
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                name = "sample.exe";
+            }
+
+            return name.Length > 180 ? name.Substring(0, 180) : name;
+        }
+
+        private static string SafeStorageFileName(string value)
+        {
+            string name = NormalizeFileName(value);
+            foreach (char ch in Path.GetInvalidFileNameChars())
+            {
+                name = name.Replace(ch, '_');
+            }
+
+            return name;
+        }
+
+        private static bool IsExecutableImage(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 0x40 || bytes[0] != (byte)'M' || bytes[1] != (byte)'Z')
+            {
+                return false;
+            }
+
+            int peOffset = BitConverter.ToInt32(bytes, 0x3C);
+            return peOffset > 0 &&
+                   peOffset + 4 < bytes.Length &&
+                   bytes[peOffset] == (byte)'P' &&
+                   bytes[peOffset + 1] == (byte)'E' &&
+                   bytes[peOffset + 2] == 0 &&
+                   bytes[peOffset + 3] == 0;
+        }
+
+        private static string ReadPeArchitecture(string path)
+        {
+            try
+            {
+                using (BinaryReader reader = new BinaryReader(File.OpenRead(path)))
+                {
+                    if (reader.BaseStream.Length < 0x40)
+                    {
+                        return "unknown";
+                    }
+
+                    reader.BaseStream.Seek(0x3C, SeekOrigin.Begin);
+                    int peOffset = reader.ReadInt32();
+                    if (peOffset <= 0 || peOffset + 6 > reader.BaseStream.Length)
+                    {
+                        return "unknown";
+                    }
+
+                    reader.BaseStream.Seek(peOffset, SeekOrigin.Begin);
+                    if (reader.ReadUInt32() != 0x00004550)
+                    {
+                        return "unknown";
+                    }
+
+                    ushort machine = reader.ReadUInt16();
+                    if (machine == 0x014C) return "x86";
+                    if (machine == 0x8664) return "x64";
+                    if (machine == 0xAA64) return "arm64";
+                    return "machine-0x" + machine.ToString("X4", CultureInfo.InvariantCulture);
+                }
+            }
+            catch
+            {
+                return "unknown";
+            }
+        }
+
+        private static string TryReadSignerSubject(string path)
+        {
+            try
+            {
+                System.Security.Cryptography.X509Certificates.X509Certificate certificate =
+                    System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
+                return certificate == null ? string.Empty : certificate.Subject;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string ReadSignatureStatus(string path)
+        {
+            return string.IsNullOrWhiteSpace(TryReadSignerSubject(path)) ? "unsigned" : "signed";
+        }
+
+        private static string ReadVersionInfo(string path, string field)
+        {
+            try
+            {
+                FileVersionInfo info = FileVersionInfo.GetVersionInfo(path);
+                if (string.Equals(field, "ProductName", StringComparison.OrdinalIgnoreCase)) return info.ProductName ?? string.Empty;
+                if (string.Equals(field, "CompanyName", StringComparison.OrdinalIgnoreCase)) return info.CompanyName ?? string.Empty;
+                if (string.Equals(field, "FileDescription", StringComparison.OrdinalIgnoreCase)) return info.FileDescription ?? string.Empty;
+                if (string.Equals(field, "FileVersion", StringComparison.OrdinalIgnoreCase)) return info.FileVersion ?? string.Empty;
+            }
+            catch
+            {
+            }
+
+            return string.Empty;
+        }
+
+        private static int ClampInt(int value, int min, int max)
+        {
+            return Math.Max(min, Math.Min(max, value));
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch
+            {
+            }
+        }
+
         private static void ValidateUsbCryptPackageBytes(byte[] packageBytes)
         {
             bool hasTool = false;
@@ -2750,9 +3429,7 @@ namespace DataProtectorWebBridge.Services
 
         private static bool IsStaleSentTask(RemoteTaskState task, DateTime now)
         {
-            TimeSpan timeout = string.Equals(task.kind, "sandbox.run", StringComparison.OrdinalIgnoreCase)
-                ? TimeSpan.FromMinutes(45)
-                : TimeSpan.FromMinutes(5);
+            TimeSpan timeout = TimeSpan.FromMinutes(5);
             DateTime sent;
             return task.status == "sent"
                 && !IsOneShotSecretTask(task.kind)
@@ -2822,11 +3499,6 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(kind, "desktop.screenshot", StringComparison.OrdinalIgnoreCase))
             {
                 return 16 * 1024 * 1024;
-            }
-
-            if (string.Equals(kind, "sandbox.run", StringComparison.OrdinalIgnoreCase))
-            {
-                return 2 * 1024 * 1024;
             }
 
             return 262144;
@@ -3546,6 +4218,7 @@ namespace DataProtectorWebBridge.Services
                 Tasks = new List<RemoteTaskState>();
                 NetworkConnections = new List<NetworkConnectionObservation>();
                 IpInfoCache = new Dictionary<string, IpInfoCacheEntry>(StringComparer.OrdinalIgnoreCase);
+                SandboxSamples = new List<SandboxSampleState>();
             }
 
             public long PolicyVersion { get; set; }
@@ -3566,6 +4239,7 @@ namespace DataProtectorWebBridge.Services
             public List<RemoteTaskState> Tasks { get; set; }
             public List<NetworkConnectionObservation> NetworkConnections { get; set; }
             public Dictionary<string, IpInfoCacheEntry> IpInfoCache { get; set; }
+            public List<SandboxSampleState> SandboxSamples { get; set; }
         }
 
         public sealed class NetworkInsightQuery
@@ -3644,6 +4318,93 @@ namespace DataProtectorWebBridge.Services
             public string version { get; set; }
             public string fileName { get; set; }
             public string base64Package { get; set; }
+        }
+
+        public sealed class SandboxSampleQuery
+        {
+            public int page { get; set; }
+            public int pageSize { get; set; }
+            public string status { get; set; }
+            public string source { get; set; }
+            public string host { get; set; }
+            public string search { get; set; }
+        }
+
+        public sealed class SandboxSampleQueryResponse
+        {
+            public int page { get; set; }
+            public int pageSize { get; set; }
+            public int total { get; set; }
+            public int queuedTotal { get; set; }
+            public int runningTotal { get; set; }
+            public int completedTotal { get; set; }
+            public int failedTotal { get; set; }
+            public SandboxSampleDto[] items { get; set; }
+        }
+
+        public class SandboxSampleSubmission
+        {
+            public string fileName { get; set; }
+            public string contentBase64 { get; set; }
+            public string sha256 { get; set; }
+            public string source { get; set; }
+            public string host { get; set; }
+            public string deviceId { get; set; }
+            public string processPath { get; set; }
+            public string suspicion { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class SandboxSampleUploadRequest : SandboxSampleSubmission
+        {
+        }
+
+        public sealed class SandboxAnalyzeRequest
+        {
+            public string sampleId { get; set; }
+            public string arguments { get; set; }
+            public int timeoutSeconds { get; set; }
+            public bool networkEnabled { get; set; }
+            public bool closeWhenDone { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class SandboxSampleDeleteRequest
+        {
+            public string sampleId { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class SandboxSampleDto
+        {
+            public string sampleId { get; set; }
+            public string sha256 { get; set; }
+            public string fileName { get; set; }
+            public long sizeBytes { get; set; }
+            public string source { get; set; }
+            public string host { get; set; }
+            public string deviceId { get; set; }
+            public string processPath { get; set; }
+            public string suspicion { get; set; }
+            public string submittedUtc { get; set; }
+            public string lastSubmittedUtc { get; set; }
+            public int submitCount { get; set; }
+            public string status { get; set; }
+            public string startedUtc { get; set; }
+            public string completedUtc { get; set; }
+            public int timeoutSeconds { get; set; }
+            public bool networkEnabled { get; set; }
+            public bool closeWhenDone { get; set; }
+            public int exitCode { get; set; }
+            public string error { get; set; }
+            public string reportJson { get; set; }
+            public string architecture { get; set; }
+            public string signer { get; set; }
+            public string signatureStatus { get; set; }
+            public string productName { get; set; }
+            public string companyName { get; set; }
+            public string fileDescription { get; set; }
+            public string fileVersion { get; set; }
         }
 
         public sealed class NetworkInsightItem
@@ -3745,6 +4506,40 @@ namespace DataProtectorWebBridge.Services
             public string country { get; set; }
             public string continent_code { get; set; }
             public string continent { get; set; }
+        }
+
+        private sealed class SandboxSampleState
+        {
+            public string sampleId { get; set; }
+            public string sha256 { get; set; }
+            public string fileName { get; set; }
+            public long sizeBytes { get; set; }
+            public string source { get; set; }
+            public string host { get; set; }
+            public string deviceId { get; set; }
+            public string processPath { get; set; }
+            public string suspicion { get; set; }
+            public string submittedUtc { get; set; }
+            public string lastSubmittedUtc { get; set; }
+            public int submitCount { get; set; }
+            public string status { get; set; }
+            public string startedUtc { get; set; }
+            public string completedUtc { get; set; }
+            public int timeoutSeconds { get; set; }
+            public bool networkEnabled { get; set; }
+            public bool closeWhenDone { get; set; }
+            public string arguments { get; set; }
+            public int exitCode { get; set; }
+            public string error { get; set; }
+            public string reportJson { get; set; }
+            public string storagePath { get; set; }
+            public string architecture { get; set; }
+            public string signer { get; set; }
+            public string signatureStatus { get; set; }
+            public string productName { get; set; }
+            public string companyName { get; set; }
+            public string fileDescription { get; set; }
+            public string fileVersion { get; set; }
         }
 
         private sealed class CentralDeviceState
@@ -3924,6 +4719,7 @@ namespace DataProtectorWebBridge.Services
             public AuditLog.AuditRecord[] Audit { get; set; }
             public PolicyBridgeService.NetworkConnectionEventDto[] NetworkConnections { get; set; }
             public RemovableDeviceObservation[] RemovableDevices { get; set; }
+            public SandboxSampleSubmission[] SandboxSamples { get; set; }
             public RemoteTaskResult[] TaskResults { get; set; }
             public bool ResultOnly { get; set; }
         }

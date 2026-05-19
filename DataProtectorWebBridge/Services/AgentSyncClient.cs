@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -13,15 +16,21 @@ namespace DataProtectorWebBridge.Services
     internal sealed class AgentSyncClient
     {
         private const string AgentVersion = "1.0";
+        private const int SandboxScanEveryHeartbeats = 4;
+        private const int SandboxMaxUploadBytes = 20 * 1024 * 1024;
+        private const int SandboxMaxUploadsPerScan = 2;
+        private const int SandboxMaxKnownHashes = 1000;
         private readonly Uri serverSyncUri;
         private readonly TimeSpan interval;
         private readonly PolicyBridgeService policyService;
         private readonly DlpProtectionService dlpProtectionService;
         private readonly string statePath;
+        private readonly string sandboxUploadStatePath;
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
         private readonly RemoteTaskExecutor taskExecutor;
         private readonly RemovableDeviceInventory removableDeviceInventory = new RemovableDeviceInventory();
         private readonly List<CentralPolicyStore.RemoteTaskResult> pendingTaskResults = new List<CentralPolicyStore.RemoteTaskResult>();
+        private readonly HashSet<string> sandboxUploadedHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly string usbCryptPolicyPath;
         private string deviceId;
         private long appliedPolicyVersion;
@@ -45,9 +54,11 @@ namespace DataProtectorWebBridge.Services
             string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             string directory = Path.Combine(dataRoot, "DataProtector");
             statePath = Path.Combine(directory, "AgentState.json");
+            sandboxUploadStatePath = Path.Combine(directory, "SandboxUploadedSamples.json");
             usbCryptPolicyPath = Path.Combine(directory, "UsbCryptPolicy.json");
             Directory.CreateDirectory(directory);
             LoadState();
+            LoadSandboxUploadState();
             dlpProtectionService.UpdatePolicy(PolicyBridgeService.DefaultDlpProtectionPolicy());
         }
 
@@ -82,6 +93,7 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
             PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
             CentralPolicyStore.RemovableDeviceObservation[] removableDevices = removableDeviceInventory.Snapshot();
+            CentralPolicyStore.SandboxSampleSubmission[] sandboxSamples = CollectSandboxSamplesIfDue();
             if (auditRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s).");
@@ -102,6 +114,7 @@ namespace DataProtectorWebBridge.Services
                 Audit = auditRecords,
                 NetworkConnections = networkConnections,
                 RemovableDevices = removableDevices,
+                SandboxSamples = sandboxSamples,
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = false
             };
@@ -111,6 +124,8 @@ namespace DataProtectorWebBridge.Services
             {
                 throw new InvalidOperationException("Central server rejected agent synchronization.");
             }
+
+            MarkSandboxSamplesUploaded(sandboxSamples);
 
             if (!string.IsNullOrWhiteSpace(response.deviceId) && !string.Equals(deviceId, response.deviceId, StringComparison.OrdinalIgnoreCase))
             {
@@ -139,7 +154,7 @@ namespace DataProtectorWebBridge.Services
             {
                 FlushTaskResults();
             }
-            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ", network " + networkConnections.Length + ", removable volumes " + removableDevices.Length + ".");
+            Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ", network " + networkConnections.Length + ", removable volumes " + removableDevices.Length + ", sandbox samples " + sandboxSamples.Length + ".");
         }
 
         private void ExecuteTasks(CentralPolicyStore.RemoteTaskDto[] tasks)
@@ -178,6 +193,7 @@ namespace DataProtectorWebBridge.Services
                 Audit = auditRecords,
                 NetworkConnections = networkConnections,
                 RemovableDevices = removableDevices,
+                SandboxSamples = new CentralPolicyStore.SandboxSampleSubmission[0],
                 TaskResults = pendingTaskResults.ToArray(),
                 ResultOnly = true
             };
@@ -232,6 +248,184 @@ namespace DataProtectorWebBridge.Services
                 Console.Error.WriteLine(DateTime.Now.ToString("s") + " network awareness drain failed: " + ex.Message);
                 return new PolicyBridgeService.NetworkConnectionEventDto[0];
             }
+        }
+
+        private CentralPolicyStore.SandboxSampleSubmission[] CollectSandboxSamplesIfDue()
+        {
+            if (heartbeatIndex % SandboxScanEveryHeartbeats != 0)
+            {
+                return new CentralPolicyStore.SandboxSampleSubmission[0];
+            }
+
+            try
+            {
+                List<CentralPolicyStore.SandboxSampleSubmission> submissions = new List<CentralPolicyStore.SandboxSampleSubmission>();
+                HashSet<string> batchHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string path in EnumerateSandboxCandidateExecutables())
+                {
+                    if (submissions.Count >= SandboxMaxUploadsPerScan)
+                    {
+                        break;
+                    }
+
+                    CentralPolicyStore.SandboxSampleSubmission submission = TryBuildSandboxSubmission(path);
+                    if (submission != null && batchHashes.Add(submission.sha256))
+                    {
+                        submissions.Add(submission);
+                    }
+                }
+
+                if (submissions.Count > 0)
+                {
+                    Console.WriteLine(DateTime.Now.ToString("s") + " Sandbox sample upload prepared " + submissions.Count + " suspicious executable(s).");
+                }
+
+                return submissions.ToArray();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " sandbox sample scan failed: " + ex.Message);
+                return new CentralPolicyStore.SandboxSampleSubmission[0];
+            }
+        }
+
+        private IEnumerable<string> EnumerateSandboxCandidateExecutables()
+        {
+            HashSet<string> directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddCandidateDirectory(directories, Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
+            AddCandidateDirectory(directories, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
+            AddCandidateDirectory(directories, Path.GetTempPath());
+            AddCandidateDirectory(directories, Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory));
+            AddCandidateDirectory(directories, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector", "Incoming"));
+
+            DateTime sinceUtc = DateTime.UtcNow.AddDays(-3);
+            foreach (string directory in directories)
+            {
+                IEnumerable<string> files;
+                try
+                {
+                    files = Directory.EnumerateFiles(directory, "*.exe", SearchOption.TopDirectoryOnly);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (string file in files)
+                {
+                    FileInfo info;
+                    try
+                    {
+                        info = new FileInfo(file);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (!info.Exists ||
+                        info.Length <= 0 ||
+                        info.Length > SandboxMaxUploadBytes ||
+                        info.LastWriteTimeUtc < sinceUtc)
+                    {
+                        continue;
+                    }
+
+                    yield return file;
+                }
+            }
+        }
+
+        private static void AddCandidateDirectory(HashSet<string> directories, string directory)
+        {
+            if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+            {
+                directories.Add(directory);
+            }
+        }
+
+        private CentralPolicyStore.SandboxSampleSubmission TryBuildSandboxSubmission(string path)
+        {
+            try
+            {
+                string hash = ComputeSha256Hex(path);
+                if (sandboxUploadedHashes.Contains(hash))
+                {
+                    return null;
+                }
+
+                string suspicion = BuildSandboxSuspicion(path);
+                if (string.IsNullOrWhiteSpace(suspicion))
+                {
+                    return null;
+                }
+
+                byte[] bytes = File.ReadAllBytes(path);
+                return new CentralPolicyStore.SandboxSampleSubmission
+                {
+                    fileName = Path.GetFileName(path),
+                    contentBase64 = Convert.ToBase64String(bytes),
+                    sha256 = hash,
+                    source = "agent",
+                    host = Environment.MachineName,
+                    deviceId = deviceId,
+                    processPath = path,
+                    suspicion = suspicion,
+                    actor = "agent-suspicious-exe"
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string BuildSandboxSuspicion(string path)
+        {
+            FileInfo info = new FileInfo(path);
+            string directory = (info.DirectoryName ?? string.Empty).ToLowerInvariant();
+            string signer = TryReadSignerSubject(path);
+            FileVersionInfo version = FileVersionInfo.GetVersionInfo(path);
+            bool unsigned = string.IsNullOrWhiteSpace(signer);
+            bool userWritableLocation =
+                directory.Contains("\\downloads") ||
+                directory.Contains("\\desktop") ||
+                directory.Contains("\\temp") ||
+                directory.Contains("\\appdata\\local\\temp");
+            bool weakMetadata =
+                string.IsNullOrWhiteSpace(version.CompanyName) &&
+                string.IsNullOrWhiteSpace(version.ProductName) &&
+                string.IsNullOrWhiteSpace(version.FileDescription);
+
+            if (unsigned && userWritableLocation)
+            {
+                return "Unsigned executable in a user-writable location.";
+            }
+
+            if (unsigned && weakMetadata)
+            {
+                return "Unsigned executable with weak version metadata.";
+            }
+
+            return string.Empty;
+        }
+
+        private void MarkSandboxSamplesUploaded(CentralPolicyStore.SandboxSampleSubmission[] samples)
+        {
+            if (samples == null || samples.Length == 0)
+            {
+                return;
+            }
+
+            foreach (CentralPolicyStore.SandboxSampleSubmission sample in samples)
+            {
+                if (sample != null && IsSha256(sample.sha256))
+                {
+                    sandboxUploadedHashes.Add(sample.sha256);
+                }
+            }
+
+            SaveSandboxUploadState();
         }
 
         private AuditLog.AuditRecord[] DrainAuditSource(string source, Func<AuditLog.AuditRecord[]> drain)
@@ -554,6 +748,31 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        private void LoadSandboxUploadState()
+        {
+            try
+            {
+                if (!File.Exists(sandboxUploadStatePath))
+                {
+                    return;
+                }
+
+                SandboxUploadState state = serializer.Deserialize<SandboxUploadState>(File.ReadAllText(sandboxUploadStatePath, Encoding.UTF8));
+                if (state == null || state.Hashes == null)
+                {
+                    return;
+                }
+
+                foreach (string hash in state.Hashes.Where(IsSha256))
+                {
+                    sandboxUploadedHashes.Add(hash);
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private void SaveState()
         {
             AgentState state = new AgentState
@@ -565,6 +784,66 @@ namespace DataProtectorWebBridge.Services
             };
 
             File.WriteAllText(statePath, serializer.Serialize(state), Encoding.UTF8);
+        }
+
+        private void SaveSandboxUploadState()
+        {
+            try
+            {
+                TrimSandboxUploadHashes();
+                File.WriteAllText(sandboxUploadStatePath, serializer.Serialize(new SandboxUploadState
+                {
+                    Hashes = sandboxUploadedHashes.ToArray()
+                }), Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+
+        private void TrimSandboxUploadHashes()
+        {
+            if (sandboxUploadedHashes.Count <= SandboxMaxKnownHashes)
+            {
+                return;
+            }
+
+            string[] keep = sandboxUploadedHashes.Take(SandboxMaxKnownHashes).ToArray();
+            sandboxUploadedHashes.Clear();
+            foreach (string hash in keep)
+            {
+                sandboxUploadedHashes.Add(hash);
+            }
+        }
+
+        private static string ComputeSha256Hex(string path)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream stream = File.OpenRead(path))
+            {
+                return BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+            }
+        }
+
+        private static bool IsSha256(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   value.Length == 64 &&
+                   value.All(Uri.IsHexDigit);
+        }
+
+        private static string TryReadSignerSubject(string path)
+        {
+            try
+            {
+                System.Security.Cryptography.X509Certificates.X509Certificate certificate =
+                    System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
+                return certificate == null ? string.Empty : certificate.Subject;
+            }
+            catch
+            {
+                return string.Empty;
+            }
         }
 
         private static Uri BuildSyncUri(string serverBaseUrl)
@@ -619,6 +898,11 @@ namespace DataProtectorWebBridge.Services
             public long AppliedPolicyVersion { get; set; }
             public string LastApplyStatus { get; set; }
             public string LastApplyMessage { get; set; }
+        }
+
+        private sealed class SandboxUploadState
+        {
+            public string[] Hashes { get; set; }
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

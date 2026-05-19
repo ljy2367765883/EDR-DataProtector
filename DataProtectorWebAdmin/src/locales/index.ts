@@ -19,14 +19,25 @@ export function setupI18n(app: App) {
   app.use(i18n);
 }
 
-export const $t = i18n.global.t as App.I18n.$T;
+const runtimeI18n = i18n as unknown as {
+  global: {
+    t: unknown;
+    locale: {
+      value: string;
+    };
+  };
+};
+
+const translate = runtimeI18n.global.t;
+
+export const $t = translate as App.I18n.$T;
 
 export function setLocale(locale: App.I18n.LangType) {
-  i18n.global.locale.value = locale;
+  runtimeI18n.global.locale.value = locale;
 
   document?.querySelector('html')?.setAttribute('lang', locale);
 }
 
 export function getLocale(): App.I18n.LangType {
-  return i18n.global.locale.value as App.I18n.LangType;
+  return runtimeI18n.global.locale.value as App.I18n.LangType;
 }

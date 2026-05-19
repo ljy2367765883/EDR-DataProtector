@@ -286,6 +286,38 @@ export function fetchInitializeUsbCrypt(data: Api.DataProtector.UsbCryptInitiali
   });
 }
 
+export function fetchSandboxSamples(params: Api.DataProtector.SandboxSampleQuery = {}) {
+  return request<Api.DataProtector.SandboxSampleQueryResponse>({
+    url: '/sandbox/samples',
+    method: 'get',
+    params
+  });
+}
+
+export function fetchSubmitSandboxSample(data: Api.DataProtector.SandboxSampleUploadRequest) {
+  return request<Api.DataProtector.SandboxSample>({
+    url: '/sandbox/samples',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchStartSandboxAnalysis(data: Api.DataProtector.SandboxAnalyzeRequest) {
+  return request<Api.DataProtector.SandboxSample>({
+    url: '/sandbox/analyze',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchRemoveSandboxSample(data: Api.DataProtector.SandboxSampleDeleteRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/sandbox/samples',
+    method: 'delete',
+    data
+  });
+}
+
 export function fetchRemovableDevices() {
   return request<Api.DataProtector.RemovableDevice[]>({
     url: '/device/removable',

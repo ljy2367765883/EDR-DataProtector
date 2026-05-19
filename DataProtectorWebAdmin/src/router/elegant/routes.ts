@@ -129,5 +129,16 @@ export const generatedRoutes: GeneratedRoute[] = [
       icon: 'mdi:remote-desktop',
       order: 25
     }
+  },
+  {
+    name: 'sandbox',
+    path: '/sandbox',
+    component: 'layout.base$view.sandbox',
+    meta: {
+      title: 'sandbox',
+      i18nKey: 'route.sandbox',
+      icon: 'mdi:shield-search',
+      order: 28
+    }
   }
 ];

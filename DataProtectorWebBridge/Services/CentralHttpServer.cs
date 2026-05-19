@@ -373,6 +373,37 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/sandbox/samples")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QuerySandboxSamples(ParseSandboxSampleQuery(context.Request)));
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/sandbox/samples")
+                {
+                    CentralPolicyStore.SandboxSampleUploadRequest request =
+                        JsonResponse.Read<CentralPolicyStore.SandboxSampleUploadRequest>(context.Request.InputStream);
+                    JsonResponse.Write(context.Response, "0000", "Sandbox sample submitted.", store.SubmitSandboxSample(request, context.Request.UserHostAddress));
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/sandbox/analyze")
+                {
+                    CentralPolicyStore.SandboxAnalyzeRequest request =
+                        JsonResponse.Read<CentralPolicyStore.SandboxAnalyzeRequest>(context.Request.InputStream);
+                    JsonResponse.Write(context.Response, "0000", "Server-side sandbox analysis started.", store.StartSandboxAnalysis(request, context.Request.UserHostAddress));
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/sandbox/samples")
+                {
+                    CentralPolicyStore.SandboxSampleDeleteRequest request =
+                        JsonResponse.Read<CentralPolicyStore.SandboxSampleDeleteRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveSandboxSample(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/usbcrypt/initialize")
                 {
                     CentralPolicyStore.UsbCryptInitializationTaskRequest request =
@@ -499,6 +530,19 @@ namespace DataProtectorWebBridge.Services
                 newness = request.QueryString["newness"],
                 search = request.QueryString["search"],
                 includePrivateRemotes = ParseBoolean(request.QueryString["includePrivateRemotes"])
+            };
+        }
+
+        private static CentralPolicyStore.SandboxSampleQuery ParseSandboxSampleQuery(HttpListenerRequest request)
+        {
+            return new CentralPolicyStore.SandboxSampleQuery
+            {
+                page = ParsePage(request.QueryString["page"]),
+                pageSize = ParseOptionalLimit(request.QueryString["pageSize"]),
+                status = request.QueryString["status"],
+                source = request.QueryString["source"],
+                host = request.QueryString["host"],
+                search = request.QueryString["search"]
             };
         }
 
