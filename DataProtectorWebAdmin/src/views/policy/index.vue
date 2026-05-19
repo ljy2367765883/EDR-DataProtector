@@ -29,6 +29,8 @@ import {
   fetchRemoveWebShellRule,
   fetchUpdateHashProtectPolicy,
   fetchUpdateLateralDefensePolicy,
+  fetchUserHookDefensePolicy,
+  fetchUpdateUserHookDefensePolicy,
   fetchUpdateDlpProtectionPolicy,
   fetchUploadUsbCryptDriverPackage,
   fetchUsbCryptDriverPackage,
@@ -49,6 +51,7 @@ const deviceSubmitting = ref(false);
 const usbCryptInitSubmitting = ref(false);
 const hashProtectSubmitting = ref(false);
 const lateralDefenseSubmitting = ref(false);
+const userHookDefenseSubmitting = ref(false);
 const usbCryptSubmitting = ref(false);
 const dlpSubmitting = ref(false);
 const usbCryptPackageUploading = ref(false);
@@ -84,6 +87,17 @@ const lateralDefensePolicy = reactive<Api.DataProtector.LateralDefensePolicy>({
   blockIpcServiceCreation: true,
   blockRemoteAdminTools: true,
   flags: 0x0000001f,
+  actor: 'web-admin'
+});
+const userHookDefensePolicy = reactive<Api.DataProtector.UserHookDefensePolicy>({
+  enabled: true,
+  monitorEarlyProcesses: true,
+  monitorImageLoads: true,
+  requireSignedRuntime: true,
+  blockUntrustedRuntime: false,
+  auditOnly: true,
+  monitorSystemProcesses: false,
+  flags: 0x0000002f,
   actor: 'web-admin'
 });
 const usbCryptPolicy = reactive<Api.DataProtector.UsbCryptPolicy>({
@@ -328,6 +342,24 @@ const lateralDefenseGroups = computed(() => {
   };
 });
 
+const userHookDefenseGroups = computed(() => {
+  const enabledFeatures = [
+    userHookDefensePolicy.monitorEarlyProcesses,
+    userHookDefensePolicy.monitorImageLoads,
+    userHookDefensePolicy.requireSignedRuntime,
+    userHookDefensePolicy.blockUntrustedRuntime,
+    userHookDefensePolicy.auditOnly,
+    userHookDefensePolicy.monitorSystemProcesses
+  ].filter(Boolean).length;
+
+  return {
+    mode: userHookDefensePolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
+    enabledFeatures,
+    activeControls: userHookDefensePolicy.enabled ? enabledFeatures : 0,
+    flags: `0x${userHookDefensePolicy.flags.toString(16).toUpperCase().padStart(8, '0')}`
+  };
+});
+
 const usbCryptGroups = computed(() => ({
   mode: usbCryptPolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
   algorithm: usbCryptPolicy.algorithm.toUpperCase(),
@@ -432,6 +464,37 @@ const lateralDefenseControls = computed(() => [
     detail: $t('dataprotector.policy.lateral.remoteAdminLaunchDesc'),
     enabled: lateralDefensePolicy.enabled && lateralDefensePolicy.blockRemoteAdminTools,
     icon: 'mdi:console-network-outline'
+  }
+]);
+
+const userHookDefenseSurfaces = computed(() => [
+  {
+    key: 'early-process',
+    title: $t('dataprotector.policy.userhook.surfacesList.earlyTitle'),
+    detail: $t('dataprotector.policy.userhook.surfacesList.earlyDetail'),
+    enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.monitorEarlyProcesses,
+    icon: 'mdi:timer-lock-outline'
+  },
+  {
+    key: 'image-load',
+    title: $t('dataprotector.policy.userhook.surfacesList.imageTitle'),
+    detail: $t('dataprotector.policy.userhook.surfacesList.imageDetail'),
+    enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.monitorImageLoads,
+    icon: 'mdi:application-brackets-outline'
+  },
+  {
+    key: 'signed-runtime',
+    title: $t('dataprotector.policy.userhook.surfacesList.runtimeTitle'),
+    detail: $t('dataprotector.policy.userhook.surfacesList.runtimeDetail'),
+    enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.requireSignedRuntime,
+    icon: 'mdi:certificate-outline'
+  },
+  {
+    key: 'audit-mode',
+    title: $t('dataprotector.policy.userhook.surfacesList.auditTitle'),
+    detail: $t('dataprotector.policy.userhook.surfacesList.auditDetail'),
+    enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.auditOnly,
+    icon: 'mdi:clipboard-pulse-outline'
   }
 ]);
 
@@ -872,6 +935,61 @@ function setLateralDefenseFeature(
   syncLateralDefenseFlags();
 }
 
+function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePolicy) {
+  if (!policy) return;
+
+  userHookDefensePolicy.enabled = Boolean(policy.enabled);
+  userHookDefensePolicy.monitorEarlyProcesses = Boolean(policy.monitorEarlyProcesses);
+  userHookDefensePolicy.monitorImageLoads = Boolean(policy.monitorImageLoads);
+  userHookDefensePolicy.requireSignedRuntime = Boolean(policy.requireSignedRuntime);
+  userHookDefensePolicy.blockUntrustedRuntime = Boolean(policy.blockUntrustedRuntime);
+  userHookDefensePolicy.auditOnly = Boolean(policy.auditOnly);
+  userHookDefensePolicy.monitorSystemProcesses = Boolean(policy.monitorSystemProcesses);
+  userHookDefensePolicy.flags = policy.flags ?? calculateUserHookDefenseFlags();
+  userHookDefensePolicy.actor = 'web-admin';
+}
+
+function calculateUserHookDefenseFlags() {
+  let flags = 0;
+  if (userHookDefensePolicy.enabled) flags |= 0x00000001;
+  if (userHookDefensePolicy.monitorEarlyProcesses) flags |= 0x00000002;
+  if (userHookDefensePolicy.monitorImageLoads) flags |= 0x00000004;
+  if (userHookDefensePolicy.requireSignedRuntime) flags |= 0x00000008;
+  if (userHookDefensePolicy.blockUntrustedRuntime) flags |= 0x00000010;
+  if (userHookDefensePolicy.auditOnly) flags |= 0x00000020;
+  if (userHookDefensePolicy.monitorSystemProcesses) flags |= 0x00000040;
+  return flags;
+}
+
+function syncUserHookDefenseFlags() {
+  userHookDefensePolicy.flags = calculateUserHookDefenseFlags();
+}
+
+function setUserHookDefenseEnabled(value: boolean) {
+  userHookDefensePolicy.enabled = value;
+  syncUserHookDefenseFlags();
+}
+
+function setUserHookDefenseFeature(
+  key:
+    | 'monitorEarlyProcesses'
+    | 'monitorImageLoads'
+    | 'requireSignedRuntime'
+    | 'blockUntrustedRuntime'
+    | 'auditOnly'
+    | 'monitorSystemProcesses',
+  value: boolean
+) {
+  userHookDefensePolicy[key] = value;
+  if (key === 'blockUntrustedRuntime' && value) {
+    userHookDefensePolicy.auditOnly = false;
+  }
+  if (key === 'auditOnly' && value) {
+    userHookDefensePolicy.blockUntrustedRuntime = false;
+  }
+  syncUserHookDefenseFlags();
+}
+
 function applyUsbCryptPolicy(policy?: Api.DataProtector.UsbCryptPolicy) {
   if (!policy) return;
 
@@ -927,6 +1045,7 @@ async function refresh() {
       removableDevicesResult,
       hashProtectPolicyResult,
       lateralDefensePolicyResult,
+      userHookDefensePolicyResult,
       usbCryptPolicyResult,
       dlpProtectionPolicyResult,
       usbCryptPackageResult
@@ -939,6 +1058,7 @@ async function refresh() {
       fetchRemovableDevices(),
       fetchHashProtectPolicy(),
       fetchLateralDefensePolicy(),
+      fetchUserHookDefensePolicy(),
       fetchUsbCryptPolicy(),
       fetchDlpProtectionPolicy(),
       fetchUsbCryptDriverPackage()
@@ -951,6 +1071,7 @@ async function refresh() {
     if (!removableDevicesResult.error) removableDevices.value = removableDevicesResult.data;
     if (!hashProtectPolicyResult.error) applyHashProtectPolicy(hashProtectPolicyResult.data);
     if (!lateralDefensePolicyResult.error) applyLateralDefensePolicy(lateralDefensePolicyResult.data);
+    if (!userHookDefensePolicyResult.error) applyUserHookDefensePolicy(userHookDefensePolicyResult.data);
     if (!usbCryptPolicyResult.error) applyUsbCryptPolicy(usbCryptPolicyResult.data);
     if (!dlpProtectionPolicyResult.error) applyDlpProtectionPolicy(dlpProtectionPolicyResult.data);
     if (!usbCryptPackageResult.error) usbCryptDriverPackage.value = usbCryptPackageResult.data;
@@ -1206,6 +1327,30 @@ async function saveLateralDefensePolicy() {
     }
   } finally {
     lateralDefenseSubmitting.value = false;
+  }
+}
+
+async function saveUserHookDefensePolicy() {
+  syncUserHookDefenseFlags();
+  userHookDefenseSubmitting.value = true;
+  try {
+    const { error, data } = await fetchUpdateUserHookDefensePolicy({
+      enabled: userHookDefensePolicy.enabled,
+      monitorEarlyProcesses: userHookDefensePolicy.monitorEarlyProcesses,
+      monitorImageLoads: userHookDefensePolicy.monitorImageLoads,
+      requireSignedRuntime: userHookDefensePolicy.requireSignedRuntime,
+      blockUntrustedRuntime: userHookDefensePolicy.blockUntrustedRuntime,
+      auditOnly: userHookDefensePolicy.auditOnly,
+      monitorSystemProcesses: userHookDefensePolicy.monitorSystemProcesses,
+      actor: 'web-admin'
+    });
+
+    if (!error && data.succeeded) {
+      window.$message?.success($t('dataprotector.policy.userhook.saved'));
+      await refresh();
+    }
+  } finally {
+    userHookDefenseSubmitting.value = false;
   }
 }
 
@@ -1741,6 +1886,151 @@ onMounted(refresh);
                       </div>
                       <NTag :type="control.enabled ? 'success' : 'default'" :bordered="false">
                         {{ control.enabled ? $t('dataprotector.common.active') : $t('dataprotector.common.inactiveState') }}
+                      </NTag>
+                    </div>
+                  </div>
+                </NGi>
+              </NGrid>
+            </NCard>
+          </NGi>
+        </NGrid>
+      </NTabPane>
+
+      <NTabPane name="userhook" :tab="$t('dataprotector.policy.tabs.userhook')">
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 m:9">
+            <NCard :title="$t('dataprotector.policy.userhook.title')" :bordered="false" class="card-wrapper">
+              <template #header-extra>
+                <NTag :type="userHookDefensePolicy.enabled ? 'success' : 'error'" :bordered="false">
+                  {{ userHookDefenseGroups.mode }}
+                </NTag>
+              </template>
+
+              <NSpace vertical :size="18">
+                <div class="flex items-center justify-between gap-16px rounded-8px bg-gray-50 p-14px dark:bg-dark-3">
+                  <div class="min-w-0">
+                    <div class="text-15px font-700">{{ $t('dataprotector.policy.userhook.enforcement') }}</div>
+                    <div class="m-t-4px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.enforcementDesc') }}</div>
+                  </div>
+                  <NSwitch :value="userHookDefensePolicy.enabled" @update:value="setUserHookDefenseEnabled">
+                    <template #checked>{{ $t('dataprotector.common.enabled') }}</template>
+                    <template #unchecked>{{ $t('dataprotector.common.disabled') }}</template>
+                  </NSwitch>
+                </div>
+
+                <NGrid :x-gap="12" :y-gap="12" cols="1 m:2">
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.earlyProcess') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.monitorEarlyProcesses"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('monitorEarlyProcesses', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.earlyProcessDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.imageLoad') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.monitorImageLoads"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('monitorImageLoads', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.imageLoadDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.signedRuntime') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.requireSignedRuntime"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('requireSignedRuntime', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.signedRuntimeDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.auditOnly') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.auditOnly"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('auditOnly', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.auditOnlyDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.blockUntrusted') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.blockUntrustedRuntime"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('blockUntrustedRuntime', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.blockUntrustedDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.systemProcesses') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.monitorSystemProcesses"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('monitorSystemProcesses', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.systemProcessesDesc') }}</div>
+                    </div>
+                  </NGi>
+                </NGrid>
+
+                <div class="flex flex-wrap items-center justify-between gap-12px">
+                  <NSpace>
+                    <NTag type="info">{{ $t('dataprotector.policy.userhook.controls', { count: userHookDefenseGroups.enabledFeatures }) }}</NTag>
+                    <NTag type="warning">{{ $t('dataprotector.policy.lateral.flags', { flags: userHookDefenseGroups.flags }) }}</NTag>
+                    <NTag :type="userHookDefensePolicy.enabled ? 'success' : 'default'">
+                      {{ $t('dataprotector.policy.userhook.active', { count: userHookDefenseGroups.activeControls }) }}
+                    </NTag>
+                  </NSpace>
+                  <NButton type="primary" :loading="userHookDefenseSubmitting" @click="saveUserHookDefensePolicy">
+                    <template #icon><SvgIcon icon="mdi:content-save-cog-outline" /></template>
+                    {{ $t('dataprotector.policy.userhook.save') }}
+                  </NButton>
+                </div>
+              </NSpace>
+            </NCard>
+          </NGi>
+
+          <NGi span="24 m:15">
+            <NCard :title="$t('dataprotector.policy.userhook.surfaces')" :bordered="false" class="card-wrapper">
+              <NGrid :x-gap="12" :y-gap="12" cols="1 l:2 xl:4">
+                <NGi v-for="surface in userHookDefenseSurfaces" :key="surface.key">
+                  <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
+                    <div class="flex items-start justify-between gap-12px">
+                      <div class="flex min-w-0 items-center gap-10px">
+                        <SvgIcon :icon="surface.icon" class="text-22px text-primary" />
+                        <div class="min-w-0">
+                          <div class="truncate text-15px font-700">{{ surface.title }}</div>
+                          <div class="m-t-6px text-12px leading-5 text-gray-500">{{ surface.detail }}</div>
+                        </div>
+                      </div>
+                      <NTag :type="surface.enabled ? 'success' : 'default'" :bordered="false">
+                        {{ surface.enabled ? $t('dataprotector.common.active') : $t('dataprotector.common.inactiveState') }}
                       </NTag>
                     </div>
                   </div>

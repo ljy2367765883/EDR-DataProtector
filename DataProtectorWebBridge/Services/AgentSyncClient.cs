@@ -127,6 +127,7 @@ namespace DataProtectorWebBridge.Services
                     response.deviceRules ?? new PolicyBridgeService.DeviceRuleDto[0],
                     response.hashProtectPolicy ?? PolicyBridgeService.DefaultHashProtectPolicy(),
                     response.lateralDefensePolicy ?? PolicyBridgeService.DefaultLateralDefensePolicy(),
+                    response.userHookDefensePolicy ?? PolicyBridgeService.DefaultUserHookDefensePolicy(),
                     response.usbCryptPolicy ?? PolicyBridgeService.DefaultUsbCryptPolicy(),
                     response.dlpProtectionPolicy ?? PolicyBridgeService.DefaultDlpProtectionPolicy(),
                     response.policyVersion);
@@ -192,17 +193,19 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
             AuditLog.AuditRecord[] hashProtectRecords = DrainAuditSource("hashprotect", policyService.DrainHashProtectAuditRecords);
             AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
+            AuditLog.AuditRecord[] userHookRecords = DrainAuditSource("userhook", policyService.DrainUserHookDefenseAuditRecords);
             AuditLog.AuditRecord[] dlpRecords = DrainAuditSource("dlp", dlpProtectionService.DrainAuditRecords);
-            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0 || dlpRecords.Length > 0)
+            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0 || userHookRecords.Length > 0 || dlpRecords.Length > 0)
             {
-                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ", dlp=" + dlpRecords.Length + ".");
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ", userhook=" + userHookRecords.Length + ", dlp=" + dlpRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length + lateralRecords.Length + dlpRecords.Length);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length + lateralRecords.Length + userHookRecords.Length + dlpRecords.Length);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
             records.AddRange(hashProtectRecords);
             records.AddRange(lateralRecords);
+            records.AddRange(userHookRecords);
             records.AddRange(dlpRecords);
             return records.ToArray();
         }
@@ -289,6 +292,7 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.DeviceRuleDto[] deviceRules,
             PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy,
             PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy,
+            PolicyBridgeService.UserHookDefensePolicyDto userHookDefensePolicy,
             PolicyBridgeService.UsbCryptPolicyDto usbCryptPolicy,
             PolicyBridgeService.DlpProtectionPolicyDto dlpProtectionPolicy,
             long policyVersion)
@@ -446,12 +450,32 @@ namespace DataProtectorWebBridge.Services
                 return;
             }
 
+            PolicyBridgeService.OperationResult userHookPolicyResult = policyService.SetUserHookDefensePolicy(new PolicyBridgeService.UserHookDefensePolicyRequest
+            {
+                enabled = userHookDefensePolicy.enabled,
+                monitorEarlyProcesses = userHookDefensePolicy.monitorEarlyProcesses,
+                monitorImageLoads = userHookDefensePolicy.monitorImageLoads,
+                requireSignedRuntime = userHookDefensePolicy.requireSignedRuntime,
+                blockUntrustedRuntime = userHookDefensePolicy.blockUntrustedRuntime,
+                auditOnly = userHookDefensePolicy.auditOnly,
+                monitorSystemProcesses = userHookDefensePolicy.monitorSystemProcesses,
+                actor = "central-agent"
+            });
+
+            if (!userHookPolicyResult.succeeded)
+            {
+                lastApplyStatus = userHookPolicyResult.statusText;
+                lastApplyMessage = "Cannot apply central application hook defense policy: " + userHookPolicyResult.message;
+                SaveState();
+                return;
+            }
+
             PersistUsbCryptPolicy(usbCryptPolicy);
             dlpProtectionService.UpdatePolicy(dlpProtectionPolicy);
 
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", application hook defense: " + PolicyBridgeService.UserHookDefensePolicySummary(userHookDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
             SaveState();
         }
 

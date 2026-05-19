@@ -151,6 +151,18 @@ DpControlMessageNotify(
                                            ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryUserHookDefenseEvents) {
+        return DpUserHookDefenseQueryEvents(OutputBuffer,
+                                            OutputBufferLength,
+                                            ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryUserHookDefensePolicy) {
+        return DpUserHookDefenseQueryPolicy(OutputBuffer,
+                                            OutputBufferLength,
+                                            ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandWriteUsbMetadata) {
         PDP_USB_METADATA_WRITE_MESSAGE request;
 
@@ -191,6 +203,19 @@ DpControlMessageNotify(
 
         policy = (PDP_LATERAL_DEFENSE_POLICY)message->Data;
         return DpLateralDefenseSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandSetUserHookDefensePolicy) {
+        PDP_USER_HOOK_DEFENSE_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_USER_HOOK_DEFENSE_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_USER_HOOK_DEFENSE_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_USER_HOOK_DEFENSE_POLICY)message->Data;
+        return DpUserHookDefenseSetPolicy(policy);
     }
 
     if (message->Command == DpPolicyCommandAddDeviceRule ||

@@ -76,6 +76,27 @@ namespace DataProtectorWebBridge.Services
             LateralDefenseFlagIpcTasks |
             LateralDefenseFlagIpcServices |
             LateralDefenseFlagProcessTools;
+        private const uint UserHookOperationProcessCreate = 1;
+        private const uint UserHookOperationHookSurfaceImageLoad = 2;
+        private const uint UserHookOperationRuntimeRequired = 3;
+        private const uint UserHookOperationRuntimeMissing = 4;
+        private const uint UserHookOperationRuntimeRejected = 5;
+        private const uint UserHookOperationSuspiciousHookAttempt = 6;
+        private const uint UserHookDefenseFlagEnabled = 0x00000001;
+        private const uint UserHookDefenseFlagEarlyProcessMonitor = 0x00000002;
+        private const uint UserHookDefenseFlagImageLoadMonitor = 0x00000004;
+        private const uint UserHookDefenseFlagRequireSignedRuntime = 0x00000008;
+        private const uint UserHookDefenseFlagBlockUntrustedRuntime = 0x00000010;
+        private const uint UserHookDefenseFlagAuditOnly = 0x00000020;
+        private const uint UserHookDefenseFlagMonitorSystemProcesses = 0x00000040;
+        private const uint UserHookDefenseAllowedFlags =
+            UserHookDefenseFlagEnabled |
+            UserHookDefenseFlagEarlyProcessMonitor |
+            UserHookDefenseFlagImageLoadMonitor |
+            UserHookDefenseFlagRequireSignedRuntime |
+            UserHookDefenseFlagBlockUntrustedRuntime |
+            UserHookDefenseFlagAuditOnly |
+            UserHookDefenseFlagMonitorSystemProcesses;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -814,6 +835,42 @@ namespace DataProtectorWebBridge.Services
             return result;
         }
 
+        public UserHookDefensePolicyDto QueryUserHookDefensePolicy()
+        {
+            DataProtectorPolicyNative.NativeUserHookDefensePolicy nativePolicy;
+            uint status = DataProtectorPolicyNative.DpPolicyQueryUserHookDefensePolicy(out nativePolicy);
+            if (status != SuccessStatus)
+            {
+                throw new BridgeException(status, ReadLastErrorMessage());
+            }
+
+            return FromUserHookDefenseFlags(nativePolicy.Flags);
+        }
+
+        public OperationResult SetUserHookDefensePolicy(UserHookDefensePolicyRequest request)
+        {
+            UserHookDefensePolicyDto normalized = NormalizeUserHookDefensePolicy(request);
+            OperationResult result = Invoke(() =>
+            {
+                DataProtectorPolicyNative.NativeUserHookDefensePolicy nativePolicy = new DataProtectorPolicyNative.NativeUserHookDefensePolicy
+                {
+                    Flags = ToUserHookDefenseFlags(normalized)
+                };
+
+                return DataProtectorPolicyNative.DpPolicySetUserHookDefensePolicy(ref nativePolicy);
+            });
+
+            auditLog.Append(
+                normalized.actor,
+                "policy.userhook.update",
+                "application-hook-defense",
+                UserHookDefensePolicySummary(normalized),
+                result.succeeded,
+                result.status,
+                result.message);
+            return result;
+        }
+
         public NetworkConnectionEventDto[] QueryNetworkConnectionEvents()
         {
             uint status = SuccessStatus;
@@ -957,6 +1014,75 @@ namespace DataProtectorWebBridge.Services
             throw new BridgeException(BufferTooSmallStatus, "The driver lateral defense event queue changed while querying. Please retry.");
         }
 
+        public UserHookDefenseEventDto[] QueryUserHookDefenseEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryUserHookDefenseEvents(
+                    new DataProtectorPolicyNative.NativeUserHookDefenseEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeUserHookDefenseEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeUserHookDefenseEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryUserHookDefenseEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<UserHookDefenseEventDto> events = new List<UserHookDefenseEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertUserHookDefenseEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver user hook defense event queue changed while querying. Please retry.");
+        }
+
         public AuditLog.AuditRecord[] DrainSmtpAuditRecords()
         {
             SmtpEventDto[] events = QuerySmtpEvents();
@@ -994,6 +1120,7 @@ namespace DataProtectorWebBridge.Services
             records.AddRange(TryDrainSecurityAuditSource("webshell", DrainWebShellAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("hashprotect", DrainHashProtectAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("lateral", DrainLateralDefenseAuditRecords));
+            records.AddRange(TryDrainSecurityAuditSource("userhook", DrainUserHookDefenseAuditRecords));
             return records.ToArray();
         }
 
@@ -1085,6 +1212,39 @@ namespace DataProtectorWebBridge.Services
                     Succeeded = true,
                     Status = item.statusText,
                     Message = message + " DesiredAccess: 0x" + item.desiredAccess.ToString("X8", CultureInfo.InvariantCulture) + "."
+                };
+
+                records.Add(record);
+                TryAppendAudit(record);
+            }
+
+            return records.ToArray();
+        }
+
+        public AuditLog.AuditRecord[] DrainUserHookDefenseAuditRecords()
+        {
+            UserHookDefenseEventDto[] events = QueryUserHookDefenseEvents();
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+
+            foreach (UserHookDefenseEventDto item in events)
+            {
+                string message = "Application hook defense observed " + item.operation + " for PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+                if (!string.IsNullOrWhiteSpace(item.processImage))
+                {
+                    message += " Process: " + item.processImage + ".";
+                }
+
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
+                    Actor = "user-hook-defense-sensor",
+                    Action = "userhook." + item.operation,
+                    Target = item.target,
+                    Extension = item.processImage,
+                    Succeeded = true,
+                    Status = item.statusText,
+                    Message = message + " ParentPID: " + item.parentProcessId.ToString(CultureInfo.InvariantCulture) + ". Flags: 0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture) + "."
                 };
 
                 records.Add(record);
@@ -1420,6 +1580,22 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static UserHookDefenseEventDto ConvertUserHookDefenseEvent(DataProtectorPolicyNative.NativeUserHookDefenseEvent nativeEvent)
+        {
+            return new UserHookDefenseEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                processId = nativeEvent.ProcessId,
+                parentProcessId = nativeEvent.ParentProcessId,
+                operation = FromUserHookDefenseOperation(nativeEvent.Operation),
+                status = nativeEvent.Status,
+                statusText = "0x" + nativeEvent.Status.ToString("X8", CultureInfo.InvariantCulture),
+                flags = nativeEvent.Flags,
+                target = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Target) ?? string.Empty),
+                processImage = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty)
+            };
+        }
+
         private static HashProtectPolicyDto FromHashProtectFlags(uint flags)
         {
             return new HashProtectPolicyDto
@@ -1585,6 +1761,109 @@ namespace DataProtectorWebBridge.Services
                 normalized.blockIpcScheduledTasks,
                 normalized.blockIpcServiceCreation,
                 normalized.blockRemoteAdminTools,
+                normalized.flags);
+        }
+
+        private static UserHookDefensePolicyDto FromUserHookDefenseFlags(uint flags)
+        {
+            return new UserHookDefensePolicyDto
+            {
+                enabled = (flags & UserHookDefenseFlagEnabled) != 0,
+                monitorEarlyProcesses = (flags & UserHookDefenseFlagEarlyProcessMonitor) != 0,
+                monitorImageLoads = (flags & UserHookDefenseFlagImageLoadMonitor) != 0,
+                requireSignedRuntime = (flags & UserHookDefenseFlagRequireSignedRuntime) != 0,
+                blockUntrustedRuntime = (flags & UserHookDefenseFlagBlockUntrustedRuntime) != 0,
+                auditOnly = (flags & UserHookDefenseFlagAuditOnly) != 0,
+                monitorSystemProcesses = (flags & UserHookDefenseFlagMonitorSystemProcesses) != 0,
+                flags = flags & UserHookDefenseAllowedFlags
+            };
+        }
+
+        internal static uint ToUserHookDefenseFlags(UserHookDefensePolicyDto policy)
+        {
+            if (policy == null)
+            {
+                return UserHookDefenseFlagEnabled |
+                       UserHookDefenseFlagEarlyProcessMonitor |
+                       UserHookDefenseFlagImageLoadMonitor |
+                       UserHookDefenseFlagRequireSignedRuntime |
+                       UserHookDefenseFlagAuditOnly;
+            }
+
+            uint flags = 0;
+            if (policy.enabled) flags |= UserHookDefenseFlagEnabled;
+            if (policy.monitorEarlyProcesses) flags |= UserHookDefenseFlagEarlyProcessMonitor;
+            if (policy.monitorImageLoads) flags |= UserHookDefenseFlagImageLoadMonitor;
+            if (policy.requireSignedRuntime) flags |= UserHookDefenseFlagRequireSignedRuntime;
+            if (policy.blockUntrustedRuntime) flags |= UserHookDefenseFlagBlockUntrustedRuntime;
+            if (policy.auditOnly) flags |= UserHookDefenseFlagAuditOnly;
+            if (policy.monitorSystemProcesses) flags |= UserHookDefenseFlagMonitorSystemProcesses;
+            return flags & UserHookDefenseAllowedFlags;
+        }
+
+        internal static UserHookDefensePolicyDto DefaultUserHookDefensePolicy()
+        {
+            return FromUserHookDefenseFlags(
+                UserHookDefenseFlagEnabled |
+                UserHookDefenseFlagEarlyProcessMonitor |
+                UserHookDefenseFlagImageLoadMonitor |
+                UserHookDefenseFlagRequireSignedRuntime |
+                UserHookDefenseFlagAuditOnly);
+        }
+
+        internal static UserHookDefensePolicyDto CloneUserHookDefensePolicy(UserHookDefensePolicyDto policy)
+        {
+            UserHookDefensePolicyDto source = policy ?? DefaultUserHookDefensePolicy();
+            return new UserHookDefensePolicyDto
+            {
+                enabled = source.enabled,
+                monitorEarlyProcesses = source.monitorEarlyProcesses,
+                monitorImageLoads = source.monitorImageLoads,
+                requireSignedRuntime = source.requireSignedRuntime,
+                blockUntrustedRuntime = source.blockUntrustedRuntime,
+                auditOnly = source.auditOnly,
+                monitorSystemProcesses = source.monitorSystemProcesses,
+                flags = ToUserHookDefenseFlags(source),
+                actor = source.actor
+            };
+        }
+
+        internal static UserHookDefensePolicyDto NormalizeUserHookDefensePolicy(UserHookDefensePolicyRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(1, "Application hook defense policy body is required.");
+            }
+
+            UserHookDefensePolicyDto normalized = new UserHookDefensePolicyDto
+            {
+                enabled = request.enabled,
+                monitorEarlyProcesses = request.monitorEarlyProcesses,
+                monitorImageLoads = request.monitorImageLoads,
+                requireSignedRuntime = request.requireSignedRuntime,
+                blockUntrustedRuntime = request.blockUntrustedRuntime,
+                auditOnly = request.auditOnly,
+                monitorSystemProcesses = request.monitorSystemProcesses,
+                actor = request.actor
+            };
+
+            normalized.flags = ToUserHookDefenseFlags(normalized);
+            return normalized;
+        }
+
+        internal static string UserHookDefensePolicySummary(UserHookDefensePolicyDto policy)
+        {
+            UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "enabled={0};earlyProcess={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};flags=0x{7:X8}",
+                normalized.enabled,
+                normalized.monitorEarlyProcesses,
+                normalized.monitorImageLoads,
+                normalized.requireSignedRuntime,
+                normalized.blockUntrustedRuntime,
+                normalized.auditOnly,
+                normalized.monitorSystemProcesses,
                 normalized.flags);
         }
 
@@ -2001,6 +2280,17 @@ namespace DataProtectorWebBridge.Services
             if (operation == LateralOperationRemoteServiceTool) return "remote-service-tool";
             if (operation == LateralOperationWmiProcessCreate) return "wmi-process-create";
             if (operation == LateralOperationPowerShellRemoteTask) return "powershell-remote-task";
+            return "unknown";
+        }
+
+        private static string FromUserHookDefenseOperation(uint operation)
+        {
+            if (operation == UserHookOperationProcessCreate) return "process-create";
+            if (operation == UserHookOperationHookSurfaceImageLoad) return "hook-surface-image-load";
+            if (operation == UserHookOperationRuntimeRequired) return "runtime-required";
+            if (operation == UserHookOperationRuntimeMissing) return "runtime-missing";
+            if (operation == UserHookOperationRuntimeRejected) return "runtime-rejected";
+            if (operation == UserHookOperationSuspiciousHookAttempt) return "suspicious-hook-attempt";
             return "unknown";
         }
 
@@ -2426,6 +2716,19 @@ namespace DataProtectorWebBridge.Services
             public string processImage { get; set; }
         }
 
+        public sealed class UserHookDefenseEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong processId { get; set; }
+            public ulong parentProcessId { get; set; }
+            public string operation { get; set; }
+            public uint status { get; set; }
+            public string statusText { get; set; }
+            public uint flags { get; set; }
+            public string target { get; set; }
+            public string processImage { get; set; }
+        }
+
         public class HashProtectPolicyRequest
         {
             public bool enabled { get; set; }
@@ -2452,6 +2755,23 @@ namespace DataProtectorWebBridge.Services
         }
 
         public sealed class LateralDefensePolicyDto : LateralDefensePolicyRequest
+        {
+            public uint flags { get; set; }
+        }
+
+        public class UserHookDefensePolicyRequest
+        {
+            public bool enabled { get; set; }
+            public bool monitorEarlyProcesses { get; set; }
+            public bool monitorImageLoads { get; set; }
+            public bool requireSignedRuntime { get; set; }
+            public bool blockUntrustedRuntime { get; set; }
+            public bool auditOnly { get; set; }
+            public bool monitorSystemProcesses { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class UserHookDefensePolicyDto : UserHookDefensePolicyRequest
         {
             public uint flags { get; set; }
         }

@@ -32,6 +32,12 @@ namespace DataProtectorAgentClient.Services
         private const uint LateralDefenseFlagIpcTasks = 0x00000004;
         private const uint LateralDefenseFlagIpcServices = 0x00000008;
         private const uint LateralDefenseFlagProcessTools = 0x00000010;
+        private const uint UserHookDefenseFlagEnabled = 0x00000001;
+        private const uint UserHookDefenseFlagEarlyProcessMonitor = 0x00000002;
+        private const uint UserHookDefenseFlagImageLoadMonitor = 0x00000004;
+        private const uint UserHookDefenseFlagRequireSignedRuntime = 0x00000008;
+        private const uint UserHookDefenseFlagBlockUntrustedRuntime = 0x00000010;
+        private const uint UserHookDefenseFlagAuditOnly = 0x00000020;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -73,6 +79,7 @@ namespace DataProtectorAgentClient.Services
             List<ProtectionFeatureViewItem> features = new List<ProtectionFeatureViewItem>();
             ReadHashProtectFeature(features);
             ReadLateralDefenseFeature(features);
+            ReadUserHookDefenseFeature(features);
             return features;
         }
 
@@ -449,6 +456,33 @@ namespace DataProtectorAgentClient.Services
             }
         }
 
+        private void ReadUserHookDefenseFeature(List<ProtectionFeatureViewItem> features)
+        {
+            try
+            {
+                DataProtectorPolicyNative.NativeUserHookDefensePolicy policy;
+                uint status = DataProtectorPolicyNative.DpPolicyQueryUserHookDefensePolicy(out policy);
+                if (status != SuccessStatus)
+                {
+                    features.Add(BuildFeatureError("应用 Hook 防御", status));
+                    return;
+                }
+
+                uint flags = policy.Flags;
+                features.Add(new ProtectionFeatureViewItem
+                {
+                    Name = "应用 Hook 防御",
+                    Description = BuildUserHookDefenseDescription(flags),
+                    State = (flags & UserHookDefenseFlagEnabled) != 0 ? "已开启" : "未开启",
+                    AccentBrushKey = (flags & UserHookDefenseFlagEnabled) != 0 ? "DpSuccessBrush" : "DpMutedBrush"
+                });
+            }
+            catch (Exception ex)
+            {
+                features.Add(BuildFeatureException("应用 Hook 防御", ex));
+            }
+        }
+
         private static ProtectionFeatureViewItem BuildFeatureError(string name, uint status)
         {
             return new ProtectionFeatureViewItem
@@ -476,6 +510,17 @@ namespace DataProtectorAgentClient.Services
                 "远程计划任务防护" + IsEnabled(flags, LateralDefenseFlagIpcTasks),
                 "远程服务创建防护" + IsEnabled(flags, LateralDefenseFlagIpcServices),
                 "横向工具调用防护" + IsEnabled(flags, LateralDefenseFlagProcessTools));
+        }
+
+        private static string BuildUserHookDefenseDescription(uint flags)
+        {
+            return JoinCapabilities(
+                "早期进程监控" + IsEnabled(flags, UserHookDefenseFlagEarlyProcessMonitor),
+                "敏感模块监控" + IsEnabled(flags, UserHookDefenseFlagImageLoadMonitor),
+                "签名运行时" + IsEnabled(flags, UserHookDefenseFlagRequireSignedRuntime),
+                (flags & UserHookDefenseFlagAuditOnly) != 0
+                    ? "仅审计已启用"
+                    : "阻断非可信运行时" + IsEnabled(flags, UserHookDefenseFlagBlockUntrustedRuntime));
         }
 
         private static ProtectionFeatureViewItem BuildFeatureException(string name, Exception ex)

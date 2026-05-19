@@ -33,6 +33,9 @@ EXPORTS
     DpPolicyQueryLateralDefenseEvents
     DpPolicySetLateralDefensePolicy
     DpPolicyQueryLateralDefensePolicy
+    DpPolicyQueryUserHookDefenseEvents
+    DpPolicySetUserHookDefensePolicy
+    DpPolicyQueryUserHookDefensePolicy
     DpPolicyAddDeviceRule
     DpPolicyRemoveDeviceRule
     DpPolicyClearDeviceRules

@@ -203,6 +203,22 @@ declare namespace Api {
       flags?: number;
     }
 
+    interface UserHookDefensePolicy {
+      enabled: boolean;
+      monitorEarlyProcesses: boolean;
+      monitorImageLoads: boolean;
+      requireSignedRuntime: boolean;
+      blockUntrustedRuntime: boolean;
+      auditOnly: boolean;
+      monitorSystemProcesses: boolean;
+      flags: number;
+      actor?: string;
+    }
+
+    interface UserHookDefensePolicyRequest extends Omit<UserHookDefensePolicy, 'flags'> {
+      flags?: number;
+    }
+
     interface UsbCryptPolicy {
       enabled: boolean;
       algorithm: 'rc4';

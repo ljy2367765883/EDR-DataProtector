@@ -54,6 +54,9 @@ namespace DataProtectorAgentClient.Native
         internal static extern uint DpPolicyQueryLateralDefensePolicy(out NativeLateralDefensePolicy policy);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryUserHookDefensePolicy(out NativeUserHookDefensePolicy policy);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyGetLastErrorMessage(StringBuilder buffer, uint bufferChars);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -103,6 +106,12 @@ namespace DataProtectorAgentClient.Native
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct NativeLateralDefensePolicy
+        {
+            public uint Flags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct NativeUserHookDefensePolicy
         {
             public uint Flags;
         }

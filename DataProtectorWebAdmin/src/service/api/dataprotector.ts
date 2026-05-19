@@ -218,6 +218,21 @@ export function fetchUpdateLateralDefensePolicy(data: Api.DataProtector.LateralD
   });
 }
 
+export function fetchUserHookDefensePolicy() {
+  return request<Api.DataProtector.UserHookDefensePolicy>({
+    url: '/userhook/policy',
+    method: 'get'
+  });
+}
+
+export function fetchUpdateUserHookDefensePolicy(data: Api.DataProtector.UserHookDefensePolicyRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/userhook/policy',
+    method: 'post',
+    data
+  });
+}
+
 export function fetchUsbCryptPolicy() {
   return request<Api.DataProtector.UsbCryptPolicy>({
     url: '/usbcrypt/policy',

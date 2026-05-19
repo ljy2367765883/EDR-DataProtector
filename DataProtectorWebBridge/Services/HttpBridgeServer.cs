@@ -186,6 +186,21 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/userhook/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryUserHookDefensePolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/userhook/policy")
+                {
+                    PolicyBridgeService.UserHookDefensePolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.UserHookDefensePolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetUserHookDefensePolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/dlp/policy")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", dlpProtectionService.QueryPolicy());

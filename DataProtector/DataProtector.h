@@ -43,6 +43,7 @@ Abstract:
 #define DP_TAG_DEVICE_RULE     'rDpD'
 #define DP_TAG_HASH_PROTECT    'hHpD'
 #define DP_TAG_LATERAL_DEFENSE 'lLpD'
+#define DP_TAG_USER_HOOK_DEFENSE 'hUpD'
 #define DP_TAG_USB_METADATA    'mUpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
@@ -69,6 +70,9 @@ Abstract:
 #define DP_LATERAL_DEFENSE_MAX_EVENTS 512
 #define DP_LATERAL_DEFENSE_TARGET_CHARS 512
 #define DP_LATERAL_DEFENSE_PROCESS_CHARS 64
+#define DP_USER_HOOK_DEFENSE_MAX_EVENTS 512
+#define DP_USER_HOOK_DEFENSE_TARGET_CHARS 512
+#define DP_USER_HOOK_DEFENSE_PROCESS_CHARS 512
 #define DP_USB_METADATA_BYTES 512
 #define DP_USB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
 #define DP_USB_METADATA_DEFAULT_OFFSET_BYTES (1024ull * 1024ull)
@@ -124,6 +128,12 @@ Abstract:
 // it blocks or queues high-risk IPC/SMB activity.
 //
 #define DP_ENABLE_LATERAL_DEFENSE_TRACE 1
+
+//
+// Application-layer API hook defense diagnostics. The module prints only
+// policy updates, callback registration failures, and queued protection events.
+//
+#define DP_ENABLE_USER_HOOK_DEFENSE_TRACE 1
 
 //
 // Cached transparent encryption keeps plaintext in the system file cache.
@@ -268,6 +278,9 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryLateralDefenseEvents = 90,
     DpPolicyCommandSetLateralDefensePolicy = 91,
     DpPolicyCommandQueryLateralDefensePolicy = 92,
+    DpPolicyCommandQueryUserHookDefenseEvents = 110,
+    DpPolicyCommandSetUserHookDefensePolicy = 111,
+    DpPolicyCommandQueryUserHookDefensePolicy = 112,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -628,6 +641,66 @@ typedef struct _DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY {
 
 #define DP_LATERAL_DEFENSE_EVENT_QUERY_VERSION 1
 
+typedef enum _DP_USER_HOOK_DEFENSE_OPERATION {
+    DpUserHookDefenseOperationProcessCreate = 1,
+    DpUserHookDefenseOperationHookSurfaceImageLoad = 2,
+    DpUserHookDefenseOperationRuntimeRequired = 3,
+    DpUserHookDefenseOperationRuntimeMissing = 4,
+    DpUserHookDefenseOperationRuntimeRejected = 5,
+    DpUserHookDefenseOperationSuspiciousHookAttempt = 6
+} DP_USER_HOOK_DEFENSE_OPERATION;
+
+#define DP_USER_HOOK_DEFENSE_POLICY_VERSION 1
+#define DP_USER_HOOK_DEFENSE_FLAG_ENABLED                 0x00000001
+#define DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR   0x00000002
+#define DP_USER_HOOK_DEFENSE_FLAG_IMAGE_LOAD_MONITOR      0x00000004
+#define DP_USER_HOOK_DEFENSE_FLAG_REQUIRE_SIGNED_RUNTIME  0x00000008
+#define DP_USER_HOOK_DEFENSE_FLAG_BLOCK_UNTRUSTED_RUNTIME 0x00000010
+#define DP_USER_HOOK_DEFENSE_FLAG_AUDIT_ONLY              0x00000020
+#define DP_USER_HOOK_DEFENSE_FLAG_MONITOR_SYSTEM_PROCESSES 0x00000040
+#define DP_USER_HOOK_DEFENSE_DEFAULT_FLAGS \
+    (DP_USER_HOOK_DEFENSE_FLAG_ENABLED | \
+     DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR | \
+     DP_USER_HOOK_DEFENSE_FLAG_IMAGE_LOAD_MONITOR | \
+     DP_USER_HOOK_DEFENSE_FLAG_REQUIRE_SIGNED_RUNTIME | \
+     DP_USER_HOOK_DEFENSE_FLAG_AUDIT_ONLY)
+#define DP_USER_HOOK_DEFENSE_ALLOWED_FLAGS \
+    (DP_USER_HOOK_DEFENSE_FLAG_ENABLED | \
+     DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR | \
+     DP_USER_HOOK_DEFENSE_FLAG_IMAGE_LOAD_MONITOR | \
+     DP_USER_HOOK_DEFENSE_FLAG_REQUIRE_SIGNED_RUNTIME | \
+     DP_USER_HOOK_DEFENSE_FLAG_BLOCK_UNTRUSTED_RUNTIME | \
+     DP_USER_HOOK_DEFENSE_FLAG_AUDIT_ONLY | \
+     DP_USER_HOOK_DEFENSE_FLAG_MONITOR_SYSTEM_PROCESSES)
+
+typedef struct _DP_USER_HOOK_DEFENSE_POLICY {
+    ULONG Version;
+    ULONG Flags;
+} DP_USER_HOOK_DEFENSE_POLICY, *PDP_USER_HOOK_DEFENSE_POLICY;
+
+typedef struct _DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER, *PDP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER;
+
+typedef struct _DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONG Operation;
+    ULONG Status;
+    ULONG Flags;
+    ULONG TargetLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    WCHAR Target[DP_USER_HOOK_DEFENSE_TARGET_CHARS];
+    WCHAR ProcessImage[DP_USER_HOOK_DEFENSE_PROCESS_CHARS];
+} DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY, *PDP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY;
+
+#define DP_USER_HOOK_DEFENSE_EVENT_QUERY_VERSION 1
+
 EXTERN_C_START
 
 DRIVER_INITIALIZE DriverEntry;
@@ -885,6 +958,16 @@ DpHashProtectUninitialize(
     );
 
 NTSTATUS
+DpUserHookDefenseInitialize(
+    VOID
+    );
+
+VOID
+DpUserHookDefenseUninitialize(
+    VOID
+    );
+
+NTSTATUS
 DpDeviceControlAddRule(
     _In_ const DP_DEVICE_RULE_MESSAGE *Rule
     );
@@ -931,6 +1014,13 @@ DpHashProtectForgetVolume(
 
 BOOLEAN
 DpHashProtectShouldBlockProcessCreate(
+    _In_ PEPROCESS Process,
+    _In_ HANDLE ProcessId,
+    _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
+    );
+
+VOID
+DpUserHookDefenseObserveProcessCreate(
     _In_ PEPROCESS Process,
     _In_ HANDLE ProcessId,
     _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
@@ -1016,6 +1106,25 @@ DpLateralDefenseSetPolicy(
 
 NTSTATUS
 DpLateralDefenseQueryPolicy(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpUserHookDefenseQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpUserHookDefenseSetPolicy(
+    _In_ const DP_USER_HOOK_DEFENSE_POLICY *Policy
+    );
+
+NTSTATUS
+DpUserHookDefenseQueryPolicy(
     _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
     _In_ ULONG OutputBufferLength,
     _Out_ PULONG ReturnOutputBufferLength

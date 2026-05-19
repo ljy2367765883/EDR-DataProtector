@@ -58,6 +58,7 @@ namespace DataProtectorWebBridge.Services
                     policyVersion = state.PolicyVersion,
                     hashProtectEnabled = QueryHashProtectPolicy().enabled,
                     lateralDefenseEnabled = QueryLateralDefensePolicy().enabled,
+                    userHookDefenseEnabled = QueryUserHookDefensePolicy().enabled,
                     usbCryptEnabled = QueryUsbCryptPolicy().enabled,
                     deviceCount = state.Devices.Count,
                     onlineDeviceCount = state.Devices.Values.Count(IsOnline),
@@ -128,6 +129,15 @@ namespace DataProtectorWebBridge.Services
             {
                 EnsureLateralDefensePolicy();
                 return PolicyBridgeService.CloneLateralDefensePolicy(state.LateralDefensePolicy);
+            }
+        }
+
+        public PolicyBridgeService.UserHookDefensePolicyDto QueryUserHookDefensePolicy()
+        {
+            lock (syncRoot)
+            {
+                EnsureUserHookDefensePolicy();
+                return PolicyBridgeService.CloneUserHookDefensePolicy(state.UserHookDefensePolicy);
             }
         }
 
@@ -616,6 +626,36 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("IPC and SMB lateral movement defense policy stored on central server.");
+        }
+
+        public PolicyBridgeService.OperationResult UpdateUserHookDefensePolicy(PolicyBridgeService.UserHookDefensePolicyRequest request)
+        {
+            PolicyBridgeService.UserHookDefensePolicyDto normalized = PolicyBridgeService.NormalizeUserHookDefensePolicy(request);
+            lock (syncRoot)
+            {
+                EnsureUserHookDefensePolicy();
+                if (PolicyBridgeService.ToUserHookDefenseFlags(state.UserHookDefensePolicy) != PolicyBridgeService.ToUserHookDefenseFlags(normalized))
+                {
+                    state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
+                    state.PolicyVersion++;
+                }
+                else
+                {
+                    state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
+                }
+
+                AppendAudit(
+                    normalized.actor,
+                    "central.policy.userhook.update",
+                    "application-hook-defense",
+                    PolicyBridgeService.UserHookDefensePolicySummary(normalized),
+                    true,
+                    "0x00000000",
+                    "Application hook defense policy stored on central server.");
+                Save();
+            }
+
+            return Success("Application hook defense policy stored on central server.");
         }
 
         public PolicyBridgeService.OperationResult UpdateUsbCryptPolicy(PolicyBridgeService.UsbCryptPolicyRequest request)
@@ -1137,6 +1177,7 @@ namespace DataProtectorWebBridge.Services
                     deviceRules = BuildEffectiveDeviceRules(deviceId),
                     hashProtectPolicy = QueryHashProtectPolicy(),
                     lateralDefensePolicy = QueryLateralDefensePolicy(),
+                    userHookDefensePolicy = QueryUserHookDefensePolicy(),
                     usbCryptPolicy = QueryUsbCryptPolicy(),
                     dlpProtectionPolicy = QueryDlpProtectionPolicy(),
                     tasks = assignedTasks
@@ -1192,6 +1233,11 @@ namespace DataProtectorWebBridge.Services
                     if (loaded != null && loaded.LateralDefensePolicy == null)
                     {
                         loaded.LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
+                    }
+
+                    if (loaded != null && loaded.UserHookDefensePolicy == null)
+                    {
+                        loaded.UserHookDefensePolicy = PolicyBridgeService.DefaultUserHookDefensePolicy();
                     }
                     if (loaded != null && loaded.UsbCryptPolicy == null)
                     {
@@ -1263,6 +1309,18 @@ namespace DataProtectorWebBridge.Services
             else
             {
                 state.LateralDefensePolicy = PolicyBridgeService.CloneLateralDefensePolicy(state.LateralDefensePolicy);
+            }
+        }
+
+        private void EnsureUserHookDefensePolicy()
+        {
+            if (state.UserHookDefensePolicy == null)
+            {
+                state.UserHookDefensePolicy = PolicyBridgeService.DefaultUserHookDefensePolicy();
+            }
+            else
+            {
+                state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(state.UserHookDefensePolicy);
             }
         }
 
@@ -3458,6 +3516,7 @@ namespace DataProtectorWebBridge.Services
                 DeviceRules = new List<PolicyBridgeService.DeviceRuleDto>();
                 HashProtectPolicy = PolicyBridgeService.DefaultHashProtectPolicy();
                 LateralDefensePolicy = PolicyBridgeService.DefaultLateralDefensePolicy();
+                UserHookDefensePolicy = PolicyBridgeService.DefaultUserHookDefensePolicy();
                 UsbCryptPolicy = PolicyBridgeService.DefaultUsbCryptPolicy();
                 DlpProtectionPolicy = PolicyBridgeService.DefaultDlpProtectionPolicy();
                 UsbCryptDriverPackage = new UsbCryptDriverPackageInfo();
@@ -3477,6 +3536,7 @@ namespace DataProtectorWebBridge.Services
             public List<PolicyBridgeService.DeviceRuleDto> DeviceRules { get; set; }
             public PolicyBridgeService.HashProtectPolicyDto HashProtectPolicy { get; set; }
             public PolicyBridgeService.LateralDefensePolicyDto LateralDefensePolicy { get; set; }
+            public PolicyBridgeService.UserHookDefensePolicyDto UserHookDefensePolicy { get; set; }
             public PolicyBridgeService.UsbCryptPolicyDto UsbCryptPolicy { get; set; }
             public PolicyBridgeService.DlpProtectionPolicyDto DlpProtectionPolicy { get; set; }
             public UsbCryptDriverPackageInfo UsbCryptDriverPackage { get; set; }
@@ -3861,6 +3921,7 @@ namespace DataProtectorWebBridge.Services
             public PolicyBridgeService.DeviceRuleDto[] deviceRules { get; set; }
             public PolicyBridgeService.HashProtectPolicyDto hashProtectPolicy { get; set; }
             public PolicyBridgeService.LateralDefensePolicyDto lateralDefensePolicy { get; set; }
+            public PolicyBridgeService.UserHookDefensePolicyDto userHookDefensePolicy { get; set; }
             public PolicyBridgeService.UsbCryptPolicyDto usbCryptPolicy { get; set; }
             public PolicyBridgeService.DlpProtectionPolicyDto dlpProtectionPolicy { get; set; }
             public RemoteTaskDto[] tasks { get; set; }

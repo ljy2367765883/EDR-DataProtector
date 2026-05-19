@@ -266,6 +266,18 @@ DriverEntry(
         return status;
     }
 
+    status = DpUserHookDefenseInitialize();
+    if (!NT_SUCCESS(status)) {
+        DpHashProtectUninitialize();
+        DpLateralDefenseUninitialize();
+        DpDeviceControlUninitialize();
+        DpWebShellUninitialize();
+        DpCryptoUninitialize();
+        DpProcessPolicyUninitialize();
+        DpShadowUninitialize();
+        return status;
+    }
+
     status = FltRegisterFilter(DriverObject,
                                &FilterRegistration,
                                &gDataProtectorFilter);
@@ -298,6 +310,7 @@ DriverEntry(
     }
 
     if (!NT_SUCCESS(status)) {
+        DpUserHookDefenseUninitialize();
         DpHashProtectUninitialize();
         DpLateralDefenseUninitialize();
         DpDeviceControlUninitialize();
@@ -322,6 +335,8 @@ DataProtectorUnload(
     DpNetFilterUninitialize();
 
     DpControlUninitialize();
+
+    DpUserHookDefenseUninitialize();
 
     DpHashProtectUninitialize();
 

@@ -66,6 +66,9 @@
     <ClCompile Include="DpUsbMetadata.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DpUserHookDefense.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DpWebShell.c">
       <Filter>Source Files</Filter>
     </ClCompile>

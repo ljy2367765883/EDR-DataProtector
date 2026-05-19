@@ -28,6 +28,8 @@
 #define DP_HASH_PROTECT_PROCESS_CHARS 64u
 #define DP_LATERAL_DEFENSE_TARGET_CHARS 512u
 #define DP_LATERAL_DEFENSE_PROCESS_CHARS 64u
+#define DP_USER_HOOK_DEFENSE_TARGET_CHARS 512u
+#define DP_USER_HOOK_DEFENSE_PROCESS_CHARS 512u
 #define DP_USB_METADATA_BYTES 512u
 #define DP_USB_METADATA_PATH_CHARS 128u
 #define DP_USB_METADATA_MESSAGE_VERSION 1u
@@ -43,6 +45,7 @@
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
 #define DP_HASH_PROTECT_EVENT_STRING_CHARS (DP_HASH_PROTECT_TARGET_CHARS + DP_HASH_PROTECT_PROCESS_CHARS + 2u)
 #define DP_LATERAL_DEFENSE_EVENT_STRING_CHARS (DP_LATERAL_DEFENSE_TARGET_CHARS + DP_LATERAL_DEFENSE_PROCESS_CHARS + 2u)
+#define DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS (DP_USER_HOOK_DEFENSE_TARGET_CHARS + DP_USER_HOOK_DEFENSE_PROCESS_CHARS + 2u)
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_API_ENABLE_FILE_TRACE 1
 #define DP_POLICY_API_TRACE_PATH L"C:\\ProgramData\\DataProtector\\PolicyApiTrace.log"
@@ -77,6 +80,9 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryLateralDefenseEvents = 90,
     DpPolicyCommandSetLateralDefensePolicy = 91,
     DpPolicyCommandQueryLateralDefensePolicy = 92,
+    DpPolicyCommandQueryUserHookDefenseEvents = 110,
+    DpPolicyCommandSetUserHookDefensePolicy = 111,
+    DpPolicyCommandQueryUserHookDefensePolicy = 112,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -324,6 +330,32 @@ typedef struct _DP_LATERAL_DEFENSE_POLICY_MESSAGE {
     ULONG Flags;
 } DP_LATERAL_DEFENSE_POLICY_MESSAGE, *PDP_LATERAL_DEFENSE_POLICY_MESSAGE;
 
+typedef struct _DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER, *PDP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER;
+
+typedef struct _DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONG Operation;
+    ULONG Status;
+    ULONG Flags;
+    ULONG TargetLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    WCHAR Target[DP_USER_HOOK_DEFENSE_TARGET_CHARS];
+    WCHAR ProcessImage[DP_USER_HOOK_DEFENSE_PROCESS_CHARS];
+} DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY, *PDP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_USER_HOOK_DEFENSE_POLICY_MESSAGE {
+    ULONG Version;
+    ULONG Flags;
+} DP_USER_HOOK_DEFENSE_POLICY_MESSAGE, *PDP_USER_HOOK_DEFENSE_POLICY_MESSAGE;
+
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
@@ -349,6 +381,16 @@ typedef struct _DP_LATERAL_DEFENSE_POLICY_MESSAGE {
      DP_POLICY_API_LATERAL_DEFENSE_FLAG_IPC_TASKS | \
      DP_POLICY_API_LATERAL_DEFENSE_FLAG_IPC_SERVICES | \
      DP_POLICY_API_LATERAL_DEFENSE_FLAG_PROCESS_TOOLS)
+#define DP_USER_HOOK_DEFENSE_EVENT_QUERY_VERSION 1u
+#define DP_USER_HOOK_DEFENSE_POLICY_VERSION 1u
+#define DP_USER_HOOK_DEFENSE_ALLOWED_FLAGS \
+    (DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_ENABLED | \
+     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR | \
+     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_IMAGE_LOAD_MONITOR | \
+     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_REQUIRE_SIGNED_RUNTIME | \
+     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_BLOCK_UNTRUSTED_RUNTIME | \
+     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_AUDIT_ONLY | \
+     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_MONITOR_SYSTEM_PROCESSES)
 #define DP_DEVICE_RULE_MESSAGE_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
@@ -3241,6 +3283,289 @@ DpPolicyQueryLateralDefensePolicy(
         (message.Flags & ~DP_LATERAL_DEFENSE_ALLOWED_FLAGS) != 0) {
 
         DpPolicySetLastErrorMessage(L"Driver returned an invalid lateral defense policy.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    Policy->Flags = message.Flags;
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryUserHookDefenseEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_USER_HOOK_DEFENSE_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER header;
+    DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER sizingHeader;
+    PDP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryUserHookDefenseEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_USER_HOOK_DEFENSE_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid user hook defense event snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount >
+                MAXDWORD / DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS) {
+
+                DpPolicySetLastErrorMessage(L"User hook defense event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+
+            *StringBufferCharsRequired =
+                sizingHeader.EventCount * DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = sizingHeader.EventCount;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        if (sizingHeader.EventCount >
+            MAXDWORD / DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS) {
+
+            DpPolicySetLastErrorMessage(L"User hook defense event snapshot is too large.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        *StringBufferCharsRequired =
+            sizingHeader.EventCount * DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS;
+    }
+
+    if (sizingHeader.EventCount >
+        MAXDWORD / DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"User hook defense event snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        StringBufferChars <
+            sizingHeader.EventCount * DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryUserHookDefenseEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid user hook defense event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_USER_HOOK_DEFENSE_EVENT_QUERY_VERSION ||
+        (header->EventCount >
+            (MAXDWORD - sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER)) /
+                sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported user hook defense event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedEventCount = header->EventCount;
+    if (EventCount != NULL) {
+        *EventCount = returnedEventCount;
+    }
+
+    entry = (PDP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < returnedEventCount; index++) {
+        DWORD targetChars;
+        DWORD processImageChars;
+
+        if (entry[index].TargetLengthBytes > sizeof(entry[index].Target) ||
+            entry[index].ProcessImageLengthBytes > sizeof(entry[index].ProcessImage) ||
+            entry[index].TargetLengthBytes % sizeof(WCHAR) != 0 ||
+            entry[index].ProcessImageLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid user hook defense event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        targetChars = entry[index].TargetLengthBytes / sizeof(WCHAR);
+        processImageChars = entry[index].ProcessImageLengthBytes / sizeof(WCHAR);
+        requiredStringChars += targetChars + 1 + processImageChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + targetChars + 1 + processImageChars + 1 <= StringBufferChars) {
+
+            Events[index].Sequence = entry[index].Sequence;
+            Events[index].ProcessId = entry[index].ProcessId;
+            Events[index].ParentProcessId = entry[index].ParentProcessId;
+            Events[index].Operation = entry[index].Operation;
+            Events[index].Status = entry[index].Status;
+            Events[index].Flags = entry[index].Flags;
+
+            Events[index].Target = StringBuffer + copiedStringChars;
+            if (targetChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars,
+                           entry[index].Target,
+                           entry[index].TargetLengthBytes);
+                copiedStringChars += targetChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].ProcessImage = StringBuffer + copiedStringChars;
+            if (processImageChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars,
+                           entry[index].ProcessImage,
+                           entry[index].ProcessImageLengthBytes);
+                copiedStringChars += processImageChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicySetUserHookDefensePolicy(
+    _In_ const DP_POLICY_API_USER_HOOK_DEFENSE_POLICY *Policy
+    )
+{
+    DP_USER_HOOK_DEFENSE_POLICY_MESSAGE message;
+
+    if (Policy == NULL ||
+        (Policy->Flags & ~DP_USER_HOOK_DEFENSE_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"User hook defense policy is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_USER_HOOK_DEFENSE_POLICY_VERSION;
+    message.Flags = Policy->Flags;
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandSetUserHookDefensePolicy,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryUserHookDefensePolicy(
+    _Out_ DP_POLICY_API_USER_HOOK_DEFENSE_POLICY *Policy
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    DP_USER_HOOK_DEFENSE_POLICY_MESSAGE message;
+
+    if (Policy == NULL) {
+        DpPolicySetLastErrorMessage(L"User hook defense policy output is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(Policy, sizeof(*Policy));
+    ZeroMemory(&message, sizeof(message));
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryUserHookDefensePolicy,
+                                          NULL,
+                                          0,
+                                          &message,
+                                          sizeof(message),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(message) ||
+        message.Version != DP_USER_HOOK_DEFENSE_POLICY_VERSION ||
+        (message.Flags & ~DP_USER_HOOK_DEFENSE_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid user hook defense policy.");
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 

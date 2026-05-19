@@ -50,6 +50,7 @@
     <ClCompile Include="DpShadow.c" />
     <ClCompile Include="DpTrace.c" />
     <ClCompile Include="DpUsbMetadata.c" />
+    <ClCompile Include="DpUserHookDefense.c" />
     <ClCompile Include="DpWebShell.c" />
     <ClInclude Include="DataProtector.h" />
     <Inf Include="DataProtector.inf" />
