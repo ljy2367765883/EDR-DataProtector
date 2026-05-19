@@ -16,10 +16,12 @@ namespace DataProtectorWebBridge.Services
     internal sealed class AgentSyncClient
     {
         private const string AgentVersion = "1.0";
-        private const int SandboxScanEveryHeartbeats = 4;
         private const int SandboxMaxUploadBytes = 20 * 1024 * 1024;
-        private const int SandboxMaxUploadsPerScan = 2;
+        private const int SandboxMaxUploadsPerHeartbeat = 2;
         private const int SandboxMaxKnownHashes = 1000;
+        private const int SandboxMaxPendingEvents = 128;
+        private const int SandboxFileReadyRetries = 6;
+        private const int SandboxFileReadyDelayMs = 500;
         private readonly Uri serverSyncUri;
         private readonly TimeSpan interval;
         private readonly PolicyBridgeService policyService;
@@ -31,6 +33,10 @@ namespace DataProtectorWebBridge.Services
         private readonly RemovableDeviceInventory removableDeviceInventory = new RemovableDeviceInventory();
         private readonly List<CentralPolicyStore.RemoteTaskResult> pendingTaskResults = new List<CentralPolicyStore.RemoteTaskResult>();
         private readonly HashSet<string> sandboxUploadedHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Queue<SandboxExecutableEvent> pendingSandboxExecutableEvents = new Queue<SandboxExecutableEvent>();
+        private readonly HashSet<string> pendingSandboxExecutablePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<FileSystemWatcher> sandboxExecutableWatchers = new List<FileSystemWatcher>();
+        private readonly object sandboxExecutableLock = new object();
         private readonly string usbCryptPolicyPath;
         private string deviceId;
         private long appliedPolicyVersion;
@@ -59,6 +65,7 @@ namespace DataProtectorWebBridge.Services
             Directory.CreateDirectory(directory);
             LoadState();
             LoadSandboxUploadState();
+            StartSandboxExecutableWatchers();
             dlpProtectionService.UpdatePolicy(PolicyBridgeService.DefaultDlpProtectionPolicy());
         }
 
@@ -93,7 +100,7 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
             PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
             CentralPolicyStore.RemovableDeviceObservation[] removableDevices = removableDeviceInventory.Snapshot();
-            CentralPolicyStore.SandboxSampleSubmission[] sandboxSamples = CollectSandboxSamplesIfDue();
+            CentralPolicyStore.SandboxSampleSubmission[] sandboxSamples = CollectSandboxExecutableEvents();
             if (auditRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s).");
@@ -119,9 +126,20 @@ namespace DataProtectorWebBridge.Services
                 ResultOnly = false
             };
 
-            CentralPolicyStore.AgentSyncResponse response = Post<CentralPolicyStore.AgentSyncRequest, CentralPolicyStore.AgentSyncResponse>(serverSyncUri, request);
+            CentralPolicyStore.AgentSyncResponse response;
+            try
+            {
+                response = Post<CentralPolicyStore.AgentSyncRequest, CentralPolicyStore.AgentSyncResponse>(serverSyncUri, request);
+            }
+            catch
+            {
+                RequeueSandboxSamples(sandboxSamples);
+                throw;
+            }
+
             if (response == null || !response.accepted)
             {
+                RequeueSandboxSamples(sandboxSamples);
                 throw new InvalidOperationException("Central server rejected agent synchronization.");
             }
 
@@ -250,25 +268,35 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private CentralPolicyStore.SandboxSampleSubmission[] CollectSandboxSamplesIfDue()
+        private CentralPolicyStore.SandboxSampleSubmission[] CollectSandboxExecutableEvents()
         {
-            if (heartbeatIndex % SandboxScanEveryHeartbeats != 0)
-            {
-                return new CentralPolicyStore.SandboxSampleSubmission[0];
-            }
-
             try
             {
                 List<CentralPolicyStore.SandboxSampleSubmission> submissions = new List<CentralPolicyStore.SandboxSampleSubmission>();
                 HashSet<string> batchHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (string path in EnumerateSandboxCandidateExecutables())
+                while (submissions.Count < SandboxMaxUploadsPerHeartbeat)
                 {
-                    if (submissions.Count >= SandboxMaxUploadsPerScan)
+                    SandboxExecutableEvent executableEvent = DequeueSandboxExecutableEvent();
+                    if (executableEvent == null)
                     {
                         break;
                     }
 
-                    CentralPolicyStore.SandboxSampleSubmission submission = TryBuildSandboxSubmission(path);
+                    SandboxExecutableReadiness readiness = ProbeSandboxExecutableReadiness(executableEvent);
+                    if (readiness == SandboxExecutableReadiness.Waiting && executableEvent.Attempts < SandboxFileReadyRetries)
+                    {
+                        executableEvent.Attempts++;
+                        executableEvent.NotBeforeUtc = DateTime.UtcNow.AddMilliseconds(SandboxFileReadyDelayMs);
+                        RequeueSandboxExecutableEvent(executableEvent);
+                        continue;
+                    }
+
+                    if (readiness != SandboxExecutableReadiness.Ready)
+                    {
+                        continue;
+                    }
+
+                    CentralPolicyStore.SandboxSampleSubmission submission = TryBuildSandboxSubmission(executableEvent);
                     if (submission != null && batchHashes.Add(submission.sha256))
                     {
                         submissions.Add(submission);
@@ -277,63 +305,239 @@ namespace DataProtectorWebBridge.Services
 
                 if (submissions.Count > 0)
                 {
-                    Console.WriteLine(DateTime.Now.ToString("s") + " Sandbox sample upload prepared " + submissions.Count + " suspicious executable(s).");
+                    Console.WriteLine(DateTime.Now.ToString("s") + " Sandbox sample upload prepared " + submissions.Count + " new or renamed executable event(s).");
                 }
 
                 return submissions.ToArray();
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine(DateTime.Now.ToString("s") + " sandbox sample scan failed: " + ex.Message);
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " sandbox executable event collection failed: " + ex.Message);
                 return new CentralPolicyStore.SandboxSampleSubmission[0];
             }
         }
 
-        private IEnumerable<string> EnumerateSandboxCandidateExecutables()
+        private void StartSandboxExecutableWatchers()
+        {
+            foreach (string directory in GetSandboxExecutableWatchDirectories())
+            {
+                try
+                {
+                    FileSystemWatcher watcher = new FileSystemWatcher(directory)
+                    {
+                        Filter = "*.*",
+                        IncludeSubdirectories = false,
+                        InternalBufferSize = 64 * 1024,
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite | NotifyFilters.Size
+                    };
+                    watcher.Created += OnSandboxExecutableCreated;
+                    watcher.Renamed += OnSandboxExecutableRenamed;
+                    watcher.Error += OnSandboxExecutableWatcherError;
+                    watcher.EnableRaisingEvents = true;
+                    sandboxExecutableWatchers.Add(watcher);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(DateTime.Now.ToString("s") + " sandbox executable watcher failed for " + directory + ": " + ex.Message);
+                }
+            }
+
+            if (sandboxExecutableWatchers.Count > 0)
+            {
+                Console.WriteLine(DateTime.Now.ToString("s") + " Sandbox executable watcher armed for " + sandboxExecutableWatchers.Count + " directory/directories. Only newly created .exe files and rename targets ending in .exe will be submitted.");
+            }
+        }
+
+        private IEnumerable<string> GetSandboxExecutableWatchDirectories()
         {
             HashSet<string> directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             AddCandidateDirectory(directories, Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
             AddCandidateDirectory(directories, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
             AddCandidateDirectory(directories, Path.GetTempPath());
             AddCandidateDirectory(directories, Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory));
-            AddCandidateDirectory(directories, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector", "Incoming"));
+            AddCandidateDirectory(directories, EnsureDirectory(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector", "Incoming")));
+            return directories;
+        }
 
-            DateTime sinceUtc = DateTime.UtcNow.AddDays(-3);
-            foreach (string directory in directories)
+        private void OnSandboxExecutableCreated(object sender, FileSystemEventArgs e)
+        {
+            EnqueueSandboxExecutableEvent(e == null ? string.Empty : e.FullPath, "created", string.Empty);
+        }
+
+        private void OnSandboxExecutableRenamed(object sender, RenamedEventArgs e)
+        {
+            EnqueueSandboxExecutableEvent(e == null ? string.Empty : e.FullPath, "renamed", e == null ? string.Empty : e.OldFullPath);
+        }
+
+        private void OnSandboxExecutableWatcherError(object sender, ErrorEventArgs e)
+        {
+            Exception error = e == null ? null : e.GetException();
+            Console.Error.WriteLine(DateTime.Now.ToString("s") + " sandbox executable watcher error: " + (error == null ? "unknown error" : error.Message));
+        }
+
+        private void EnqueueSandboxExecutableEvent(string path, string eventKind, string previousPath)
+        {
+            path = NormalizeLocalPath(path);
+            if (!IsExecutablePath(path))
             {
-                IEnumerable<string> files;
-                try
+                return;
+            }
+
+            lock (sandboxExecutableLock)
+            {
+                if (pendingSandboxExecutablePaths.Contains(path))
                 {
-                    files = Directory.EnumerateFiles(directory, "*.exe", SearchOption.TopDirectoryOnly);
+                    return;
                 }
-                catch
+
+                while (pendingSandboxExecutableEvents.Count >= SandboxMaxPendingEvents)
+                {
+                    SandboxExecutableEvent dropped = pendingSandboxExecutableEvents.Dequeue();
+                    if (dropped != null)
+                    {
+                        pendingSandboxExecutablePaths.Remove(dropped.Path);
+                    }
+                }
+
+                SandboxExecutableEvent executableEvent = new SandboxExecutableEvent
+                {
+                    Path = path,
+                    PreviousPath = NormalizeLocalPath(previousPath),
+                    EventKind = string.Equals(eventKind, "renamed", StringComparison.OrdinalIgnoreCase) ? "renamed" : "created",
+                    FirstSeenUtc = DateTime.UtcNow,
+                    NotBeforeUtc = DateTime.UtcNow.AddMilliseconds(SandboxFileReadyDelayMs),
+                    LastLength = -1
+                };
+                pendingSandboxExecutableEvents.Enqueue(executableEvent);
+                pendingSandboxExecutablePaths.Add(path);
+            }
+
+            Console.WriteLine(DateTime.Now.ToString("s") + " Sandbox executable event queued kind=" + eventKind + " path=" + path);
+        }
+
+        private SandboxExecutableEvent DequeueSandboxExecutableEvent()
+        {
+            lock (sandboxExecutableLock)
+            {
+                DateTime now = DateTime.UtcNow;
+                int count = pendingSandboxExecutableEvents.Count;
+                for (int index = 0; index < count; index++)
+                {
+                    SandboxExecutableEvent executableEvent = pendingSandboxExecutableEvents.Dequeue();
+                    pendingSandboxExecutablePaths.Remove(executableEvent.Path);
+                    if (executableEvent.NotBeforeUtc > now)
+                    {
+                        pendingSandboxExecutableEvents.Enqueue(executableEvent);
+                        pendingSandboxExecutablePaths.Add(executableEvent.Path);
+                        continue;
+                    }
+
+                    return executableEvent;
+                }
+            }
+
+            return null;
+        }
+
+        private void RequeueSandboxExecutableEvent(SandboxExecutableEvent executableEvent)
+        {
+            if (executableEvent == null || !IsExecutablePath(executableEvent.Path))
+            {
+                return;
+            }
+
+            lock (sandboxExecutableLock)
+            {
+                if (pendingSandboxExecutablePaths.Contains(executableEvent.Path))
+                {
+                    return;
+                }
+
+                while (pendingSandboxExecutableEvents.Count >= SandboxMaxPendingEvents)
+                {
+                    SandboxExecutableEvent dropped = pendingSandboxExecutableEvents.Dequeue();
+                    if (dropped != null)
+                    {
+                        pendingSandboxExecutablePaths.Remove(dropped.Path);
+                    }
+                }
+
+                pendingSandboxExecutableEvents.Enqueue(executableEvent);
+                pendingSandboxExecutablePaths.Add(executableEvent.Path);
+            }
+        }
+
+        private void RequeueSandboxSamples(CentralPolicyStore.SandboxSampleSubmission[] samples)
+        {
+            if (samples == null || samples.Length == 0)
+            {
+                return;
+            }
+
+            foreach (CentralPolicyStore.SandboxSampleSubmission sample in samples)
+            {
+                if (sample == null || string.IsNullOrWhiteSpace(sample.processPath))
                 {
                     continue;
                 }
 
-                foreach (string file in files)
+                RequeueSandboxExecutableEvent(new SandboxExecutableEvent
                 {
-                    FileInfo info;
-                    try
-                    {
-                        info = new FileInfo(file);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (!info.Exists ||
-                        info.Length <= 0 ||
-                        info.Length > SandboxMaxUploadBytes ||
-                        info.LastWriteTimeUtc < sinceUtc)
-                    {
-                        continue;
-                    }
-
-                    yield return file;
-                }
+                    Path = NormalizeLocalPath(sample.processPath),
+                    EventKind = "created",
+                    FirstSeenUtc = DateTime.UtcNow,
+                    NotBeforeUtc = DateTime.UtcNow.AddSeconds(1),
+                    Attempts = 0,
+                    LastLength = -1
+                });
             }
+        }
+
+        private SandboxExecutableReadiness ProbeSandboxExecutableReadiness(SandboxExecutableEvent executableEvent)
+        {
+            if (executableEvent == null || !IsExecutablePath(executableEvent.Path))
+            {
+                return SandboxExecutableReadiness.Invalid;
+            }
+
+            FileInfo info;
+            try
+            {
+                info = new FileInfo(executableEvent.Path);
+            }
+            catch
+            {
+                return SandboxExecutableReadiness.Invalid;
+            }
+
+            if (!info.Exists)
+            {
+                return SandboxExecutableReadiness.Invalid;
+            }
+
+            if (info.Length <= 0)
+            {
+                return SandboxExecutableReadiness.Waiting;
+            }
+
+            if (info.Length > SandboxMaxUploadBytes)
+            {
+                return SandboxExecutableReadiness.Invalid;
+            }
+
+            if (executableEvent.LastLength >= 0 && executableEvent.LastLength != info.Length)
+            {
+                executableEvent.LastLength = info.Length;
+                return SandboxExecutableReadiness.Waiting;
+            }
+
+            executableEvent.LastLength = info.Length;
+            if (info.LastWriteTimeUtc > DateTime.UtcNow.AddMilliseconds(-SandboxFileReadyDelayMs))
+            {
+                return SandboxExecutableReadiness.Waiting;
+            }
+
+            return ProbePortableExecutableHeader(executableEvent.Path);
         }
 
         private static void AddCandidateDirectory(HashSet<string> directories, string directory)
@@ -344,22 +548,18 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private CentralPolicyStore.SandboxSampleSubmission TryBuildSandboxSubmission(string path)
+        private CentralPolicyStore.SandboxSampleSubmission TryBuildSandboxSubmission(SandboxExecutableEvent executableEvent)
         {
             try
             {
+                string path = executableEvent.Path;
                 string hash = ComputeSha256Hex(path);
                 if (sandboxUploadedHashes.Contains(hash))
                 {
                     return null;
                 }
 
-                string suspicion = BuildSandboxSuspicion(path);
-                if (string.IsNullOrWhiteSpace(suspicion))
-                {
-                    return null;
-                }
-
+                string suspicion = BuildSandboxSuspicion(executableEvent);
                 byte[] bytes = File.ReadAllBytes(path);
                 return new CentralPolicyStore.SandboxSampleSubmission
                 {
@@ -380,8 +580,9 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private static string BuildSandboxSuspicion(string path)
+        private static string BuildSandboxSuspicion(SandboxExecutableEvent executableEvent)
         {
+            string path = executableEvent.Path;
             FileInfo info = new FileInfo(path);
             string directory = (info.DirectoryName ?? string.Empty).ToLowerInvariant();
             string signer = TryReadSignerSubject(path);
@@ -397,17 +598,90 @@ namespace DataProtectorWebBridge.Services
                 string.IsNullOrWhiteSpace(version.ProductName) &&
                 string.IsNullOrWhiteSpace(version.FileDescription);
 
+            string eventReason = string.Equals(executableEvent.EventKind, "renamed", StringComparison.OrdinalIgnoreCase)
+                ? "Executable file was renamed to an .exe target"
+                : "New executable file was created";
+
             if (unsigned && userWritableLocation)
             {
-                return "Unsigned executable in a user-writable location.";
+                return eventReason + "; unsigned executable in a user-writable location.";
             }
 
             if (unsigned && weakMetadata)
             {
-                return "Unsigned executable with weak version metadata.";
+                return eventReason + "; unsigned executable with weak version metadata.";
             }
 
-            return string.Empty;
+            return eventReason + "; executable event captured for server-side sandbox analysis.";
+        }
+
+        private static SandboxExecutableReadiness ProbePortableExecutableHeader(string path)
+        {
+            try
+            {
+                using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    if (stream.Length < 2)
+                    {
+                        return SandboxExecutableReadiness.Waiting;
+                    }
+
+                    int first = stream.ReadByte();
+                    int second = stream.ReadByte();
+                    return first == 'M' && second == 'Z'
+                        ? SandboxExecutableReadiness.Ready
+                        : SandboxExecutableReadiness.Invalid;
+                }
+            }
+            catch (IOException)
+            {
+                return SandboxExecutableReadiness.Waiting;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return SandboxExecutableReadiness.Waiting;
+            }
+        }
+
+        private static bool IsExecutablePath(string path)
+        {
+            return !string.IsNullOrWhiteSpace(path) &&
+                   string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizeLocalPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                return Path.GetFullPath(path);
+            }
+            catch
+            {
+                return path.Trim();
+            }
+        }
+
+        private static string EnsureDirectory(string directory)
+        {
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+            }
+            catch
+            {
+            }
+
+            return directory;
         }
 
         private void MarkSandboxSamplesUploaded(CentralPolicyStore.SandboxSampleSubmission[] samples)
@@ -903,6 +1177,24 @@ namespace DataProtectorWebBridge.Services
         private sealed class SandboxUploadState
         {
             public string[] Hashes { get; set; }
+        }
+
+        private enum SandboxExecutableReadiness
+        {
+            Invalid = 0,
+            Waiting = 1,
+            Ready = 2
+        }
+
+        private sealed class SandboxExecutableEvent
+        {
+            public string Path { get; set; }
+            public string PreviousPath { get; set; }
+            public string EventKind { get; set; }
+            public DateTime FirstSeenUtc { get; set; }
+            public DateTime NotBeforeUtc { get; set; }
+            public int Attempts { get; set; }
+            public long LastLength { get; set; }
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
