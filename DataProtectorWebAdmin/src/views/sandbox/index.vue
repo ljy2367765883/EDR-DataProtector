@@ -3,6 +3,7 @@ import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import type { DataTableColumns, PaginationProps, UploadCustomRequestOptions } from 'naive-ui';
 import { NButton, NTag, useMessage } from 'naive-ui';
 import {
+  fetchRemoveSandboxLogs,
   fetchRemoveSandboxSample,
   fetchSandboxSamples,
   fetchStartSandboxAnalysis,
@@ -139,6 +140,8 @@ type SandboxReport = {
   stderr?: string;
   errors?: string[];
   error?: string;
+  hostReportRoot?: string;
+  hostConfigPath?: string;
 };
 
 type AttackFlowStage = {
@@ -324,7 +327,7 @@ const sampleColumns = computed<DataTableColumns<Api.DataProtector.SandboxSample>
   {
     title: $t('dataprotector.common.action'),
     key: 'actions',
-    width: 230,
+    width: 320,
     render(row) {
       return (
         <div class="action-row">
@@ -333,6 +336,9 @@ const sampleColumns = computed<DataTableColumns<Api.DataProtector.SandboxSample>
           </NButton>
           <NButton size="small" secondary onClick={() => selectSample(row)}>
             {$t('dataprotector.sandbox.report')}
+          </NButton>
+          <NButton size="small" secondary disabled={row.status === 'running' || !row.reportJson} onClick={() => removeLogs(row)}>
+            {$t('dataprotector.sandbox.deleteLogs')}
           </NButton>
           <NButton size="small" type="error" secondary disabled={row.status === 'running'} onClick={() => removeSample(row)}>
             {$t('dataprotector.common.delete')}
@@ -578,6 +584,43 @@ function removeSample(row: Api.DataProtector.SandboxSample) {
   });
 }
 
+function removeLogs(row: Api.DataProtector.SandboxSample) {
+  window.$dialog?.warning({
+    title: $t('dataprotector.sandbox.deleteLogsTitle'),
+    content: $t('dataprotector.sandbox.deleteLogsContent', { name: row.fileName }),
+    positiveText: $t('dataprotector.sandbox.deleteLogs'),
+    negativeText: $t('dataprotector.common.cancel'),
+    onPositiveClick: async () => {
+      const reportValue = parseJson<SandboxReport | null>(row.reportJson, null);
+      const { error, data } = await fetchRemoveSandboxLogs({
+        sampleId: row.sampleId,
+        runId: reportValue?.runId,
+        actor: 'web-admin'
+      });
+      if (!error && data.succeeded) {
+        message.success($t('dataprotector.sandbox.logsDeleted'));
+        await refresh(false);
+      }
+    }
+  });
+}
+
+function clearLogs() {
+  window.$dialog?.warning({
+    title: $t('dataprotector.sandbox.clearLogsTitle'),
+    content: $t('dataprotector.sandbox.clearLogsContent'),
+    positiveText: $t('dataprotector.sandbox.clearLogs'),
+    negativeText: $t('dataprotector.common.cancel'),
+    onPositiveClick: async () => {
+      const { error, data } = await fetchRemoveSandboxLogs({ all: true, actor: 'web-admin' });
+      if (!error && data.succeeded) {
+        message.success($t('dataprotector.sandbox.logsCleared'));
+        await refresh(false);
+      }
+    }
+  });
+}
+
 function startPolling() {
   stopPolling();
   pollTimer.value = window.setInterval(async () => {
@@ -644,7 +687,7 @@ function sanitizeSandboxReport(value: SandboxReport | null) {
   };
 
   const internalPids = new Set(
-    reportClone.processes
+    (reportClone.processes || [])
       .filter(process => isInternalProcess(process))
       .map(process => process.pid)
       .filter(pid => Number.isFinite(pid))
@@ -903,7 +946,7 @@ const attackFlowStageLabelKeys = {
   network: 'dataprotector.sandbox.attackFlow.stages.network',
   persistence: 'dataprotector.sandbox.attackFlow.stages.persistence',
   artifact: 'dataprotector.sandbox.attackFlow.stages.artifact'
-};
+} as const satisfies Record<string, App.I18n.I18nKey>;
 
 const attackFlowStageDetailKeys = {
   launch: 'dataprotector.sandbox.attackFlow.details.launch',
@@ -912,7 +955,7 @@ const attackFlowStageDetailKeys = {
   network: 'dataprotector.sandbox.attackFlow.details.network',
   persistence: 'dataprotector.sandbox.attackFlow.details.persistence',
   artifact: 'dataprotector.sandbox.attackFlow.details.artifact'
-};
+} as const satisfies Record<string, App.I18n.I18nKey>;
 
 function countTextMatches(values: string[], tokens: string[]) {
   return values.reduce((count, value) => {
@@ -1068,10 +1111,16 @@ onBeforeUnmount(stopPolling);
           <template #header>
             <div class="panel-title">
               <span>{{ $t('dataprotector.sandbox.queue') }}</span>
-              <NButton type="primary" :loading="loading" @click="refresh(false)">
-                <template #icon><SvgIcon icon="mdi:refresh" /></template>
-                {{ $t('dataprotector.common.refresh') }}
-              </NButton>
+              <NSpace align="center" wrap>
+                <NButton secondary :disabled="loading || samples.some(item => item.status === 'running')" @click="clearLogs">
+                  <template #icon><SvgIcon icon="mdi:delete-sweep-outline" /></template>
+                  {{ $t('dataprotector.sandbox.clearLogs') }}
+                </NButton>
+                <NButton type="primary" :loading="loading" @click="refresh(false)">
+                  <template #icon><SvgIcon icon="mdi:refresh" /></template>
+                  {{ $t('dataprotector.common.refresh') }}
+                </NButton>
+              </NSpace>
             </div>
           </template>
 
@@ -1097,7 +1146,7 @@ onBeforeUnmount(stopPolling);
             :row-props="rowProps"
             :pagination="pagination"
             remote
-            :scroll-x="1780"
+            :scroll-x="1880"
             size="small"
           />
         </NCard>
@@ -1170,7 +1219,22 @@ onBeforeUnmount(stopPolling);
       </NGi>
     </NGrid>
 
-    <NCard :title="$t('dataprotector.sandbox.report')" :bordered="false" class="work-panel">
+    <NCard :bordered="false" class="work-panel">
+      <template #header>
+        <div class="panel-title">
+          <span>{{ $t('dataprotector.sandbox.report') }}</span>
+          <NButton
+            v-if="selectedSample"
+            secondary
+            type="error"
+            :disabled="selectedSample.status === 'running' || !selectedSample.reportJson"
+            @click="removeLogs(selectedSample)"
+          >
+            <template #icon><SvgIcon icon="mdi:file-document-remove-outline" /></template>
+            {{ $t('dataprotector.sandbox.deleteLogs') }}
+          </NButton>
+        </div>
+      </template>
       <template v-if="selectedSample && report">
         <div class="report-summary">
           <div class="report-metric">
@@ -1403,6 +1467,10 @@ onBeforeUnmount(stopPolling);
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.action-row {
+  flex-wrap: wrap;
 }
 
 .panel-title {

@@ -318,6 +318,14 @@ export function fetchRemoveSandboxSample(data: Api.DataProtector.SandboxSampleDe
   });
 }
 
+export function fetchRemoveSandboxLogs(data: Api.DataProtector.SandboxLogDeleteRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/sandbox/logs',
+    method: 'delete',
+    data
+  });
+}
+
 export function fetchRemovableDevices() {
   return request<Api.DataProtector.RemovableDevice[]>({
     url: '/device/removable',

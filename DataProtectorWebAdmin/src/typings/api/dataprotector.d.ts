@@ -334,6 +334,13 @@ declare namespace Api {
       actor?: string;
     }
 
+    interface SandboxLogDeleteRequest {
+      sampleId?: string;
+      runId?: string;
+      all?: boolean;
+      actor?: string;
+    }
+
     interface SandboxSample {
       sampleId: string;
       sha256: string;

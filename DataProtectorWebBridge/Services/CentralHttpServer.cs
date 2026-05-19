@@ -404,6 +404,15 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "DELETE" && path == "/api/sandbox/logs")
+                {
+                    CentralPolicyStore.SandboxLogDeleteRequest request =
+                        JsonResponse.Read<CentralPolicyStore.SandboxLogDeleteRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = store.RemoveSandboxLogs(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/usbcrypt/initialize")
                 {
                     CentralPolicyStore.UsbCryptInitializationTaskRequest request =

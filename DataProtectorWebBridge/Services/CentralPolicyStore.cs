@@ -23,6 +23,7 @@ namespace DataProtectorWebBridge.Services
         private const string UsbCryptPackageDirectoryName = "UsbCryptPackages";
         private const string UsbCryptPackageFileName = "current.zip";
         private const string SandboxSampleDirectoryName = "SandboxSamples";
+        private const string SandboxRunDirectoryName = "Sandbox";
         private const int MaxSandboxSampleBytes = 50 * 1024 * 1024;
         private const int MaxSandboxSampleRecords = 1000;
         private readonly object syncRoot = new object();
@@ -966,6 +967,93 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("Sandbox sample removed.");
+        }
+
+        public PolicyBridgeService.OperationResult RemoveSandboxLogs(SandboxLogDeleteRequest request)
+        {
+            if (request == null)
+            {
+                throw new PolicyBridgeService.BridgeException(1, "Sandbox log delete request body is required.");
+            }
+
+            string actor = NormalizeDeviceText(request.actor);
+            string sampleId = NormalizeDeviceText(request.sampleId);
+            string runId = NormalizeDeviceText(request.runId);
+            int removedRuns = 0;
+            int clearedReports = 0;
+
+            lock (syncRoot)
+            {
+                EnsureSandboxState();
+                if (request.all)
+                {
+                    if (state.SandboxSamples.Any(item => string.Equals(item.status, "running", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw new PolicyBridgeService.BridgeException(1, "Sandbox logs cannot be cleared while analysis is running.");
+                    }
+
+                    removedRuns = DeleteAllSandboxRunDirectories();
+                    foreach (SandboxSampleState sampleRecord in state.SandboxSamples)
+                    {
+                        if (ClearSandboxSampleReport(sampleRecord))
+                        {
+                            clearedReports++;
+                        }
+                    }
+
+                    AppendAudit(actor, "sandbox.logs.clear", "*", "sandbox", true, "0x00000000", "Sandbox run logs cleared. Removed run directories: " + removedRuns + ", cleared reports: " + clearedReports + ".");
+                    Save();
+                    return Success("Sandbox logs cleared.");
+                }
+
+                if (string.IsNullOrWhiteSpace(sampleId) && string.IsNullOrWhiteSpace(runId))
+                {
+                    throw new PolicyBridgeService.BridgeException(1, "Sandbox sample id or run id is required.");
+                }
+
+                SandboxSampleState sample = null;
+                if (!string.IsNullOrWhiteSpace(sampleId))
+                {
+                    sample = state.SandboxSamples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase));
+                    if (sample == null)
+                    {
+                        throw new PolicyBridgeService.BridgeException(1, "Sandbox sample was not found.");
+                    }
+
+                    if (string.Equals(sample.status, "running", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new PolicyBridgeService.BridgeException(1, "Sandbox logs cannot be removed while analysis is running.");
+                    }
+                }
+
+                HashSet<string> runDirectoryPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(runId))
+                {
+                    AddSandboxRunDirectoryCandidate(runDirectoryPaths, runId);
+                }
+
+                if (sample != null)
+                {
+                    AddSandboxReportDirectoryCandidates(runDirectoryPaths, sample.reportJson);
+                    if (ClearSandboxSampleReport(sample))
+                    {
+                        clearedReports++;
+                    }
+                }
+
+                foreach (string path in runDirectoryPaths)
+                {
+                    if (TryDeleteDirectory(path))
+                    {
+                        removedRuns++;
+                    }
+                }
+
+                AppendAudit(actor, "sandbox.logs.remove", string.IsNullOrWhiteSpace(sampleId) ? runId : sampleId, "sandbox", true, "0x00000000", "Sandbox run logs removed. Removed run directories: " + removedRuns + ", cleared reports: " + clearedReports + ".");
+                Save();
+            }
+
+            return Success("Sandbox logs removed.");
         }
 
         public NetworkInsightResponse QueryNetworkInsights(NetworkInsightQuery query)
@@ -2662,6 +2750,142 @@ namespace DataProtectorWebBridge.Services
             return Path.Combine(DirectoryPath, SandboxSampleDirectoryName);
         }
 
+        private string GetSandboxRunDirectory()
+        {
+            return Path.Combine(DirectoryPath, SandboxRunDirectoryName);
+        }
+
+        private int DeleteAllSandboxRunDirectories()
+        {
+            string root = GetSandboxRunDirectory();
+            if (!Directory.Exists(root))
+            {
+                return 0;
+            }
+
+            int removed = 0;
+            foreach (string directory in Directory.GetDirectories(root))
+            {
+                if (TryDeleteDirectory(directory))
+                {
+                    removed++;
+                }
+            }
+
+            return removed;
+        }
+
+        private bool ClearSandboxSampleReport(SandboxSampleState sample)
+        {
+            if (sample == null)
+            {
+                return false;
+            }
+
+            bool hadReport = !string.IsNullOrWhiteSpace(sample.reportJson) ||
+                             !string.IsNullOrWhiteSpace(sample.startedUtc) ||
+                             !string.IsNullOrWhiteSpace(sample.completedUtc) ||
+                             !string.IsNullOrWhiteSpace(sample.error) ||
+                             sample.exitCode != 0;
+            sample.reportJson = string.Empty;
+            sample.startedUtc = string.Empty;
+            sample.completedUtc = string.Empty;
+            sample.error = string.Empty;
+            sample.exitCode = 0;
+            if (!string.Equals(sample.status, "running", StringComparison.OrdinalIgnoreCase))
+            {
+                sample.status = "queued";
+            }
+
+            return hadReport;
+        }
+
+        private void AddSandboxReportDirectoryCandidates(HashSet<string> paths, string reportJson)
+        {
+            if (paths == null || string.IsNullOrWhiteSpace(reportJson))
+            {
+                return;
+            }
+
+            try
+            {
+                Dictionary<string, object> report = serializer.Deserialize<Dictionary<string, object>>(reportJson);
+                if (report == null)
+                {
+                    return;
+                }
+
+                object hostReportRoot;
+                if (report.TryGetValue("hostReportRoot", out hostReportRoot))
+                {
+                    AddSandboxRunDirectoryPathCandidate(paths, Convert.ToString(hostReportRoot, CultureInfo.InvariantCulture));
+                }
+
+                object runId;
+                if (report.TryGetValue("runId", out runId))
+                {
+                    AddSandboxRunDirectoryCandidate(paths, Convert.ToString(runId, CultureInfo.InvariantCulture));
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void AddSandboxRunDirectoryCandidate(HashSet<string> paths, string runId)
+        {
+            if (paths == null || string.IsNullOrWhiteSpace(runId))
+            {
+                return;
+            }
+
+            string safeRunId = new string(runId.Trim().Where(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_').ToArray());
+            if (string.IsNullOrWhiteSpace(safeRunId))
+            {
+                return;
+            }
+
+            AddSandboxRunDirectoryPathCandidate(paths, Path.Combine(GetSandboxRunDirectory(), safeRunId));
+        }
+
+        private void AddSandboxRunDirectoryPathCandidate(HashSet<string> paths, string candidate)
+        {
+            string safePath;
+            if (paths == null || !TryGetSafeSandboxRunDirectory(candidate, out safePath))
+            {
+                return;
+            }
+
+            paths.Add(safePath);
+        }
+
+        private bool TryGetSafeSandboxRunDirectory(string candidate, out string safePath)
+        {
+            safePath = string.Empty;
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                return false;
+            }
+
+            try
+            {
+                string root = Path.GetFullPath(GetSandboxRunDirectory()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string full = Path.GetFullPath(Environment.ExpandEnvironmentVariables(candidate.Trim().Trim('"'))).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase) ||
+                    !full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                safePath = full;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void RunSandboxAnalysisWorker(string sampleId, Dictionary<string, object> args, string actor)
         {
             VirtualSandboxRunner.SandboxTaskResult result;
@@ -2959,6 +3183,24 @@ namespace DataProtectorWebBridge.Services
             }
             catch
             {
+            }
+        }
+
+        private static bool TryDeleteDirectory(string path)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+                {
+                    return false;
+                }
+
+                Directory.Delete(path, true);
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -4372,6 +4614,14 @@ namespace DataProtectorWebBridge.Services
         public sealed class SandboxSampleDeleteRequest
         {
             public string sampleId { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class SandboxLogDeleteRequest
+        {
+            public string sampleId { get; set; }
+            public string runId { get; set; }
+            public bool all { get; set; }
             public string actor { get; set; }
         }
 
