@@ -653,7 +653,12 @@ typedef enum _DP_USER_HOOK_DEFENSE_OPERATION {
     DpUserHookDefenseOperationRuntimeInjectionRequired = 7,
     DpUserHookDefenseOperationRuntimeInjectionQueued = 8,
     DpUserHookDefenseOperationRuntimeInjectionFailed = 9,
-    DpUserHookDefenseOperationRuntimeInjectionSkipped = 10
+    DpUserHookDefenseOperationRuntimeInjectionSkipped = 10,
+    DpUserHookDefenseOperationBehaviorProcessAccess = 11,
+    DpUserHookDefenseOperationBehaviorThreadAccess = 12,
+    DpUserHookDefenseOperationSensitiveImageReload = 13,
+    DpUserHookDefenseOperationSensitiveImageAbnormalPath = 14,
+    DpUserHookDefenseOperationBehaviorRemoteThreadCreate = 15
 } DP_USER_HOOK_DEFENSE_OPERATION;
 
 #define DP_USER_HOOK_DEFENSE_POLICY_VERSION 4

@@ -18,6 +18,12 @@ Abstract:
 #include <ntstrsafe.h>
 #include <ntimage.h>
 
+extern
+UCHAR *
+PsGetProcessImageFileName(
+    _In_ PEPROCESS Process
+    );
+
 #if DP_ENABLE_USER_HOOK_DEFENSE_TRACE
 #define DP_USER_HOOK_TRACE(_format, ...) \
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "DataProtector[UserHook] " _format, __VA_ARGS__)
@@ -30,6 +36,71 @@ Abstract:
 #define DP_USER_HOOK_DEDUP_WINDOW_100NS (10LL * 1000LL * 10000LL)
 #define DP_USER_HOOK_MAX_APC_ATTEMPTS 3
 #define DP_USER_HOOK_INJECT_STUB_BYTES 128
+#define DP_USER_HOOK_OB_ALTITUDE L"385203.77"
+
+#ifndef PROCESS_CREATE_THREAD
+#define PROCESS_CREATE_THREAD             (0x0002)
+#endif
+
+#ifndef PROCESS_VM_OPERATION
+#define PROCESS_VM_OPERATION              (0x0008)
+#endif
+
+#ifndef PROCESS_VM_READ
+#define PROCESS_VM_READ                   (0x0010)
+#endif
+
+#ifndef PROCESS_VM_WRITE
+#define PROCESS_VM_WRITE                  (0x0020)
+#endif
+
+#ifndef PROCESS_DUP_HANDLE
+#define PROCESS_DUP_HANDLE                (0x0040)
+#endif
+
+#ifndef PROCESS_CREATE_PROCESS
+#define PROCESS_CREATE_PROCESS            (0x0080)
+#endif
+
+#ifndef PROCESS_SET_INFORMATION
+#define PROCESS_SET_INFORMATION           (0x0200)
+#endif
+
+#ifndef PROCESS_SUSPEND_RESUME
+#define PROCESS_SUSPEND_RESUME            (0x0800)
+#endif
+
+#ifndef THREAD_TERMINATE
+#define THREAD_TERMINATE                  (0x0001)
+#endif
+
+#ifndef THREAD_SUSPEND_RESUME
+#define THREAD_SUSPEND_RESUME             (0x0002)
+#endif
+
+#ifndef THREAD_GET_CONTEXT
+#define THREAD_GET_CONTEXT                (0x0008)
+#endif
+
+#ifndef THREAD_SET_CONTEXT
+#define THREAD_SET_CONTEXT                (0x0010)
+#endif
+
+#ifndef THREAD_SET_INFORMATION
+#define THREAD_SET_INFORMATION            (0x0020)
+#endif
+
+#ifndef THREAD_SET_THREAD_TOKEN
+#define THREAD_SET_THREAD_TOKEN           (0x0080)
+#endif
+
+#ifndef THREAD_IMPERSONATE
+#define THREAD_IMPERSONATE                (0x0100)
+#endif
+
+#ifndef THREAD_DIRECT_IMPERSONATION
+#define THREAD_DIRECT_IMPERSONATION       (0x0200)
+#endif
 
 typedef
 VOID
@@ -128,6 +199,7 @@ typedef struct _DP_USER_HOOK_TARGET_ENTRY {
     HANDLE ProcessId;
     ULONG State;
     ULONG AttemptCount;
+    ULONG SensitiveImageMask;
 } DP_USER_HOOK_TARGET_ENTRY, *PDP_USER_HOOK_TARGET_ENTRY;
 
 typedef struct _DP_USER_HOOK_APC_CONTEXT {
@@ -167,6 +239,8 @@ static ULONG gDpUserHookTrustedSignerSubjectsLengthBytes = 0;
 static ULONG gDpUserHookRuntimeDllPathLengthBytes = 0;
 static BOOLEAN gDpUserHookInitialized = FALSE;
 static BOOLEAN gDpUserHookImageNotifyRegistered = FALSE;
+static BOOLEAN gDpUserHookThreadNotifyRegistered = FALSE;
+static PVOID gDpUserHookObHandle = NULL;
 static ULONG gDpUserHookEventCount = 0;
 static ULONGLONG gDpUserHookEventSequence = 0;
 static ULONGLONG gDpUserHookDroppedEvents = 0;
@@ -215,6 +289,136 @@ DpUserHookFeatureEnabled(
 
     return FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_ENABLED) &&
            FlagOn(flags, FeatureFlag);
+}
+
+static
+BOOLEAN
+DpUserHookEnabled(
+    VOID
+    )
+{
+    return FlagOn(DpUserHookReadPolicyFlags(), DP_USER_HOOK_DEFENSE_FLAG_ENABLED);
+}
+
+static
+BOOLEAN
+DpUserHookAsciiEqualsInsensitive(
+    _In_z_ const CHAR *Left,
+    _In_z_ const CHAR *Right
+    )
+{
+    CHAR leftChar;
+    CHAR rightChar;
+
+    if (Left == NULL || Right == NULL) {
+        return FALSE;
+    }
+
+    for (;;) {
+        leftChar = *Left++;
+        rightChar = *Right++;
+
+        if (leftChar >= 'A' && leftChar <= 'Z') {
+            leftChar = (CHAR)(leftChar - 'A' + 'a');
+        }
+
+        if (rightChar >= 'A' && rightChar <= 'Z') {
+            rightChar = (CHAR)(rightChar - 'A' + 'a');
+        }
+
+        if (leftChar != rightChar) {
+            return FALSE;
+        }
+
+        if (leftChar == '\0') {
+            return TRUE;
+        }
+    }
+}
+
+static
+BOOLEAN
+DpUserHookIsTrustedBehaviorSource(
+    _In_opt_ PEPROCESS Process
+    )
+{
+    const CHAR *imageName;
+
+    if (Process == NULL) {
+        return TRUE;
+    }
+
+    imageName = (const CHAR *)PsGetProcessImageFileName(Process);
+    return DpUserHookAsciiEqualsInsensitive(imageName, "System") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "csrss.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "lsass.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "services.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "svchost.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "DataProtectorWebBridge.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "DataProtectorAgentClient.exe");
+}
+
+static
+VOID
+DpUserHookBuildAsciiProcessTarget(
+    _Out_writes_(TargetChars) PWCHAR Target,
+    _In_ ULONG TargetChars,
+    _In_z_ PCWSTR Prefix,
+    _In_opt_z_ const CHAR *SourceImageName,
+    _In_ HANDLE SourceProcessId,
+    _In_ HANDLE TargetProcessId,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_z_ const CHAR *TargetImageName
+    )
+{
+    ANSI_STRING ansi;
+    UNICODE_STRING unicode;
+    WCHAR sourceImageBuffer[64];
+    WCHAR targetImageBuffer[64];
+    NTSTATUS status;
+
+    if (Target == NULL || TargetChars == 0) {
+        return;
+    }
+
+    Target[0] = L'\0';
+    sourceImageBuffer[0] = L'\0';
+    targetImageBuffer[0] = L'\0';
+    if (SourceImageName != NULL && SourceImageName[0] != '\0') {
+        RtlInitAnsiString(&ansi, SourceImageName);
+        unicode.Buffer = sourceImageBuffer;
+        unicode.Length = 0;
+        unicode.MaximumLength = sizeof(sourceImageBuffer);
+        status = RtlAnsiStringToUnicodeString(&unicode, &ansi, FALSE);
+        if (!NT_SUCCESS(status)) {
+            sourceImageBuffer[0] = L'\0';
+        } else {
+            sourceImageBuffer[RTL_NUMBER_OF(sourceImageBuffer) - 1] = L'\0';
+        }
+    }
+
+    if (TargetImageName != NULL && TargetImageName[0] != '\0') {
+        RtlInitAnsiString(&ansi, TargetImageName);
+        unicode.Buffer = targetImageBuffer;
+        unicode.Length = 0;
+        unicode.MaximumLength = sizeof(targetImageBuffer);
+        status = RtlAnsiStringToUnicodeString(&unicode, &ansi, FALSE);
+        if (!NT_SUCCESS(status)) {
+            targetImageBuffer[0] = L'\0';
+        } else {
+            targetImageBuffer[RTL_NUMBER_OF(targetImageBuffer) - 1] = L'\0';
+        }
+    }
+
+    (VOID)RtlStringCchPrintfW(Target,
+                              TargetChars,
+                              L"%ws sourcePid=%Iu source=%ws targetPid=%Iu access=0x%08X target=%ws",
+                              Prefix,
+                              (ULONG_PTR)SourceProcessId,
+                              sourceImageBuffer,
+                              (ULONG_PTR)TargetProcessId,
+                              (ULONG)DesiredAccess,
+                              targetImageBuffer);
 }
 
 static
@@ -581,6 +785,35 @@ DpUserHookIsTrackedTargetProcess(
 
 static
 BOOLEAN
+DpUserHookMarkSensitiveImageLoaded(
+    _In_ HANDLE ProcessId,
+    _In_ ULONG ImageMask
+    )
+{
+    KIRQL oldIrql;
+    ULONG index;
+    BOOLEAN alreadyLoaded = FALSE;
+
+    if (ProcessId == NULL || ImageMask == 0) {
+        return FALSE;
+    }
+
+    KeAcquireSpinLock(&gDpUserHookTargetLock, &oldIrql);
+
+    for (index = 0; index < RTL_NUMBER_OF(gDpUserHookTargets); index++) {
+        if (gDpUserHookTargets[index].ProcessId == ProcessId) {
+            alreadyLoaded = FlagOn(gDpUserHookTargets[index].SensitiveImageMask, ImageMask) ? TRUE : FALSE;
+            gDpUserHookTargets[index].SensitiveImageMask |= ImageMask;
+            break;
+        }
+    }
+
+    KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
+    return alreadyLoaded;
+}
+
+static
+BOOLEAN
 DpUserHookMarkTargetInjectionQueued(
     _In_ HANDLE ProcessId,
     _Out_ PULONG AttemptCount
@@ -793,6 +1026,42 @@ DpUserHookClearEvents(
 }
 
 static
+ACCESS_MASK
+DpUserHookSensitiveProcessAccessMask(
+    VOID
+    )
+{
+    return PROCESS_CREATE_THREAD |
+           PROCESS_VM_OPERATION |
+           PROCESS_VM_READ |
+           PROCESS_VM_WRITE |
+           PROCESS_DUP_HANDLE |
+           PROCESS_CREATE_PROCESS |
+           PROCESS_SET_INFORMATION |
+           PROCESS_SUSPEND_RESUME |
+           WRITE_DAC |
+           WRITE_OWNER;
+}
+
+static
+ACCESS_MASK
+DpUserHookSensitiveThreadAccessMask(
+    VOID
+    )
+{
+    return THREAD_TERMINATE |
+           THREAD_SUSPEND_RESUME |
+           THREAD_GET_CONTEXT |
+           THREAD_SET_CONTEXT |
+           THREAD_SET_INFORMATION |
+           THREAD_SET_THREAD_TOKEN |
+           THREAD_IMPERSONATE |
+           THREAD_DIRECT_IMPERSONATION |
+           WRITE_DAC |
+           WRITE_OWNER;
+}
+
+static
 VOID
 DpUserHookQueueEvent(
     _In_ DP_USER_HOOK_DEFENSE_OPERATION Operation,
@@ -903,6 +1172,172 @@ DpUserHookQueueEvent(
                        Flags,
                        &targetText,
                        &processText);
+}
+
+static
+OB_PREOP_CALLBACK_STATUS
+DpUserHookObPreOperationCallback(
+    _In_ PVOID RegistrationContext,
+    _Inout_ POB_PRE_OPERATION_INFORMATION OperationInformation
+    )
+{
+    PEPROCESS sourceProcess;
+    HANDLE sourceProcessId;
+    ACCESS_MASK desiredAccess = 0;
+    ACCESS_MASK sensitiveAccess;
+    WCHAR target[DP_USER_HOOK_DEFENSE_TARGET_CHARS];
+    UNICODE_STRING targetString;
+    DP_USER_HOOK_DEFENSE_OPERATION operation;
+    PEPROCESS targetProcess = NULL;
+    HANDLE targetProcessId = NULL;
+    const CHAR *sourceImageName;
+    const CHAR *targetImageName = "";
+
+    UNREFERENCED_PARAMETER(RegistrationContext);
+
+    if (!DpUserHookEnabled() ||
+        OperationInformation == NULL ||
+        OperationInformation->Parameters == NULL ||
+        OperationInformation->KernelHandle) {
+
+        return OB_PREOP_SUCCESS;
+    }
+
+    sourceProcess = PsGetCurrentProcess();
+    sourceProcessId = PsGetCurrentProcessId();
+    sourceImageName = (const CHAR *)PsGetProcessImageFileName(sourceProcess);
+    if (sourceProcessId == NULL ||
+        sourceProcessId == (HANDLE)(ULONG_PTR)4 ||
+        DpUserHookIsTrustedBehaviorSource(sourceProcess)) {
+
+        return OB_PREOP_SUCCESS;
+    }
+
+    if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+        desiredAccess = OperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+    } else if (OperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+        desiredAccess = OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+    }
+
+    if (OperationInformation->ObjectType == *PsProcessType) {
+        targetProcess = (PEPROCESS)OperationInformation->Object;
+        targetProcessId = PsGetProcessId(targetProcess);
+        if (targetProcessId == sourceProcessId) {
+            return OB_PREOP_SUCCESS;
+        }
+
+        sensitiveAccess = desiredAccess & DpUserHookSensitiveProcessAccessMask();
+        if (sensitiveAccess == 0) {
+            return OB_PREOP_SUCCESS;
+        }
+
+        targetImageName = (const CHAR *)PsGetProcessImageFileName(targetProcess);
+        DpUserHookBuildAsciiProcessTarget(target,
+                                          RTL_NUMBER_OF(target),
+                                          L"process-access",
+                                          sourceImageName,
+                                          sourceProcessId,
+                                          targetProcessId,
+                                          desiredAccess,
+                                          targetImageName);
+        operation = DpUserHookDefenseOperationBehaviorProcessAccess;
+    } else if (OperationInformation->ObjectType == *PsThreadType) {
+        PETHREAD targetThread = (PETHREAD)OperationInformation->Object;
+        targetProcess = IoThreadToProcess(targetThread);
+        targetProcessId = PsGetProcessId(targetProcess);
+        if (targetProcessId == sourceProcessId) {
+            return OB_PREOP_SUCCESS;
+        }
+
+        sensitiveAccess = desiredAccess & DpUserHookSensitiveThreadAccessMask();
+        if (sensitiveAccess == 0) {
+            return OB_PREOP_SUCCESS;
+        }
+
+        targetImageName = (const CHAR *)PsGetProcessImageFileName(targetProcess);
+        DpUserHookBuildAsciiProcessTarget(target,
+                                          RTL_NUMBER_OF(target),
+                                          L"thread-access",
+                                          sourceImageName,
+                                          sourceProcessId,
+                                          targetProcessId,
+                                          desiredAccess,
+                                          targetImageName);
+        operation = DpUserHookDefenseOperationBehaviorThreadAccess;
+    } else {
+        return OB_PREOP_SUCCESS;
+    }
+
+    RtlInitUnicodeString(&targetString, target);
+    DpUserHookQueueEvent(operation,
+                         sourceProcessId,
+                         targetProcessId,
+                         STATUS_SUCCESS,
+                         &targetString,
+                         NULL,
+                         DpUserHookReadPolicyFlags());
+
+    return OB_PREOP_SUCCESS;
+}
+
+static
+VOID
+DpUserHookThreadNotify(
+    _In_ HANDLE ProcessId,
+    _In_ HANDLE ThreadId,
+    _In_ BOOLEAN Create
+    )
+{
+    HANDLE sourceProcessId;
+    PEPROCESS sourceProcess;
+    PEPROCESS targetProcess = NULL;
+    const CHAR *sourceImageName;
+    const CHAR *targetImageName = "";
+    WCHAR target[DP_USER_HOOK_DEFENSE_TARGET_CHARS];
+    UNICODE_STRING targetString;
+    NTSTATUS status;
+
+    if (!Create || !DpUserHookEnabled() || ProcessId == NULL) {
+        return;
+    }
+
+    sourceProcess = PsGetCurrentProcess();
+    sourceProcessId = PsGetCurrentProcessId();
+    if (sourceProcessId == NULL ||
+        sourceProcessId == ProcessId ||
+        sourceProcessId == (HANDLE)(ULONG_PTR)4 ||
+        DpUserHookIsTrustedBehaviorSource(sourceProcess)) {
+
+        return;
+    }
+
+    status = PsLookupProcessByProcessId(ProcessId, &targetProcess);
+    if (NT_SUCCESS(status)) {
+        targetImageName = (const CHAR *)PsGetProcessImageFileName(targetProcess);
+    }
+
+    sourceImageName = (const CHAR *)PsGetProcessImageFileName(sourceProcess);
+    (VOID)RtlStringCchPrintfW(target,
+                              RTL_NUMBER_OF(target),
+                              L"remote-thread sourcePid=%Iu source=%hs targetPid=%Iu thread=%Iu target=%hs",
+                              (ULONG_PTR)sourceProcessId,
+                              sourceImageName,
+                              (ULONG_PTR)ProcessId,
+                              (ULONG_PTR)ThreadId,
+                              targetImageName);
+
+    RtlInitUnicodeString(&targetString, target);
+    DpUserHookQueueEvent(DpUserHookDefenseOperationBehaviorRemoteThreadCreate,
+                         sourceProcessId,
+                         ProcessId,
+                         STATUS_SUCCESS,
+                         &targetString,
+                         NULL,
+                         DpUserHookReadPolicyFlags());
+
+    if (targetProcess != NULL) {
+        ObDereferenceObject(targetProcess);
+    }
 }
 
 static
@@ -1461,36 +1896,65 @@ DpUserHookImageHasSuffix(
 }
 
 static
+ULONG
+DpUserHookSensitiveImageMask(
+    _In_opt_ PUNICODE_STRING FullImageName
+    )
+{
+    typedef struct _DP_USER_HOOK_SENSITIVE_IMAGE_DESCRIPTOR {
+        PCWSTR Suffix;
+        ULONG Mask;
+    } DP_USER_HOOK_SENSITIVE_IMAGE_DESCRIPTOR;
+
+    static const DP_USER_HOOK_SENSITIVE_IMAGE_DESCRIPTOR HookSensitiveImages[] = {
+        { L"\\ntdll.dll", 0x00000001 },
+        { L"\\kernel32.dll", 0x00000002 },
+        { L"\\kernelbase.dll", 0x00000004 },
+        { L"\\user32.dll", 0x00000008 },
+        { L"\\advapi32.dll", 0x00000010 },
+        { L"\\wininet.dll", 0x00000020 },
+        { L"\\winhttp.dll", 0x00000040 },
+        { L"\\ws2_32.dll", 0x00000080 },
+        { L"\\crypt32.dll", 0x00000100 },
+        { L"\\bcrypt.dll", 0x00000200 },
+        { L"\\amsi.dll", 0x00000400 },
+        { L"\\dbghelp.dll", 0x00000800 },
+        { L"\\psapi.dll", 0x00001000 },
+        { L"\\version.dll", 0x00002000 }
+    };
+    ULONG index;
+
+    for (index = 0; index < RTL_NUMBER_OF(HookSensitiveImages); index++) {
+        if (DpUserHookImageHasSuffix(FullImageName, HookSensitiveImages[index].Suffix)) {
+            return HookSensitiveImages[index].Mask;
+        }
+    }
+
+    return 0;
+}
+
+static
 BOOLEAN
 DpUserHookIsHookSensitiveImage(
     _In_opt_ PUNICODE_STRING FullImageName
     )
 {
-    static const PCWSTR HookSensitiveImages[] = {
-        L"\\ntdll.dll",
-        L"\\kernel32.dll",
-        L"\\kernelbase.dll",
-        L"\\user32.dll",
-        L"\\advapi32.dll",
-        L"\\wininet.dll",
-        L"\\winhttp.dll",
-        L"\\ws2_32.dll",
-        L"\\crypt32.dll",
-        L"\\bcrypt.dll",
-        L"\\amsi.dll",
-        L"\\dbghelp.dll",
-        L"\\psapi.dll",
-        L"\\version.dll"
-    };
-    ULONG index;
+    return DpUserHookSensitiveImageMask(FullImageName) != 0;
+}
 
-    for (index = 0; index < RTL_NUMBER_OF(HookSensitiveImages); index++) {
-        if (DpUserHookImageHasSuffix(FullImageName, HookSensitiveImages[index])) {
-            return TRUE;
-        }
+static
+BOOLEAN
+DpUserHookIsExpectedSensitiveImagePath(
+    _In_opt_ PUNICODE_STRING FullImageName
+    )
+{
+    if (FullImageName == NULL || FullImageName->Buffer == NULL) {
+        return FALSE;
     }
 
-    return FALSE;
+    return DpUserHookUnicodeContainsLiteral(FullImageName, L"\\Windows\\System32\\") ||
+           DpUserHookUnicodeContainsLiteral(FullImageName, L"\\Windows\\SysWOW64\\") ||
+           DpUserHookUnicodeContainsLiteral(FullImageName, L"\\Windows\\WinSxS\\");
 }
 
 static
@@ -1501,6 +1965,9 @@ DpUserHookLoadImageNotify(
     _In_ PIMAGE_INFO ImageInfo
     )
 {
+    ULONG sensitiveMask;
+    BOOLEAN duplicateSensitiveImage;
+
     UNREFERENCED_PARAMETER(ImageInfo);
 
     if (!DpUserHookIsTrackedTargetProcess(ProcessId)) {
@@ -1509,8 +1976,9 @@ DpUserHookLoadImageNotify(
 
     DpUserHookTryQueueRuntimeInjection(ProcessId, FullImageName, ImageInfo);
 
+    sensitiveMask = DpUserHookSensitiveImageMask(FullImageName);
     if (!DpUserHookFeatureEnabled(DP_USER_HOOK_DEFENSE_FLAG_IMAGE_LOAD_MONITOR) ||
-        !DpUserHookIsHookSensitiveImage(FullImageName)) {
+        sensitiveMask == 0) {
 
         return;
     }
@@ -1522,6 +1990,27 @@ DpUserHookLoadImageNotify(
                          FullImageName,
                          NULL,
                          DpUserHookReadPolicyFlags());
+
+    duplicateSensitiveImage = DpUserHookMarkSensitiveImageLoaded(ProcessId, sensitiveMask);
+    if (duplicateSensitiveImage) {
+        DpUserHookQueueEvent(DpUserHookDefenseOperationSensitiveImageReload,
+                             ProcessId,
+                             NULL,
+                             STATUS_SUCCESS,
+                             FullImageName,
+                             NULL,
+                             DpUserHookReadPolicyFlags());
+    }
+
+    if (!DpUserHookIsExpectedSensitiveImagePath(FullImageName)) {
+        DpUserHookQueueEvent(DpUserHookDefenseOperationSensitiveImageAbnormalPath,
+                             ProcessId,
+                             NULL,
+                             STATUS_SUCCESS,
+                             FullImageName,
+                             NULL,
+                             DpUserHookReadPolicyFlags());
+    }
 }
 
 VOID
@@ -1578,6 +2067,9 @@ DpUserHookDefenseInitialize(
     )
 {
     NTSTATUS status;
+    OB_OPERATION_REGISTRATION operationRegistrations[2];
+    OB_CALLBACK_REGISTRATION callbackRegistration;
+    UNICODE_STRING altitude;
 
     InitializeListHead(&gDpUserHookEvents);
     KeInitializeSpinLock(&gDpUserHookEventLock);
@@ -1611,6 +2103,42 @@ DpUserHookDefenseInitialize(
         return status;
     }
 
+    status = PsSetCreateThreadNotifyRoutine(DpUserHookThreadNotify);
+    if (NT_SUCCESS(status)) {
+        gDpUserHookThreadNotifyRegistered = TRUE;
+    } else {
+        DP_USER_HOOK_TRACE("PsSetCreateThreadNotifyRoutine failed status=0x%08X\n", status);
+        DpUserHookDefenseUninitialize();
+        return status;
+    }
+
+    RtlZeroMemory(operationRegistrations, sizeof(operationRegistrations));
+    operationRegistrations[0].ObjectType = PsProcessType;
+    operationRegistrations[0].Operations = OB_OPERATION_HANDLE_CREATE |
+                                           OB_OPERATION_HANDLE_DUPLICATE;
+    operationRegistrations[0].PreOperation = DpUserHookObPreOperationCallback;
+    operationRegistrations[0].PostOperation = NULL;
+    operationRegistrations[1].ObjectType = PsThreadType;
+    operationRegistrations[1].Operations = OB_OPERATION_HANDLE_CREATE |
+                                           OB_OPERATION_HANDLE_DUPLICATE;
+    operationRegistrations[1].PreOperation = DpUserHookObPreOperationCallback;
+    operationRegistrations[1].PostOperation = NULL;
+
+    RtlInitUnicodeString(&altitude, DP_USER_HOOK_OB_ALTITUDE);
+    RtlZeroMemory(&callbackRegistration, sizeof(callbackRegistration));
+    callbackRegistration.Version = OB_FLT_REGISTRATION_VERSION;
+    callbackRegistration.OperationRegistrationCount = RTL_NUMBER_OF(operationRegistrations);
+    callbackRegistration.Altitude = altitude;
+    callbackRegistration.OperationRegistration = operationRegistrations;
+
+    status = ObRegisterCallbacks(&callbackRegistration, &gDpUserHookObHandle);
+    if (!NT_SUCCESS(status)) {
+        gDpUserHookObHandle = NULL;
+        DP_USER_HOOK_TRACE("ObRegisterCallbacks failed status=0x%08X\n", status);
+        DpUserHookDefenseUninitialize();
+        return status;
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -1619,6 +2147,16 @@ DpUserHookDefenseUninitialize(
     VOID
     )
 {
+    if (gDpUserHookObHandle != NULL) {
+        ObUnRegisterCallbacks(gDpUserHookObHandle);
+        gDpUserHookObHandle = NULL;
+    }
+
+    if (gDpUserHookThreadNotifyRegistered) {
+        PsRemoveCreateThreadNotifyRoutine(DpUserHookThreadNotify);
+        gDpUserHookThreadNotifyRegistered = FALSE;
+    }
+
     if (gDpUserHookImageNotifyRegistered) {
         PsRemoveLoadImageNotifyRoutine(DpUserHookLoadImageNotify);
         gDpUserHookImageNotifyRegistered = FALSE;

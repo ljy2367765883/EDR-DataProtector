@@ -20,8 +20,6 @@
 #define DP_RUNTIME_HOOK_PROBE_BYTES 32
 #define DP_RUNTIME_INTEGRITY_INTERVAL_MS 1500
 #define DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS 30000
-#define DP_RUNTIME_SYSCALL_SCAN_INTERVAL_MS 10000
-#define DP_RUNTIME_SYSCALL_SCAN_REGION_LIMIT (1024 * 1024)
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -110,8 +108,6 @@ static HANDLE gIntegrityThread;
 static volatile LONG gRuntimeShuttingDown;
 static DP_RUNTIME_HOOK_ENTRY gHookEntries[DP_RUNTIME_MAX_HOOKS];
 static DWORD gHookEntryCount;
-static DWORD gLastSyscallScanTick;
-static DWORD gLastSyscallRiskReportTick;
 
 static VOID
 DpRuntimeWriteEvent(
@@ -897,120 +893,6 @@ DpRuntimeIsLikelySyscallStub(
     return FALSE;
 }
 
-static BOOL
-DpRuntimeContainsSyscallStub(
-    _In_reads_(Length) const BYTE *Bytes,
-    _In_ SIZE_T Length
-    )
-{
-    SIZE_T i;
-
-    if (Bytes == NULL || Length < 11) {
-        return FALSE;
-    }
-
-    for (i = 0; i + 10 < Length; i++) {
-        if (Bytes[i] == 0x4C &&
-            Bytes[i + 1] == 0x8B &&
-            Bytes[i + 2] == 0xD1 &&
-            Bytes[i + 3] == 0xB8 &&
-            Bytes[i + 8] == 0x0F &&
-            Bytes[i + 9] == 0x05 &&
-            (Bytes[i + 10] == 0xC3 || Bytes[i + 10] == 0xC2)) {
-            return TRUE;
-        }
-
-        if (Bytes[i] == 0x0F &&
-            Bytes[i + 1] == 0x05 &&
-            (Bytes[i + 2] == 0xC3 || Bytes[i + 2] == 0xC2)) {
-            return TRUE;
-        }
-    }
-
-    return FALSE;
-}
-
-static BOOL
-DpRuntimeIsExecutableMemoryProtection(
-    _In_ DWORD Protect
-    )
-{
-    if ((Protect & PAGE_GUARD) != 0 || (Protect & PAGE_NOACCESS) != 0) {
-        return FALSE;
-    }
-
-    return DpRuntimeIsExecutableProtection(Protect);
-}
-
-static VOID
-DpRuntimeScanPrivateSyscallStubs(VOID)
-{
-    BYTE *cursor = NULL;
-    SYSTEM_INFO systemInfo;
-    DWORD nowTick = GetTickCount();
-
-    if (nowTick - gLastSyscallScanTick < DP_RUNTIME_SYSCALL_SCAN_INTERVAL_MS) {
-        return;
-    }
-
-    gLastSyscallScanTick = nowTick;
-    GetSystemInfo(&systemInfo);
-    cursor = (BYTE *)systemInfo.lpMinimumApplicationAddress;
-
-    while (cursor < (BYTE *)systemInfo.lpMaximumApplicationAddress) {
-        MEMORY_BASIC_INFORMATION mbi;
-        BYTE *buffer;
-        SIZE_T scanSize;
-        SIZE_T bytesRead = 0;
-        WCHAR target[160];
-
-        if (InterlockedCompareExchange(&gRuntimeShuttingDown, 0, 0) != 0) {
-            return;
-        }
-
-        if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi)) {
-            break;
-        }
-
-        if (mbi.RegionSize == 0) {
-            break;
-        }
-
-        if (mbi.State == MEM_COMMIT &&
-            mbi.Type == MEM_PRIVATE &&
-            DpRuntimeIsExecutableMemoryProtection(mbi.Protect)) {
-            scanSize = mbi.RegionSize;
-            if (scanSize > DP_RUNTIME_SYSCALL_SCAN_REGION_LIMIT) {
-                scanSize = DP_RUNTIME_SYSCALL_SCAN_REGION_LIMIT;
-            }
-
-            buffer = (BYTE *)HeapAlloc(GetProcessHeap(), 0, scanSize);
-            if (buffer != NULL) {
-                if (ReadProcessMemory(GetCurrentProcess(), mbi.BaseAddress, buffer, scanSize, &bytesRead) &&
-                    DpRuntimeContainsSyscallStub(buffer, bytesRead)) {
-                    if (nowTick - gLastSyscallRiskReportTick >= DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS) {
-                        gLastSyscallRiskReportTick = nowTick;
-                        if (SUCCEEDED(StringCchPrintfW(target,
-                                                       ARRAYSIZE(target),
-                                                       L"private-executable-memory:%p size=%Iu",
-                                                       mbi.BaseAddress,
-                                                       mbi.RegionSize))) {
-                            DpRuntimeWriteEvent(L"userhook.runtime.direct-syscall-risk", target, ERROR_SUCCESS, FALSE);
-                        }
-                    }
-
-                    HeapFree(GetProcessHeap(), 0, buffer);
-                    return;
-                }
-
-                HeapFree(GetProcessHeap(), 0, buffer);
-            }
-        }
-
-        cursor = (BYTE *)mbi.BaseAddress + mbi.RegionSize;
-    }
-}
-
 static VOID
 DpRuntimeCaptureHookBytes(VOID)
 {
@@ -1153,7 +1035,6 @@ DpRuntimeIntegrityThreadProc(
 
     while (WaitForSingleObject(gIntegrityStopEvent, DP_RUNTIME_INTEGRITY_INTERVAL_MS) == WAIT_TIMEOUT) {
         DpRuntimeCheckHookIntegrity();
-        DpRuntimeScanPrivateSyscallStubs();
     }
 
     return ERROR_SUCCESS;

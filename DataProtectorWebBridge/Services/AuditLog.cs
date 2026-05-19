@@ -152,7 +152,11 @@ namespace DataProtectorWebBridge.Services
                 action.StartsWith("userhook.runtime.unhook-detected", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.runtime.hook-overwrite-detected", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.runtime.syscall-bypass-risk", StringComparison.OrdinalIgnoreCase) ||
-                action.StartsWith("userhook.runtime.direct-syscall-risk", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.behavior-process-access", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.behavior-thread-access", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.behavior-remote-thread-create", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.sensitive-image-reload", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.sensitive-image-abnormal-path", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.clipboard.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.screenshot.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.IndexOf(".blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||

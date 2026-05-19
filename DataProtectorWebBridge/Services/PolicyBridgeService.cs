@@ -88,6 +88,11 @@ namespace DataProtectorWebBridge.Services
         private const uint UserHookOperationRuntimeInjectionQueued = 8;
         private const uint UserHookOperationRuntimeInjectionFailed = 9;
         private const uint UserHookOperationRuntimeInjectionSkipped = 10;
+        private const uint UserHookOperationBehaviorProcessAccess = 11;
+        private const uint UserHookOperationBehaviorThreadAccess = 12;
+        private const uint UserHookOperationSensitiveImageReload = 13;
+        private const uint UserHookOperationSensitiveImageAbnormalPath = 14;
+        private const uint UserHookOperationBehaviorRemoteThreadCreate = 15;
         private const uint UserHookDefenseFlagEnabled = 0x00000001;
         private const uint UserHookDefenseFlagEarlyProcessInjection = 0x00000002;
         private const uint UserHookDefenseFlagImageLoadMonitor = 0x00000004;
@@ -2725,6 +2730,11 @@ namespace DataProtectorWebBridge.Services
             if (operation == UserHookOperationRuntimeInjectionQueued) return "runtime-injection-queued";
             if (operation == UserHookOperationRuntimeInjectionFailed) return "runtime-injection-failed";
             if (operation == UserHookOperationRuntimeInjectionSkipped) return "runtime-injection-skipped";
+            if (operation == UserHookOperationBehaviorProcessAccess) return "behavior-process-access";
+            if (operation == UserHookOperationBehaviorThreadAccess) return "behavior-thread-access";
+            if (operation == UserHookOperationSensitiveImageReload) return "sensitive-image-reload";
+            if (operation == UserHookOperationSensitiveImageAbnormalPath) return "sensitive-image-abnormal-path";
+            if (operation == UserHookOperationBehaviorRemoteThreadCreate) return "behavior-remote-thread-create";
             return "unknown";
         }
 
