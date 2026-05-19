@@ -9,6 +9,8 @@ param(
 
     [switch]$UsbCryptTrace,
 
+    [switch]$AllowInvalidKernelSignature,
+
     [switch]$AllowInvalidUsbRuntimeKernelSignature
 )
 
@@ -41,7 +43,7 @@ function Invoke-Checked {
     }
 }
 
-function Invoke-UsbRuntimeSigning {
+function Invoke-ReleaseDriverSigning {
     param(
         [Parameter(Mandatory = $true)]
         [string]$FilePath
@@ -59,7 +61,7 @@ function Invoke-UsbRuntimeSigning {
     try {
         & $cSignTool sign /r $dSignRule /f $FilePath /ac
         if ($LASTEXITCODE -ne 0) {
-            throw "USB runtime signing failed with exit code $LASTEXITCODE for: $FilePath"
+            throw "Driver release signing failed with exit code $LASTEXITCODE for: $FilePath"
         }
     }
     finally {
@@ -68,19 +70,19 @@ function Invoke-UsbRuntimeSigning {
 
     $signature = Get-AuthenticodeSignature -LiteralPath $FilePath
     if ($null -eq $signature.SignerCertificate) {
-        throw "USB runtime signing verification failed; no signer certificate was found for: $FilePath"
+        throw "Driver release signing verification failed; no signer certificate was found for: $FilePath"
     }
 
     if (-not [string]::Equals($signature.SignerCertificate.Thumbprint, $usbRuntimeSignerThumbprint, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "USB runtime signing verification failed; unexpected signer thumbprint '$($signature.SignerCertificate.Thumbprint)' for: $FilePath"
+        throw "Driver release signing verification failed; unexpected signer thumbprint '$($signature.SignerCertificate.Thumbprint)' for: $FilePath"
     }
 
     if ($signature.SignerCertificate.Subject -notlike "*$usbRuntimeSignerSubject*") {
-        throw "USB runtime signing verification failed; unexpected signer subject '$($signature.SignerCertificate.Subject)' for: $FilePath"
+        throw "Driver release signing verification failed; unexpected signer subject '$($signature.SignerCertificate.Subject)' for: $FilePath"
     }
 }
 
-function Invoke-UsbRuntimeKernelSigningVerification {
+function Invoke-KernelModeSigningVerification {
     param(
         [Parameter(Mandatory = $true)]
         [string]$FilePath
@@ -92,12 +94,31 @@ function Invoke-UsbRuntimeKernelSigningVerification {
 
     & $signtool verify /v /kp $FilePath
     if ($LASTEXITCODE -ne 0) {
-        if ($AllowInvalidUsbRuntimeKernelSignature) {
-            Write-Warning "USB runtime kernel-mode signature verification failed for: $FilePath. Continuing because -AllowInvalidUsbRuntimeKernelSignature was specified. This package is not a production driver-signing release and may fail to load with Win32=577 on default Windows systems."
+        if ($AllowInvalidKernelSignature -or $AllowInvalidUsbRuntimeKernelSignature) {
+            Write-Warning "Kernel-mode signature verification failed for: $FilePath. Continuing because an allow-invalid kernel signature switch was specified. This package is not a production driver-signing release and may fail to load with Win32=577 on default Windows systems."
             return
         }
 
-        throw "USB runtime kernel-mode signature verification failed for: $FilePath. Windows will reject this driver at load time, usually as Win32=577. Use a currently valid kernel-mode signing certificate or Microsoft attestation/WHQL signing for release builds."
+        throw "Kernel-mode signature verification failed for: $FilePath. Windows will reject this driver at load time, usually as Win32=577. Use a currently valid kernel-mode signing certificate or Microsoft attestation/WHQL signing for release builds."
+    }
+}
+
+function Invoke-ServerDriverArtifactSigning {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServerPublish
+    )
+
+    $driverArtifacts = Get-ChildItem -LiteralPath $ServerPublish -Recurse -File |
+        Where-Object { $_.Extension -in @(".sys", ".cat") } |
+        Sort-Object @{ Expression = { if ($_.Extension -ieq ".sys") { 0 } else { 1 } } }, FullName
+
+    foreach ($artifact in $driverArtifacts) {
+        Invoke-ReleaseDriverSigning $artifact.FullName
+    }
+
+    foreach ($artifact in $driverArtifacts) {
+        Invoke-KernelModeSigningVerification $artifact.FullName
     }
 }
 
@@ -252,6 +273,7 @@ try {
     if (Test-Path -LiteralPath (Join-Path $driverPackage "DataProtector.inf")) {
         Copy-Item -LiteralPath (Join-Path $driverPackage "DataProtector.inf") -Destination $serverSandboxKernelPublish -Force
     }
+    Invoke-ServerDriverArtifactSigning $serverPublish
 
     $agentClientFiles = @(
         "DataProtectorAgentClient.exe",
@@ -282,10 +304,10 @@ try {
         if (Test-Path -LiteralPath $usbCryptDriverCertificate) {
             Copy-Item -LiteralPath $usbCryptDriverCertificate -Destination $runtimeDriverStaging -Force
         }
-        Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
-        Invoke-UsbRuntimeSigning (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
-        Invoke-UsbRuntimeKernelSigningVerification (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
-        Invoke-UsbRuntimeKernelSigningVerification (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
+        Invoke-ReleaseDriverSigning (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
+        Invoke-ReleaseDriverSigning (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
+        Invoke-KernelModeSigningVerification (Join-Path $runtimeDriverStaging "DataProtectorUsbCrypt.sys")
+        Invoke-KernelModeSigningVerification (Join-Path $runtimeDriverStaging "dataprotectorusbcrypt.cat")
         Compress-Archive -Path (Join-Path $runtimeStaging "*") -DestinationPath (Join-Path $serverUsbRuntimePublish "DataProtectorUsbRuntime.zip") -Force
     }
     finally {
