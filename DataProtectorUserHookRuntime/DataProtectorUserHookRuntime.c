@@ -7,6 +7,7 @@
 #include <wintrust.h>
 #include <softpub.h>
 #include <stdio.h>
+#include <string.h>
 #include <strsafe.h>
 #include <MinHook.h>
 
@@ -15,6 +16,12 @@
 #define DP_RUNTIME_MAX_TEXT 1024
 #define DP_RUNTIME_MAX_POLICY_TEXT 32768
 #define DP_RUNTIME_STATUS_BLOCKED 0xC0000022u
+#define DP_RUNTIME_MAX_HOOKS 32
+#define DP_RUNTIME_HOOK_PROBE_BYTES 32
+#define DP_RUNTIME_INTEGRITY_INTERVAL_MS 1500
+#define DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS 30000
+#define DP_RUNTIME_SYSCALL_SCAN_INTERVAL_MS 10000
+#define DP_RUNTIME_SYSCALL_SCAN_REGION_LIMIT (1024 * 1024)
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -27,6 +34,25 @@ typedef enum _DP_RUNTIME_PROCESS_MATCH_MODE {
     DpRuntimeMatchDirectory = 1,
     DpRuntimeMatchExactPath = 2
 } DP_RUNTIME_PROCESS_MATCH_MODE;
+
+typedef struct _DP_RUNTIME_HOOK_ENTRY {
+    WCHAR ModuleName[32];
+    CHAR ApiName[64];
+    WCHAR DisplayName[128];
+    LPVOID Target;
+    LPVOID Detour;
+    LPVOID *OriginalSlot;
+    BYTE OriginalBytes[DP_RUNTIME_HOOK_PROBE_BYTES];
+    BYTE HookBytes[DP_RUNTIME_HOOK_PROBE_BYTES];
+    SIZE_T ProbeLength;
+    BOOL Created;
+    BOOL Enabled;
+    BOOL IsNtdllSyscall;
+    BOOL HookBytesCaptured;
+    BOOL TamperActive;
+    BOOL SyscallRiskActive;
+    DWORD LastReportTick;
+} DP_RUNTIME_HOOK_ENTRY;
 
 typedef HANDLE (WINAPI *PFN_CreateRemoteThread)(
     HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
@@ -76,7 +102,16 @@ static WCHAR gCurrentProcessPath[MAX_PATH * 2];
 static DWORD gCurrentProcessId;
 static BOOL gAuditOnly = TRUE;
 static BOOL gEnabled = TRUE;
+static BOOL gMinHookInitialized;
+static BOOL gHooksEnabled;
 static HANDLE gInitThread;
+static HANDLE gIntegrityStopEvent;
+static HANDLE gIntegrityThread;
+static volatile LONG gRuntimeShuttingDown;
+static DP_RUNTIME_HOOK_ENTRY gHookEntries[DP_RUNTIME_MAX_HOOKS];
+static DWORD gHookEntryCount;
+static DWORD gLastSyscallScanTick;
+static DWORD gLastSyscallRiskReportTick;
 
 static VOID
 DpRuntimeWriteEvent(
@@ -825,6 +860,326 @@ DpRuntimeIsExecutableProtection(
     return (Protection & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
+static BOOL
+DpRuntimeReadCodeBytes(
+    _In_ LPVOID Address,
+    _Out_writes_(Length) BYTE *Buffer,
+    _In_ SIZE_T Length
+    )
+{
+    __try {
+        CopyMemory(Buffer, Address, Length);
+        return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ZeroMemory(Buffer, Length);
+        return FALSE;
+    }
+}
+
+static BOOL
+DpRuntimeIsLikelySyscallStub(
+    _In_reads_(Length) const BYTE *Bytes,
+    _In_ SIZE_T Length
+    )
+{
+    SIZE_T i;
+
+    if (Bytes == NULL || Length < 8) {
+        return FALSE;
+    }
+
+    for (i = 0; i + 2 < Length; i++) {
+        if (Bytes[i] == 0x0F && Bytes[i + 1] == 0x05) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeContainsSyscallStub(
+    _In_reads_(Length) const BYTE *Bytes,
+    _In_ SIZE_T Length
+    )
+{
+    SIZE_T i;
+
+    if (Bytes == NULL || Length < 11) {
+        return FALSE;
+    }
+
+    for (i = 0; i + 10 < Length; i++) {
+        if (Bytes[i] == 0x4C &&
+            Bytes[i + 1] == 0x8B &&
+            Bytes[i + 2] == 0xD1 &&
+            Bytes[i + 3] == 0xB8 &&
+            Bytes[i + 8] == 0x0F &&
+            Bytes[i + 9] == 0x05 &&
+            (Bytes[i + 10] == 0xC3 || Bytes[i + 10] == 0xC2)) {
+            return TRUE;
+        }
+
+        if (Bytes[i] == 0x0F &&
+            Bytes[i + 1] == 0x05 &&
+            (Bytes[i + 2] == 0xC3 || Bytes[i + 2] == 0xC2)) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeIsExecutableMemoryProtection(
+    _In_ DWORD Protect
+    )
+{
+    if ((Protect & PAGE_GUARD) != 0 || (Protect & PAGE_NOACCESS) != 0) {
+        return FALSE;
+    }
+
+    return DpRuntimeIsExecutableProtection(Protect);
+}
+
+static VOID
+DpRuntimeScanPrivateSyscallStubs(VOID)
+{
+    BYTE *cursor = NULL;
+    SYSTEM_INFO systemInfo;
+    DWORD nowTick = GetTickCount();
+
+    if (nowTick - gLastSyscallScanTick < DP_RUNTIME_SYSCALL_SCAN_INTERVAL_MS) {
+        return;
+    }
+
+    gLastSyscallScanTick = nowTick;
+    GetSystemInfo(&systemInfo);
+    cursor = (BYTE *)systemInfo.lpMinimumApplicationAddress;
+
+    while (cursor < (BYTE *)systemInfo.lpMaximumApplicationAddress) {
+        MEMORY_BASIC_INFORMATION mbi;
+        BYTE *buffer;
+        SIZE_T scanSize;
+        SIZE_T bytesRead = 0;
+        WCHAR target[160];
+
+        if (InterlockedCompareExchange(&gRuntimeShuttingDown, 0, 0) != 0) {
+            return;
+        }
+
+        if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi)) {
+            break;
+        }
+
+        if (mbi.RegionSize == 0) {
+            break;
+        }
+
+        if (mbi.State == MEM_COMMIT &&
+            mbi.Type == MEM_PRIVATE &&
+            DpRuntimeIsExecutableMemoryProtection(mbi.Protect)) {
+            scanSize = mbi.RegionSize;
+            if (scanSize > DP_RUNTIME_SYSCALL_SCAN_REGION_LIMIT) {
+                scanSize = DP_RUNTIME_SYSCALL_SCAN_REGION_LIMIT;
+            }
+
+            buffer = (BYTE *)HeapAlloc(GetProcessHeap(), 0, scanSize);
+            if (buffer != NULL) {
+                if (ReadProcessMemory(GetCurrentProcess(), mbi.BaseAddress, buffer, scanSize, &bytesRead) &&
+                    DpRuntimeContainsSyscallStub(buffer, bytesRead)) {
+                    if (nowTick - gLastSyscallRiskReportTick >= DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS) {
+                        gLastSyscallRiskReportTick = nowTick;
+                        if (SUCCEEDED(StringCchPrintfW(target,
+                                                       ARRAYSIZE(target),
+                                                       L"private-executable-memory:%p size=%Iu",
+                                                       mbi.BaseAddress,
+                                                       mbi.RegionSize))) {
+                            DpRuntimeWriteEvent(L"userhook.runtime.direct-syscall-risk", target, ERROR_SUCCESS, FALSE);
+                        }
+                    }
+
+                    HeapFree(GetProcessHeap(), 0, buffer);
+                    return;
+                }
+
+                HeapFree(GetProcessHeap(), 0, buffer);
+            }
+        }
+
+        cursor = (BYTE *)mbi.BaseAddress + mbi.RegionSize;
+    }
+}
+
+static VOID
+DpRuntimeCaptureHookBytes(VOID)
+{
+    DWORD i;
+
+    for (i = 0; i < gHookEntryCount; i++) {
+        DP_RUNTIME_HOOK_ENTRY *entry = &gHookEntries[i];
+        if (!entry->Created || entry->Target == NULL) {
+            continue;
+        }
+
+        if (DpRuntimeReadCodeBytes(entry->Target, entry->HookBytes, entry->ProbeLength)) {
+            entry->HookBytesCaptured = TRUE;
+            entry->Enabled = TRUE;
+        }
+    }
+}
+
+static BOOL
+DpRuntimeShouldReportHookTamper(
+    _Inout_ DP_RUNTIME_HOOK_ENTRY *Entry,
+    _In_ DWORD NowTick,
+    _In_ BOOL IsActiveFlag
+    )
+{
+    if (!IsActiveFlag) {
+        return TRUE;
+    }
+
+    if (NowTick - Entry->LastReportTick >= DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static VOID
+DpRuntimeTryRestoreHook(
+    _Inout_ DP_RUNTIME_HOOK_ENTRY *Entry
+    )
+{
+    MH_STATUS status;
+    BYTE restoredBytes[DP_RUNTIME_HOOK_PROBE_BYTES];
+
+    status = MH_DisableHook(Entry->Target);
+    if (status != MH_OK && status != MH_ERROR_DISABLED) {
+        Entry->Enabled = FALSE;
+        DpRuntimeWriteEvent(L"userhook.runtime.unhook-restore-failed", Entry->DisplayName, (DWORD)status, TRUE);
+        return;
+    }
+
+    status = MH_EnableHook(Entry->Target);
+    if (status == MH_OK || status == MH_ERROR_ENABLED) {
+        if (DpRuntimeReadCodeBytes(Entry->Target, restoredBytes, Entry->ProbeLength) &&
+            memcmp(restoredBytes, Entry->HookBytes, Entry->ProbeLength) == 0) {
+            Entry->Enabled = TRUE;
+            Entry->TamperActive = FALSE;
+            Entry->SyscallRiskActive = FALSE;
+            DpRuntimeWriteEvent(L"userhook.runtime.unhook-restored", Entry->DisplayName, ERROR_SUCCESS, FALSE);
+            return;
+        }
+
+        Entry->Enabled = FALSE;
+        DpRuntimeWriteEvent(L"userhook.runtime.unhook-restore-verify-failed", Entry->DisplayName, ERROR_INVALID_DATA, TRUE);
+        return;
+    }
+
+    Entry->Enabled = FALSE;
+    DpRuntimeWriteEvent(L"userhook.runtime.unhook-restore-failed", Entry->DisplayName, (DWORD)status, TRUE);
+}
+
+static VOID
+DpRuntimeCheckHookIntegrity(VOID)
+{
+    DWORD i;
+    DWORD nowTick = GetTickCount();
+
+    for (i = 0; i < gHookEntryCount; i++) {
+        BYTE currentBytes[DP_RUNTIME_HOOK_PROBE_BYTES];
+        BOOL matchesHook;
+        BOOL matchesOriginal;
+        BOOL isSyscallStub;
+        BOOL shouldReport;
+        DP_RUNTIME_HOOK_ENTRY *entry = &gHookEntries[i];
+
+        if (InterlockedCompareExchange(&gRuntimeShuttingDown, 0, 0) != 0) {
+            return;
+        }
+
+        if (!entry->Created || !entry->HookBytesCaptured || entry->Target == NULL) {
+            continue;
+        }
+
+        if (!DpRuntimeReadCodeBytes(entry->Target, currentBytes, entry->ProbeLength)) {
+            shouldReport = DpRuntimeShouldReportHookTamper(entry, nowTick, entry->TamperActive);
+            entry->TamperActive = TRUE;
+            entry->LastReportTick = shouldReport ? nowTick : entry->LastReportTick;
+            if (shouldReport) {
+                DpRuntimeWriteEvent(L"userhook.runtime.hook-probe-failed", entry->DisplayName, GetLastError(), FALSE);
+            }
+            continue;
+        }
+
+        matchesHook = (memcmp(currentBytes, entry->HookBytes, entry->ProbeLength) == 0);
+        if (matchesHook) {
+            entry->TamperActive = FALSE;
+            entry->SyscallRiskActive = FALSE;
+            continue;
+        }
+
+        matchesOriginal = (memcmp(currentBytes, entry->OriginalBytes, entry->ProbeLength) == 0);
+        isSyscallStub = entry->IsNtdllSyscall && DpRuntimeIsLikelySyscallStub(currentBytes, entry->ProbeLength);
+
+        shouldReport = DpRuntimeShouldReportHookTamper(entry, nowTick, entry->TamperActive);
+        entry->TamperActive = TRUE;
+        entry->LastReportTick = shouldReport ? nowTick : entry->LastReportTick;
+        if (shouldReport) {
+            if (matchesOriginal) {
+                DpRuntimeWriteEvent(L"userhook.runtime.unhook-detected", entry->DisplayName, ERROR_SUCCESS, FALSE);
+            } else {
+                DpRuntimeWriteEvent(L"userhook.runtime.hook-overwrite-detected", entry->DisplayName, ERROR_INVALID_DATA, FALSE);
+            }
+        }
+
+        if (isSyscallStub && !entry->SyscallRiskActive) {
+            entry->SyscallRiskActive = TRUE;
+            DpRuntimeWriteEvent(L"userhook.runtime.syscall-bypass-risk", entry->DisplayName, ERROR_SUCCESS, FALSE);
+        }
+
+        DpRuntimeTryRestoreHook(entry);
+    }
+}
+
+static DWORD WINAPI
+DpRuntimeIntegrityThreadProc(
+    _In_opt_ LPVOID Parameter
+    )
+{
+    UNREFERENCED_PARAMETER(Parameter);
+
+    while (WaitForSingleObject(gIntegrityStopEvent, DP_RUNTIME_INTEGRITY_INTERVAL_MS) == WAIT_TIMEOUT) {
+        DpRuntimeCheckHookIntegrity();
+        DpRuntimeScanPrivateSyscallStubs();
+    }
+
+    return ERROR_SUCCESS;
+}
+
+static VOID
+DpRuntimeStopIntegrityMonitor(VOID)
+{
+    InterlockedExchange(&gRuntimeShuttingDown, 1);
+
+    if (gIntegrityStopEvent != NULL) {
+        SetEvent(gIntegrityStopEvent);
+    }
+
+    if (gIntegrityThread != NULL) {
+        WaitForSingleObject(gIntegrityThread, 1000);
+        CloseHandle(gIntegrityThread);
+        gIntegrityThread = NULL;
+    }
+
+    if (gIntegrityStopEvent != NULL) {
+        CloseHandle(gIntegrityStopEvent);
+        gIntegrityStopEvent = NULL;
+    }
+}
+
 static HANDLE WINAPI
 DpHookCreateRemoteThread(
     HANDLE processHandle,
@@ -1253,6 +1608,8 @@ DpRuntimeHookApi(
 {
     HMODULE module = GetModuleHandleW(ModuleName);
     FARPROC target;
+    DP_RUNTIME_HOOK_ENTRY *entry;
+    BOOL isNtdllSyscall;
 
     if (module == NULL) {
         module = LoadLibraryW(ModuleName);
@@ -1267,7 +1624,35 @@ DpRuntimeHookApi(
         return FALSE;
     }
 
-    return MH_CreateHook((LPVOID)target, Detour, Original) == MH_OK;
+    if (gHookEntryCount >= DP_RUNTIME_MAX_HOOKS) {
+        return FALSE;
+    }
+
+    entry = &gHookEntries[gHookEntryCount];
+    ZeroMemory(entry, sizeof(*entry));
+    entry->Target = (LPVOID)target;
+    entry->Detour = Detour;
+    entry->OriginalSlot = Original;
+    entry->ProbeLength = DP_RUNTIME_HOOK_PROBE_BYTES;
+    isNtdllSyscall = (_wcsicmp(ModuleName, L"ntdll.dll") == 0 && _strnicmp(ApiName, "Nt", 2) == 0);
+    entry->IsNtdllSyscall = isNtdllSyscall;
+    (VOID)StringCchCopyW(entry->ModuleName, ARRAYSIZE(entry->ModuleName), ModuleName);
+    (VOID)StringCchCopyA(entry->ApiName, ARRAYSIZE(entry->ApiName), ApiName);
+    (VOID)StringCchPrintfW(entry->DisplayName, ARRAYSIZE(entry->DisplayName), L"%s!%S", ModuleName, ApiName);
+
+    if (!DpRuntimeReadCodeBytes(entry->Target, entry->OriginalBytes, entry->ProbeLength)) {
+        DpRuntimeWriteEvent(L"userhook.runtime.hook-baseline-failed", entry->DisplayName, GetLastError(), TRUE);
+        return FALSE;
+    }
+
+    if (MH_CreateHook((LPVOID)target, Detour, Original) != MH_OK) {
+        DpRuntimeWriteEvent(L"userhook.runtime.create-hook-failed", entry->DisplayName, GetLastError(), FALSE);
+        return FALSE;
+    }
+
+    entry->Created = TRUE;
+    gHookEntryCount++;
+    return TRUE;
 }
 
 static BOOL CALLBACK
@@ -1292,6 +1677,7 @@ DpRuntimeInitializeOnce(
         DpRuntimeWriteEvent(L"userhook.runtime.minhook-init-failed", L"MinHook", GetLastError(), FALSE);
         return TRUE;
     }
+    gMinHookInitialized = TRUE;
 
     DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThread", DpHookCreateRemoteThread, (LPVOID *)&gRealCreateRemoteThread);
     DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThreadEx", DpHookCreateRemoteThreadEx, (LPVOID *)&gRealCreateRemoteThreadEx);
@@ -1315,6 +1701,23 @@ DpRuntimeInitializeOnce(
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
         DpRuntimeWriteEvent(L"userhook.runtime.enable-hooks-failed", L"MinHook", GetLastError(), FALSE);
         return TRUE;
+    }
+    gHooksEnabled = TRUE;
+    DpRuntimeCaptureHookBytes();
+
+    if (gIntegrityThread == NULL) {
+        InterlockedExchange(&gRuntimeShuttingDown, 0);
+        gIntegrityStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (gIntegrityStopEvent != NULL) {
+            gIntegrityThread = CreateThread(NULL, 0, DpRuntimeIntegrityThreadProc, NULL, 0, NULL);
+            if (gIntegrityThread == NULL) {
+                CloseHandle(gIntegrityStopEvent);
+                gIntegrityStopEvent = NULL;
+                DpRuntimeWriteEvent(L"userhook.runtime.integrity-thread-failed", L"CreateThread", GetLastError(), TRUE);
+            }
+        } else {
+            DpRuntimeWriteEvent(L"userhook.runtime.integrity-event-failed", L"CreateEvent", GetLastError(), TRUE);
+        }
     }
 
     DpRuntimeWriteEvent(L"userhook.runtime.loaded", L"DataProtectorUserHookRuntime.dll", ERROR_SUCCESS, FALSE);
@@ -1355,9 +1758,12 @@ DllMain(
             gInitThread = NULL;
         }
     } else if (Reason == DLL_PROCESS_DETACH) {
-        if (gRealCreateProcessW != NULL) {
+        DpRuntimeStopIntegrityMonitor();
+        if (gMinHookInitialized) {
             MH_DisableHook(MH_ALL_HOOKS);
             MH_Uninitialize();
+            gHooksEnabled = FALSE;
+            gMinHookInitialized = FALSE;
         }
     }
 
