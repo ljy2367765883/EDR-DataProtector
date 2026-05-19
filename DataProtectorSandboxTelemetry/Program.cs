@@ -53,8 +53,8 @@ namespace DataProtectorSandboxTelemetry
             Stopwatch stopwatch = Stopwatch.StartNew();
             List<BehaviorRecord> behaviors = new List<BehaviorRecord>();
             List<string> errors = new List<string>();
-            Process process = null;
             SuspendedProcess suspendedProcess = null;
+            int samplePid = 0;
             int exitCode = -1;
             bool timedOut = false;
             string workspace = Path.GetDirectoryName(options.SamplePath) ?? Environment.CurrentDirectory;
@@ -74,10 +74,10 @@ namespace DataProtectorSandboxTelemetry
             try
             {
                 suspendedProcess = StartSampleSuspended(options.SamplePath, options.Arguments, workspace);
-                process = suspendedProcess.Process;
+                samplePid = suspendedProcess.ProcessId;
                 if (!string.IsNullOrWhiteSpace(runtimePath) && File.Exists(runtimePath))
                 {
-                    runtimeInjected = TryInjectDll(process, runtimePath, errors);
+                    runtimeInjected = TryInjectDll(samplePid, runtimePath, errors);
                     runtimeStatus = runtimeInjected ? "injected" : "inject-failed";
                 }
                 else
@@ -90,7 +90,7 @@ namespace DataProtectorSandboxTelemetry
                 {
                     ResumeThread(suspendedProcess.MainThreadHandle);
                 }
-                ObserveProcess(process, options.TimeoutSeconds, behaviors, errors, out timedOut, out exitCode);
+                ObserveProcess(samplePid, suspendedProcess.ProcessHandle, options.TimeoutSeconds, behaviors, errors, out timedOut, out exitCode);
             }
             catch (Exception ex)
             {
@@ -100,26 +100,17 @@ namespace DataProtectorSandboxTelemetry
             {
                 if (suspendedProcess != null)
                 {
-                    suspendedProcess.Dispose();
-                }
+                    if (!timedOut)
+                    {
+                        suspendedProcess.TerminateIfRunning(errors);
+                    }
 
-                if (process != null)
-                {
-                    try
-                    {
-                        if (!process.HasExited)
-                        {
-                            process.Kill();
-                        }
-                    }
-                    catch
-                    {
-                    }
+                    suspendedProcess.Dispose();
                 }
             }
 
             Snapshot after = Snapshot.Capture(errors);
-            List<ProcessRecord> processes = CollectProcessRecords(process == null ? 0 : process.Id, before, after);
+            List<ProcessRecord> processes = CollectProcessRecords(samplePid, before, after);
             List<NetworkRecord> network = CollectNetworkRecords(processes);
             List<RegistryRecord> registry = CompareRegistry(before.Autoruns, after.Autoruns, behaviors);
             List<ServiceRecord> services = CompareServices(before.Services, after.Services, behaviors);
@@ -149,7 +140,7 @@ namespace DataProtectorSandboxTelemetry
                 },
                 execution = new ExecutionRecord
                 {
-                    pid = process == null ? 0 : process.Id,
+                    pid = samplePid,
                     exitCode = exitCode,
                     timedOut = timedOut,
                     timeoutSeconds = options.TimeoutSeconds,
@@ -248,7 +239,7 @@ namespace DataProtectorSandboxTelemetry
             }
         }
 
-        private static void ObserveProcess(Process process, int timeoutSeconds, List<BehaviorRecord> behaviors, List<string> errors, out bool timedOut, out int exitCode)
+        private static void ObserveProcess(int processId, IntPtr processHandle, int timeoutSeconds, List<BehaviorRecord> behaviors, List<string> errors, out bool timedOut, out int exitCode)
         {
             timedOut = false;
             exitCode = -1;
@@ -257,7 +248,7 @@ namespace DataProtectorSandboxTelemetry
 
             while (DateTime.UtcNow < deadline)
             {
-                List<ProcessRecord> tree = CollectProcessTree(process.Id);
+                List<ProcessRecord> tree = CollectProcessTree(processId);
                 foreach (ProcessRecord record in tree)
                 {
                     if (observed.Add(record.pid))
@@ -266,9 +257,11 @@ namespace DataProtectorSandboxTelemetry
                     }
                 }
 
-                if (process.HasExited)
+                uint wait = WaitForSingleObject(processHandle, 0);
+                if (wait == 0)
                 {
-                    exitCode = process.ExitCode;
+                    uint nativeExitCode;
+                    exitCode = GetExitCodeProcess(processHandle, out nativeExitCode) ? unchecked((int)nativeExitCode) : -1;
                     return;
                 }
 
@@ -276,14 +269,10 @@ namespace DataProtectorSandboxTelemetry
             }
 
             timedOut = true;
-            AddBehavior(behaviors, "analysis-timeout", "medium", "Sample remained active until the sandbox deadline.", process.Id);
-            try
+            AddBehavior(behaviors, "analysis-timeout", "medium", "Sample remained active until the sandbox deadline.", processId);
+            if (!TerminateProcess(processHandle, 1))
             {
-                process.Kill();
-            }
-            catch (Exception ex)
-            {
-                errors.Add("Failed to terminate timed-out sample: " + ex.Message);
+                errors.Add("Failed to terminate timed-out sample: Win32=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
             }
         }
 
@@ -309,15 +298,15 @@ namespace DataProtectorSandboxTelemetry
                 throw new InvalidOperationException("CreateProcessW failed: " + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
             }
 
-            CloseHandle(processInformation.hProcess);
             return new SuspendedProcess
             {
-                Process = Process.GetProcessById((int)processInformation.dwProcessId),
+                ProcessId = (int)processInformation.dwProcessId,
+                ProcessHandle = processInformation.hProcess,
                 MainThreadHandle = processInformation.hThread
             };
         }
 
-        private static bool TryInjectDll(Process process, string dllPath, List<string> errors)
+        private static bool TryInjectDll(int processId, string dllPath, List<string> errors)
         {
             IntPtr processHandle = IntPtr.Zero;
             IntPtr remoteMemory = IntPtr.Zero;
@@ -325,7 +314,7 @@ namespace DataProtectorSandboxTelemetry
             try
             {
                 byte[] bytes = Encoding.Unicode.GetBytes(dllPath + "\0");
-                processHandle = OpenProcess(0x001F0FFF, false, process.Id);
+                processHandle = OpenProcess(0x001F0FFF, false, processId);
                 if (processHandle == IntPtr.Zero)
                 {
                     errors.Add("OpenProcess for runtime injection failed: " + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
@@ -441,6 +430,11 @@ namespace DataProtectorSandboxTelemetry
                 return sensor;
             }
 
+            if (!EnablePrivilege("SeLoadDriverPrivilege", errors))
+            {
+                errors.Add("SeLoadDriverPrivilege could not be enabled; minifilter loading may fail with Win32=1314.");
+            }
+
             string sourceDriver = FindExistingFile(
                 driverPackagePath,
                 Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "driver", "DataProtector.sys"),
@@ -528,6 +522,54 @@ namespace DataProtectorSandboxTelemetry
             }
         }
 
+        private static bool EnablePrivilege(string privilegeName, List<string> errors)
+        {
+            IntPtr token = IntPtr.Zero;
+            try
+            {
+                if (!OpenProcessToken(GetCurrentProcess(), 0x0020 | 0x0008, out token))
+                {
+                    errors.Add("OpenProcessToken failed while enabling " + privilegeName + ": Win32=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    return false;
+                }
+
+                LUID luid;
+                if (!LookupPrivilegeValue(null, privilegeName, out luid))
+                {
+                    errors.Add("LookupPrivilegeValue failed for " + privilegeName + ": Win32=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    return false;
+                }
+
+                TOKEN_PRIVILEGES privileges = new TOKEN_PRIVILEGES
+                {
+                    PrivilegeCount = 1,
+                    Luid = luid,
+                    Attributes = 0x00000002
+                };
+                if (!AdjustTokenPrivileges(token, false, ref privileges, 0, IntPtr.Zero, IntPtr.Zero))
+                {
+                    errors.Add("AdjustTokenPrivileges failed for " + privilegeName + ": Win32=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    return false;
+                }
+
+                int win32 = Marshal.GetLastWin32Error();
+                if (win32 != 0)
+                {
+                    errors.Add("AdjustTokenPrivileges did not assign " + privilegeName + ": Win32=" + win32.ToString(CultureInfo.InvariantCulture));
+                    return false;
+                }
+
+                return true;
+            }
+            finally
+            {
+                if (token != IntPtr.Zero)
+                {
+                    CloseHandle(token);
+                }
+            }
+        }
+
         private static void SetMiniFilterInstanceRegistry(string serviceName)
         {
             using (Microsoft.Win32.RegistryKey serviceKey = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Services\" + serviceName))
@@ -589,7 +631,10 @@ namespace DataProtectorSandboxTelemetry
                 }
                 else
                 {
-                    ChangeServiceConfig(service, 2, 3, 1, driverImagePath, "FSFilter Encryption", IntPtr.Zero, "FltMgr\0", null, null, serviceName);
+                    if (!ChangeServiceConfig(service, 2, 3, 1, driverImagePath, "FSFilter Encryption", IntPtr.Zero, "FltMgr\0", null, null, serviceName))
+                    {
+                        errors.Add("Kernel sensor service config update failed: Win32=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    }
                 }
 
                 uint filterLoadResult = FilterLoad(serviceName);
@@ -1426,6 +1471,15 @@ namespace DataProtectorSandboxTelemetry
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr processHandle, out uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr processHandle, uint exitCode);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibrary(string fileName);
 
@@ -1477,6 +1531,15 @@ namespace DataProtectorSandboxTelemetry
         [DllImport("fltlib.dll", CharSet = CharSet.Unicode)]
         private static extern uint FilterLoad(string filterName);
 
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool LookupPrivilegeValue(string systemName, string name, out LUID luid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool AdjustTokenPrivileges(IntPtr tokenHandle, bool disableAllPrivileges, ref TOKEN_PRIVILEGES newState, uint bufferLength, IntPtr previousState, IntPtr returnLength);
+
         [UnmanagedFunctionPointer(CallingConvention.Winapi)]
         private delegate uint DpPolicySetUserHookDefensePolicyDelegate(ref NativeUserHookDefensePolicy policy);
 
@@ -1511,6 +1574,21 @@ namespace DataProtectorSandboxTelemetry
             public uint Flags;
             public IntPtr Target;
             public IntPtr ProcessImage;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LUID
+        {
+            public uint LowPart;
+            public int HighPart;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_PRIVILEGES
+        {
+            public uint PrivilegeCount;
+            public LUID Luid;
+            public uint Attributes;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -1581,8 +1659,27 @@ namespace DataProtectorSandboxTelemetry
 
         private sealed class SuspendedProcess : IDisposable
         {
-            public Process Process { get; set; }
+            public int ProcessId { get; set; }
+            public IntPtr ProcessHandle { get; set; }
             public IntPtr MainThreadHandle { get; set; }
+
+            public void TerminateIfRunning(List<string> errors)
+            {
+                if (ProcessHandle == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                if (WaitForSingleObject(ProcessHandle, 0) == 0)
+                {
+                    return;
+                }
+
+                if (!TerminateProcess(ProcessHandle, 1))
+                {
+                    errors.Add("Failed to terminate sample during cleanup: Win32=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                }
+            }
 
             public void Dispose()
             {
@@ -1590,6 +1687,12 @@ namespace DataProtectorSandboxTelemetry
                 {
                     CloseHandle(MainThreadHandle);
                     MainThreadHandle = IntPtr.Zero;
+                }
+
+                if (ProcessHandle != IntPtr.Zero)
+                {
+                    CloseHandle(ProcessHandle);
+                    ProcessHandle = IntPtr.Zero;
                 }
             }
         }
@@ -1671,10 +1774,71 @@ namespace DataProtectorSandboxTelemetry
                 }
                 catch (Exception ex)
                 {
-                    errors.Add("Service snapshot failed: " + ex.Message);
+                    errors.Add("Service WMI snapshot failed: " + ex.Message + ". Using registry fallback.");
+                    QueryServicesFromRegistry(services, errors);
                 }
 
                 return services;
+            }
+
+            private static void QueryServicesFromRegistry(Dictionary<string, ServiceRecord> services, List<string> errors)
+            {
+                try
+                {
+                    using (Microsoft.Win32.RegistryKey root = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services"))
+                    {
+                        if (root == null)
+                        {
+                            return;
+                        }
+
+                        foreach (string name in root.GetSubKeyNames())
+                        {
+                            using (Microsoft.Win32.RegistryKey key = root.OpenSubKey(name))
+                            {
+                                if (key == null)
+                                {
+                                    continue;
+                                }
+
+                                int type = Convert.ToInt32(key.GetValue("Type", 0), CultureInfo.InvariantCulture);
+                                if ((type & 0x00000001) == 0 && (type & 0x00000002) == 0 && (type & 0x00000010) == 0)
+                                {
+                                    continue;
+                                }
+
+                                services[name] = new ServiceRecord
+                                {
+                                    name = name,
+                                    displayName = Convert.ToString(key.GetValue("DisplayName", name), CultureInfo.InvariantCulture) ?? name,
+                                    pathName = Convert.ToString(key.GetValue("ImagePath", string.Empty), CultureInfo.InvariantCulture) ?? string.Empty,
+                                    serviceType = ServiceTypeName(type),
+                                    startMode = Convert.ToString(key.GetValue("Start", string.Empty), CultureInfo.InvariantCulture) ?? string.Empty,
+                                    state = "unknown"
+                                };
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    errors.Add("Service registry fallback failed: " + ex.Message);
+                }
+            }
+
+            private static string ServiceTypeName(int type)
+            {
+                if ((type & 0x00000001) != 0 || (type & 0x00000002) != 0)
+                {
+                    return "Kernel Driver";
+                }
+
+                if ((type & 0x00000010) != 0)
+                {
+                    return "Own Process";
+                }
+
+                return type.ToString(CultureInfo.InvariantCulture);
             }
 
             private static Dictionary<string, TaskRecord> QueryTasks(List<string> errors)
