@@ -592,6 +592,7 @@
         processes: '进程管理',
         apps: '应用程序',
         startup: '自启动',
+        sandbox: '隔离沙箱',
         shell: '命令终端',
         desktop: '远程桌面',
         accounts: '账号'
@@ -622,6 +623,65 @@
       },
       startup: {
         entries: '{count} 个自启动项'
+      },
+      sandbox: {
+        title: '虚拟化隔离分析',
+        subtitle: '样本只会在 Windows Sandbox / Hyper-V 边界内运行，宿主机不直接执行样本。',
+        hardIsolation: '硬隔离',
+        samplePath: '样本路径',
+        samplePathPlaceholder: '例如 C:\\Users\\Public\\sample.exe',
+        arguments: '启动参数',
+        argumentsPlaceholder: '可选参数',
+        timeout: '分析时长（秒）',
+        options: '隔离选项',
+        enableNetwork: '允许沙箱联网',
+        copyDirectory: '复制同目录文件',
+        closeWhenDone: '完成后关闭沙箱',
+        run: '启动隔离分析',
+        empty: '尚未运行隔离分析',
+        pathRequired: '请输入样本路径。',
+        invalidReport: '沙箱返回了无效报告。',
+        boundary: '隔离边界',
+        network: '网络',
+        exitCode: '退出码',
+        duration: '时间',
+        columns: {
+          severity: '等级',
+          type: '类型',
+          detail: '详情',
+          time: '时间',
+          signature: '签名',
+          remote: '远端',
+          local: '本地',
+          state: '状态'
+        },
+        metrics: {
+          behaviors: '行为',
+          processes: '进程',
+          network: '连接',
+          artifacts: '文件'
+        },
+        sections: {
+          behaviors: '危险行为',
+          processes: '进程链',
+          network: '网络连接',
+          artifacts: '文件变化',
+          output: '输出'
+        },
+        severity: {
+          critical: '严重',
+          high: '高危',
+          medium: '中危',
+          low: '低危',
+          info: '信息'
+        },
+        risk: {
+          critical: '严重风险',
+          high: '高风险',
+          medium: '中风险',
+          low: '低风险',
+          clean: '未见异常'
+        }
       },
       shell: {
         connected: '已连接',
@@ -694,6 +754,9 @@
           input: '终端输入',
           read: '终端输出读取',
           stop: '终端停止'
+        },
+        sandbox: {
+          run: '隔离沙箱分析'
         },
         desktop: {
           screenshot: '桌面截图'

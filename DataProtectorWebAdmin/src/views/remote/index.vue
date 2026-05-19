@@ -9,7 +9,7 @@ defineOptions({
   name: 'RemoteOps'
 });
 
-type WorkbenchTab = 'files' | 'processes' | 'apps' | 'startup' | 'shell' | 'desktop' | 'accounts';
+type WorkbenchTab = 'files' | 'processes' | 'apps' | 'startup' | 'sandbox' | 'shell' | 'desktop' | 'accounts';
 
 type InstalledApp = {
   displayName: string;
@@ -62,6 +62,79 @@ type TerminalSnapshot = {
   output: string;
 };
 
+type SandboxBehavior = {
+  type: string;
+  severity: string;
+  detail: string;
+  pid: number;
+  timeUtc: string;
+};
+
+type SandboxProcess = {
+  pid: number;
+  parentPid: number;
+  name: string;
+  path: string;
+  commandLine: string;
+  createdUtc: string;
+  signature?: {
+    status: string;
+    signer: string;
+  };
+};
+
+type SandboxNetwork = {
+  pid: number;
+  localAddress: string;
+  localPort: number;
+  remoteAddress: string;
+  remotePort: number;
+  state: string;
+  timeUtc: string;
+};
+
+type SandboxFileArtifact = {
+  path: string;
+  size: number;
+  modifiedUtc: string;
+  sha256: string;
+};
+
+type SandboxReport = {
+  schema: string;
+  isolation: string;
+  runId: string;
+  startedUtc: string;
+  completedUtc: string;
+  host?: string;
+  hostReportRoot?: string;
+  sample?: {
+    hostPath: string;
+    fileName: string;
+    sha256: string;
+    architecture: string;
+    signer: string;
+    sandboxPath?: string;
+  };
+  execution?: {
+    pid: number;
+    exitCode: number | null;
+    timedOut: boolean;
+    timeoutSeconds: number;
+  };
+  isolationControls?: Record<string, string>;
+  analysisHardening?: Record<string, string>;
+  behaviors?: SandboxBehavior[];
+  processes?: SandboxProcess[];
+  network?: SandboxNetwork[];
+  fileArtifacts?: SandboxFileArtifact[];
+  registryChanges?: Array<Record<string, string>>;
+  stdout?: string;
+  stderr?: string;
+  errors?: string[];
+  error?: string;
+};
+
 const devices = ref<Api.DataProtector.Device[]>([]);
 const selectedDeviceId = ref('');
 const activeTab = ref<WorkbenchTab>('files');
@@ -106,6 +179,17 @@ const accountForm = reactive({
   username: '',
   newPassword: ''
 });
+const sandboxForm = reactive({
+  path: '',
+  arguments: '',
+  timeoutSeconds: 120,
+  networkEnabled: false,
+  copyInputDirectory: false,
+  closeWhenDone: true
+});
+const sandboxReport = ref<SandboxReport | null>(null);
+const sandboxRawOutput = ref('');
+const sandboxRunning = ref(false);
 
 const selectedDevice = computed(() => devices.value.find(device => device.deviceId === selectedDeviceId.value) || null);
 const onlineDevices = computed(() => devices.value.filter(device => device.online).length);
@@ -235,6 +319,106 @@ const startupColumns = computed<DataTableColumns<StartupItem>>(() => [
   }
 ]);
 
+const sandboxRiskLevel = computed(() => {
+  const behaviors = sandboxReport.value?.behaviors || [];
+  if (behaviors.some(item => item.severity === 'critical')) return 'critical';
+  if (behaviors.some(item => item.severity === 'high')) return 'high';
+  if (behaviors.some(item => item.severity === 'medium')) return 'medium';
+  if (behaviors.length) return 'low';
+  return 'clean';
+});
+
+const sandboxRiskTagType = computed(() => {
+  if (sandboxRiskLevel.value === 'critical' || sandboxRiskLevel.value === 'high') return 'error';
+  if (sandboxRiskLevel.value === 'medium') return 'warning';
+  if (sandboxRiskLevel.value === 'low') return 'info';
+  return 'success';
+});
+
+const sandboxBehaviorColumns = computed<DataTableColumns<SandboxBehavior>>(() => [
+  {
+    title: $t('dataprotector.remote.sandbox.columns.severity'),
+    key: 'severity',
+    width: 110,
+    render(row) {
+      return h(
+        NTag,
+        { type: severityTagType(row.severity), bordered: false },
+        { default: () => severityLabel(row.severity) }
+      );
+    }
+  },
+  { title: $t('dataprotector.remote.sandbox.columns.type'), key: 'type', width: 190, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.remote.sandbox.columns.detail'), key: 'detail', minWidth: 360, ellipsis: { tooltip: true } },
+  { title: 'PID', key: 'pid', width: 90 },
+  {
+    title: $t('dataprotector.remote.sandbox.columns.time'),
+    key: 'timeUtc',
+    width: 180,
+    render(row) {
+      return formatTime(row.timeUtc);
+    }
+  }
+]);
+
+const sandboxProcessColumns = computed<DataTableColumns<SandboxProcess>>(() => [
+  { title: 'PID', key: 'pid', width: 90 },
+  { title: 'PPID', key: 'parentPid', width: 90 },
+  { title: $t('dataprotector.remote.columns.process'), key: 'name', width: 170, ellipsis: { tooltip: true } },
+  {
+    title: $t('dataprotector.remote.sandbox.columns.signature'),
+    key: 'signature',
+    width: 150,
+    render(row) {
+      return row.signature?.status || '-';
+    }
+  },
+  { title: $t('dataprotector.remote.columns.path'), key: 'path', minWidth: 360, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.remote.columns.command'), key: 'commandLine', minWidth: 360, ellipsis: { tooltip: true } }
+]);
+
+const sandboxNetworkColumns = computed<DataTableColumns<SandboxNetwork>>(() => [
+  { title: 'PID', key: 'pid', width: 90 },
+  {
+    title: $t('dataprotector.remote.sandbox.columns.remote'),
+    key: 'remoteAddress',
+    minWidth: 220,
+    render(row) {
+      return `${row.remoteAddress}:${row.remotePort}`;
+    }
+  },
+  {
+    title: $t('dataprotector.remote.sandbox.columns.local'),
+    key: 'localAddress',
+    minWidth: 220,
+    render(row) {
+      return `${row.localAddress}:${row.localPort}`;
+    }
+  },
+  { title: $t('dataprotector.remote.sandbox.columns.state'), key: 'state', width: 130 },
+  {
+    title: $t('dataprotector.remote.sandbox.columns.time'),
+    key: 'timeUtc',
+    width: 180,
+    render(row) {
+      return formatTime(row.timeUtc);
+    }
+  }
+]);
+
+const sandboxFileColumns = computed<DataTableColumns<SandboxFileArtifact>>(() => [
+  { title: $t('dataprotector.remote.columns.path'), key: 'path', minWidth: 360, ellipsis: { tooltip: true } },
+  {
+    title: $t('dataprotector.remote.columns.size'),
+    key: 'size',
+    width: 120,
+    render(row) {
+      return formatBytes(row.size);
+    }
+  },
+  { title: 'SHA256', key: 'sha256', minWidth: 320, ellipsis: { tooltip: true } }
+]);
+
 async function refreshDevices() {
   loadingDevices.value = true;
   try {
@@ -270,6 +454,9 @@ function resetPanelState() {
   terminalAutoFollow.value = true;
   stopTerminalPolling();
   screenshotSrc.value = '';
+  sandboxReport.value = null;
+  sandboxRawOutput.value = '';
+  sandboxRunning.value = false;
 }
 
 async function refreshActivePanel() {
@@ -296,6 +483,10 @@ async function refreshActivePanel() {
 
   if (activeTab.value === 'startup') {
     await loadStartupItems();
+    return;
+  }
+
+  if (activeTab.value === 'sandbox') {
     return;
   }
 
@@ -629,7 +820,42 @@ async function lockScreen() {
   }
 }
 
-async function runRemoteTask(kind: string, args: Record<string, unknown>, logActivity = true) {
+async function runSandboxAnalysis() {
+  if (!sandboxForm.path.trim()) {
+    window.$message?.warning($t('dataprotector.remote.sandbox.pathRequired'));
+    return;
+  }
+
+  panelLoading.value = true;
+  sandboxRunning.value = true;
+  sandboxReport.value = null;
+  sandboxRawOutput.value = '';
+  try {
+    const task = await runRemoteTask(
+      'sandbox.run',
+      {
+        path: sandboxForm.path,
+        arguments: sandboxForm.arguments,
+        timeoutSeconds: sandboxForm.timeoutSeconds,
+        networkEnabled: sandboxForm.networkEnabled,
+        copyInputDirectory: sandboxForm.copyInputDirectory,
+        closeWhenDone: sandboxForm.closeWhenDone
+      },
+      true,
+      Math.max(60, Number(sandboxForm.timeoutSeconds || 120) + 300)
+    );
+    sandboxRawOutput.value = task.output || '';
+    sandboxReport.value = parseJson<SandboxReport | null>(task.output, null);
+    if (!sandboxReport.value) {
+      window.$message?.error($t('dataprotector.remote.sandbox.invalidReport'));
+    }
+  } finally {
+    sandboxRunning.value = false;
+    panelLoading.value = false;
+  }
+}
+
+async function runRemoteTask(kind: string, args: Record<string, unknown>, logActivity = true, timeoutSeconds = 40) {
   if (!selectedDevice.value) {
     throw new Error($t('dataprotector.remote.errors.selectEndpoint'));
   }
@@ -650,7 +876,8 @@ async function runRemoteTask(kind: string, args: Record<string, unknown>, logAct
     pushActivity($t('dataprotector.remote.activity.queued', { operation: operationLabel(kind) }));
   }
 
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  const attempts = Math.max(1, Math.ceil(timeoutSeconds));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     await sleep(1000);
     const tasksResult = await fetchRemoteTasks({ deviceId: selectedDevice.value.deviceId, limit: 100 });
     if (tasksResult.error) continue;
@@ -715,11 +942,41 @@ function operationLabel(kind: string) {
     'terminal.input': $t('dataprotector.remote.operations.terminal.input'),
     'terminal.read': $t('dataprotector.remote.operations.terminal.read'),
     'terminal.stop': $t('dataprotector.remote.operations.terminal.stop'),
+    'sandbox.run': $t('dataprotector.remote.operations.sandbox.run'),
     'desktop.screenshot': $t('dataprotector.remote.operations.desktop.screenshot'),
     'session.lock': $t('dataprotector.remote.operations.session.lock'),
     'user.changePassword': $t('dataprotector.remote.operations.user.changePassword')
   };
   return labels[kind] || kind;
+}
+
+function severityTagType(severity: string) {
+  if (severity === 'critical' || severity === 'high') return 'error';
+  if (severity === 'medium') return 'warning';
+  if (severity === 'low') return 'info';
+  return 'default';
+}
+
+function severityLabel(severity: string) {
+  const labels: Record<string, string> = {
+    critical: $t('dataprotector.remote.sandbox.severity.critical'),
+    high: $t('dataprotector.remote.sandbox.severity.high'),
+    medium: $t('dataprotector.remote.sandbox.severity.medium'),
+    low: $t('dataprotector.remote.sandbox.severity.low'),
+    info: $t('dataprotector.remote.sandbox.severity.info')
+  };
+  return labels[severity] || labels.info;
+}
+
+function sandboxRiskLabel(level: string) {
+  const labels: Record<string, string> = {
+    critical: $t('dataprotector.remote.sandbox.risk.critical'),
+    high: $t('dataprotector.remote.sandbox.risk.high'),
+    medium: $t('dataprotector.remote.sandbox.risk.medium'),
+    low: $t('dataprotector.remote.sandbox.risk.low'),
+    clean: $t('dataprotector.remote.sandbox.risk.clean')
+  };
+  return labels[level] || labels.clean;
 }
 
 function parentPath(path: string) {
@@ -831,6 +1088,7 @@ onBeforeUnmount(() => {
           <NTab name="processes">{{ $t('dataprotector.remote.tabs.processes') }}</NTab>
           <NTab name="apps">{{ $t('dataprotector.remote.tabs.apps') }}</NTab>
           <NTab name="startup">{{ $t('dataprotector.remote.tabs.startup') }}</NTab>
+          <NTab name="sandbox">{{ $t('dataprotector.remote.tabs.sandbox') }}</NTab>
           <NTab name="shell">{{ $t('dataprotector.remote.tabs.shell') }}</NTab>
           <NTab name="desktop">{{ $t('dataprotector.remote.tabs.desktop') }}</NTab>
           <NTab name="accounts">{{ $t('dataprotector.remote.tabs.accounts') }}</NTab>
@@ -962,6 +1220,143 @@ onBeforeUnmount(() => {
               :scroll-x="1120"
               :pagination="{ pageSize: 12 }"
             />
+          </template>
+
+          <template v-else-if="activeTab === 'sandbox'">
+            <div class="sandbox-layout">
+              <div class="sandbox-launch-card">
+                <div class="sandbox-card-head">
+                  <div>
+                    <div class="module-count">{{ $t('dataprotector.remote.sandbox.title') }}</div>
+                    <p>{{ $t('dataprotector.remote.sandbox.subtitle') }}</p>
+                  </div>
+                  <NTag type="success" :bordered="false">{{ $t('dataprotector.remote.sandbox.hardIsolation') }}</NTag>
+                </div>
+                <NForm label-placement="top">
+                  <NFormItem :label="$t('dataprotector.remote.sandbox.samplePath')">
+                    <NInput v-model:value="sandboxForm.path" :placeholder="$t('dataprotector.remote.sandbox.samplePathPlaceholder')" />
+                  </NFormItem>
+                  <NFormItem :label="$t('dataprotector.remote.sandbox.arguments')">
+                    <NInput v-model:value="sandboxForm.arguments" :placeholder="$t('dataprotector.remote.sandbox.argumentsPlaceholder')" />
+                  </NFormItem>
+                  <NGrid :x-gap="12" :y-gap="12" cols="1 m:2">
+                    <NGi>
+                      <NFormItem :label="$t('dataprotector.remote.sandbox.timeout')">
+                        <NInputNumber v-model:value="sandboxForm.timeoutSeconds" :min="15" :max="1800" class="w-full" />
+                      </NFormItem>
+                    </NGi>
+                    <NGi>
+                      <NFormItem :label="$t('dataprotector.remote.sandbox.options')">
+                        <div class="sandbox-checks">
+                          <NCheckbox v-model:checked="sandboxForm.networkEnabled">
+                            {{ $t('dataprotector.remote.sandbox.enableNetwork') }}
+                          </NCheckbox>
+                          <NCheckbox v-model:checked="sandboxForm.copyInputDirectory">
+                            {{ $t('dataprotector.remote.sandbox.copyDirectory') }}
+                          </NCheckbox>
+                          <NCheckbox v-model:checked="sandboxForm.closeWhenDone">
+                            {{ $t('dataprotector.remote.sandbox.closeWhenDone') }}
+                          </NCheckbox>
+                        </div>
+                      </NFormItem>
+                    </NGi>
+                  </NGrid>
+                  <NButton type="primary" :loading="sandboxRunning" :disabled="!selectedDevice || !sandboxForm.path.trim()" @click="runSandboxAnalysis">
+                    <template #icon><SvgIcon icon="mdi:shield-search" /></template>
+                    {{ $t('dataprotector.remote.sandbox.run') }}
+                  </NButton>
+                </NForm>
+              </div>
+
+              <div class="sandbox-report-card">
+                <template v-if="sandboxReport">
+                  <div class="sandbox-summary">
+                    <div>
+                      <div class="module-count">{{ sandboxReport.sample?.fileName || '-' }}</div>
+                      <div class="sandbox-muted">{{ sandboxReport.sample?.architecture || '-' }} / {{ sandboxReport.sample?.sha256 || '-' }}</div>
+                    </div>
+                    <NTag :type="sandboxRiskTagType" :bordered="false">{{ sandboxRiskLabel(sandboxRiskLevel) }}</NTag>
+                  </div>
+
+                  <div class="sandbox-metrics">
+                    <div class="sandbox-metric">
+                      <span>{{ $t('dataprotector.remote.sandbox.metrics.behaviors') }}</span>
+                      <strong>{{ sandboxReport.behaviors?.length || 0 }}</strong>
+                    </div>
+                    <div class="sandbox-metric">
+                      <span>{{ $t('dataprotector.remote.sandbox.metrics.processes') }}</span>
+                      <strong>{{ sandboxReport.processes?.length || 0 }}</strong>
+                    </div>
+                    <div class="sandbox-metric">
+                      <span>{{ $t('dataprotector.remote.sandbox.metrics.network') }}</span>
+                      <strong>{{ sandboxReport.network?.length || 0 }}</strong>
+                    </div>
+                    <div class="sandbox-metric">
+                      <span>{{ $t('dataprotector.remote.sandbox.metrics.artifacts') }}</span>
+                      <strong>{{ sandboxReport.fileArtifacts?.length || 0 }}</strong>
+                    </div>
+                  </div>
+
+                  <NAlert v-if="sandboxReport.error || sandboxReport.errors?.length" type="warning" :bordered="false" class="m-b-12px">
+                    {{ sandboxReport.error || sandboxReport.errors?.join('; ') }}
+                  </NAlert>
+
+                  <NDescriptions :column="2" bordered size="small" class="m-b-14px">
+                    <NDescriptionsItem :label="$t('dataprotector.remote.sandbox.boundary')">
+                      {{ sandboxReport.isolationControls?.boundary || sandboxReport.isolation }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem :label="$t('dataprotector.remote.sandbox.network')">
+                      {{ sandboxReport.isolationControls?.network || '-' }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem :label="$t('dataprotector.remote.sandbox.exitCode')">
+                      {{ sandboxReport.execution?.exitCode ?? '-' }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem :label="$t('dataprotector.remote.sandbox.duration')">
+                      {{ formatTime(sandboxReport.startedUtc) }} - {{ formatTime(sandboxReport.completedUtc) }}
+                    </NDescriptionsItem>
+                  </NDescriptions>
+
+                  <NCollapse>
+                    <NCollapseItem :title="$t('dataprotector.remote.sandbox.sections.behaviors')" name="behaviors">
+                      <NDataTable
+                        :columns="sandboxBehaviorColumns"
+                        :data="sandboxReport.behaviors || []"
+                        :scroll-x="920"
+                        :pagination="{ pageSize: 8 }"
+                      />
+                    </NCollapseItem>
+                    <NCollapseItem :title="$t('dataprotector.remote.sandbox.sections.processes')" name="processes">
+                      <NDataTable
+                        :columns="sandboxProcessColumns"
+                        :data="sandboxReport.processes || []"
+                        :scroll-x="1200"
+                        :pagination="{ pageSize: 8 }"
+                      />
+                    </NCollapseItem>
+                    <NCollapseItem :title="$t('dataprotector.remote.sandbox.sections.network')" name="network">
+                      <NDataTable
+                        :columns="sandboxNetworkColumns"
+                        :data="sandboxReport.network || []"
+                        :scroll-x="900"
+                        :pagination="{ pageSize: 8 }"
+                      />
+                    </NCollapseItem>
+                    <NCollapseItem :title="$t('dataprotector.remote.sandbox.sections.artifacts')" name="artifacts">
+                      <NDataTable
+                        :columns="sandboxFileColumns"
+                        :data="sandboxReport.fileArtifacts || []"
+                        :scroll-x="860"
+                        :pagination="{ pageSize: 8 }"
+                      />
+                    </NCollapseItem>
+                    <NCollapseItem :title="$t('dataprotector.remote.sandbox.sections.output')" name="output">
+                      <pre class="sandbox-output">{{ sandboxReport.stdout || sandboxReport.stderr || sandboxRawOutput }}</pre>
+                    </NCollapseItem>
+                  </NCollapse>
+                </template>
+                <NEmpty v-else :description="$t('dataprotector.remote.sandbox.empty')" />
+              </div>
+            </div>
           </template>
 
           <template v-else-if="activeTab === 'shell'">
@@ -1324,6 +1719,84 @@ onBeforeUnmount(() => {
   border-radius: 8px;
 }
 
+.sandbox-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.sandbox-launch-card,
+.sandbox-report-card {
+  padding: 16px;
+  background: rgb(255 255 255);
+  border: 1px solid rgb(229 231 235);
+  border-radius: 8px;
+}
+
+.sandbox-card-head,
+.sandbox-summary {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.sandbox-card-head p,
+.sandbox-muted {
+  margin: 4px 0 0;
+  color: rgb(107 114 128);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.sandbox-checks {
+  display: grid;
+  gap: 8px;
+}
+
+.sandbox-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.sandbox-metric {
+  padding: 10px 12px;
+  background: rgb(249 250 251);
+  border: 1px solid rgb(229 231 235);
+  border-radius: 8px;
+}
+
+.sandbox-metric span {
+  display: block;
+  color: rgb(107 114 128);
+  font-size: 12px;
+}
+
+.sandbox-metric strong {
+  display: block;
+  margin-top: 4px;
+  color: rgb(17 24 39);
+  font-size: 20px;
+}
+
+.sandbox-output {
+  max-height: 360px;
+  padding: 14px;
+  overflow: auto;
+  color: rgb(209 250 229);
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  background: rgb(17 24 39);
+  border-radius: 8px;
+}
+
 .screenshot-frame {
   display: flex;
   align-items: center;
@@ -1365,6 +1838,11 @@ onBeforeUnmount(() => {
 
 @media (max-width: 960px) {
   .remote-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .sandbox-layout,
+  .sandbox-metrics {
     grid-template-columns: 1fr;
   }
 }

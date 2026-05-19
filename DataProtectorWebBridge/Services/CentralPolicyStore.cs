@@ -2750,11 +2750,14 @@ namespace DataProtectorWebBridge.Services
 
         private static bool IsStaleSentTask(RemoteTaskState task, DateTime now)
         {
+            TimeSpan timeout = string.Equals(task.kind, "sandbox.run", StringComparison.OrdinalIgnoreCase)
+                ? TimeSpan.FromMinutes(45)
+                : TimeSpan.FromMinutes(5);
             DateTime sent;
             return task.status == "sent"
                 && !IsOneShotSecretTask(task.kind)
                 && DateTime.TryParse(task.sentUtc, out sent)
-                && now - sent.ToUniversalTime() > TimeSpan.FromMinutes(5);
+                && now - sent.ToUniversalTime() > timeout;
         }
 
         private static bool IsOneShotSecretTask(string kind)
@@ -2819,6 +2822,11 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(kind, "desktop.screenshot", StringComparison.OrdinalIgnoreCase))
             {
                 return 16 * 1024 * 1024;
+            }
+
+            if (string.Equals(kind, "sandbox.run", StringComparison.OrdinalIgnoreCase))
+            {
+                return 2 * 1024 * 1024;
             }
 
             return 262144;

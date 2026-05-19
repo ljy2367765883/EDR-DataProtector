@@ -596,6 +596,7 @@ const local: App.I18n.Schema = {
         processes: 'Process Manager',
         apps: 'Applications',
         startup: 'Startup',
+        sandbox: 'Isolated Sandbox',
         shell: 'Command',
         desktop: 'Desktop',
         accounts: 'Accounts'
@@ -626,6 +627,65 @@ const local: App.I18n.Schema = {
       },
       startup: {
         entries: '{count} startup entries'
+      },
+      sandbox: {
+        title: 'Virtualized Isolation Analysis',
+        subtitle: 'Samples run only inside the Windows Sandbox / Hyper-V boundary. The host never executes the sample directly.',
+        hardIsolation: 'hard isolation',
+        samplePath: 'Sample path',
+        samplePathPlaceholder: 'For example C:\\Users\\Public\\sample.exe',
+        arguments: 'Arguments',
+        argumentsPlaceholder: 'Optional arguments',
+        timeout: 'Analysis time (seconds)',
+        options: 'Isolation options',
+        enableNetwork: 'Allow sandbox network',
+        copyDirectory: 'Copy sibling files',
+        closeWhenDone: 'Close sandbox when done',
+        run: 'Start Isolated Analysis',
+        empty: 'No isolated analysis has run yet',
+        pathRequired: 'Enter a sample path.',
+        invalidReport: 'The sandbox returned an invalid report.',
+        boundary: 'Boundary',
+        network: 'Network',
+        exitCode: 'Exit code',
+        duration: 'Time',
+        columns: {
+          severity: 'Severity',
+          type: 'Type',
+          detail: 'Detail',
+          time: 'Time',
+          signature: 'Signature',
+          remote: 'Remote',
+          local: 'Local',
+          state: 'State'
+        },
+        metrics: {
+          behaviors: 'Behaviors',
+          processes: 'Processes',
+          network: 'Connections',
+          artifacts: 'Files'
+        },
+        sections: {
+          behaviors: 'Risk Behaviors',
+          processes: 'Process Tree',
+          network: 'Network Connections',
+          artifacts: 'File Changes',
+          output: 'Output'
+        },
+        severity: {
+          critical: 'Critical',
+          high: 'High',
+          medium: 'Medium',
+          low: 'Low',
+          info: 'Info'
+        },
+        risk: {
+          critical: 'Critical risk',
+          high: 'High risk',
+          medium: 'Medium risk',
+          low: 'Low risk',
+          clean: 'No anomaly'
+        }
       },
       shell: {
         connected: 'Connected',
@@ -698,6 +758,9 @@ const local: App.I18n.Schema = {
           input: 'terminal input',
           read: 'terminal output read',
           stop: 'terminal stop'
+        },
+        sandbox: {
+          run: 'isolated sandbox analysis'
         },
         desktop: {
           screenshot: 'desktop screenshot'
