@@ -844,8 +844,17 @@ const local: App.I18n.Schema = {
       },
       attackFlow: {
         eyebrow: 'Attack Flow',
-        title: 'Attack Flow Graph',
+        title: 'Threat Storyline',
         active: '{count} stage(s) hit',
+        processGraph: 'Process Graph',
+        timeline: 'Behavior Timeline',
+        empty: 'No sample behavior',
+        entities: {
+          processes: 'Processes',
+          network: 'Network',
+          persistence: 'Persistence',
+          artifacts: 'Files'
+        },
         stages: {
           launch: 'Sample Launch',
           process: 'Process Chain',

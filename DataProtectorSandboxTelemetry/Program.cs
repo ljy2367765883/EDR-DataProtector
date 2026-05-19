@@ -20,6 +20,9 @@ namespace DataProtectorSandboxTelemetry
         private const int MaxRuntimeEventBytes = 2 * 1024 * 1024;
         private const string RuntimeEventPath = @"C:\ProgramData\DataProtector\UserHookRuntimeEvents.jsonl";
         private const string RuntimePolicyPath = @"C:\ProgramData\DataProtector\UserHookRuntimePolicy.json";
+        private const string KernelSensorServiceName = "DataProtector";
+        private const string KernelSensorDriverFileName = "DataProtector.sys";
+        private const string KernelSensorDriverImagePath = @"\SystemRoot\System32\drivers\DataProtector.sys";
         private static readonly JavaScriptSerializer Serializer = CreateSerializer();
 
         private static int Main(string[] args)
@@ -422,7 +425,7 @@ namespace DataProtectorSandboxTelemetry
             {
                 enabled = false,
                 status = "disabled",
-                serviceName = "DataProtector",
+                serviceName = KernelSensorServiceName,
                 driverPath = string.Empty,
                 policyApiPath = policyApiPath ?? string.Empty,
                 runtimePath = runtimePath ?? string.Empty,
@@ -452,17 +455,21 @@ namespace DataProtectorSandboxTelemetry
 
             try
             {
-                string destinationDriver = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "drivers", "DataProtectorSandbox.sys");
+                string destinationDriver = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                    "System32",
+                    "drivers",
+                    KernelSensorDriverFileName);
                 File.Copy(sourceDriver, destinationDriver, true);
                 sensor.driverPath = destinationDriver;
 
                 SetMiniFilterInstanceRegistry(sensor.serviceName);
-                int win32 = InstallAndStartKernelService(sensor.serviceName, destinationDriver);
+                int win32 = InstallAndStartKernelService(sensor.serviceName, KernelSensorDriverImagePath, errors);
                 sensor.win32 = win32;
                 if (win32 != 0 && win32 != 1056)
                 {
                     sensor.status = "start-failed";
-                    sensor.message = "Kernel sensor service start failed with Win32=" + win32.ToString(CultureInfo.InvariantCulture) + ".";
+                    sensor.message = "Kernel sensor minifilter load failed with Win32=" + win32.ToString(CultureInfo.InvariantCulture) + ".";
                     errors.Add(sensor.message);
                     return sensor;
                 }
@@ -547,7 +554,7 @@ namespace DataProtectorSandboxTelemetry
             }
         }
 
-        private static int InstallAndStartKernelService(string serviceName, string driverPath)
+        private static int InstallAndStartKernelService(string serviceName, string driverImagePath, List<string> errors)
         {
             IntPtr manager = OpenSCManager(null, null, 0xF003F);
             if (manager == IntPtr.Zero)
@@ -569,7 +576,7 @@ namespace DataProtectorSandboxTelemetry
                         2,
                         3,
                         1,
-                        driverPath,
+                        driverImagePath,
                         "FSFilter Encryption",
                         IntPtr.Zero,
                         "FltMgr\0",
@@ -582,8 +589,18 @@ namespace DataProtectorSandboxTelemetry
                 }
                 else
                 {
-                    ChangeServiceConfig(service, 2, 3, 1, driverPath, "FSFilter Encryption", IntPtr.Zero, "FltMgr\0", null, null, serviceName);
+                    ChangeServiceConfig(service, 2, 3, 1, driverImagePath, "FSFilter Encryption", IntPtr.Zero, "FltMgr\0", null, null, serviceName);
                 }
+
+                uint filterLoadResult = FilterLoad(serviceName);
+                if (filterLoadResult == 0 || filterLoadResult == 0x80070420)
+                {
+                    return 0;
+                }
+
+                int filterLoadWin32 = HResultToWin32(filterLoadResult);
+                errors.Add("Kernel sensor FilterLoad failed: hr=0x" + filterLoadResult.ToString("X8", CultureInfo.InvariantCulture) +
+                           " win32=" + filterLoadWin32.ToString(CultureInfo.InvariantCulture) + ". Falling back to SCM StartService.");
 
                 if (StartService(service, 0, null))
                 {
@@ -602,6 +619,17 @@ namespace DataProtectorSandboxTelemetry
 
                 CloseServiceHandle(manager);
             }
+        }
+
+        private static int HResultToWin32(uint result)
+        {
+            const uint FacilityWin32Mask = 0xFFFF0000;
+            if ((result & FacilityWin32Mask) == 0x80070000)
+            {
+                return (int)(result & 0xFFFF);
+            }
+
+            return unchecked((int)result);
         }
 
         private static uint ApplyKernelUserHookPolicy(string policyApiPath, string runtimePath, List<string> errors)
@@ -1445,6 +1473,9 @@ namespace DataProtectorSandboxTelemetry
 
         [DllImport("advapi32.dll", SetLastError = true)]
         private static extern bool CloseServiceHandle(IntPtr serviceControlManagerObject);
+
+        [DllImport("fltlib.dll", CharSet = CharSet.Unicode)]
+        private static extern uint FilterLoad(string filterName);
 
         [UnmanagedFunctionPointer(CallingConvention.Winapi)]
         private delegate uint DpPolicySetUserHookDefensePolicyDelegate(ref NativeUserHookDefensePolicy policy);

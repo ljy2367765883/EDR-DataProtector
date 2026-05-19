@@ -840,8 +840,17 @@
       },
       attackFlow: {
         eyebrow: 'Attack Flow',
-        title: '攻击流程图',
+        title: '威胁故事线',
         active: '{count} 个阶段命中',
+        processGraph: '进程关系',
+        timeline: '行为时间线',
+        empty: '暂无样本行为',
+        entities: {
+          processes: '进程',
+          network: '网络',
+          persistence: '持久化',
+          artifacts: '文件'
+        },
         stages: {
           launch: '样本启动',
           process: '进程链',

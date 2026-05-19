@@ -151,6 +151,41 @@ type AttackFlowStage = {
   icon: string;
 };
 
+type AttackStoryProcessNode = {
+  pid: number;
+  parentPid: number;
+  name: string;
+  path: string;
+  risk: string;
+  depth: number;
+  order: number;
+};
+
+type AttackStoryEvent = {
+  id: string;
+  time: string;
+  type: string;
+  title: string;
+  detail: string;
+  severity: string;
+  icon: string;
+  pid: number;
+};
+
+type AttackStoryEntity = {
+  key: string;
+  label: string;
+  value: number;
+  icon: string;
+};
+
+type AttackStory = {
+  stages: AttackFlowStage[];
+  processes: AttackStoryProcessNode[];
+  events: AttackStoryEvent[];
+  entities: AttackStoryEntity[];
+};
+
 const message = useMessage();
 const loading = ref(false);
 const uploading = ref(false);
@@ -200,8 +235,8 @@ const samples = computed(() => response.value?.items ?? []);
 const selectedSample = computed(() => samples.value.find(item => item.sampleId === selectedSampleId.value) || samples.value[0] || null);
 const rawReport = computed(() => parseJson<SandboxReport | null>(selectedSample.value?.reportJson, null));
 const report = computed(() => sanitizeSandboxReport(rawReport.value));
-const attackFlowStages = computed(() => buildAttackFlowStages(report.value));
-const activeAttackFlowStageCount = computed(() => attackFlowStages.value.filter(item => item.active).length);
+const attackStory = computed(() => buildAttackStory(report.value));
+const activeAttackFlowStageCount = computed(() => attackStory.value.stages.filter(item => item.active).length);
 const stats = computed(() => ({
   total: response.value?.total ?? 0,
   queued: response.value?.queuedTotal ?? 0,
@@ -683,6 +718,15 @@ function isInternalTelemetryText(value?: string) {
   ].some(token => text.includes(token));
 }
 
+function buildAttackStory(value: SandboxReport | null): AttackStory {
+  return {
+    stages: buildAttackFlowStages(value),
+    processes: buildAttackProcessGraph(value).slice(0, 8),
+    events: buildAttackStoryEvents(value).slice(0, 10),
+    entities: buildAttackStoryEntities(value)
+  };
+}
+
 function buildAttackFlowStages(value: SandboxReport | null): AttackFlowStage[] {
   const behaviors = value?.behaviors || [];
   const processes = value?.processes || [];
@@ -730,6 +774,113 @@ function buildAttackFlowStages(value: SandboxReport | null): AttackFlowStage[] {
   ];
 }
 
+function buildAttackProcessGraph(value: SandboxReport | null): AttackStoryProcessNode[] {
+  const processes = [...(value?.processes || [])].sort((left, right) => {
+    const leftTime = Date.parse(left.createdUtc || '') || 0;
+    const rightTime = Date.parse(right.createdUtc || '') || 0;
+    return leftTime - rightTime;
+  });
+  const pidSet = new Set(processes.map(item => item.pid));
+  const riskByPid = new Map<number, string>();
+
+  for (const behavior of value?.behaviors || []) {
+    if (!behavior?.pid) continue;
+    riskByPid.set(behavior.pid, maxSeverity(riskByPid.get(behavior.pid), behavior.severity));
+  }
+  for (const event of value?.runtimeEvents || []) {
+    if (!event?.pid) continue;
+    riskByPid.set(event.pid, maxSeverity(riskByPid.get(event.pid), event.blocked ? 'high' : 'medium'));
+  }
+  for (const event of value?.kernelEvents || []) {
+    if (!event?.pid) continue;
+    riskByPid.set(event.pid, maxSeverity(riskByPid.get(event.pid), 'high'));
+  }
+
+  return processes.map((process, index) => ({
+    pid: process.pid,
+    parentPid: process.parentPid,
+    name: process.name || basename(process.path) || `PID ${process.pid}`,
+    path: process.path || process.commandLine || '-',
+    risk: riskByPid.get(process.pid) || 'info',
+    depth: process.parentPid && pidSet.has(process.parentPid) ? 1 : 0,
+    order: index + 1
+  }));
+}
+
+function buildAttackStoryEvents(value: SandboxReport | null): AttackStoryEvent[] {
+  const events: AttackStoryEvent[] = [];
+
+  for (const behavior of value?.behaviors || []) {
+    events.push({
+      id: `behavior-${events.length}`,
+      time: behavior.timeUtc,
+      type: behavior.type || 'behavior',
+      title: normalizeEventTitle(behavior.type || 'behavior'),
+      detail: behavior.detail || '-',
+      severity: behavior.severity || 'info',
+      icon: eventIcon(behavior.type),
+      pid: behavior.pid || 0
+    });
+  }
+
+  for (const runtime of value?.runtimeEvents || []) {
+    events.push({
+      id: `runtime-${events.length}`,
+      time: runtime.timestampUtc,
+      type: runtime.action || 'runtime',
+      title: normalizeEventTitle(runtime.action || 'runtime'),
+      detail: runtime.target || runtime.processImage || '-',
+      severity: runtime.blocked ? 'high' : 'medium',
+      icon: eventIcon(runtime.action),
+      pid: runtime.pid || 0
+    });
+  }
+
+  for (const kernel of value?.kernelEvents || []) {
+    events.push({
+      id: `kernel-${events.length}`,
+      time: value?.completedUtc || value?.startedUtc || '',
+      type: kernel.operationName || 'kernel',
+      title: normalizeEventTitle(kernel.operationName || 'kernel'),
+      detail: kernel.target || kernel.description || kernel.processImage || '-',
+      severity: 'high',
+      icon: eventIcon(kernel.operationName),
+      pid: kernel.pid || 0
+    });
+  }
+
+  return events.sort((left, right) => (Date.parse(left.time || '') || 0) - (Date.parse(right.time || '') || 0));
+}
+
+function buildAttackStoryEntities(value: SandboxReport | null): AttackStoryEntity[] {
+  return [
+    {
+      key: 'processes',
+      label: $t('dataprotector.sandbox.attackFlow.entities.processes'),
+      value: value?.processes?.length || 0,
+      icon: 'mdi:family-tree'
+    },
+    {
+      key: 'network',
+      label: $t('dataprotector.sandbox.attackFlow.entities.network'),
+      value: value?.network?.length || 0,
+      icon: 'mdi:access-point-network'
+    },
+    {
+      key: 'persistence',
+      label: $t('dataprotector.sandbox.attackFlow.entities.persistence'),
+      value: (value?.services?.length || 0) + (value?.scheduledTasks?.length || 0),
+      icon: 'mdi:shield-key-outline'
+    },
+    {
+      key: 'artifacts',
+      label: $t('dataprotector.sandbox.attackFlow.entities.artifacts'),
+      value: value?.fileArtifacts?.length || 0,
+      icon: 'mdi:file-cog-outline'
+    }
+  ];
+}
+
 function createAttackFlowStage(key: string, active: boolean, count: number, severity: string, icon: string) {
   const stageKey = key as keyof typeof attackFlowStageLabelKeys;
   return {
@@ -768,6 +919,35 @@ function countTextMatches(values: string[], tokens: string[]) {
     const text = String(value || '').toLowerCase();
     return count + (tokens.some(token => text.includes(token)) ? 1 : 0);
   }, 0);
+}
+
+function maxSeverity(current: string | undefined, next: string | undefined) {
+  const score: Record<string, number> = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
+  const currentSeverity = current || 'info';
+  const nextSeverity = next || 'info';
+  return (score[nextSeverity] ?? 0) > (score[currentSeverity] ?? 0) ? nextSeverity : currentSeverity;
+}
+
+function basename(path?: string) {
+  const value = String(path || '');
+  const index = Math.max(value.lastIndexOf('\\'), value.lastIndexOf('/'));
+  return index >= 0 ? value.slice(index + 1) : value;
+}
+
+function normalizeEventTitle(value?: string) {
+  const text = String(value || '').replace(/[-_.]+/g, ' ').trim();
+  if (!text) return '-';
+  return text.replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function eventIcon(value?: string) {
+  const text = String(value || '').toLowerCase();
+  if (text.includes('network') || text.includes('connect') || text.includes('dns')) return 'mdi:access-point-network';
+  if (text.includes('registry') || text.includes('task') || text.includes('service') || text.includes('persist')) return 'mdi:shield-key-outline';
+  if (text.includes('memory') || text.includes('hook') || text.includes('syscall') || text.includes('virtual')) return 'mdi:memory';
+  if (text.includes('file') || text.includes('driver') || text.includes('drop')) return 'mdi:file-cog-outline';
+  if (text.includes('process') || text.includes('command') || text.includes('injection')) return 'mdi:source-branch';
+  return 'mdi:radar';
 }
 
 function statusTagType(status: string) {
@@ -1037,23 +1217,73 @@ onBeforeUnmount(stopPolling);
               {{ $t('dataprotector.sandbox.attackFlow.active', { count: activeAttackFlowStageCount }) }}
             </NTag>
           </div>
-          <div class="attack-flow">
-            <template v-for="(stage, index) in attackFlowStages" :key="stage.key">
-              <div class="flow-node" :class="[{ active: stage.active }, `severity-${stage.severity}`]">
-                <div class="flow-icon">
-                  <SvgIcon :icon="stage.icon" />
+
+          <div class="story-stage-rail">
+            <div
+              v-for="stage in attackStory.stages"
+              :key="stage.key"
+              class="story-stage"
+              :class="[{ active: stage.active }, `severity-${stage.severity}`]"
+            >
+              <SvgIcon :icon="stage.icon" />
+              <span>{{ stage.label }}</span>
+            </div>
+          </div>
+
+          <div class="attack-story-grid">
+            <div class="story-process-panel">
+              <div class="story-panel-title">{{ $t('dataprotector.sandbox.attackFlow.processGraph') }}</div>
+              <div class="process-graph">
+                <div
+                  v-for="node in attackStory.processes"
+                  :key="`${node.pid}-${node.order}`"
+                  class="process-node"
+                  :class="[`severity-${node.risk}`, { child: node.depth > 0 }]"
+                  :style="{ marginLeft: `${node.depth * 22}px` }"
+                >
+                  <div class="process-dot" />
+                  <div class="process-copy">
+                    <div class="process-name">{{ node.name }}</div>
+                    <div class="process-meta">PID {{ node.pid }} · PPID {{ node.parentPid || '-' }}</div>
+                    <div class="process-path">{{ node.path }}</div>
+                  </div>
                 </div>
-                <div class="flow-body">
-                  <div class="flow-label">{{ stage.label }}</div>
-                  <div class="flow-detail">{{ stage.detail }}</div>
-                </div>
+                <NEmpty v-if="!attackStory.processes.length" :description="$t('dataprotector.sandbox.attackFlow.empty')" />
               </div>
-              <div
-                v-if="index < attackFlowStages.length - 1"
-                class="flow-link"
-                :class="{ active: stage.active || attackFlowStages[index + 1]?.active }"
-              />
-            </template>
+            </div>
+
+            <div class="story-timeline-panel">
+              <div class="story-panel-title">{{ $t('dataprotector.sandbox.attackFlow.timeline') }}</div>
+              <div class="story-timeline">
+                <div
+                  v-for="event in attackStory.events"
+                  :key="event.id"
+                  class="timeline-event"
+                  :class="`severity-${event.severity}`"
+                >
+                  <div class="timeline-marker">
+                    <SvgIcon :icon="event.icon" />
+                  </div>
+                  <div class="timeline-card">
+                    <div class="timeline-topline">
+                      <span>{{ event.title }}</span>
+                      <small>{{ formatTime(event.time) }}</small>
+                    </div>
+                    <div class="timeline-detail">{{ event.detail }}</div>
+                    <div class="timeline-meta">PID {{ event.pid || '-' }} · {{ severityLabel(event.severity) }}</div>
+                  </div>
+                </div>
+                <NEmpty v-if="!attackStory.events.length" :description="$t('dataprotector.sandbox.attackFlow.empty')" />
+              </div>
+            </div>
+          </div>
+
+          <div class="story-entity-row">
+            <div v-for="entity in attackStory.entities" :key="entity.key" class="story-entity">
+              <SvgIcon :icon="entity.icon" />
+              <span>{{ entity.label }}</span>
+              <strong>{{ entity.value }}</strong>
+            </div>
           </div>
         </div>
 
@@ -1261,8 +1491,8 @@ onBeforeUnmount(stopPolling);
   padding: 16px;
   overflow: hidden;
   background:
-    linear-gradient(135deg, rgb(45 23 82 / 92%), rgb(17 24 39 / 96%)),
-    radial-gradient(circle at 18% 20%, rgb(125 92 255 / 34%), transparent 34%);
+    linear-gradient(135deg, rgb(37 24 66 / 95%), rgb(11 18 32 / 97%)),
+    radial-gradient(circle at 20% 18%, rgb(125 92 255 / 22%), transparent 34%);
   border: 1px solid rgb(167 139 250 / 26%);
   border-radius: 8px;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%), 0 18px 42px rgb(30 21 54 / 18%);
@@ -1296,94 +1526,264 @@ onBeforeUnmount(stopPolling);
   font-weight: 800;
 }
 
-.attack-flow {
+.story-stage-rail {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr) 28px minmax(145px, 1fr);
-  gap: 0;
-  align-items: stretch;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
 }
 
-.flow-node {
-  position: relative;
+.story-stage {
   display: flex;
   min-width: 0;
-  min-height: 96px;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 13px;
-  color: rgb(226 232 240);
-  background: rgb(15 23 42 / 58%);
-  border: 1px solid rgb(148 163 184 / 22%);
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 8px;
+  color: rgb(203 213 225);
+  font-size: 12px;
+  font-weight: 800;
+  background: rgb(15 23 42 / 48%);
+  border: 1px solid rgb(148 163 184 / 18%);
   border-radius: 8px;
-  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
 }
 
-.flow-node.active {
-  background: linear-gradient(145deg, rgb(79 70 229 / 42%), rgb(14 165 233 / 18%));
-  border-color: rgb(103 232 249 / 54%);
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 8%), 0 12px 28px rgb(14 165 233 / 14%);
+.story-stage.active {
+  color: #ffffff;
+  background: linear-gradient(135deg, rgb(124 58 237 / 42%), rgb(8 145 178 / 24%));
+  border-color: rgb(103 232 249 / 44%);
   animation: flow-node-pulse 2.8s ease-in-out infinite;
 }
 
-.flow-icon {
+.attack-story-grid {
+  position: relative;
   display: grid;
-  flex: 0 0 34px;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  color: rgb(216 180 254);
-  font-size: 21px;
-  background: rgb(255 255 255 / 8%);
-  border: 1px solid rgb(255 255 255 / 12%);
+  grid-template-columns: minmax(280px, 0.85fr) minmax(360px, 1.15fr);
+  gap: 12px;
+}
+
+.story-process-panel,
+.story-timeline-panel {
+  min-width: 0;
+  padding: 14px;
+  background: rgb(2 6 23 / 42%);
+  border: 1px solid rgb(148 163 184 / 16%);
   border-radius: 8px;
 }
 
-.flow-node.active .flow-icon {
-  color: #ffffff;
-  background: rgb(34 211 238 / 18%);
-  border-color: rgb(103 232 249 / 48%);
-}
-
-.flow-body {
-  min-width: 0;
-}
-
-.flow-label {
-  color: #ffffff;
+.story-panel-title {
+  margin-bottom: 12px;
+  color: rgb(226 232 240);
   font-size: 13px;
   font-weight: 800;
 }
 
-.flow-detail {
+.process-graph {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.process-graph::before {
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  left: 9px;
+  width: 1px;
+  content: '';
+  background: linear-gradient(180deg, rgb(103 232 249 / 12%), rgb(103 232 249 / 56%), rgb(167 139 250 / 12%));
+}
+
+.process-node {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 11px;
+  color: rgb(226 232 240);
+  background: rgb(15 23 42 / 58%);
+  border: 1px solid rgb(148 163 184 / 18%);
+  border-radius: 8px;
+}
+
+.process-node.child::before {
+  position: absolute;
+  top: 19px;
+  left: -21px;
+  width: 20px;
+  height: 1px;
+  content: '';
+  background: rgb(103 232 249 / 35%);
+}
+
+.process-dot {
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
   margin-top: 5px;
+  background: rgb(103 232 249);
+  border-radius: 50%;
+  box-shadow: 0 0 16px rgb(34 211 238 / 60%);
+}
+
+.process-copy {
+  min-width: 0;
+}
+
+.process-name {
+  overflow: hidden;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-meta,
+.process-path,
+.timeline-meta {
+  overflow: hidden;
+  color: rgb(148 163 184);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-path {
+  margin-top: 3px;
+}
+
+.story-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.story-timeline::before {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 16px;
+  width: 2px;
+  content: '';
+  background: linear-gradient(180deg, rgb(34 211 238 / 12%), rgb(34 211 238 / 58%), rgb(168 85 247 / 12%));
+}
+
+.timeline-event {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.timeline-marker {
+  z-index: 1;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #ffffff;
+  font-size: 18px;
+  background: rgb(30 41 59);
+  border: 1px solid rgb(103 232 249 / 42%);
+  border-radius: 8px;
+  box-shadow: 0 0 20px rgb(14 165 233 / 18%);
+}
+
+.severity-critical .process-dot,
+.severity-critical .timeline-marker,
+.severity-high .process-dot,
+.severity-high .timeline-marker {
+  background: rgb(244 63 94);
+  border-color: rgb(251 113 133 / 52%);
+  box-shadow: 0 0 20px rgb(244 63 94 / 34%);
+}
+
+.severity-medium .process-dot,
+.severity-medium .timeline-marker {
+  background: rgb(245 158 11);
+  border-color: rgb(251 191 36 / 46%);
+  box-shadow: 0 0 18px rgb(245 158 11 / 28%);
+}
+
+.timeline-card {
+  min-width: 0;
+  padding: 10px 12px;
+  background: rgb(15 23 42 / 62%);
+  border: 1px solid rgb(148 163 184 / 18%);
+  border-radius: 8px;
+}
+
+.timeline-topline {
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.timeline-topline span {
+  overflow: hidden;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-topline small {
+  flex: 0 0 auto;
+  color: rgb(148 163 184);
+  font-size: 11px;
+}
+
+.timeline-detail {
+  display: -webkit-box;
+  margin-top: 5px;
+  overflow: hidden;
   color: rgb(203 213 225);
   font-size: 12px;
   line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-.flow-link {
-  position: relative;
-  align-self: center;
-  height: 2px;
-  margin: 0 6px;
+.story-entity-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.story-entity {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  color: rgb(203 213 225);
+  background: rgb(15 23 42 / 46%);
+  border: 1px solid rgb(148 163 184 / 16%);
+  border-radius: 8px;
+}
+
+.story-entity span {
+  min-width: 0;
   overflow: hidden;
-  background: rgb(148 163 184 / 26%);
-  border-radius: 99px;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.flow-link::after {
-  position: absolute;
-  inset: 0;
-  content: '';
-  background: linear-gradient(90deg, transparent, rgb(103 232 249), rgb(167 139 250), transparent);
-  opacity: 0;
-  transform: translateX(-100%);
-}
-
-.flow-link.active::after {
-  opacity: 1;
-  animation: flow-link-move 1.7s linear infinite;
+.story-entity strong {
+  margin-left: auto;
+  color: #ffffff;
+  font-size: 18px;
 }
 
 .sandbox-output {
@@ -1414,24 +1814,10 @@ onBeforeUnmount(stopPolling);
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .attack-flow {
+  .story-stage-rail,
+  .attack-story-grid,
+  .story-entity-row {
     grid-template-columns: 1fr;
-    gap: 8px;
-  }
-
-  .flow-link {
-    width: 2px;
-    height: 22px;
-    margin: 0 0 0 29px;
-  }
-
-  .flow-link::after {
-    background: linear-gradient(180deg, transparent, rgb(103 232 249), rgb(167 139 250), transparent);
-    transform: translateY(-100%);
-  }
-
-  .flow-link.active::after {
-    animation-name: flow-link-move-y;
   }
 }
 
@@ -1462,21 +1848,4 @@ onBeforeUnmount(stopPolling);
   }
 }
 
-@keyframes flow-link-move {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(100%);
-  }
-}
-
-@keyframes flow-link-move-y {
-  from {
-    transform: translateY(-100%);
-  }
-  to {
-    transform: translateY(100%);
-  }
-}
 </style>
