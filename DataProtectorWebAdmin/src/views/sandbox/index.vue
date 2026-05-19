@@ -614,6 +614,18 @@ function clearLogs() {
     onPositiveClick: async () => {
       const { error, data } = await fetchRemoveSandboxLogs({ all: true, actor: 'web-admin' });
       if (!error && data.succeeded) {
+        selectedSampleId.value = '';
+        response.value = {
+          page: pagination.page || 1,
+          pageSize: pagination.pageSize || 20,
+          total: 0,
+          queuedTotal: 0,
+          runningTotal: 0,
+          completedTotal: 0,
+          failedTotal: 0,
+          items: []
+        };
+        pagination.itemCount = 0;
         message.success($t('dataprotector.sandbox.logsCleared'));
         await refresh(false);
       }

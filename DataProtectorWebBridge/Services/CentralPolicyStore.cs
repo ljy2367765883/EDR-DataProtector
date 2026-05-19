@@ -993,15 +993,20 @@ namespace DataProtectorWebBridge.Services
                     }
 
                     removedRuns = DeleteAllSandboxRunDirectories();
-                    foreach (SandboxSampleState sampleRecord in state.SandboxSamples)
+                    int removedRecords = state.SandboxSamples.Count;
+                    int removedSampleFiles = 0;
+                    foreach (SandboxSampleState sampleRecord in state.SandboxSamples.ToArray())
                     {
-                        if (ClearSandboxSampleReport(sampleRecord))
+                        if (!string.IsNullOrWhiteSpace(sampleRecord.storagePath))
                         {
-                            clearedReports++;
+                            removedSampleFiles += TryDeleteFile(sampleRecord.storagePath) ? 1 : 0;
                         }
                     }
 
-                    AppendAudit(actor, "sandbox.logs.clear", "*", "sandbox", true, "0x00000000", "Sandbox run logs cleared. Removed run directories: " + removedRuns + ", cleared reports: " + clearedReports + ".");
+                    removedSampleFiles += DeleteAllSandboxSampleStoreFiles();
+                    state.SandboxSamples.Clear();
+
+                    AppendAudit(actor, "sandbox.logs.clear", "*", "sandbox", true, "0x00000000", "Sandbox history cleared. Removed run directories: " + removedRuns + ", sample records: " + removedRecords + ", sample files: " + removedSampleFiles + ".");
                     Save();
                     return Success("Sandbox logs cleared.");
                 }
@@ -3175,15 +3180,50 @@ namespace DataProtectorWebBridge.Services
             return Math.Max(min, Math.Min(max, value));
         }
 
-        private static void TryDeleteFile(string path)
+        private static bool TryDeleteFile(string path)
         {
             try
             {
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                {
+                    return false;
+                }
+
                 File.Delete(path);
+                return true;
             }
             catch
             {
+                return false;
             }
+        }
+
+        private int DeleteAllSandboxSampleStoreFiles()
+        {
+            string root = GetSandboxSampleDirectory();
+            if (!Directory.Exists(root))
+            {
+                return 0;
+            }
+
+            int removed = 0;
+            foreach (string file in Directory.GetFiles(root))
+            {
+                if (TryDeleteFile(file))
+                {
+                    removed++;
+                }
+            }
+
+            foreach (string directory in Directory.GetDirectories(root))
+            {
+                if (TryDeleteDirectory(directory))
+                {
+                    removed++;
+                }
+            }
+
+            return removed;
         }
 
         private static bool TryDeleteDirectory(string path)
