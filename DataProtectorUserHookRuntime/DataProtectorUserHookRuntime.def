@@ -1,0 +1,3 @@
+LIBRARY "DataProtectorUserHookRuntime"
+EXPORTS
+    DpUserHookRuntimeInitialize

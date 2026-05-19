@@ -459,6 +459,9 @@ namespace DataProtectorWebBridge.Services
                 blockUntrustedRuntime = userHookDefensePolicy.blockUntrustedRuntime,
                 auditOnly = userHookDefensePolicy.auditOnly,
                 monitorSystemProcesses = userHookDefensePolicy.monitorSystemProcesses,
+                excludedProcessNames = userHookDefensePolicy.excludedProcessNames,
+                excludedProcessDirectories = userHookDefensePolicy.excludedProcessDirectories,
+                runtimePath = userHookDefensePolicy.runtimePath,
                 actor = "central-agent"
             });
 

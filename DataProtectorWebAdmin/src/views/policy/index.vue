@@ -56,6 +56,8 @@ const usbCryptSubmitting = ref(false);
 const dlpSubmitting = ref(false);
 const usbCryptPackageUploading = ref(false);
 const connected = ref(false);
+const userHookExcludedProcessesText = ref('');
+const userHookExcludedDirectoriesText = ref('');
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
 const webShellRules = ref<Api.DataProtector.WebShellRule[]>([]);
@@ -97,6 +99,9 @@ const userHookDefensePolicy = reactive<Api.DataProtector.UserHookDefensePolicy>(
   blockUntrustedRuntime: false,
   auditOnly: true,
   monitorSystemProcesses: false,
+  excludedProcessNames: [],
+  excludedProcessDirectories: [],
+  runtimePath: '',
   flags: 0x0000002f,
   actor: 'web-admin'
 });
@@ -945,8 +950,13 @@ function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePo
   userHookDefensePolicy.blockUntrustedRuntime = Boolean(policy.blockUntrustedRuntime);
   userHookDefensePolicy.auditOnly = Boolean(policy.auditOnly);
   userHookDefensePolicy.monitorSystemProcesses = Boolean(policy.monitorSystemProcesses);
+  userHookDefensePolicy.excludedProcessNames = policy.excludedProcessNames || [];
+  userHookDefensePolicy.excludedProcessDirectories = policy.excludedProcessDirectories || [];
+  userHookDefensePolicy.runtimePath = policy.runtimePath || '';
   userHookDefensePolicy.flags = policy.flags ?? calculateUserHookDefenseFlags();
   userHookDefensePolicy.actor = 'web-admin';
+  userHookExcludedProcessesText.value = userHookDefensePolicy.excludedProcessNames.join('\n');
+  userHookExcludedDirectoriesText.value = userHookDefensePolicy.excludedProcessDirectories.join('\n');
 }
 
 function calculateUserHookDefenseFlags() {
@@ -1342,6 +1352,9 @@ async function saveUserHookDefensePolicy() {
       blockUntrustedRuntime: userHookDefensePolicy.blockUntrustedRuntime,
       auditOnly: userHookDefensePolicy.auditOnly,
       monitorSystemProcesses: userHookDefensePolicy.monitorSystemProcesses,
+      excludedProcessNames: linesToList(userHookExcludedProcessesText.value),
+      excludedProcessDirectories: linesToList(userHookExcludedDirectoriesText.value),
+      runtimePath: userHookDefensePolicy.runtimePath,
       actor: 'web-admin'
     });
 
@@ -1995,6 +2008,37 @@ onMounted(refresh);
                         />
                       </div>
                       <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.systemProcessesDesc') }}</div>
+                    </div>
+                  </NGi>
+                </NGrid>
+
+                <NGrid :x-gap="12" :y-gap="12" cols="1 l:2">
+                  <NGi>
+                    <NFormItem :label="$t('dataprotector.policy.userhook.excludedProcesses')">
+                      <NInput
+                        v-model:value="userHookExcludedProcessesText"
+                        type="textarea"
+                        :autosize="{ minRows: 4, maxRows: 8 }"
+                        :placeholder="$t('dataprotector.policy.userhook.excludedProcessPlaceholder')"
+                      />
+                    </NFormItem>
+                  </NGi>
+                  <NGi>
+                    <NFormItem :label="$t('dataprotector.policy.userhook.excludedDirectories')">
+                      <NInput
+                        v-model:value="userHookExcludedDirectoriesText"
+                        type="textarea"
+                        :autosize="{ minRows: 4, maxRows: 8 }"
+                        :placeholder="$t('dataprotector.policy.userhook.excludedDirectoryPlaceholder')"
+                      />
+                    </NFormItem>
+                  </NGi>
+                  <NGi span="1 l:2">
+                    <div class="rounded-8px border border-dashed border-gray-200 p-14px dark:border-gray-700">
+                      <div class="text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.runtimePath') }}</div>
+                      <div class="m-t-6px break-all font-mono text-12px">
+                        {{ userHookDefensePolicy.runtimePath || $t('dataprotector.policy.userhook.runtimePathPending') }}
+                      </div>
                     </div>
                   </NGi>
                 </NGrid>

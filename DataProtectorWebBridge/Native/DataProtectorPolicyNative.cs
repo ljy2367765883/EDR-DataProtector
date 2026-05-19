@@ -324,6 +324,9 @@ namespace DataProtectorWebBridge.Native
         internal struct NativeUserHookDefensePolicy
         {
             public uint Flags;
+            public IntPtr ExcludedProcessNames;
+            public IntPtr ExcludedProcessDirectories;
+            public IntPtr RuntimeDllPath;
         }
 
         [StructLayout(LayoutKind.Sequential)]

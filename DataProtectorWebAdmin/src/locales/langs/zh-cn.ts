@@ -1,4 +1,4 @@
-const local: App.I18n.Schema = {
+﻿const local: App.I18n.Schema = {
   system: {
     title: 'DataProtector Web Admin',
     updateTitle: '系统版本更新通知',
@@ -812,38 +812,43 @@ const local: App.I18n.Schema = {
         saved: '横向移动防御策略已保存到中央策略。'
       },
       userhook: {
-        title: '应用层 Hook 防御策略',
-        enforcement: '早期防护开关',
-        enforcementDesc: '内核早鸟感知进程启动和敏感 API 模块加载，在签名运行时接管前建立审计闭环。',
-        earlyProcess: '早期进程监控',
-        earlyProcessDesc: '在内核通知阶段记录进程创建，用于运行时防护决策。',
+        title: '应用 Hook 防御策略',
+        enforcement: '早期注入防护',
+        enforcementDesc: '内核早鸟控制仅对未命中白名单的可疑进程加载用户态 Hook Runtime。',
+        earlyProcess: '注入非白名单进程',
+        earlyProcessDesc: '白名单命中的可信进程不注入；其它进程可在早期加载 Hook Runtime 进行行为监控。',
         imageLoad: 'Hook 面模块监控',
-        imageLoadDesc: '监控 ntdll、kernelbase、wininet、ws2_32、amsi 等 Hook 敏感模块。',
+        imageLoadDesc: '仅在已选中注入的进程内跟踪 ntdll、kernelbase、wininet、ws2_32、amsi 等敏感模块。',
         signedRuntime: '要求签名运行时',
         signedRuntimeDesc: '标记需要可信用户态运行时接管防护的进程。',
         auditOnly: '仅审计',
         auditOnlyDesc: '运行时推广验证期仅记录需要防护的动作。',
-        blockUntrusted: '阻断非可信运行时',
-        blockUntrustedDesc: '保留对未签名或版本不匹配运行时的拒绝策略。',
+        blockUntrusted: '阻断高危 Hook 行为',
+        blockUntrustedDesc: '运行时可阻断远程线程、跨进程写内存等高危行为。',
         systemProcesses: '包含系统进程',
         systemProcessesDesc: '将监控扩展到 PID 4 和系统启动面。',
         controls: '控制项：{count}/6',
         active: '生效：{count}',
+        excludedProcesses: '不注入进程名白名单',
+        excludedProcessPlaceholder: '每行一个进程，例如 chrome.exe',
+        excludedDirectories: '不注入进程目录白名单',
+        excludedDirectoryPlaceholder: '每行一个目录，例如 C:\\Program Files\\TrustedApp',
+        runtimePath: '终端 Runtime 缓存路径',
+        runtimePathPending: '保存策略后由 Agent 自动准备',
         save: '保存应用 Hook 防御',
         surfaces: '受保护的应用 Hook 面',
         saved: '应用 Hook 防御策略已保存到中央策略。',
         surfacesList: {
           earlyTitle: '内核早鸟进程阶段',
-          earlyDetail: '在用户代码正常运行前创建可审计的防护记录。',
+          earlyDetail: '仅对白名单之外的进程请求 Hook Runtime 注入。',
           imageTitle: '敏感 API 模块加载',
-          imageDetail: '观测网络、凭据、UI 和脚本拦截常见的 API Hook 目标。',
+          imageDetail: '观察网络、凭据、UI 和脚本拦截常见的 API Hook 目标。',
           runtimeTitle: '签名运行时门禁',
           runtimeDetail: '将用户态防护组件与中央策略和签名要求绑定。',
           auditTitle: '度量推广模式',
           auditDetail: '在启用更强防护前，让终端上报将要接管的面。'
         }
-      },
-      dlp: {
+      },      dlp: {
         title: '截图和剪贴板防泄密',
         enforcement: '终端 DLP 防护',
         enforcementDesc: '通过 Agent 控制剪贴板流转和常见截图入口。',

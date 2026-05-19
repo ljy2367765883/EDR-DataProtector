@@ -30,6 +30,8 @@
 #define DP_LATERAL_DEFENSE_PROCESS_CHARS 64u
 #define DP_USER_HOOK_DEFENSE_TARGET_CHARS 512u
 #define DP_USER_HOOK_DEFENSE_PROCESS_CHARS 512u
+#define DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS 2048u
+#define DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS 512u
 #define DP_USB_METADATA_BYTES 512u
 #define DP_USB_METADATA_PATH_CHARS 128u
 #define DP_USB_METADATA_MESSAGE_VERSION 1u
@@ -354,6 +356,12 @@ typedef struct _DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY {
 typedef struct _DP_USER_HOOK_DEFENSE_POLICY_MESSAGE {
     ULONG Version;
     ULONG Flags;
+    ULONG ExcludedProcessNamesLengthBytes;
+    ULONG ExcludedProcessDirectoriesLengthBytes;
+    ULONG RuntimeDllPathLengthBytes;
+    WCHAR ExcludedProcessNames[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+    WCHAR ExcludedProcessDirectories[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+    WCHAR RuntimeDllPath[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
 } DP_USER_HOOK_DEFENSE_POLICY_MESSAGE, *PDP_USER_HOOK_DEFENSE_POLICY_MESSAGE;
 
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
@@ -382,10 +390,10 @@ typedef struct _DP_USER_HOOK_DEFENSE_POLICY_MESSAGE {
      DP_POLICY_API_LATERAL_DEFENSE_FLAG_IPC_SERVICES | \
      DP_POLICY_API_LATERAL_DEFENSE_FLAG_PROCESS_TOOLS)
 #define DP_USER_HOOK_DEFENSE_EVENT_QUERY_VERSION 1u
-#define DP_USER_HOOK_DEFENSE_POLICY_VERSION 1u
+#define DP_USER_HOOK_DEFENSE_POLICY_VERSION 3u
 #define DP_USER_HOOK_DEFENSE_ALLOWED_FLAGS \
     (DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_ENABLED | \
-     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR | \
+     DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION | \
      DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_IMAGE_LOAD_MONITOR | \
      DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_REQUIRE_SIGNED_RUNTIME | \
      DP_POLICY_API_USER_HOOK_DEFENSE_FLAG_BLOCK_UNTRUSTED_RUNTIME | \
@@ -398,6 +406,9 @@ typedef struct _DP_USER_HOOK_DEFENSE_POLICY_MESSAGE {
 C_ASSERT(sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY) == 1232);
 
 static WCHAR gLastErrorMessage[512];
+__declspec(thread) static WCHAR gUserHookQueryExcludedProcessNames[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+__declspec(thread) static WCHAR gUserHookQueryExcludedProcessDirectories[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+__declspec(thread) static WCHAR gUserHookQueryRuntimeDllPath[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
 static volatile LONG gFormatLock = 0;
 static volatile LONG gFormatActive = 0;
 static volatile LONG gFormatCompleted = 0;
@@ -3514,6 +3525,7 @@ DpPolicySetUserHookDefensePolicy(
     )
 {
     DP_USER_HOOK_DEFENSE_POLICY_MESSAGE message;
+    HRESULT hr;
 
     if (Policy == NULL ||
         (Policy->Flags & ~DP_USER_HOOK_DEFENSE_ALLOWED_FLAGS) != 0) {
@@ -3525,6 +3537,45 @@ DpPolicySetUserHookDefensePolicy(
     ZeroMemory(&message, sizeof(message));
     message.Version = DP_USER_HOOK_DEFENSE_POLICY_VERSION;
     message.Flags = Policy->Flags;
+
+    if (Policy->ExcludedProcessNames != NULL) {
+        hr = StringCchCopyW(message.ExcludedProcessNames,
+                            ARRAYSIZE(message.ExcludedProcessNames),
+                            Policy->ExcludedProcessNames);
+        if (FAILED(hr)) {
+            DpPolicySetLastErrorMessage(L"User hook excluded process name list is too long.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        message.ExcludedProcessNamesLengthBytes =
+            (ULONG)(wcslen(message.ExcludedProcessNames) * sizeof(WCHAR));
+    }
+
+    if (Policy->ExcludedProcessDirectories != NULL) {
+        hr = StringCchCopyW(message.ExcludedProcessDirectories,
+                            ARRAYSIZE(message.ExcludedProcessDirectories),
+                            Policy->ExcludedProcessDirectories);
+        if (FAILED(hr)) {
+            DpPolicySetLastErrorMessage(L"User hook excluded process directory list is too long.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        message.ExcludedProcessDirectoriesLengthBytes =
+            (ULONG)(wcslen(message.ExcludedProcessDirectories) * sizeof(WCHAR));
+    }
+
+    if (Policy->RuntimeDllPath != NULL) {
+        hr = StringCchCopyW(message.RuntimeDllPath,
+                            ARRAYSIZE(message.RuntimeDllPath),
+                            Policy->RuntimeDllPath);
+        if (FAILED(hr)) {
+            DpPolicySetLastErrorMessage(L"User hook runtime DLL path is too long.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        message.RuntimeDllPathLengthBytes =
+            (ULONG)(wcslen(message.RuntimeDllPath) * sizeof(WCHAR));
+    }
 
     return DpPolicySendRawPolicyMessage(DpPolicyCommandSetUserHookDefensePolicy,
                                         &message,
@@ -3569,7 +3620,43 @@ DpPolicyQueryUserHookDefensePolicy(
         return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
+    ZeroMemory(gUserHookQueryExcludedProcessNames, sizeof(gUserHookQueryExcludedProcessNames));
+    ZeroMemory(gUserHookQueryExcludedProcessDirectories, sizeof(gUserHookQueryExcludedProcessDirectories));
+    ZeroMemory(gUserHookQueryRuntimeDllPath, sizeof(gUserHookQueryRuntimeDllPath));
+
+    if (message.ExcludedProcessNamesLengthBytes >= sizeof(message.ExcludedProcessNames) ||
+        message.ExcludedProcessDirectoriesLengthBytes >= sizeof(message.ExcludedProcessDirectories) ||
+        message.RuntimeDllPathLengthBytes >= sizeof(message.RuntimeDllPath) ||
+        message.ExcludedProcessNamesLengthBytes % sizeof(WCHAR) != 0 ||
+        message.ExcludedProcessDirectoriesLengthBytes % sizeof(WCHAR) != 0 ||
+        message.RuntimeDllPathLengthBytes % sizeof(WCHAR) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned invalid user hook defense policy strings.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (message.ExcludedProcessNamesLengthBytes != 0) {
+        CopyMemory(gUserHookQueryExcludedProcessNames,
+                   message.ExcludedProcessNames,
+                   message.ExcludedProcessNamesLengthBytes);
+    }
+
+    if (message.ExcludedProcessDirectoriesLengthBytes != 0) {
+        CopyMemory(gUserHookQueryExcludedProcessDirectories,
+                   message.ExcludedProcessDirectories,
+                   message.ExcludedProcessDirectoriesLengthBytes);
+    }
+
+    if (message.RuntimeDllPathLengthBytes != 0) {
+        CopyMemory(gUserHookQueryRuntimeDllPath,
+                   message.RuntimeDllPath,
+                   message.RuntimeDllPathLengthBytes);
+    }
+
     Policy->Flags = message.Flags;
+    Policy->ExcludedProcessNames = gUserHookQueryExcludedProcessNames;
+    Policy->ExcludedProcessDirectories = gUserHookQueryExcludedProcessDirectories;
+    Policy->RuntimeDllPath = gUserHookQueryRuntimeDllPath;
     DpPolicySetLastErrorMessage(L"Success.");
     return DP_POLICY_API_SUCCESS;
 }

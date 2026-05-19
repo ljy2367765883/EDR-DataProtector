@@ -634,7 +634,9 @@ namespace DataProtectorWebBridge.Services
             lock (syncRoot)
             {
                 EnsureUserHookDefensePolicy();
-                if (PolicyBridgeService.ToUserHookDefenseFlags(state.UserHookDefensePolicy) != PolicyBridgeService.ToUserHookDefenseFlags(normalized))
+                if (PolicyBridgeService.ToUserHookDefenseFlags(state.UserHookDefensePolicy) != PolicyBridgeService.ToUserHookDefenseFlags(normalized) ||
+                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessNames, normalized.excludedProcessNames) ||
+                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessDirectories, normalized.excludedProcessDirectories))
                 {
                     state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
                     state.PolicyVersion++;
@@ -656,6 +658,11 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Success("Application hook defense policy stored on central server.");
+        }
+
+        private static bool StringArrayEquals(string[] left, string[] right)
+        {
+            return (left ?? new string[0]).SequenceEqual(right ?? new string[0], StringComparer.OrdinalIgnoreCase);
         }
 
         public PolicyBridgeService.OperationResult UpdateUsbCryptPolicy(PolicyBridgeService.UsbCryptPolicyRequest request)

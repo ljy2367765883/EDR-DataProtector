@@ -21,6 +21,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DataProtectorUsbCrypt", "Da
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DataProtectorUsbTool", "DataProtectorUsbTool\DataProtectorUsbTool.vcxproj", "{5B3E5C4C-40D2-4EF2-8E69-7EBD7BCBC7C1}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DataProtectorUserHookRuntime", "DataProtectorUserHookRuntime\DataProtectorUserHookRuntime.vcxproj", "{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataProtectorAgentClient", "DataProtectorAgentClient\DataProtectorAgentClient.csproj", "{A3E192C4-162B-4CE0-9F69-C9F2DD6400D5}"
 	ProjectSection(ProjectDependencies) = postProject
 		{128D2525-C3AA-4E07-96CE-5F39EC669E72} = {128D2525-C3AA-4E07-96CE-5F39EC669E72}
@@ -114,6 +116,18 @@ Global
 		{5B3E5C4C-40D2-4EF2-8E69-7EBD7BCBC7C1}.Release|x64.ActiveCfg = Release|x64
 		{5B3E5C4C-40D2-4EF2-8E69-7EBD7BCBC7C1}.Release|x64.Build.0 = Release|x64
 		{5B3E5C4C-40D2-4EF2-8E69-7EBD7BCBC7C1}.Release|x86.ActiveCfg = Release|Win32
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Debug|ARM.ActiveCfg = Debug|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Debug|ARM64.ActiveCfg = Debug|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Debug|x64.ActiveCfg = Debug|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Debug|x64.Build.0 = Debug|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Debug|x86.ActiveCfg = Debug|Win32
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Debug|x86.Build.0 = Debug|Win32
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Release|ARM.ActiveCfg = Release|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Release|ARM64.ActiveCfg = Release|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Release|x64.ActiveCfg = Release|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Release|x64.Build.0 = Release|x64
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Release|x86.ActiveCfg = Release|Win32
+		{0F2AB2A0-00D7-4C22-9AF8-9F64255C6D50}.Release|x86.Build.0 = Release|Win32
 		{A3E192C4-162B-4CE0-9F69-C9F2DD6400D5}.Debug|ARM.ActiveCfg = Debug|x64
 		{A3E192C4-162B-4CE0-9F69-C9F2DD6400D5}.Debug|ARM64.ActiveCfg = Debug|x64
 		{A3E192C4-162B-4CE0-9F69-C9F2DD6400D5}.Debug|x64.ActiveCfg = Debug|x64

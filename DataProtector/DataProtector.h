@@ -73,6 +73,8 @@ Abstract:
 #define DP_USER_HOOK_DEFENSE_MAX_EVENTS 512
 #define DP_USER_HOOK_DEFENSE_TARGET_CHARS 512
 #define DP_USER_HOOK_DEFENSE_PROCESS_CHARS 512
+#define DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS 2048
+#define DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS 512
 #define DP_USB_METADATA_BYTES 512
 #define DP_USB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
 #define DP_USB_METADATA_DEFAULT_OFFSET_BYTES (1024ull * 1024ull)
@@ -647,12 +649,17 @@ typedef enum _DP_USER_HOOK_DEFENSE_OPERATION {
     DpUserHookDefenseOperationRuntimeRequired = 3,
     DpUserHookDefenseOperationRuntimeMissing = 4,
     DpUserHookDefenseOperationRuntimeRejected = 5,
-    DpUserHookDefenseOperationSuspiciousHookAttempt = 6
+    DpUserHookDefenseOperationSuspiciousHookAttempt = 6,
+    DpUserHookDefenseOperationRuntimeInjectionRequired = 7,
+    DpUserHookDefenseOperationRuntimeInjectionQueued = 8,
+    DpUserHookDefenseOperationRuntimeInjectionFailed = 9,
+    DpUserHookDefenseOperationRuntimeInjectionSkipped = 10
 } DP_USER_HOOK_DEFENSE_OPERATION;
 
-#define DP_USER_HOOK_DEFENSE_POLICY_VERSION 1
+#define DP_USER_HOOK_DEFENSE_POLICY_VERSION 3
 #define DP_USER_HOOK_DEFENSE_FLAG_ENABLED                 0x00000001
-#define DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR   0x00000002
+#define DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION 0x00000002
+#define DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR   DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION
 #define DP_USER_HOOK_DEFENSE_FLAG_IMAGE_LOAD_MONITOR      0x00000004
 #define DP_USER_HOOK_DEFENSE_FLAG_REQUIRE_SIGNED_RUNTIME  0x00000008
 #define DP_USER_HOOK_DEFENSE_FLAG_BLOCK_UNTRUSTED_RUNTIME 0x00000010
@@ -676,6 +683,12 @@ typedef enum _DP_USER_HOOK_DEFENSE_OPERATION {
 typedef struct _DP_USER_HOOK_DEFENSE_POLICY {
     ULONG Version;
     ULONG Flags;
+    ULONG ExcludedProcessNamesLengthBytes;
+    ULONG ExcludedProcessDirectoriesLengthBytes;
+    ULONG RuntimeDllPathLengthBytes;
+    WCHAR ExcludedProcessNames[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+    WCHAR ExcludedProcessDirectories[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+    WCHAR RuntimeDllPath[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
 } DP_USER_HOOK_DEFENSE_POLICY, *PDP_USER_HOOK_DEFENSE_POLICY;
 
 typedef struct _DP_USER_HOOK_DEFENSE_EVENT_QUERY_HEADER {

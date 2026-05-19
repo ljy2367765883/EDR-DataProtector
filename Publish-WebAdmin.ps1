@@ -118,6 +118,7 @@ $driverCertificate = Join-Path $root "DataProtector\$Platform\$Configuration\Dat
 $usbCryptDriverPackage = Join-Path $root "DataProtectorUsbCrypt\$Platform\$Configuration\DataProtectorUsbCrypt"
 $usbCryptDriverCertificate = Join-Path $root "DataProtectorUsbCrypt\$Platform\$Configuration\DataProtectorUsbCrypt.cer"
 $usbToolOutput = Join-Path $root "DataProtectorUsbTool\$Platform\$Configuration\DataProtectorUsbTool.exe"
+$userHookRuntimeOutput = Join-Path $root "DataProtectorUserHookRuntime\$Platform\$Configuration\DataProtectorUserHookRuntime.dll"
 
 Push-Location $root
 try {
@@ -130,6 +131,7 @@ try {
     }
     Invoke-Checked $msBuild $usbCryptBuildArguments "DataProtectorUsbCrypt driver build"
     Invoke-Checked $msBuild @(".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbTool build"
+    Invoke-Checked $msBuild @(".\DataProtectorUserHookRuntime\DataProtectorUserHookRuntime.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUserHookRuntime build"
     Invoke-Checked $msBuild @(".\DataProtectorWebBridge\DataProtectorWebBridge.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorWebBridge build"
     Invoke-Checked $msBuild @(".\DataProtectorAgentClient\DataProtectorAgentClient.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorAgentClient build"
 
@@ -166,6 +168,10 @@ try {
         throw "USB crypt tool output was not found: $usbToolOutput"
     }
 
+    if (-not (Test-Path -LiteralPath $userHookRuntimeOutput)) {
+        throw "User hook runtime output was not found: $userHookRuntimeOutput"
+    }
+
     if (Test-Path -LiteralPath $OutputDirectory) {
         $resolvedOutput = (Resolve-Path -LiteralPath $OutputDirectory).Path
         $resolvedRoot = (Resolve-Path -LiteralPath $root).Path
@@ -198,6 +204,9 @@ try {
             Copy-Item -LiteralPath $source -Destination $agentPublish -Force
         }
     }
+
+    Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $agentPublish -Force
+    Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $serverPublish -Force
 
     $agentClientFiles = @(
         "DataProtectorAgentClient.exe",

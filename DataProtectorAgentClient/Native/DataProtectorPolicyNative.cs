@@ -114,6 +114,9 @@ namespace DataProtectorAgentClient.Native
         internal struct NativeUserHookDefensePolicy
         {
             public uint Flags;
+            public IntPtr ExcludedProcessNames;
+            public IntPtr ExcludedProcessDirectories;
+            public IntPtr RuntimeDllPath;
         }
     }
 }

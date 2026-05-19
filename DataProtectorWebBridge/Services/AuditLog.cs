@@ -71,6 +71,14 @@ namespace DataProtectorWebBridge.Services
                 return "lateral";
             }
 
+            if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("policy.userhook", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("central.policy.userhook", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".userhook.", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "userhook";
+            }
+
             if (action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("policy.dlp", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("central.policy.dlp", StringComparison.OrdinalIgnoreCase) ||
@@ -140,6 +148,7 @@ namespace DataProtectorWebBridge.Services
             if (action.StartsWith("webshell.danger", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("hashdump.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.blocked", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.clipboard.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.screenshot.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.IndexOf(".blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -186,6 +195,7 @@ namespace DataProtectorWebBridge.Services
             if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
             {

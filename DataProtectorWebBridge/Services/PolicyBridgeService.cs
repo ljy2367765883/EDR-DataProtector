@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Web.Script.Serialization;
 using DataProtectorWebBridge.Native;
 
 namespace DataProtectorWebBridge.Services
@@ -82,8 +83,12 @@ namespace DataProtectorWebBridge.Services
         private const uint UserHookOperationRuntimeMissing = 4;
         private const uint UserHookOperationRuntimeRejected = 5;
         private const uint UserHookOperationSuspiciousHookAttempt = 6;
+        private const uint UserHookOperationRuntimeInjectionRequired = 7;
+        private const uint UserHookOperationRuntimeInjectionQueued = 8;
+        private const uint UserHookOperationRuntimeInjectionFailed = 9;
+        private const uint UserHookOperationRuntimeInjectionSkipped = 10;
         private const uint UserHookDefenseFlagEnabled = 0x00000001;
-        private const uint UserHookDefenseFlagEarlyProcessMonitor = 0x00000002;
+        private const uint UserHookDefenseFlagEarlyProcessInjection = 0x00000002;
         private const uint UserHookDefenseFlagImageLoadMonitor = 0x00000004;
         private const uint UserHookDefenseFlagRequireSignedRuntime = 0x00000008;
         private const uint UserHookDefenseFlagBlockUntrustedRuntime = 0x00000010;
@@ -91,7 +96,7 @@ namespace DataProtectorWebBridge.Services
         private const uint UserHookDefenseFlagMonitorSystemProcesses = 0x00000040;
         private const uint UserHookDefenseAllowedFlags =
             UserHookDefenseFlagEnabled |
-            UserHookDefenseFlagEarlyProcessMonitor |
+            UserHookDefenseFlagEarlyProcessInjection |
             UserHookDefenseFlagImageLoadMonitor |
             UserHookDefenseFlagRequireSignedRuntime |
             UserHookDefenseFlagBlockUntrustedRuntime |
@@ -844,7 +849,18 @@ namespace DataProtectorWebBridge.Services
                 throw new BridgeException(status, ReadLastErrorMessage());
             }
 
-            return FromUserHookDefenseFlags(nativePolicy.Flags);
+            UserHookDefensePolicyDto policy = FromUserHookDefenseFlags(nativePolicy.Flags);
+            policy.excludedProcessNames = NormalizeStringList(
+                SplitUserHookPolicyList(Marshal.PtrToStringUni(nativePolicy.ExcludedProcessNames)),
+                DefaultUserHookExcludedProcessNames());
+            policy.excludedProcessDirectories = NormalizeStringList(
+                SplitUserHookPolicyList(Marshal.PtrToStringUni(nativePolicy.ExcludedProcessDirectories)),
+                DefaultUserHookExcludedProcessDirectories());
+            string runtimePath = Marshal.PtrToStringUni(nativePolicy.RuntimeDllPath);
+            policy.runtimePath = string.IsNullOrWhiteSpace(runtimePath)
+                ? GetPreparedUserHookRuntimePath()
+                : runtimePath;
+            return policy;
         }
 
         public OperationResult SetUserHookDefensePolicy(UserHookDefensePolicyRequest request)
@@ -852,13 +868,49 @@ namespace DataProtectorWebBridge.Services
             UserHookDefensePolicyDto normalized = NormalizeUserHookDefensePolicy(request);
             OperationResult result = Invoke(() =>
             {
-                DataProtectorPolicyNative.NativeUserHookDefensePolicy nativePolicy = new DataProtectorPolicyNative.NativeUserHookDefensePolicy
-                {
-                    Flags = ToUserHookDefenseFlags(normalized)
-                };
+                IntPtr excludedNames = IntPtr.Zero;
+                IntPtr excludedDirectories = IntPtr.Zero;
+                IntPtr runtimeDllPath = IntPtr.Zero;
 
-                return DataProtectorPolicyNative.DpPolicySetUserHookDefensePolicy(ref nativePolicy);
+                try
+                {
+                    string runtimePath = PrepareUserHookRuntimeDll();
+                    excludedNames = Marshal.StringToHGlobalUni(string.Join("\n", normalized.excludedProcessNames ?? new string[0]));
+                    excludedDirectories = Marshal.StringToHGlobalUni(string.Join("\n", normalized.excludedProcessDirectories ?? new string[0]));
+                    runtimeDllPath = Marshal.StringToHGlobalUni(runtimePath);
+                    DataProtectorPolicyNative.NativeUserHookDefensePolicy nativePolicy = new DataProtectorPolicyNative.NativeUserHookDefensePolicy
+                    {
+                        Flags = ToUserHookDefenseFlags(normalized),
+                        ExcludedProcessNames = excludedNames,
+                        ExcludedProcessDirectories = excludedDirectories,
+                        RuntimeDllPath = runtimeDllPath
+                    };
+
+                    return DataProtectorPolicyNative.DpPolicySetUserHookDefensePolicy(ref nativePolicy);
+                }
+                finally
+                {
+                    if (excludedNames != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(excludedNames);
+                    }
+
+                    if (excludedDirectories != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(excludedDirectories);
+                    }
+
+                    if (runtimeDllPath != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(runtimeDllPath);
+                    }
+                }
             });
+
+            if (result.succeeded)
+            {
+                WriteUserHookRuntimePolicy(normalized);
+            }
 
             auditLog.Append(
                 normalized.actor,
@@ -1228,11 +1280,7 @@ namespace DataProtectorWebBridge.Services
 
             foreach (UserHookDefenseEventDto item in events)
             {
-                string message = "Application hook defense observed " + item.operation + " for PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
-                if (!string.IsNullOrWhiteSpace(item.processImage))
-                {
-                    message += " Process: " + item.processImage + ".";
-                }
+                string message = BuildUserHookAuditMessage(item);
 
                 AuditLog.AuditRecord record = new AuditLog.AuditRecord
                 {
@@ -1242,13 +1290,118 @@ namespace DataProtectorWebBridge.Services
                     Action = "userhook." + item.operation,
                     Target = item.target,
                     Extension = item.processImage,
-                    Succeeded = true,
+                    Succeeded = item.status == SuccessStatus || item.status == 0x00000103,
                     Status = item.statusText,
-                    Message = message + " ParentPID: " + item.parentProcessId.ToString(CultureInfo.InvariantCulture) + ". Flags: 0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture) + "."
+                    Message = message
                 };
 
                 records.Add(record);
                 TryAppendAudit(record);
+            }
+
+            records.AddRange(DrainUserHookRuntimeAuditRecords());
+
+            return records.ToArray();
+        }
+
+        private static string BuildUserHookAuditMessage(UserHookDefenseEventDto item)
+        {
+            string message = "Application hook defense " + item.operation + " for PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+            if (!string.IsNullOrWhiteSpace(item.processImage))
+            {
+                message += " Process: " + item.processImage + ".";
+            }
+
+            message += " ParentPID: " + item.parentProcessId.ToString(CultureInfo.InvariantCulture) + ".";
+            message += " Flags: 0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture) + ".";
+            return message;
+        }
+
+        private AuditLog.AuditRecord[] DrainUserHookRuntimeAuditRecords()
+        {
+            string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            string path = Path.Combine(dataRoot, "DataProtector", "UserHookRuntimeEvents.jsonl");
+            string[] lines;
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+            JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+
+            if (!File.Exists(path))
+            {
+                return records.ToArray();
+            }
+
+            try
+            {
+                lines = File.ReadAllLines(path, Encoding.UTF8)
+                    .Where(line => !string.IsNullOrWhiteSpace(line))
+                    .Take(2048)
+                    .ToArray();
+                File.WriteAllText(path, string.Empty, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                return new[]
+                {
+                    new AuditLog.AuditRecord
+                    {
+                        TimestampUtc = DateTime.UtcNow.ToString("o"),
+                        Host = Environment.MachineName,
+                        Actor = "user-hook-runtime",
+                        Action = "userhook.runtime.drain.failed",
+                        Target = path,
+                        Extension = string.Empty,
+                        Succeeded = false,
+                        Status = "0x00000001",
+                        Message = ex.Message
+                    }
+                };
+            }
+
+            foreach (string line in lines)
+            {
+                try
+                {
+                    UserHookRuntimeEvent runtimeEvent = serializer.Deserialize<UserHookRuntimeEvent>(line);
+                    if (runtimeEvent == null)
+                    {
+                        continue;
+                    }
+
+                    bool blocked = runtimeEvent.blocked ||
+                        (runtimeEvent.action ?? string.Empty).IndexOf(".blocked.", StringComparison.OrdinalIgnoreCase) >= 0;
+                    AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                    {
+                        TimestampUtc = string.IsNullOrWhiteSpace(runtimeEvent.timestampUtc) ? DateTime.UtcNow.ToString("o") : runtimeEvent.timestampUtc,
+                        Host = string.IsNullOrWhiteSpace(runtimeEvent.host) ? Environment.MachineName : runtimeEvent.host,
+                        Actor = "user-hook-runtime",
+                        Action = runtimeEvent.action ?? "userhook.runtime.event",
+                        Target = runtimeEvent.target ?? string.Empty,
+                        Extension = runtimeEvent.processImage ?? string.Empty,
+                        Succeeded = !blocked,
+                        Status = string.IsNullOrWhiteSpace(runtimeEvent.status) ? "0x00000000" : runtimeEvent.status,
+                        Message = "User-mode hook runtime event from PID " + runtimeEvent.pid.ToString(CultureInfo.InvariantCulture) + "."
+                    };
+
+                    records.Add(record);
+                    TryAppendAudit(record);
+                }
+                catch
+                {
+                    AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                    {
+                        TimestampUtc = DateTime.UtcNow.ToString("o"),
+                        Host = Environment.MachineName,
+                        Actor = "user-hook-runtime",
+                        Action = "userhook.runtime.parse.failed",
+                        Target = "UserHookRuntimeEvents.jsonl",
+                        Extension = string.Empty,
+                        Succeeded = false,
+                        Status = "0x00000001",
+                        Message = line
+                    };
+                    records.Add(record);
+                    TryAppendAudit(record);
+                }
             }
 
             return records.ToArray();
@@ -1769,12 +1922,15 @@ namespace DataProtectorWebBridge.Services
             return new UserHookDefensePolicyDto
             {
                 enabled = (flags & UserHookDefenseFlagEnabled) != 0,
-                monitorEarlyProcesses = (flags & UserHookDefenseFlagEarlyProcessMonitor) != 0,
+                monitorEarlyProcesses = (flags & UserHookDefenseFlagEarlyProcessInjection) != 0,
                 monitorImageLoads = (flags & UserHookDefenseFlagImageLoadMonitor) != 0,
                 requireSignedRuntime = (flags & UserHookDefenseFlagRequireSignedRuntime) != 0,
                 blockUntrustedRuntime = (flags & UserHookDefenseFlagBlockUntrustedRuntime) != 0,
                 auditOnly = (flags & UserHookDefenseFlagAuditOnly) != 0,
                 monitorSystemProcesses = (flags & UserHookDefenseFlagMonitorSystemProcesses) != 0,
+                excludedProcessNames = DefaultUserHookExcludedProcessNames(),
+                excludedProcessDirectories = DefaultUserHookExcludedProcessDirectories(),
+                runtimePath = GetPreparedUserHookRuntimePath(),
                 flags = flags & UserHookDefenseAllowedFlags
             };
         }
@@ -1784,7 +1940,7 @@ namespace DataProtectorWebBridge.Services
             if (policy == null)
             {
                 return UserHookDefenseFlagEnabled |
-                       UserHookDefenseFlagEarlyProcessMonitor |
+                       UserHookDefenseFlagEarlyProcessInjection |
                        UserHookDefenseFlagImageLoadMonitor |
                        UserHookDefenseFlagRequireSignedRuntime |
                        UserHookDefenseFlagAuditOnly;
@@ -1792,7 +1948,7 @@ namespace DataProtectorWebBridge.Services
 
             uint flags = 0;
             if (policy.enabled) flags |= UserHookDefenseFlagEnabled;
-            if (policy.monitorEarlyProcesses) flags |= UserHookDefenseFlagEarlyProcessMonitor;
+            if (policy.monitorEarlyProcesses) flags |= UserHookDefenseFlagEarlyProcessInjection;
             if (policy.monitorImageLoads) flags |= UserHookDefenseFlagImageLoadMonitor;
             if (policy.requireSignedRuntime) flags |= UserHookDefenseFlagRequireSignedRuntime;
             if (policy.blockUntrustedRuntime) flags |= UserHookDefenseFlagBlockUntrustedRuntime;
@@ -1805,7 +1961,7 @@ namespace DataProtectorWebBridge.Services
         {
             return FromUserHookDefenseFlags(
                 UserHookDefenseFlagEnabled |
-                UserHookDefenseFlagEarlyProcessMonitor |
+                UserHookDefenseFlagEarlyProcessInjection |
                 UserHookDefenseFlagImageLoadMonitor |
                 UserHookDefenseFlagRequireSignedRuntime |
                 UserHookDefenseFlagAuditOnly);
@@ -1823,6 +1979,9 @@ namespace DataProtectorWebBridge.Services
                 blockUntrustedRuntime = source.blockUntrustedRuntime,
                 auditOnly = source.auditOnly,
                 monitorSystemProcesses = source.monitorSystemProcesses,
+                excludedProcessNames = NormalizeStringList(source.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
+                excludedProcessDirectories = NormalizeStringList(source.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
+                runtimePath = string.IsNullOrWhiteSpace(source.runtimePath) ? GetPreparedUserHookRuntimePath() : source.runtimePath,
                 flags = ToUserHookDefenseFlags(source),
                 actor = source.actor
             };
@@ -1844,6 +2003,9 @@ namespace DataProtectorWebBridge.Services
                 blockUntrustedRuntime = request.blockUntrustedRuntime,
                 auditOnly = request.auditOnly,
                 monitorSystemProcesses = request.monitorSystemProcesses,
+                excludedProcessNames = NormalizeStringList(request.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
+                excludedProcessDirectories = NormalizeStringList(request.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
+                runtimePath = GetPreparedUserHookRuntimePath(),
                 actor = request.actor
             };
 
@@ -1856,7 +2018,7 @@ namespace DataProtectorWebBridge.Services
             UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "enabled={0};earlyProcess={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};flags=0x{7:X8}",
+                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};excludedNames={7};excludedDirs={8};flags=0x{9:X8}",
                 normalized.enabled,
                 normalized.monitorEarlyProcesses,
                 normalized.monitorImageLoads,
@@ -1864,7 +2026,167 @@ namespace DataProtectorWebBridge.Services
                 normalized.blockUntrustedRuntime,
                 normalized.auditOnly,
                 normalized.monitorSystemProcesses,
+                normalized.excludedProcessNames.Length,
+                normalized.excludedProcessDirectories.Length,
                 normalized.flags);
+        }
+
+        private static string[] DefaultUserHookExcludedProcessNames()
+        {
+            return new[]
+            {
+                "DataProtectorWebBridge.exe",
+                "DataProtectorAgentClient.exe",
+                "DataProtectorAdmin.exe",
+                "DataProtectorUsbTool.exe",
+                "explorer.exe",
+                "dwm.exe",
+                "SearchIndexer.exe",
+                "RuntimeBroker.exe",
+                "chrome.exe",
+                "msedge.exe",
+                "firefox.exe",
+                "WINWORD.EXE",
+                "EXCEL.EXE",
+                "POWERPNT.EXE",
+                "OUTLOOK.EXE",
+                "Teams.exe",
+                "WeChat.exe",
+                "QQ.exe",
+                "DingTalk.exe",
+                "Feishu.exe"
+            };
+        }
+
+        private static string[] DefaultUserHookExcludedProcessDirectories()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            return NormalizeStringList(
+                new[]
+                {
+                    Path.Combine(windows, "System32"),
+                    Path.Combine(windows, "SysWOW64"),
+                    Path.Combine(windows, "WinSxS"),
+                    Path.Combine(programFiles, "DataProtector"),
+                    Path.Combine(programFilesX86, "DataProtector")
+                },
+                new string[0]);
+        }
+
+        private static string[] NormalizeStringList(string[] values, string[] fallback)
+        {
+            IEnumerable<string> source = values == null || values.Length == 0
+                ? (fallback ?? new string[0])
+                : values;
+
+            return source
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => item.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(128)
+                .ToArray();
+        }
+
+        private static string[] SplitUserHookPolicyList(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return new string[0];
+            }
+
+            return value
+                .Split(new[] { '\r', '\n', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(item => item.Trim())
+                .Where(item => item.Length != 0)
+                .ToArray();
+        }
+
+        private static void WriteUserHookRuntimePolicy(UserHookDefensePolicyDto policy)
+        {
+            try
+            {
+                UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
+                string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                string directory = Path.Combine(dataRoot, "DataProtector");
+                Directory.CreateDirectory(directory);
+                string path = Path.Combine(directory, "UserHookRuntimePolicy.json");
+                JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+                File.WriteAllText(path, serializer.Serialize(normalized), Encoding.UTF8);
+            }
+            catch
+            {
+                // Runtime policy cache is best-effort; kernel policy application remains authoritative.
+            }
+        }
+
+        private static string GetPreparedUserHookRuntimePath()
+        {
+            string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            return Path.Combine(dataRoot, "DataProtector", "Runtime", "DataProtectorUserHookRuntime.dll");
+        }
+
+        private static string PrepareUserHookRuntimeDll()
+        {
+            string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            string runtimeDirectory = Path.Combine(dataRoot, "DataProtector", "Runtime");
+            string runtimePath = GetPreparedUserHookRuntimePath();
+            string sourcePath = FindUserHookRuntimeSource();
+
+            Directory.CreateDirectory(runtimeDirectory);
+            if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+            {
+                return runtimePath;
+            }
+
+            if (!File.Exists(runtimePath) || !FileHashesEqual(sourcePath, runtimePath))
+            {
+                File.Copy(sourcePath, runtimePath, true);
+            }
+
+            return runtimePath;
+        }
+
+        private static string FindUserHookRuntimeSource()
+        {
+            string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            string[] candidates =
+            {
+                Path.Combine(baseDirectory, "DataProtectorUserHookRuntime.dll"),
+                Path.Combine(baseDirectory, "agent", "DataProtectorUserHookRuntime.dll"),
+                Path.Combine(baseDirectory, "server", "DataProtectorUserHookRuntime.dll"),
+                Path.Combine(Environment.CurrentDirectory, "DataProtectorUserHookRuntime.dll")
+            };
+
+            foreach (string candidate in candidates)
+            {
+                if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static bool FileHashesEqual(string leftPath, string rightPath)
+        {
+            try
+            {
+                using (SHA256 sha256 = SHA256.Create())
+                using (FileStream left = File.OpenRead(leftPath))
+                using (FileStream right = File.OpenRead(rightPath))
+                {
+                    byte[] leftHash = sha256.ComputeHash(left);
+                    byte[] rightHash = sha256.ComputeHash(right);
+                    return leftHash.SequenceEqual(rightHash);
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         internal static UsbCryptPolicyDto DefaultUsbCryptPolicy()
@@ -2291,6 +2613,10 @@ namespace DataProtectorWebBridge.Services
             if (operation == UserHookOperationRuntimeMissing) return "runtime-missing";
             if (operation == UserHookOperationRuntimeRejected) return "runtime-rejected";
             if (operation == UserHookOperationSuspiciousHookAttempt) return "suspicious-hook-attempt";
+            if (operation == UserHookOperationRuntimeInjectionRequired) return "runtime-injection-required";
+            if (operation == UserHookOperationRuntimeInjectionQueued) return "runtime-injection-queued";
+            if (operation == UserHookOperationRuntimeInjectionFailed) return "runtime-injection-failed";
+            if (operation == UserHookOperationRuntimeInjectionSkipped) return "runtime-injection-skipped";
             return "unknown";
         }
 
@@ -2729,6 +3055,18 @@ namespace DataProtectorWebBridge.Services
             public string processImage { get; set; }
         }
 
+        private sealed class UserHookRuntimeEvent
+        {
+            public string timestampUtc { get; set; }
+            public string host { get; set; }
+            public uint pid { get; set; }
+            public string action { get; set; }
+            public string target { get; set; }
+            public string processImage { get; set; }
+            public string status { get; set; }
+            public bool blocked { get; set; }
+        }
+
         public class HashProtectPolicyRequest
         {
             public bool enabled { get; set; }
@@ -2768,6 +3106,9 @@ namespace DataProtectorWebBridge.Services
             public bool blockUntrustedRuntime { get; set; }
             public bool auditOnly { get; set; }
             public bool monitorSystemProcesses { get; set; }
+            public string[] excludedProcessNames { get; set; }
+            public string[] excludedProcessDirectories { get; set; }
+            public string runtimePath { get; set; }
             public string actor { get; set; }
         }
 
