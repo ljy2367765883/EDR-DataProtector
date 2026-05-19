@@ -42,6 +42,13 @@
 #define DP_USB_LAYOUT_RESCAN_SLEEP_MS 500u
 #define DP_USB_LAYOUT_FORMAT_SLEEP_MS 500u
 #define DP_USB_LAYOUT_PUBLIC_PARTITION_NUMBER 1u
+#define DP_USB_LAYOUT_SECTOR_BYTES 512u
+#define DP_USB_LAYOUT_SMALL_PUBLIC_MAX_BYTES (32ull * 1024ull * 1024ull)
+#define DP_USB_LAYOUT_FAT_COUNT 2u
+#define DP_USB_LAYOUT_FAT16_RESERVED_SECTORS 1u
+#define DP_USB_LAYOUT_FAT16_ROOT_ENTRIES 512u
+#define DP_USB_LAYOUT_FAT16_MIN_CLUSTERS 4085u
+#define DP_USB_LAYOUT_FAT16_MAX_CLUSTERS 65525u
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
 #define DP_NETWORK_CONNECTION_EVENT_STRING_CHARS (DP_NETWORK_EVENT_PROCESS_PATH_CHARS + DP_NETWORK_EVENT_DOMAIN_CHARS + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
@@ -442,6 +449,20 @@ typedef VOID (WINAPI *DP_FORMAT_EX)(
     _In_ ULONG ClusterSize,
     _In_ DP_FMIFS_CALLBACK Callback
     );
+
+typedef struct _DP_PUBLIC_FAT16_LAYOUT {
+    DWORD BytesPerSector;
+    DWORD SectorsPerCluster;
+    DWORD ReservedSectors;
+    DWORD FatCount;
+    DWORD RootEntryCount;
+    DWORD RootDirectorySectors;
+    DWORD TotalSectors;
+    DWORD FatSectors;
+    DWORD DataSectors;
+    DWORD ClusterCount;
+    DWORD HiddenSectors;
+} DP_PUBLIC_FAT16_LAYOUT, *PDP_PUBLIC_FAT16_LAYOUT;
 
 #if DP_POLICY_API_ENABLE_FILE_TRACE
 static
@@ -4381,7 +4402,9 @@ DpPolicyCreateUsbPublicLayout(
     partition->PartitionLength.QuadPart = (LONGLONG)PublicPartitionBytes;
     partition->PartitionNumber = DP_USB_LAYOUT_PUBLIC_PARTITION_NUMBER;
     partition->RewritePartition = TRUE;
-    partition->Mbr.PartitionType = PARTITION_IFS;
+    partition->Mbr.PartitionType = PublicPartitionBytes <= DP_USB_LAYOUT_SMALL_PUBLIC_MAX_BYTES ?
+                                   PARTITION_FAT_16 :
+                                   PARTITION_IFS;
     partition->Mbr.BootIndicator = FALSE;
     partition->Mbr.RecognizedPartition = TRUE;
     partition->Mbr.HiddenSectors = (DWORD)(PublicPartitionOffsetBytes / 512ull);
@@ -4479,7 +4502,24 @@ DpPolicyAssignDriveLetter(
 
 static
 DWORD
-DpPolicyVerifyNtfsVolume(
+DpPolicyIsSupportedPublicFileSystem(
+    _In_z_ LPCWSTR FileSystem
+    )
+{
+    if (FileSystem == NULL || FileSystem[0] == L'\0') {
+        return FALSE;
+    }
+
+    return _wcsicmp(FileSystem, L"FAT") == 0 ||
+           _wcsicmp(FileSystem, L"FAT16") == 0 ||
+           _wcsicmp(FileSystem, L"FAT32") == 0 ||
+           _wcsicmp(FileSystem, L"exFAT") == 0 ||
+           _wcsicmp(FileSystem, L"NTFS") == 0;
+}
+
+static
+DWORD
+DpPolicyVerifyPublicToolVolume(
     _In_z_ LPCWSTR DriveRoot
     )
 {
@@ -4507,16 +4547,24 @@ DpPolicyVerifyNtfsVolume(
                                   fileSystem,
                                   ARRAYSIZE(fileSystem))) {
 
-            if (_wcsicmp(fileSystem, L"NTFS") == 0) {
+            if (DpPolicyIsSupportedPublicFileSystem(fileSystem)) {
                 if (_wcsicmp(label, DP_USB_LAYOUT_PUBLIC_LABEL) != 0) {
                     (VOID)SetVolumeLabelW(DriveRoot, DP_USB_LAYOUT_PUBLIC_LABEL);
                 }
 
+                DpPolicyTrace(L"USB public partition verify success root=%s fs=%s label=%s",
+                              DriveRoot,
+                              fileSystem,
+                              label);
                 DpPolicySetLastErrorMessage(L"Success.");
                 return DP_POLICY_API_SUCCESS;
             }
 
-            DpPolicySetLastErrorMessage(L"USB public partition format verification did not return NTFS.");
+            DpPolicyTrace(L"USB public partition verify rejected root=%s fs=%s label=%s",
+                          DriveRoot,
+                          fileSystem,
+                          label);
+            DpPolicySetLastErrorMessage(L"USB public partition format verification returned an unsupported file system.");
             return DP_POLICY_API_ERROR_WINDOWS_API;
         }
 
@@ -4555,13 +4603,14 @@ DpPolicyFormatCallback(
 
 static
 DWORD
-DpPolicyFormatNtfs(
-    _In_z_ LPCWSTR DriveRoot
+DpPolicyFormatWithFmifs(
+    _In_z_ LPCWSTR DriveRoot,
+    _In_z_ LPCWSTR FileSystemName,
+    _In_ ULONG ClusterSize
     )
 {
     HMODULE module;
     DP_FORMAT_EX formatEx;
-    DWORD verifyResult;
     DWORD waitCount = 0;
 
     while (InterlockedCompareExchange(&gFormatLock, 1, 0) != 0) {
@@ -4593,12 +4642,17 @@ DpPolicyFormatNtfs(
     InterlockedExchange(&gFormatCompleted, 0);
     InterlockedExchange(&gFormatSuccess, 0);
 
+    DpPolicyTrace(L"USB public partition FormatEx begin root=%s fs=%s cluster=%lu",
+                  DriveRoot,
+                  FileSystemName,
+                  ClusterSize);
+
     formatEx((PWSTR)DriveRoot,
              0,
-             L"NTFS",
+             (PWSTR)FileSystemName,
              DP_USB_LAYOUT_PUBLIC_LABEL,
              TRUE,
-             512,
+             ClusterSize,
              DpPolicyFormatCallback);
 
     InterlockedExchange(&gFormatActive, 0);
@@ -4606,18 +4660,453 @@ DpPolicyFormatNtfs(
     InterlockedExchange(&gFormatLock, 0);
     Sleep(DP_USB_LAYOUT_FORMAT_SLEEP_MS);
 
-    verifyResult = DpPolicyVerifyNtfsVolume(DriveRoot);
-    if (verifyResult == DP_POLICY_API_SUCCESS) {
+    if (InterlockedCompareExchange(&gFormatCompleted, 0, 0) != 0 &&
+        InterlockedCompareExchange(&gFormatSuccess, 0, 0) != 0) {
+
+        DpPolicyTrace(L"USB public partition FormatEx success root=%s fs=%s",
+                      DriveRoot,
+                      FileSystemName);
         return DP_POLICY_API_SUCCESS;
     }
 
-    if (InterlockedCompareExchange(&gFormatCompleted, 0, 0) != 0 &&
-        InterlockedCompareExchange(&gFormatSuccess, 0, 0) == 0) {
+    DpPolicyTrace(L"USB public partition FormatEx failed root=%s fs=%s completed=%ld success=%ld",
+                  DriveRoot,
+                  FileSystemName,
+                  InterlockedCompareExchange(&gFormatCompleted, 0, 0),
+                  InterlockedCompareExchange(&gFormatSuccess, 0, 0));
 
-        DpPolicySetLastErrorMessage(L"Windows FormatEx reported that USB public partition formatting failed.");
+    DpPolicySetLastErrorMessage(L"Windows FormatEx reported that USB public partition formatting failed.");
+    return DP_POLICY_API_ERROR_WINDOWS_API;
+}
+
+static
+VOID
+DpPolicyWriteLe16(
+    _Out_writes_bytes_(2) BYTE *Target,
+    _In_ USHORT Value
+    )
+{
+    Target[0] = (BYTE)(Value & 0xFFu);
+    Target[1] = (BYTE)((Value >> 8) & 0xFFu);
+}
+
+static
+VOID
+DpPolicyWriteLe32(
+    _Out_writes_bytes_(4) BYTE *Target,
+    _In_ ULONG Value
+    )
+{
+    Target[0] = (BYTE)(Value & 0xFFu);
+    Target[1] = (BYTE)((Value >> 8) & 0xFFu);
+    Target[2] = (BYTE)((Value >> 16) & 0xFFu);
+    Target[3] = (BYTE)((Value >> 24) & 0xFFu);
+}
+
+static
+DWORD
+DpPolicyCalculateFat16Layout(
+    _In_ ULONGLONG VolumeBytes,
+    _In_ ULONGLONG PartitionOffsetBytes,
+    _Out_ PDP_PUBLIC_FAT16_LAYOUT Layout
+    )
+{
+    DWORD sectorsPerClusterOptions[] = { 1u, 2u, 4u, 8u, 16u, 32u, 64u };
+    DWORD totalSectors;
+    DWORD index;
+
+    if (Layout == NULL ||
+        VolumeBytes < (ULONGLONG)DP_USB_LAYOUT_SECTOR_BYTES * 4096ull ||
+        (VolumeBytes % DP_USB_LAYOUT_SECTOR_BYTES) != 0 ||
+        VolumeBytes / DP_USB_LAYOUT_SECTOR_BYTES > 0xFFFFu) {
+
+        DpPolicySetLastErrorMessage(L"USB public partition is not suitable for direct FAT16 formatting.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
     }
 
-    return verifyResult;
+    totalSectors = (DWORD)(VolumeBytes / DP_USB_LAYOUT_SECTOR_BYTES);
+
+    for (index = 0; index < ARRAYSIZE(sectorsPerClusterOptions); index++) {
+        DWORD sectorsPerCluster = sectorsPerClusterOptions[index];
+        DWORD rootSectors = ((DP_USB_LAYOUT_FAT16_ROOT_ENTRIES * 32u) + (DP_USB_LAYOUT_SECTOR_BYTES - 1u)) / DP_USB_LAYOUT_SECTOR_BYTES;
+        DWORD available = totalSectors - DP_USB_LAYOUT_FAT16_RESERVED_SECTORS - rootSectors;
+        DWORD fatSectors = 1;
+        DWORD clusterCount = 0;
+        DWORD iteration;
+
+        for (iteration = 0; iteration < 16; iteration++) {
+            DWORD dataSectors;
+            DWORD requiredFatSectors;
+
+            if (available <= fatSectors * DP_USB_LAYOUT_FAT_COUNT) {
+                break;
+            }
+
+            dataSectors = available - (fatSectors * DP_USB_LAYOUT_FAT_COUNT);
+            clusterCount = dataSectors / sectorsPerCluster;
+            requiredFatSectors = ((clusterCount + 2u) * sizeof(USHORT) + (DP_USB_LAYOUT_SECTOR_BYTES - 1u)) / DP_USB_LAYOUT_SECTOR_BYTES;
+            if (requiredFatSectors == fatSectors) {
+                break;
+            }
+
+            fatSectors = requiredFatSectors;
+        }
+
+        if (clusterCount >= DP_USB_LAYOUT_FAT16_MIN_CLUSTERS &&
+            clusterCount < DP_USB_LAYOUT_FAT16_MAX_CLUSTERS) {
+
+            ZeroMemory(Layout, sizeof(*Layout));
+            Layout->BytesPerSector = DP_USB_LAYOUT_SECTOR_BYTES;
+            Layout->SectorsPerCluster = sectorsPerCluster;
+            Layout->ReservedSectors = DP_USB_LAYOUT_FAT16_RESERVED_SECTORS;
+            Layout->FatCount = DP_USB_LAYOUT_FAT_COUNT;
+            Layout->RootEntryCount = DP_USB_LAYOUT_FAT16_ROOT_ENTRIES;
+            Layout->RootDirectorySectors = rootSectors;
+            Layout->TotalSectors = totalSectors;
+            Layout->FatSectors = fatSectors;
+            Layout->DataSectors = totalSectors - DP_USB_LAYOUT_FAT16_RESERVED_SECTORS - rootSectors - (fatSectors * DP_USB_LAYOUT_FAT_COUNT);
+            Layout->ClusterCount = clusterCount;
+            Layout->HiddenSectors = (DWORD)(PartitionOffsetBytes / DP_USB_LAYOUT_SECTOR_BYTES);
+            return DP_POLICY_API_SUCCESS;
+        }
+    }
+
+    DpPolicySetLastErrorMessage(L"Cannot calculate a valid FAT16 layout for the USB public partition.");
+    return DP_POLICY_API_ERROR_WINDOWS_API;
+}
+
+static
+VOID
+DpPolicyBuildFat16BootSector(
+    _In_ const DP_PUBLIC_FAT16_LAYOUT *Layout,
+    _Out_writes_bytes_(DP_USB_LAYOUT_SECTOR_BYTES) BYTE *Sector
+    )
+{
+    ZeroMemory(Sector, DP_USB_LAYOUT_SECTOR_BYTES);
+
+    Sector[0] = 0xEB;
+    Sector[1] = 0x3C;
+    Sector[2] = 0x90;
+    CopyMemory(&Sector[3], "MSDOS5.0", 8);
+    DpPolicyWriteLe16(&Sector[11], (USHORT)Layout->BytesPerSector);
+    Sector[13] = (BYTE)Layout->SectorsPerCluster;
+    DpPolicyWriteLe16(&Sector[14], (USHORT)Layout->ReservedSectors);
+    Sector[16] = (BYTE)Layout->FatCount;
+    DpPolicyWriteLe16(&Sector[17], (USHORT)Layout->RootEntryCount);
+    DpPolicyWriteLe16(&Sector[19], (USHORT)Layout->TotalSectors);
+    Sector[21] = 0xF8;
+    DpPolicyWriteLe16(&Sector[22], (USHORT)Layout->FatSectors);
+    DpPolicyWriteLe16(&Sector[24], 32);
+    DpPolicyWriteLe16(&Sector[26], 64);
+    DpPolicyWriteLe32(&Sector[28], Layout->HiddenSectors);
+    DpPolicyWriteLe32(&Sector[32], 0);
+    Sector[36] = 0x80;
+    Sector[38] = 0x29;
+    DpPolicyWriteLe32(&Sector[39], GetTickCount());
+    CopyMemory(&Sector[43], "DPUSB      ", 11);
+    CopyMemory(&Sector[54], "FAT16   ", 8);
+    Sector[510] = 0x55;
+    Sector[511] = 0xAA;
+}
+
+static
+DWORD
+DpPolicyWritePublicVolumeSectors(
+    _In_z_ LPCWSTR VolumeName,
+    _In_ const DP_PUBLIC_FAT16_LAYOUT *Layout
+    )
+{
+    WCHAR volumePath[MAX_PATH];
+    HANDLE volumeHandle;
+    BYTE sector[DP_USB_LAYOUT_SECTOR_BYTES];
+    DWORD bytesTransferred;
+    DWORD fatIndex;
+    DWORD sectorIndex;
+    DWORD result = DP_POLICY_API_SUCCESS;
+    DWORD lastError = ERROR_SUCCESS;
+    HRESULT hr;
+    size_t length;
+
+    hr = StringCchCopyW(volumePath, ARRAYSIZE(volumePath), VolumeName);
+    if (FAILED(hr)) {
+        DpPolicySetLastErrorMessage(L"USB public volume path is too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    length = wcslen(volumePath);
+    if (length > 0 && volumePath[length - 1] == L'\\') {
+        volumePath[length - 1] = L'\0';
+    }
+
+    volumeHandle = CreateFileW(volumePath,
+                               GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                               NULL);
+    if (volumeHandle == INVALID_HANDLE_VALUE) {
+        DpPolicySetLastErrorFromCode(GetLastError(), L"Cannot open USB public volume for direct FAT formatting");
+        return DP_POLICY_API_ERROR_WINDOWS_API;
+    }
+
+    (VOID)DeviceIoControl(volumeHandle,
+                          FSCTL_LOCK_VOLUME,
+                          NULL,
+                          0,
+                          NULL,
+                          0,
+                          &bytesTransferred,
+                          NULL);
+    (VOID)DeviceIoControl(volumeHandle,
+                          FSCTL_DISMOUNT_VOLUME,
+                          NULL,
+                          0,
+                          NULL,
+                          0,
+                          &bytesTransferred,
+                          NULL);
+
+    DpPolicyBuildFat16BootSector(Layout, sector);
+    if (!WriteFile(volumeHandle, sector, sizeof(sector), &bytesTransferred, NULL) ||
+        bytesTransferred != sizeof(sector)) {
+
+        lastError = GetLastError();
+        result = DP_POLICY_API_ERROR_WINDOWS_API;
+        goto Exit;
+    }
+
+    ZeroMemory(sector, sizeof(sector));
+    sector[0] = 0xF8;
+    sector[1] = 0xFF;
+    sector[2] = 0xFF;
+    sector[3] = 0xFF;
+
+    for (fatIndex = 0; fatIndex < Layout->FatCount; fatIndex++) {
+        LARGE_INTEGER offset;
+        offset.QuadPart = ((LONGLONG)Layout->ReservedSectors +
+                           ((LONGLONG)fatIndex * (LONGLONG)Layout->FatSectors)) *
+                          DP_USB_LAYOUT_SECTOR_BYTES;
+
+        if (!SetFilePointerEx(volumeHandle, offset, NULL, FILE_BEGIN)) {
+            lastError = GetLastError();
+            result = DP_POLICY_API_ERROR_WINDOWS_API;
+            goto Exit;
+        }
+
+        for (sectorIndex = 0; sectorIndex < Layout->FatSectors; sectorIndex++) {
+            if (!WriteFile(volumeHandle, sector, sizeof(sector), &bytesTransferred, NULL) ||
+                bytesTransferred != sizeof(sector)) {
+
+                lastError = GetLastError();
+                result = DP_POLICY_API_ERROR_WINDOWS_API;
+                goto Exit;
+            }
+
+            if (sectorIndex == 0) {
+                ZeroMemory(sector, sizeof(sector));
+            }
+        }
+    }
+
+    {
+        LARGE_INTEGER rootOffset;
+        rootOffset.QuadPart = ((LONGLONG)Layout->ReservedSectors +
+                               ((LONGLONG)Layout->FatCount * (LONGLONG)Layout->FatSectors)) *
+                              DP_USB_LAYOUT_SECTOR_BYTES;
+
+        if (!SetFilePointerEx(volumeHandle, rootOffset, NULL, FILE_BEGIN)) {
+            lastError = GetLastError();
+            result = DP_POLICY_API_ERROR_WINDOWS_API;
+            goto Exit;
+        }
+    }
+
+    ZeroMemory(sector, sizeof(sector));
+    for (sectorIndex = 0; sectorIndex < Layout->RootDirectorySectors; sectorIndex++) {
+        if (!WriteFile(volumeHandle, sector, sizeof(sector), &bytesTransferred, NULL) ||
+            bytesTransferred != sizeof(sector)) {
+
+            lastError = GetLastError();
+            result = DP_POLICY_API_ERROR_WINDOWS_API;
+            goto Exit;
+        }
+    }
+
+    FlushFileBuffers(volumeHandle);
+
+Exit:
+    (VOID)DeviceIoControl(volumeHandle,
+                          FSCTL_UNLOCK_VOLUME,
+                          NULL,
+                          0,
+                          NULL,
+                          0,
+                          &bytesTransferred,
+                          NULL);
+    CloseHandle(volumeHandle);
+
+    if (result != DP_POLICY_API_SUCCESS) {
+        DpPolicySetLastErrorFromCode(lastError, L"Cannot write direct FAT metadata to USB public partition");
+    }
+
+    return result;
+}
+
+static
+DWORD
+DpPolicyQueryVolumeLength(
+    _In_z_ LPCWSTR VolumeName,
+    _In_ ULONGLONG FallbackBytes,
+    _Out_ ULONGLONG *VolumeBytes
+    )
+{
+    WCHAR volumePath[MAX_PATH];
+    HANDLE volumeHandle;
+    GET_LENGTH_INFORMATION lengthInfo;
+    DWORD bytesReturned = 0;
+    HRESULT hr;
+    size_t length;
+
+    if (VolumeBytes == NULL) {
+        DpPolicySetLastErrorMessage(L"USB public volume length output is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+    *VolumeBytes = FallbackBytes;
+
+    hr = StringCchCopyW(volumePath, ARRAYSIZE(volumePath), VolumeName);
+    if (FAILED(hr)) {
+        DpPolicySetLastErrorMessage(L"USB public volume path is too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    length = wcslen(volumePath);
+    if (length > 0 && volumePath[length - 1] == L'\\') {
+        volumePath[length - 1] = L'\0';
+    }
+
+    volumeHandle = CreateFileW(volumePath,
+                               GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL,
+                               NULL);
+    if (volumeHandle == INVALID_HANDLE_VALUE) {
+        DpPolicyTrace(L"USB public partition length query open failed volume=%s error=%lu",
+                      VolumeName,
+                      GetLastError());
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    ZeroMemory(&lengthInfo, sizeof(lengthInfo));
+    if (DeviceIoControl(volumeHandle,
+                        IOCTL_DISK_GET_LENGTH_INFO,
+                        NULL,
+                        0,
+                        &lengthInfo,
+                        sizeof(lengthInfo),
+                        &bytesReturned,
+                        NULL) &&
+        lengthInfo.Length.QuadPart > 0) {
+
+        *VolumeBytes = (ULONGLONG)lengthInfo.Length.QuadPart;
+    } else {
+        DpPolicyTrace(L"USB public partition length query failed volume=%s error=%lu fallback=%I64u",
+                      VolumeName,
+                      GetLastError(),
+                      FallbackBytes);
+    }
+
+    CloseHandle(volumeHandle);
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyDirectFormatFat16(
+    _In_z_ LPCWSTR VolumeName,
+    _In_ ULONGLONG VolumeBytes,
+    _In_ ULONGLONG PartitionOffsetBytes
+    )
+{
+    DP_PUBLIC_FAT16_LAYOUT layout;
+    ULONGLONG actualBytes = VolumeBytes;
+    DWORD result;
+
+    result = DpPolicyQueryVolumeLength(VolumeName,
+                                       VolumeBytes,
+                                       &actualBytes);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    result = DpPolicyCalculateFat16Layout(actualBytes,
+                                          PartitionOffsetBytes,
+                                          &layout);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    DpPolicyTrace(L"USB public partition direct FAT16 begin volume=%s bytes=%I64u spc=%lu fatSectors=%lu clusters=%lu",
+                  VolumeName,
+                  actualBytes,
+                  layout.SectorsPerCluster,
+                  layout.FatSectors,
+                  layout.ClusterCount);
+
+    result = DpPolicyWritePublicVolumeSectors(VolumeName, &layout);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    DpPolicyTrace(L"USB public partition direct FAT16 success volume=%s", VolumeName);
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyFormatPublicToolVolume(
+    _In_z_ LPCWSTR DriveRoot,
+    _In_z_ LPCWSTR VolumeName,
+    _In_ ULONGLONG PublicPartitionOffsetBytes,
+    _In_ ULONGLONG PublicPartitionBytes
+    )
+{
+    DWORD result;
+    DWORD verifyResult;
+
+    UNREFERENCED_PARAMETER(VolumeName);
+
+    if (PublicPartitionBytes <= DP_USB_LAYOUT_SMALL_PUBLIC_MAX_BYTES) {
+        UNREFERENCED_PARAMETER(PublicPartitionOffsetBytes);
+
+        verifyResult = DpPolicyVerifyPublicToolVolume(DriveRoot);
+        if (verifyResult == DP_POLICY_API_SUCCESS) {
+            return DP_POLICY_API_SUCCESS;
+        }
+
+        DpPolicyTrace(L"USB public partition preformatted FAT16 verify failed root=%s", DriveRoot);
+
+        result = DpPolicyFormatWithFmifs(DriveRoot, L"FAT", 0);
+        if (result == DP_POLICY_API_SUCCESS) {
+            verifyResult = DpPolicyVerifyPublicToolVolume(DriveRoot);
+            if (verifyResult == DP_POLICY_API_SUCCESS) {
+                return DP_POLICY_API_SUCCESS;
+            }
+        }
+    }
+
+    result = DpPolicyFormatWithFmifs(DriveRoot, L"NTFS", 0);
+    if (result == DP_POLICY_API_SUCCESS) {
+        verifyResult = DpPolicyVerifyPublicToolVolume(DriveRoot);
+        if (verifyResult == DP_POLICY_API_SUCCESS) {
+            return DP_POLICY_API_SUCCESS;
+        }
+    }
+
+    DpPolicySetLastErrorMessage(L"USB public partition formatting failed for all supported file systems.");
+    return DP_POLICY_API_ERROR_WINDOWS_API;
 }
 
 static
@@ -4793,6 +5282,15 @@ DpPolicyInitializeUsbLayout(
         return result;
     }
 
+    if (PublicPartitionBytes <= DP_USB_LAYOUT_SMALL_PUBLIC_MAX_BYTES) {
+        result = DpPolicyDirectFormatFat16(volumeName,
+                                           PublicPartitionBytes,
+                                           PublicPartitionOffsetBytes);
+        if (result != DP_POLICY_API_SUCCESS) {
+            return result;
+        }
+    }
+
     result = DpPolicyAssignDriveLetter(volumeName,
                                        PreferredDriveRoot,
                                        DriveRoot,
@@ -4801,7 +5299,10 @@ DpPolicyInitializeUsbLayout(
         return result;
     }
 
-    result = DpPolicyFormatNtfs(DriveRoot);
+    result = DpPolicyFormatPublicToolVolume(DriveRoot,
+                                            volumeName,
+                                            PublicPartitionOffsetBytes,
+                                            PublicPartitionBytes);
     if (result != DP_POLICY_API_SUCCESS) {
         return result;
     }
