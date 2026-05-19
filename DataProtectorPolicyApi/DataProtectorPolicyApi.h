@@ -216,6 +216,8 @@ typedef struct _DP_POLICY_API_USER_HOOK_DEFENSE_POLICY {
     DWORD Flags;
     LPCWSTR ExcludedProcessNames;
     LPCWSTR ExcludedProcessDirectories;
+    LPCWSTR ExcludedProcessPaths;
+    LPCWSTR TrustedSignerSubjects;
     LPCWSTR RuntimeDllPath;
 } DP_POLICY_API_USER_HOOK_DEFENSE_POLICY, *PDP_POLICY_API_USER_HOOK_DEFENSE_POLICY;
 

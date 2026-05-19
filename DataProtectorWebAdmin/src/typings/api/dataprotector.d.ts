@@ -213,6 +213,8 @@ declare namespace Api {
       monitorSystemProcesses: boolean;
       excludedProcessNames: string[];
       excludedProcessDirectories: string[];
+      excludedProcessPaths: string[];
+      trustedSignerSubjects: string[];
       runtimePath: string;
       flags: number;
       actor?: string;

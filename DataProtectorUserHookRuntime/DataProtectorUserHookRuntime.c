@@ -3,6 +3,9 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <wincrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
 #include <stdio.h>
 #include <strsafe.h>
 #include <MinHook.h>
@@ -10,7 +13,7 @@
 #define DP_RUNTIME_EVENT_PATH L"C:\\ProgramData\\DataProtector\\UserHookRuntimeEvents.jsonl"
 #define DP_RUNTIME_POLICY_PATH L"C:\\ProgramData\\DataProtector\\UserHookRuntimePolicy.json"
 #define DP_RUNTIME_MAX_TEXT 1024
-#define DP_RUNTIME_MAX_POLICY_TEXT 8192
+#define DP_RUNTIME_MAX_POLICY_TEXT 32768
 #define DP_RUNTIME_STATUS_BLOCKED 0xC0000022u
 
 #ifndef NT_SUCCESS
@@ -18,6 +21,12 @@
 #endif
 
 typedef LONG NTSTATUS;
+
+typedef enum _DP_RUNTIME_PROCESS_MATCH_MODE {
+    DpRuntimeMatchProcessName = 0,
+    DpRuntimeMatchDirectory = 1,
+    DpRuntimeMatchExactPath = 2
+} DP_RUNTIME_PROCESS_MATCH_MODE;
 
 typedef HANDLE (WINAPI *PFN_CreateRemoteThread)(
     HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
@@ -68,6 +77,14 @@ static DWORD gCurrentProcessId;
 static BOOL gAuditOnly = TRUE;
 static BOOL gEnabled = TRUE;
 static HANDLE gInitThread;
+
+static VOID
+DpRuntimeWriteEvent(
+    _In_z_ LPCWSTR Action,
+    _In_opt_z_ LPCWSTR Target,
+    _In_ DWORD Status,
+    _In_ BOOL Blocked
+    );
 
 static BOOL
 DpRuntimeReadTextFile(
@@ -230,12 +247,131 @@ DpRuntimePathHasSuffix(
     return _wcsicmp(Path + pathLength - suffixLength, Suffix) == 0;
 }
 
+static int
+DpRuntimeHexValue(
+    _In_ WCHAR Value
+    )
+{
+    if (Value >= L'0' && Value <= L'9') {
+        return (int)(Value - L'0');
+    }
+
+    if (Value >= L'a' && Value <= L'f') {
+        return (int)(Value - L'a') + 10;
+    }
+
+    if (Value >= L'A' && Value <= L'F') {
+        return (int)(Value - L'A') + 10;
+    }
+
+    return -1;
+}
+
+static BOOL
+DpRuntimeJsonReadStringToken(
+    _In_ WCHAR *StartQuote,
+    _In_ WCHAR *ArrayEnd,
+    _Out_writes_(TokenChars) WCHAR *Token,
+    _In_ DWORD TokenChars,
+    _Outptr_result_maybenull_ WCHAR **NextCursor
+    )
+{
+    WCHAR *cursor;
+    DWORD written = 0;
+    BOOL escaped = FALSE;
+
+    if (NextCursor != NULL) {
+        *NextCursor = NULL;
+    }
+
+    if (StartQuote == NULL || ArrayEnd == NULL || Token == NULL || TokenChars == 0 || *StartQuote != L'"') {
+        return FALSE;
+    }
+
+    cursor = StartQuote + 1;
+    while (cursor < ArrayEnd) {
+        WCHAR ch = *cursor++;
+
+        if (escaped) {
+            if (ch == L'n' || ch == L'r' || ch == L't') {
+                ch = L' ';
+            } else if (ch == L'u' && cursor + 4 <= ArrayEnd) {
+                int h0 = DpRuntimeHexValue(cursor[0]);
+                int h1 = DpRuntimeHexValue(cursor[1]);
+                int h2 = DpRuntimeHexValue(cursor[2]);
+                int h3 = DpRuntimeHexValue(cursor[3]);
+                if (h0 >= 0 && h1 >= 0 && h2 >= 0 && h3 >= 0) {
+                    ch = (WCHAR)((h0 << 12) | (h1 << 8) | (h2 << 4) | h3);
+                    cursor += 4;
+                }
+            }
+
+            if (written + 1 < TokenChars) {
+                Token[written++] = ch;
+            }
+
+            escaped = FALSE;
+            continue;
+        }
+
+        if (ch == L'\\') {
+            escaped = TRUE;
+            continue;
+        }
+
+        if (ch == L'"') {
+            Token[written] = L'\0';
+            if (NextCursor != NULL) {
+                *NextCursor = cursor;
+            }
+
+            return TRUE;
+        }
+
+        if (written + 1 < TokenChars) {
+            Token[written++] = ch;
+        }
+    }
+
+    Token[0] = L'\0';
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeStringContainsInsensitive(
+    _In_z_ const WCHAR *Value,
+    _In_z_ const WCHAR *Needle
+    )
+{
+    size_t valueLength;
+    size_t needleLength;
+    size_t index;
+
+    if (Value == NULL || Needle == NULL) {
+        return FALSE;
+    }
+
+    valueLength = wcslen(Value);
+    needleLength = wcslen(Needle);
+    if (needleLength == 0 || valueLength < needleLength) {
+        return FALSE;
+    }
+
+    for (index = 0; index <= valueLength - needleLength; index++) {
+        if (_wcsnicmp(Value + index, Needle, needleLength) == 0) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 static BOOL
 DpRuntimeJsonArrayContainsProcess(
     _In_z_ const WCHAR *Json,
     _In_z_ const WCHAR *Key,
     _In_z_ const WCHAR *ProcessPath,
-    _In_ BOOL DirectoryMatch
+    _In_ DP_RUNTIME_PROCESS_MATCH_MODE MatchMode
     )
 {
     WCHAR pattern[128];
@@ -267,26 +403,25 @@ DpRuntimeJsonArrayContainsProcess(
 
     while (cursor < arrayEnd) {
         WCHAR *start = wcschr(cursor, L'"');
-        WCHAR *end;
         WCHAR token[DP_RUNTIME_MAX_TEXT];
-        size_t chars;
+        WCHAR *nextCursor;
 
         if (start == NULL || start >= arrayEnd) {
             break;
         }
 
-        end = wcschr(start + 1, L'"');
-        if (end == NULL || end > arrayEnd) {
+        if (!DpRuntimeJsonReadStringToken(start, arrayEnd, token, ARRAYSIZE(token), &nextCursor) ||
+            nextCursor == NULL) {
             break;
         }
 
-        chars = (size_t)(end - start - 1);
-        if (chars > 0 && chars < ARRAYSIZE(token)) {
-            CopyMemory(token, start + 1, chars * sizeof(WCHAR));
-            token[chars] = L'\0';
-
-            if (!DirectoryMatch) {
+        if (token[0] != L'\0') {
+            if (MatchMode == DpRuntimeMatchProcessName) {
                 if (DpRuntimePathHasSuffix(ProcessPath, token)) {
+                    return TRUE;
+                }
+            } else if (MatchMode == DpRuntimeMatchExactPath) {
+                if (_wcsicmp(ProcessPath, token) == 0) {
                     return TRUE;
                 }
             } else if (_wcsnicmp(ProcessPath, token, wcslen(token)) == 0) {
@@ -297,10 +432,216 @@ DpRuntimeJsonArrayContainsProcess(
             }
         }
 
-        cursor = end + 1;
+        cursor = nextCursor;
     }
 
     return FALSE;
+}
+
+static BOOL
+DpRuntimeVerifyFileSignature(
+    _In_z_ const WCHAR *Path
+    )
+{
+    WINTRUST_FILE_INFO fileInfo;
+    WINTRUST_DATA trustData;
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    LONG status;
+
+    ZeroMemory(&fileInfo, sizeof(fileInfo));
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = Path;
+
+    ZeroMemory(&trustData, sizeof(trustData));
+    trustData.cbStruct = sizeof(trustData);
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.pFile = &fileInfo;
+    trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+    trustData.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    status = WinVerifyTrust(NULL, &action, &trustData);
+    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(NULL, &action, &trustData);
+
+    return status == ERROR_SUCCESS;
+}
+
+static BOOL
+DpRuntimeGetFileSignerSubject(
+    _In_z_ const WCHAR *Path,
+    _Out_writes_(SubjectChars) WCHAR *Subject,
+    _In_ DWORD SubjectChars
+    )
+{
+    HCERTSTORE store = NULL;
+    HCRYPTMSG message = NULL;
+    DWORD signerInfoBytes = 0;
+    PCMSG_SIGNER_INFO signerInfo = NULL;
+    CERT_INFO certInfo;
+    PCCERT_CONTEXT certContext = NULL;
+    BOOL result = FALSE;
+
+    if (Subject == NULL || SubjectChars == 0) {
+        return FALSE;
+    }
+
+    Subject[0] = L'\0';
+
+    if (!CryptQueryObject(CERT_QUERY_OBJECT_FILE,
+                          Path,
+                          CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+                          CERT_QUERY_FORMAT_FLAG_BINARY,
+                          0,
+                          NULL,
+                          NULL,
+                          NULL,
+                          &store,
+                          &message,
+                          NULL)) {
+        return FALSE;
+    }
+
+    if (!CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, NULL, &signerInfoBytes) ||
+        signerInfoBytes == 0) {
+        goto Cleanup;
+    }
+
+    signerInfo = (PCMSG_SIGNER_INFO)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, signerInfoBytes);
+    if (signerInfo == NULL) {
+        goto Cleanup;
+    }
+
+    if (!CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, signerInfo, &signerInfoBytes)) {
+        goto Cleanup;
+    }
+
+    ZeroMemory(&certInfo, sizeof(certInfo));
+    certInfo.Issuer = signerInfo->Issuer;
+    certInfo.SerialNumber = signerInfo->SerialNumber;
+    certContext = CertFindCertificateInStore(store,
+                                             X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                                             0,
+                                             CERT_FIND_SUBJECT_CERT,
+                                             &certInfo,
+                                             NULL);
+    if (certContext == NULL) {
+        goto Cleanup;
+    }
+
+    if (CertGetNameStringW(certContext,
+                           CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                           0,
+                           NULL,
+                           Subject,
+                           SubjectChars) > 1) {
+        result = TRUE;
+    }
+
+Cleanup:
+    if (certContext != NULL) {
+        CertFreeCertificateContext(certContext);
+    }
+
+    if (signerInfo != NULL) {
+        HeapFree(GetProcessHeap(), 0, signerInfo);
+    }
+
+    if (message != NULL) {
+        CryptMsgClose(message);
+    }
+
+    if (store != NULL) {
+        CertCloseStore(store, 0);
+    }
+
+    return result;
+}
+
+static BOOL
+DpRuntimeJsonArrayContainsText(
+    _In_z_ const WCHAR *Json,
+    _In_z_ const WCHAR *Key,
+    _In_z_ const WCHAR *Value
+    )
+{
+    WCHAR pattern[128];
+    WCHAR *cursor;
+    WCHAR *arrayEnd;
+
+    if (Json == NULL || Key == NULL || Value == NULL || Value[0] == L'\0') {
+        return FALSE;
+    }
+
+    if (FAILED(StringCchPrintfW(pattern, ARRAYSIZE(pattern), L"\"%s\"", Key))) {
+        return FALSE;
+    }
+
+    cursor = wcsstr(Json, pattern);
+    if (cursor == NULL) {
+        return FALSE;
+    }
+
+    cursor = wcschr(cursor, L'[');
+    if (cursor == NULL) {
+        return FALSE;
+    }
+
+    arrayEnd = wcschr(cursor, L']');
+    if (arrayEnd == NULL) {
+        return FALSE;
+    }
+
+    while (cursor < arrayEnd) {
+        WCHAR *start = wcschr(cursor, L'"');
+        WCHAR token[DP_RUNTIME_MAX_TEXT];
+        WCHAR *nextCursor;
+
+        if (start == NULL || start >= arrayEnd) {
+            break;
+        }
+
+        if (!DpRuntimeJsonReadStringToken(start, arrayEnd, token, ARRAYSIZE(token), &nextCursor) ||
+            nextCursor == NULL) {
+            break;
+        }
+
+        if (token[0] != L'\0') {
+            if (DpRuntimeStringContainsInsensitive(Value, token)) {
+                return TRUE;
+            }
+        }
+
+        cursor = nextCursor;
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeShouldExitBySignerPolicy(
+    _In_z_ const WCHAR *Policy
+    )
+{
+    WCHAR subject[DP_RUNTIME_MAX_TEXT];
+
+    if (Policy == NULL ||
+        !DpRuntimeGetFileSignerSubject(gCurrentProcessPath, subject, ARRAYSIZE(subject))) {
+        return FALSE;
+    }
+
+    if (!DpRuntimeJsonArrayContainsText(Policy, L"trustedSignerSubjects", subject)) {
+        return FALSE;
+    }
+
+    if (!DpRuntimeVerifyFileSignature(gCurrentProcessPath)) {
+        DpRuntimeWriteEvent(L"userhook.runtime.policy-signer-untrusted", subject, GetLastError(), FALSE);
+        return FALSE;
+    }
+
+    DpRuntimeWriteEvent(L"userhook.runtime.policy-signer-excluded", subject, ERROR_SUCCESS, FALSE);
+    return TRUE;
 }
 
 static BOOL
@@ -319,8 +660,22 @@ DpRuntimeShouldExitByPolicy(VOID)
         return TRUE;
     }
 
-    return DpRuntimeJsonArrayContainsProcess(policy, L"excludedProcessNames", gCurrentProcessPath, FALSE) ||
-           DpRuntimeJsonArrayContainsProcess(policy, L"excludedProcessDirectories", gCurrentProcessPath, TRUE);
+    if (DpRuntimeJsonArrayContainsProcess(policy, L"excludedProcessNames", gCurrentProcessPath, DpRuntimeMatchProcessName)) {
+        DpRuntimeWriteEvent(L"userhook.runtime.policy-name-excluded", gCurrentProcessPath, ERROR_SUCCESS, FALSE);
+        return TRUE;
+    }
+
+    if (DpRuntimeJsonArrayContainsProcess(policy, L"excludedProcessDirectories", gCurrentProcessPath, DpRuntimeMatchDirectory)) {
+        DpRuntimeWriteEvent(L"userhook.runtime.policy-directory-excluded", gCurrentProcessPath, ERROR_SUCCESS, FALSE);
+        return TRUE;
+    }
+
+    if (DpRuntimeJsonArrayContainsProcess(policy, L"excludedProcessPaths", gCurrentProcessPath, DpRuntimeMatchExactPath)) {
+        DpRuntimeWriteEvent(L"userhook.runtime.policy-path-excluded", gCurrentProcessPath, ERROR_SUCCESS, FALSE);
+        return TRUE;
+    }
+
+    return DpRuntimeShouldExitBySignerPolicy(policy);
 }
 
 static VOID

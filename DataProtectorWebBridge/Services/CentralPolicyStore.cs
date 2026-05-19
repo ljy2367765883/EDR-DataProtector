@@ -636,7 +636,9 @@ namespace DataProtectorWebBridge.Services
                 EnsureUserHookDefensePolicy();
                 if (PolicyBridgeService.ToUserHookDefenseFlags(state.UserHookDefensePolicy) != PolicyBridgeService.ToUserHookDefenseFlags(normalized) ||
                     !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessNames, normalized.excludedProcessNames) ||
-                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessDirectories, normalized.excludedProcessDirectories))
+                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessDirectories, normalized.excludedProcessDirectories) ||
+                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessPaths, normalized.excludedProcessPaths) ||
+                    !StringArrayEquals(state.UserHookDefensePolicy.trustedSignerSubjects, normalized.trustedSignerSubjects))
                 {
                     state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
                     state.PolicyVersion++;
@@ -649,15 +651,15 @@ namespace DataProtectorWebBridge.Services
                 AppendAudit(
                     normalized.actor,
                     "central.policy.userhook.update",
-                    "application-hook-defense",
+                    "process-threat-insight",
                     PolicyBridgeService.UserHookDefensePolicySummary(normalized),
                     true,
                     "0x00000000",
-                    "Application hook defense policy stored on central server.");
+                    "Process threat insight policy stored on central server.");
                 Save();
             }
 
-            return Success("Application hook defense policy stored on central server.");
+            return Success("Process threat insight policy stored on central server.");
         }
 
         private static bool StringArrayEquals(string[] left, string[] right)

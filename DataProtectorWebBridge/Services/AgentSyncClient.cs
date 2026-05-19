@@ -461,6 +461,8 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = userHookDefensePolicy.monitorSystemProcesses,
                 excludedProcessNames = userHookDefensePolicy.excludedProcessNames,
                 excludedProcessDirectories = userHookDefensePolicy.excludedProcessDirectories,
+                excludedProcessPaths = userHookDefensePolicy.excludedProcessPaths,
+                trustedSignerSubjects = userHookDefensePolicy.trustedSignerSubjects,
                 runtimePath = userHookDefensePolicy.runtimePath,
                 actor = "central-agent"
             });
@@ -468,7 +470,7 @@ namespace DataProtectorWebBridge.Services
             if (!userHookPolicyResult.succeeded)
             {
                 lastApplyStatus = userHookPolicyResult.statusText;
-                lastApplyMessage = "Cannot apply central application hook defense policy: " + userHookPolicyResult.message;
+                lastApplyMessage = "Cannot apply central process threat insight policy: " + userHookPolicyResult.message;
                 SaveState();
                 return;
             }
@@ -478,7 +480,7 @@ namespace DataProtectorWebBridge.Services
 
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", application hook defense: " + PolicyBridgeService.UserHookDefensePolicySummary(userHookDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", process threat insight: " + PolicyBridgeService.UserHookDefensePolicySummary(userHookDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
             SaveState();
         }
 

@@ -116,6 +116,8 @@ namespace DataProtectorAgentClient.Native
             public uint Flags;
             public IntPtr ExcludedProcessNames;
             public IntPtr ExcludedProcessDirectories;
+            public IntPtr ExcludedProcessPaths;
+            public IntPtr TrustedSignerSubjects;
             public IntPtr RuntimeDllPath;
         }
     }

@@ -46,6 +46,12 @@ typedef enum _DP_USER_HOOK_APC_ENVIRONMENT {
     DpUserHookInsertApcEnvironment
 } DP_USER_HOOK_APC_ENVIRONMENT;
 
+typedef enum _DP_USER_HOOK_MATCH_MODE {
+    DpUserHookMatchProcessName = 0,
+    DpUserHookMatchDirectory = 1,
+    DpUserHookMatchExactPath = 2
+} DP_USER_HOOK_MATCH_MODE;
+
 typedef
 VOID
 (*DP_USER_HOOK_KERNEL_ROUTINE)(
@@ -151,9 +157,13 @@ static EX_PUSH_LOCK gDpUserHookPolicyLock;
 static volatile LONG gDpUserHookPolicyFlags = DP_USER_HOOK_DEFENSE_DEFAULT_FLAGS;
 static WCHAR gDpUserHookExcludedProcessNames[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
 static WCHAR gDpUserHookExcludedProcessDirectories[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+static WCHAR gDpUserHookExcludedProcessPaths[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
+static WCHAR gDpUserHookTrustedSignerSubjects[DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS];
 static WCHAR gDpUserHookRuntimeDllPath[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
 static ULONG gDpUserHookExcludedProcessNamesLengthBytes = 0;
 static ULONG gDpUserHookExcludedProcessDirectoriesLengthBytes = 0;
+static ULONG gDpUserHookExcludedProcessPathsLengthBytes = 0;
+static ULONG gDpUserHookTrustedSignerSubjectsLengthBytes = 0;
 static ULONG gDpUserHookRuntimeDllPathLengthBytes = 0;
 static BOOLEAN gDpUserHookInitialized = FALSE;
 static BOOLEAN gDpUserHookImageNotifyRegistered = FALSE;
@@ -267,7 +277,7 @@ DpUserHookMatchListEntry(
     _In_reads_(LengthBytes) const WCHAR *List,
     _In_ ULONG LengthBytes,
     _In_ PCUNICODE_STRING Value,
-    _In_ BOOLEAN DirectoryMatch
+    _In_ DP_USER_HOOK_MATCH_MODE MatchMode
     )
 {
     ULONG chars;
@@ -306,8 +316,12 @@ DpUserHookMatchListEntry(
             token.Length = (USHORT)((end - start) * sizeof(WCHAR));
             token.MaximumLength = token.Length;
 
-            if (!DirectoryMatch) {
+            if (MatchMode == DpUserHookMatchProcessName) {
                 if (RtlSuffixUnicodeString(&token, Value, TRUE)) {
+                    return TRUE;
+                }
+            } else if (MatchMode == DpUserHookMatchExactPath) {
+                if (RtlEqualUnicodeString(&token, Value, TRUE)) {
                     return TRUE;
                 }
             } else if (Value->Length >= token.Length && RtlPrefixUnicodeString(&token, Value, TRUE)) {
@@ -411,11 +425,15 @@ DpUserHookIsPolicyExcludedImage(
         DpUserHookMatchListEntry(gDpUserHookExcludedProcessNames,
                                  gDpUserHookExcludedProcessNamesLengthBytes,
                                  ImagePath,
-                                 FALSE) ||
+                                 DpUserHookMatchProcessName) ||
         DpUserHookMatchListEntry(gDpUserHookExcludedProcessDirectories,
                                  gDpUserHookExcludedProcessDirectoriesLengthBytes,
                                  ImagePath,
-                                 TRUE);
+                                 DpUserHookMatchDirectory) ||
+        DpUserHookMatchListEntry(gDpUserHookExcludedProcessPaths,
+                                 gDpUserHookExcludedProcessPathsLengthBytes,
+                                 ImagePath,
+                                 DpUserHookMatchExactPath);
 
     FltReleasePushLock(&gDpUserHookPolicyLock);
 
@@ -1574,9 +1592,13 @@ DpUserHookDefenseInitialize(
     RtlZeroMemory(gDpUserHookTargets, sizeof(gDpUserHookTargets));
     RtlZeroMemory(gDpUserHookExcludedProcessNames, sizeof(gDpUserHookExcludedProcessNames));
     RtlZeroMemory(gDpUserHookExcludedProcessDirectories, sizeof(gDpUserHookExcludedProcessDirectories));
+    RtlZeroMemory(gDpUserHookExcludedProcessPaths, sizeof(gDpUserHookExcludedProcessPaths));
+    RtlZeroMemory(gDpUserHookTrustedSignerSubjects, sizeof(gDpUserHookTrustedSignerSubjects));
     RtlZeroMemory(gDpUserHookRuntimeDllPath, sizeof(gDpUserHookRuntimeDllPath));
     gDpUserHookExcludedProcessNamesLengthBytes = 0;
     gDpUserHookExcludedProcessDirectoriesLengthBytes = 0;
+    gDpUserHookExcludedProcessPathsLengthBytes = 0;
+    gDpUserHookTrustedSignerSubjectsLengthBytes = 0;
     gDpUserHookRuntimeDllPathLengthBytes = 0;
     gDpUserHookInitialized = TRUE;
 
@@ -1615,6 +1637,8 @@ DpUserHookDefenseSetPolicy(
     ULONG flags;
     ULONG namesBytes;
     ULONG directoriesBytes;
+    ULONG pathsBytes;
+    ULONG signerBytes;
     ULONG runtimeBytes;
 
     if (Policy == NULL ||
@@ -1630,12 +1654,18 @@ DpUserHookDefenseSetPolicy(
                      (ULONG)((DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS - 1) * sizeof(WCHAR)));
     directoriesBytes = min(Policy->ExcludedProcessDirectoriesLengthBytes,
                            (ULONG)((DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS - 1) * sizeof(WCHAR)));
+    pathsBytes = min(Policy->ExcludedProcessPathsLengthBytes,
+                     (ULONG)((DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS - 1) * sizeof(WCHAR)));
+    signerBytes = min(Policy->TrustedSignerSubjectsLengthBytes,
+                      (ULONG)((DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS - 1) * sizeof(WCHAR)));
     runtimeBytes = min(Policy->RuntimeDllPathLengthBytes,
                        (ULONG)((DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS - 1) * sizeof(WCHAR)));
 
     FltAcquirePushLockExclusive(&gDpUserHookPolicyLock);
     RtlZeroMemory(gDpUserHookExcludedProcessNames, sizeof(gDpUserHookExcludedProcessNames));
     RtlZeroMemory(gDpUserHookExcludedProcessDirectories, sizeof(gDpUserHookExcludedProcessDirectories));
+    RtlZeroMemory(gDpUserHookExcludedProcessPaths, sizeof(gDpUserHookExcludedProcessPaths));
+    RtlZeroMemory(gDpUserHookTrustedSignerSubjects, sizeof(gDpUserHookTrustedSignerSubjects));
     RtlZeroMemory(gDpUserHookRuntimeDllPath, sizeof(gDpUserHookRuntimeDllPath));
     if (namesBytes != 0) {
         RtlCopyMemory(gDpUserHookExcludedProcessNames,
@@ -1646,6 +1676,16 @@ DpUserHookDefenseSetPolicy(
         RtlCopyMemory(gDpUserHookExcludedProcessDirectories,
                       Policy->ExcludedProcessDirectories,
                       directoriesBytes);
+    }
+    if (pathsBytes != 0) {
+        RtlCopyMemory(gDpUserHookExcludedProcessPaths,
+                      Policy->ExcludedProcessPaths,
+                      pathsBytes);
+    }
+    if (signerBytes != 0) {
+        RtlCopyMemory(gDpUserHookTrustedSignerSubjects,
+                      Policy->TrustedSignerSubjects,
+                      signerBytes);
     }
     if (runtimeBytes != 0) {
         RtlCopyMemory(gDpUserHookRuntimeDllPath,
@@ -1658,6 +1698,12 @@ DpUserHookDefenseSetPolicy(
     gDpUserHookExcludedProcessDirectoriesLengthBytes =
         DpUserHookBoundedStringBytes(gDpUserHookExcludedProcessDirectories,
                                      DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS);
+    gDpUserHookExcludedProcessPathsLengthBytes =
+        DpUserHookBoundedStringBytes(gDpUserHookExcludedProcessPaths,
+                                     DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS);
+    gDpUserHookTrustedSignerSubjectsLengthBytes =
+        DpUserHookBoundedStringBytes(gDpUserHookTrustedSignerSubjects,
+                                     DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS);
     gDpUserHookRuntimeDllPathLengthBytes =
         DpUserHookBoundedStringBytes(gDpUserHookRuntimeDllPath,
                                      DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS);
@@ -1665,10 +1711,12 @@ DpUserHookDefenseSetPolicy(
 
     InterlockedExchange((volatile LONG *)&gDpUserHookPolicyFlags, (LONG)flags);
 
-    DP_USER_HOOK_TRACE("policy updated flags=0x%08X excludedNamesBytes=%lu excludedDirectoriesBytes=%lu runtimeBytes=%lu\n",
+    DP_USER_HOOK_TRACE("policy updated flags=0x%08X excludedNamesBytes=%lu excludedDirectoriesBytes=%lu excludedPathsBytes=%lu trustedSignersBytes=%lu runtimeBytes=%lu\n",
                        flags,
                        gDpUserHookExcludedProcessNamesLengthBytes,
                        gDpUserHookExcludedProcessDirectoriesLengthBytes,
+                       gDpUserHookExcludedProcessPathsLengthBytes,
+                       gDpUserHookTrustedSignerSubjectsLengthBytes,
                        gDpUserHookRuntimeDllPathLengthBytes);
 
     return STATUS_SUCCESS;
@@ -1701,6 +1749,8 @@ DpUserHookDefenseQueryPolicy(
     FltAcquirePushLockShared(&gDpUserHookPolicyLock);
     policy->ExcludedProcessNamesLengthBytes = gDpUserHookExcludedProcessNamesLengthBytes;
     policy->ExcludedProcessDirectoriesLengthBytes = gDpUserHookExcludedProcessDirectoriesLengthBytes;
+    policy->ExcludedProcessPathsLengthBytes = gDpUserHookExcludedProcessPathsLengthBytes;
+    policy->TrustedSignerSubjectsLengthBytes = gDpUserHookTrustedSignerSubjectsLengthBytes;
     policy->RuntimeDllPathLengthBytes = gDpUserHookRuntimeDllPathLengthBytes;
     RtlCopyMemory(policy->ExcludedProcessNames,
                   gDpUserHookExcludedProcessNames,
@@ -1708,6 +1758,12 @@ DpUserHookDefenseQueryPolicy(
     RtlCopyMemory(policy->ExcludedProcessDirectories,
                   gDpUserHookExcludedProcessDirectories,
                   sizeof(policy->ExcludedProcessDirectories));
+    RtlCopyMemory(policy->ExcludedProcessPaths,
+                  gDpUserHookExcludedProcessPaths,
+                  sizeof(policy->ExcludedProcessPaths));
+    RtlCopyMemory(policy->TrustedSignerSubjects,
+                  gDpUserHookTrustedSignerSubjects,
+                  sizeof(policy->TrustedSignerSubjects));
     RtlCopyMemory(policy->RuntimeDllPath,
                   gDpUserHookRuntimeDllPath,
                   sizeof(policy->RuntimeDllPath));

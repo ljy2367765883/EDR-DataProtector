@@ -17,6 +17,7 @@ namespace DataProtectorWebBridge.Services
     {
         private const uint SuccessStatus = 0;
         private const uint BufferTooSmallStatus = 0xE0010005;
+        private const uint PathBufferChars = 2048;
         private const uint RuleTypeProcessName = 1;
         private const uint RuleTypeProcessDirectory = 2;
         private const uint RuleTypeExcludedDirectory = 3;
@@ -854,8 +855,14 @@ namespace DataProtectorWebBridge.Services
                 SplitUserHookPolicyList(Marshal.PtrToStringUni(nativePolicy.ExcludedProcessNames)),
                 DefaultUserHookExcludedProcessNames());
             policy.excludedProcessDirectories = NormalizeStringList(
-                SplitUserHookPolicyList(Marshal.PtrToStringUni(nativePolicy.ExcludedProcessDirectories)),
+                SplitUserHookPolicyList(NormalizeDevicePathList(Marshal.PtrToStringUni(nativePolicy.ExcludedProcessDirectories))),
                 DefaultUserHookExcludedProcessDirectories());
+            policy.excludedProcessPaths = NormalizeStringList(
+                SplitUserHookPolicyList(NormalizeDevicePathList(Marshal.PtrToStringUni(nativePolicy.ExcludedProcessPaths))),
+                DefaultUserHookExcludedProcessPaths());
+            policy.trustedSignerSubjects = NormalizeStringList(
+                SplitUserHookPolicyList(Marshal.PtrToStringUni(nativePolicy.TrustedSignerSubjects)),
+                DefaultUserHookTrustedSignerSubjects());
             string runtimePath = Marshal.PtrToStringUni(nativePolicy.RuntimeDllPath);
             policy.runtimePath = string.IsNullOrWhiteSpace(runtimePath)
                 ? GetPreparedUserHookRuntimePath()
@@ -870,19 +877,25 @@ namespace DataProtectorWebBridge.Services
             {
                 IntPtr excludedNames = IntPtr.Zero;
                 IntPtr excludedDirectories = IntPtr.Zero;
+                IntPtr excludedPaths = IntPtr.Zero;
+                IntPtr trustedSigners = IntPtr.Zero;
                 IntPtr runtimeDllPath = IntPtr.Zero;
 
                 try
                 {
                     string runtimePath = PrepareUserHookRuntimeDll();
                     excludedNames = Marshal.StringToHGlobalUni(string.Join("\n", normalized.excludedProcessNames ?? new string[0]));
-                    excludedDirectories = Marshal.StringToHGlobalUni(string.Join("\n", normalized.excludedProcessDirectories ?? new string[0]));
+                    excludedDirectories = Marshal.StringToHGlobalUni(string.Join("\n", ConvertUserHookPathsForKernel(normalized.excludedProcessDirectories ?? new string[0])));
+                    excludedPaths = Marshal.StringToHGlobalUni(string.Join("\n", ConvertUserHookPathsForKernel(normalized.excludedProcessPaths ?? new string[0])));
+                    trustedSigners = Marshal.StringToHGlobalUni(string.Join("\n", normalized.trustedSignerSubjects ?? new string[0]));
                     runtimeDllPath = Marshal.StringToHGlobalUni(runtimePath);
                     DataProtectorPolicyNative.NativeUserHookDefensePolicy nativePolicy = new DataProtectorPolicyNative.NativeUserHookDefensePolicy
                     {
                         Flags = ToUserHookDefenseFlags(normalized),
                         ExcludedProcessNames = excludedNames,
                         ExcludedProcessDirectories = excludedDirectories,
+                        ExcludedProcessPaths = excludedPaths,
+                        TrustedSignerSubjects = trustedSigners,
                         RuntimeDllPath = runtimeDllPath
                     };
 
@@ -900,6 +913,16 @@ namespace DataProtectorWebBridge.Services
                         Marshal.FreeHGlobal(excludedDirectories);
                     }
 
+                    if (excludedPaths != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(excludedPaths);
+                    }
+
+                    if (trustedSigners != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(trustedSigners);
+                    }
+
                     if (runtimeDllPath != IntPtr.Zero)
                     {
                         Marshal.FreeHGlobal(runtimeDllPath);
@@ -915,7 +938,7 @@ namespace DataProtectorWebBridge.Services
             auditLog.Append(
                 normalized.actor,
                 "policy.userhook.update",
-                "application-hook-defense",
+                "process-threat-insight",
                 UserHookDefensePolicySummary(normalized),
                 result.succeeded,
                 result.status,
@@ -1306,7 +1329,7 @@ namespace DataProtectorWebBridge.Services
 
         private static string BuildUserHookAuditMessage(UserHookDefenseEventDto item)
         {
-            string message = "Application hook defense " + item.operation + " for PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+            string message = "Process threat insight " + item.operation + " for PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
             if (!string.IsNullOrWhiteSpace(item.processImage))
             {
                 message += " Process: " + item.processImage + ".";
@@ -1379,7 +1402,7 @@ namespace DataProtectorWebBridge.Services
                         Extension = runtimeEvent.processImage ?? string.Empty,
                         Succeeded = !blocked,
                         Status = string.IsNullOrWhiteSpace(runtimeEvent.status) ? "0x00000000" : runtimeEvent.status,
-                        Message = "User-mode hook runtime event from PID " + runtimeEvent.pid.ToString(CultureInfo.InvariantCulture) + "."
+                        Message = "Process threat runtime event from PID " + runtimeEvent.pid.ToString(CultureInfo.InvariantCulture) + "."
                     };
 
                     records.Add(record);
@@ -1930,6 +1953,8 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = (flags & UserHookDefenseFlagMonitorSystemProcesses) != 0,
                 excludedProcessNames = DefaultUserHookExcludedProcessNames(),
                 excludedProcessDirectories = DefaultUserHookExcludedProcessDirectories(),
+                excludedProcessPaths = DefaultUserHookExcludedProcessPaths(),
+                trustedSignerSubjects = DefaultUserHookTrustedSignerSubjects(),
                 runtimePath = GetPreparedUserHookRuntimePath(),
                 flags = flags & UserHookDefenseAllowedFlags
             };
@@ -1981,6 +2006,8 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = source.monitorSystemProcesses,
                 excludedProcessNames = NormalizeStringList(source.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
                 excludedProcessDirectories = NormalizeStringList(source.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
+                excludedProcessPaths = NormalizeStringList(source.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
+                trustedSignerSubjects = NormalizeStringList(source.trustedSignerSubjects, DefaultUserHookTrustedSignerSubjects()),
                 runtimePath = string.IsNullOrWhiteSpace(source.runtimePath) ? GetPreparedUserHookRuntimePath() : source.runtimePath,
                 flags = ToUserHookDefenseFlags(source),
                 actor = source.actor
@@ -1991,7 +2018,7 @@ namespace DataProtectorWebBridge.Services
         {
             if (request == null)
             {
-                throw new BridgeException(1, "Application hook defense policy body is required.");
+                throw new BridgeException(1, "Process threat insight policy body is required.");
             }
 
             UserHookDefensePolicyDto normalized = new UserHookDefensePolicyDto
@@ -2005,6 +2032,8 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = request.monitorSystemProcesses,
                 excludedProcessNames = NormalizeStringList(request.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
                 excludedProcessDirectories = NormalizeStringList(request.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
+                excludedProcessPaths = NormalizeStringList(request.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
+                trustedSignerSubjects = NormalizeStringList(request.trustedSignerSubjects, DefaultUserHookTrustedSignerSubjects()),
                 runtimePath = GetPreparedUserHookRuntimePath(),
                 actor = request.actor
             };
@@ -2018,7 +2047,7 @@ namespace DataProtectorWebBridge.Services
             UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};excludedNames={7};excludedDirs={8};flags=0x{9:X8}",
+                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};excludedNames={7};excludedDirs={8};excludedPaths={9};trustedSigners={10};flags=0x{11:X8}",
                 normalized.enabled,
                 normalized.monitorEarlyProcesses,
                 normalized.monitorImageLoads,
@@ -2028,6 +2057,8 @@ namespace DataProtectorWebBridge.Services
                 normalized.monitorSystemProcesses,
                 normalized.excludedProcessNames.Length,
                 normalized.excludedProcessDirectories.Length,
+                normalized.excludedProcessPaths.Length,
+                normalized.trustedSignerSubjects.Length,
                 normalized.flags);
         }
 
@@ -2075,6 +2106,16 @@ namespace DataProtectorWebBridge.Services
                 new string[0]);
         }
 
+        private static string[] DefaultUserHookExcludedProcessPaths()
+        {
+            return new string[0];
+        }
+
+        private static string[] DefaultUserHookTrustedSignerSubjects()
+        {
+            return new string[0];
+        }
+
         private static string[] NormalizeStringList(string[] values, string[] fallback)
         {
             IEnumerable<string> source = values == null || values.Length == 0
@@ -2101,6 +2142,73 @@ namespace DataProtectorWebBridge.Services
                 .Select(item => item.Trim())
                 .Where(item => item.Length != 0)
                 .ToArray();
+        }
+
+        private static string NormalizeDevicePathList(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            return string.Join(
+                "\n",
+                SplitUserHookPolicyList(value).Select(NormalizeDevicePath).Where(item => !string.IsNullOrWhiteSpace(item)));
+        }
+
+        private static string[] ConvertUserHookPathsForKernel(string[] values)
+        {
+            string[] normalized = NormalizeStringList(values, new string[0]);
+            List<string> converted = new List<string>(normalized.Length);
+
+            foreach (string value in normalized)
+            {
+                string convertedPath;
+                if (TryConvertDosPathToNtPath(value, out convertedPath))
+                {
+                    converted.Add(convertedPath);
+                }
+                else
+                {
+                    converted.Add(value);
+                }
+            }
+
+            return converted.ToArray();
+        }
+
+        private static bool TryConvertDosPathToNtPath(string value, out string converted)
+        {
+            converted = value;
+            if (string.IsNullOrWhiteSpace(value) ||
+                value.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase) ||
+                value.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            try
+            {
+                StringBuilder buffer = new StringBuilder((int)PathBufferChars);
+                uint status = DataProtectorPolicyNative.DpPolicyConvertDosPathToNtPath(value, buffer, PathBufferChars);
+                if (status != SuccessStatus)
+                {
+                    return false;
+                }
+
+                string ntPath = buffer.ToString();
+                if (string.IsNullOrWhiteSpace(ntPath))
+                {
+                    return false;
+                }
+
+                converted = ntPath;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void WriteUserHookRuntimePolicy(UserHookDefensePolicyDto policy)
@@ -3108,6 +3216,8 @@ namespace DataProtectorWebBridge.Services
             public bool monitorSystemProcesses { get; set; }
             public string[] excludedProcessNames { get; set; }
             public string[] excludedProcessDirectories { get; set; }
+            public string[] excludedProcessPaths { get; set; }
+            public string[] trustedSignerSubjects { get; set; }
             public string runtimePath { get; set; }
             public string actor { get; set; }
         }

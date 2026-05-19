@@ -58,6 +58,8 @@ const usbCryptPackageUploading = ref(false);
 const connected = ref(false);
 const userHookExcludedProcessesText = ref('');
 const userHookExcludedDirectoriesText = ref('');
+const userHookExcludedPathsText = ref('');
+const userHookTrustedSignersText = ref('');
 const rules = ref<Api.DataProtector.PolicyRule[]>([]);
 const networkRules = ref<Api.DataProtector.NetworkRule[]>([]);
 const webShellRules = ref<Api.DataProtector.WebShellRule[]>([]);
@@ -101,6 +103,8 @@ const userHookDefensePolicy = reactive<Api.DataProtector.UserHookDefensePolicy>(
   monitorSystemProcesses: false,
   excludedProcessNames: [],
   excludedProcessDirectories: [],
+  excludedProcessPaths: [],
+  trustedSignerSubjects: [],
   runtimePath: '',
   flags: 0x0000002f,
   actor: 'web-admin'
@@ -952,11 +956,15 @@ function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePo
   userHookDefensePolicy.monitorSystemProcesses = Boolean(policy.monitorSystemProcesses);
   userHookDefensePolicy.excludedProcessNames = policy.excludedProcessNames || [];
   userHookDefensePolicy.excludedProcessDirectories = policy.excludedProcessDirectories || [];
+  userHookDefensePolicy.excludedProcessPaths = policy.excludedProcessPaths || [];
+  userHookDefensePolicy.trustedSignerSubjects = policy.trustedSignerSubjects || [];
   userHookDefensePolicy.runtimePath = policy.runtimePath || '';
   userHookDefensePolicy.flags = policy.flags ?? calculateUserHookDefenseFlags();
   userHookDefensePolicy.actor = 'web-admin';
   userHookExcludedProcessesText.value = userHookDefensePolicy.excludedProcessNames.join('\n');
   userHookExcludedDirectoriesText.value = userHookDefensePolicy.excludedProcessDirectories.join('\n');
+  userHookExcludedPathsText.value = userHookDefensePolicy.excludedProcessPaths.join('\n');
+  userHookTrustedSignersText.value = userHookDefensePolicy.trustedSignerSubjects.join('\n');
 }
 
 function calculateUserHookDefenseFlags() {
@@ -1354,6 +1362,8 @@ async function saveUserHookDefensePolicy() {
       monitorSystemProcesses: userHookDefensePolicy.monitorSystemProcesses,
       excludedProcessNames: linesToList(userHookExcludedProcessesText.value),
       excludedProcessDirectories: linesToList(userHookExcludedDirectoriesText.value),
+      excludedProcessPaths: linesToList(userHookExcludedPathsText.value),
+      trustedSignerSubjects: linesToList(userHookTrustedSignersText.value),
       runtimePath: userHookDefensePolicy.runtimePath,
       actor: 'web-admin'
     });
@@ -2024,12 +2034,32 @@ onMounted(refresh);
                     </NFormItem>
                   </NGi>
                   <NGi>
+                    <NFormItem :label="$t('dataprotector.policy.userhook.excludedPaths')">
+                      <NInput
+                        v-model:value="userHookExcludedPathsText"
+                        type="textarea"
+                        :autosize="{ minRows: 4, maxRows: 8 }"
+                        :placeholder="$t('dataprotector.policy.userhook.excludedPathPlaceholder')"
+                      />
+                    </NFormItem>
+                  </NGi>
+                  <NGi>
                     <NFormItem :label="$t('dataprotector.policy.userhook.excludedDirectories')">
                       <NInput
                         v-model:value="userHookExcludedDirectoriesText"
                         type="textarea"
                         :autosize="{ minRows: 4, maxRows: 8 }"
                         :placeholder="$t('dataprotector.policy.userhook.excludedDirectoryPlaceholder')"
+                      />
+                    </NFormItem>
+                  </NGi>
+                  <NGi>
+                    <NFormItem :label="$t('dataprotector.policy.userhook.trustedSigners')">
+                      <NInput
+                        v-model:value="userHookTrustedSignersText"
+                        type="textarea"
+                        :autosize="{ minRows: 4, maxRows: 8 }"
+                        :placeholder="$t('dataprotector.policy.userhook.trustedSignerPlaceholder')"
                       />
                     </NFormItem>
                   </NGi>

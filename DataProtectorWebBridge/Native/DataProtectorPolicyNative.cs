@@ -150,6 +150,12 @@ namespace DataProtectorWebBridge.Native
         internal static extern uint DpPolicyQueryUserHookDefensePolicy(out NativeUserHookDefensePolicy policy);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyConvertDosPathToNtPath(
+            string dosPath,
+            StringBuilder ntPath,
+            uint ntPathChars);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyAddDeviceRule(ref NativeDeviceRule rule);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -326,6 +332,8 @@ namespace DataProtectorWebBridge.Native
             public uint Flags;
             public IntPtr ExcludedProcessNames;
             public IntPtr ExcludedProcessDirectories;
+            public IntPtr ExcludedProcessPaths;
+            public IntPtr TrustedSignerSubjects;
             public IntPtr RuntimeDllPath;
         }
 

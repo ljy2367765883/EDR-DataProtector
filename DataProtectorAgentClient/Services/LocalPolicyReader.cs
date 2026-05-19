@@ -464,14 +464,14 @@ namespace DataProtectorAgentClient.Services
                 uint status = DataProtectorPolicyNative.DpPolicyQueryUserHookDefensePolicy(out policy);
                 if (status != SuccessStatus)
                 {
-                    features.Add(BuildFeatureError("应用 Hook 防御", status));
+                    features.Add(BuildFeatureError("进程威胁感知", status));
                     return;
                 }
 
                 uint flags = policy.Flags;
                 features.Add(new ProtectionFeatureViewItem
                 {
-                    Name = "应用 Hook 防御",
+                    Name = "进程威胁感知",
                     Description = BuildUserHookDefenseDescription(flags),
                     State = (flags & UserHookDefenseFlagEnabled) != 0 ? "已开启" : "未开启",
                     AccentBrushKey = (flags & UserHookDefenseFlagEnabled) != 0 ? "DpSuccessBrush" : "DpMutedBrush"
@@ -479,7 +479,7 @@ namespace DataProtectorAgentClient.Services
             }
             catch (Exception ex)
             {
-                features.Add(BuildFeatureException("应用 Hook 防御", ex));
+                features.Add(BuildFeatureException("进程威胁感知", ex));
             }
         }
 
@@ -515,7 +515,7 @@ namespace DataProtectorAgentClient.Services
         private static string BuildUserHookDefenseDescription(uint flags)
         {
             return JoinCapabilities(
-                "早期注入监控" + IsEnabled(flags, UserHookDefenseFlagEarlyProcessInjection),
+                "早期进程接管" + IsEnabled(flags, UserHookDefenseFlagEarlyProcessInjection),
                 "敏感模块监控" + IsEnabled(flags, UserHookDefenseFlagImageLoadMonitor),
                 "签名运行时" + IsEnabled(flags, UserHookDefenseFlagRequireSignedRuntime),
                 (flags & UserHookDefenseFlagAuditOnly) != 0
