@@ -48,6 +48,56 @@ DpUsbMetadataHasKnownMagic(
 }
 
 static
+ULONG
+DpUsbMetadataCrc32(
+    _In_reads_bytes_(Count) const UCHAR *Buffer,
+    _In_ ULONG Count
+    )
+{
+    ULONG crc = 0xFFFFFFFFUL;
+    ULONG index;
+    INT bit;
+
+    if (Buffer == NULL) {
+        return 0;
+    }
+
+    for (index = 0; index < Count; index++) {
+        crc ^= Buffer[index];
+        for (bit = 0; bit < 8; bit++) {
+            crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
+        }
+    }
+
+    return ~crc;
+}
+
+static
+BOOLEAN
+DpUsbMetadataIsValidManifest(
+    _In_reads_bytes_(DP_USB_METADATA_BYTES) const UCHAR *Buffer
+    )
+{
+    ULONG magic;
+    ULONG metadataBytes;
+    ULONG storedCrc;
+    ULONG actualCrc;
+
+    if (Buffer == NULL) {
+        return FALSE;
+    }
+
+    RtlCopyMemory(&magic, Buffer, sizeof(magic));
+    RtlCopyMemory(&metadataBytes, Buffer + (sizeof(ULONG) * 2), sizeof(metadataBytes));
+    RtlCopyMemory(&storedCrc, Buffer + DP_USB_METADATA_BYTES - sizeof(ULONG), sizeof(storedCrc));
+    actualCrc = DpUsbMetadataCrc32(Buffer, DP_USB_METADATA_BYTES - sizeof(ULONG));
+
+    return (magic == DP_USB_METADATA_MAGIC_V2 || magic == DP_USB_METADATA_MAGIC_V1) &&
+           metadataBytes == DP_USB_METADATA_BYTES &&
+           storedCrc == actualCrc;
+}
+
+static
 BOOLEAN
 DpUsbMetadataAddUlonglong(
     _In_ ULONGLONG Left,
@@ -378,6 +428,7 @@ DpUsbMetadataWrite(
     ULONG partitionCount = 0;
     ULONGLONG diskSizeBytes = 0;
     UCHAR existing[DP_USB_METADATA_BYTES];
+    UCHAR verify[DP_USB_METADATA_BYTES];
     NTSTATUS status;
     DP_USB_METADATA_WRITE_RESULT result;
 
@@ -436,7 +487,8 @@ DpUsbMetadataWrite(
     }
 
     if (!DpUsbMetadataIsZeroBlock(existing) &&
-        !DpUsbMetadataHasKnownMagic(existing)) {
+        DpUsbMetadataHasKnownMagic(existing) &&
+        !DpUsbMetadataIsValidManifest(existing)) {
 
         status = STATUS_OBJECT_NAME_COLLISION;
         goto Exit;
@@ -445,6 +497,21 @@ DpUsbMetadataWrite(
     status = DpUsbMetadataWriteBlock(diskHandle,
                                      Request->OffsetBytes,
                                      Request->Metadata);
+    if (!NT_SUCCESS(status)) {
+        goto Exit;
+    }
+
+    status = DpUsbMetadataReadExisting(diskHandle,
+                                       Request->OffsetBytes,
+                                       verify);
+    if (!NT_SUCCESS(status)) {
+        goto Exit;
+    }
+
+    if (RtlCompareMemory(verify, Request->Metadata, DP_USB_METADATA_BYTES) != DP_USB_METADATA_BYTES) {
+        status = STATUS_DATA_ERROR;
+        goto Exit;
+    }
 
 Exit:
     result.Status = (ULONG)status;

@@ -56,6 +56,7 @@ namespace DataProtectorWebBridge.Services
 
             PhysicalDiskTarget disk = ResolvePhysicalDiskTarget(targetRoot);
             Trace(agentDirectory, "resolved physical disk " + DescribeDisk(disk));
+            PhysicalDiskTarget selectedDisk = disk;
 
             if (!normalized.confirmed)
             {
@@ -85,16 +86,18 @@ namespace DataProtectorWebBridge.Services
                 disk = ResolvePhysicalDiskTargetWithRetry(targetRoot, agentDirectory);
                 Trace(agentDirectory, "resolved physical disk after layout " + DescribeDisk(disk));
                 ValidateUsbCryptLayout(disk, normalized.publicToolAreaBytes, normalized.hardwareId);
-                PreparePublicToolArea(targetRoot, runtimePackage);
-                Trace(agentDirectory, "runtime copied to " + targetRoot);
 
                 long dataLength = normalized.dataLengthBytes > 0
                     ? normalized.dataLengthBytes
-                    : Math.Max(0, disk.diskSizeBytes - DataOffsetBytes);
+                    : Math.Max(0, selectedDisk.diskSizeBytes - DataOffsetBytes);
 
                 byte[] metadata = BuildRawMetadata(normalized, target, key, dataLength);
-                DataProtectorPolicyNative.NativeUsbMetadataWriteResult writeResult = WriteRawMetadataThroughDriver(disk.physicalDrivePath, metadata);
+                DataProtectorPolicyNative.NativeUsbMetadataWriteResult writeResult = WriteRawMetadataThroughDriver(selectedDisk.physicalDrivePath, metadata);
                 Trace(agentDirectory, "metadata written status=0x" + writeResult.Status.ToString("X8") + " offset=" + writeResult.OffsetBytes + " diskSize=" + writeResult.DiskSizeBytes + " partitions=" + writeResult.PartitionCount);
+                VerifyRawMetadataReadback(selectedDisk.physicalDrivePath, metadata, agentDirectory);
+
+                PreparePublicToolArea(targetRoot, runtimePackage);
+                Trace(agentDirectory, "runtime copied to " + targetRoot);
 
                 return new UsbCryptInitializationResult
                 {
@@ -105,7 +108,7 @@ namespace DataProtectorWebBridge.Services
                     dataOffsetBytes = DataOffsetBytes,
                     dataLengthBytes = dataLength,
                     metadataOffsetBytes = (long)writeResult.OffsetBytes,
-                    metadataLocation = disk.physicalDrivePath + "@" + writeResult.OffsetBytes,
+                    metadataLocation = selectedDisk.physicalDrivePath + "@" + writeResult.OffsetBytes,
                     toolPath = Path.Combine(targetRoot, ToolFileName),
                     driverPath = Path.Combine(targetRoot, RuntimeDirectoryName),
                     driverPackageVersion = normalized.driverPackageVersion,
@@ -435,6 +438,64 @@ namespace DataProtectorWebBridge.Services
             }
 
             return result;
+        }
+
+        private static void VerifyRawMetadataReadback(string physicalDrivePath, byte[] expected, string agentDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(physicalDrivePath) || expected == null || expected.Length != MetadataBytes)
+            {
+                throw new InvalidOperationException("USB raw metadata readback arguments are invalid.");
+            }
+
+            byte[] actual = new byte[MetadataBytes];
+            using (FileStream stream = new FileStream(
+                physicalDrivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite))
+            {
+                stream.Seek(MetadataOffsetBytes, SeekOrigin.Begin);
+                int total = 0;
+                while (total < actual.Length)
+                {
+                    int read = stream.Read(actual, total, actual.Length - total);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    total += read;
+                }
+
+                if (total != actual.Length)
+                {
+                    throw new InvalidOperationException("USB raw metadata readback returned " + total + " bytes; expected " + actual.Length + ".");
+                }
+            }
+
+            uint expectedCrc = BitConverter.ToUInt32(expected, MetadataBytes - sizeof(uint));
+            uint actualCrc = BitConverter.ToUInt32(actual, MetadataBytes - sizeof(uint));
+            uint calculatedCrc = Crc32(actual, 0, MetadataBytes - sizeof(uint));
+            uint magic = BitConverter.ToUInt32(actual, 0);
+            uint version = BitConverter.ToUInt32(actual, 4);
+
+            bool matches = expected.SequenceEqual(actual) &&
+                magic == MetadataMagic &&
+                version == MetadataVersion &&
+                actualCrc == calculatedCrc;
+
+            Trace(agentDirectory, "metadata readback path=" + physicalDrivePath +
+                " magic=0x" + magic.ToString("X8") +
+                " version=" + version +
+                " storedCrc=0x" + actualCrc.ToString("X8") +
+                " calcCrc=0x" + calculatedCrc.ToString("X8") +
+                " expectedCrc=0x" + expectedCrc.ToString("X8") +
+                " matches=" + matches);
+
+            if (!matches)
+            {
+                throw new InvalidOperationException("USB raw metadata readback verification failed; initialization stopped before copying the unlock tool.");
+            }
         }
 
         private static string FormatNativeError(uint status)

@@ -243,11 +243,13 @@ typedef enum _DPUSB_SERVICE_PATH_MODE {
 static DPUSB_UI_STATE g_Ui;
 static BOOL g_UsbSourceRootSet = FALSE;
 static WCHAR g_UsbSourceRoot[MAX_PATH];
+static WCHAR g_LastMetadataDiagnostic[512];
 
 static BOOL AutoPrepareDriver(wchar_t *deployedPath, DWORD deployedPathChars, wchar_t *servicePath, DWORD servicePathChars, DWORD *win32Error);
 static BOOL OpenSessionWithSecret(const DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
 static BOOL UnlockSecretFromPassword(const wchar_t *password, DPUSB_UNLOCK_SECRET *secret, DWORD *win32Error);
 static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Error);
+static void SetMetadataDiagnostic(const wchar_t *format, ...);
 static void AppendLog(const wchar_t *format, ...);
 static BOOL IsProcessElevated(void);
 static BOOL EnableProcessPrivilege(const wchar_t *privilegeName, DWORD *win32Error);
@@ -1032,9 +1034,18 @@ static BOOL ReadManifestFromPhysicalPath(const wchar_t *physicalPath,
     BYTE raw[DPUSB_UNLOCK_METADATA_BYTES];
     DWORD storedCrc;
     DWORD actualCrc;
+    DWORD magic = 0;
+    DWORD version = 0;
+    DWORD metadataBytes = 0;
+    DWORD algorithm = 0;
+    DWORD keyLength = 0;
+    DWORD kdfIterations = 0;
     LARGE_INTEGER offset;
 
+    SetMetadataDiagnostic(NULL);
+
     if (physicalPath == NULL || physicalPath[0] == L'\0' || manifest == NULL) {
+        SetMetadataDiagnostic(L"invalid metadata read arguments");
         if (win32Error != NULL) {
             *win32Error = ERROR_INVALID_PARAMETER;
         }
@@ -1049,6 +1060,9 @@ static BOOL ReadManifestFromPhysicalPath(const wchar_t *physicalPath,
                        0,
                        NULL);
     if (disk == INVALID_HANDLE_VALUE) {
+        SetMetadataDiagnostic(L"cannot open %s for raw metadata read; Win32=%lu",
+                              physicalPath,
+                              GetLastError());
         if (win32Error != NULL) {
             *win32Error = GetLastError();
         }
@@ -1059,6 +1073,10 @@ static BOOL ReadManifestFromPhysicalPath(const wchar_t *physicalPath,
     ZeroMemory(raw, sizeof(raw));
     offset.QuadPart = (LONGLONG)DPUSB_UNLOCK_METADATA_OFFSET_BYTES;
     if (SetFilePointerEx(disk, offset, NULL, FILE_BEGIN) == 0) {
+        SetMetadataDiagnostic(L"cannot seek %s to metadata offset %I64u; Win32=%lu",
+                              physicalPath,
+                              DPUSB_UNLOCK_METADATA_OFFSET_BYTES,
+                              GetLastError());
         if (win32Error != NULL) {
             *win32Error = GetLastError();
         }
@@ -1067,6 +1085,11 @@ static BOOL ReadManifestFromPhysicalPath(const wchar_t *physicalPath,
     }
 
     if (!ReadFile(disk, raw, sizeof(raw), &readBytes, NULL) || readBytes != sizeof(raw)) {
+        SetMetadataDiagnostic(L"raw metadata read from %s returned %lu/%lu bytes; Win32=%lu",
+                              physicalPath,
+                              readBytes,
+                              (DWORD)sizeof(raw),
+                              GetLastError());
         if (win32Error != NULL) {
             *win32Error = GetLastError() == ERROR_SUCCESS ? ERROR_INVALID_DATA : GetLastError();
         }
@@ -1076,8 +1099,26 @@ static BOOL ReadManifestFromPhysicalPath(const wchar_t *physicalPath,
 
     CloseHandle(disk);
     CopyMemory(manifest, raw, sizeof(*manifest));
+    CopyMemory(&magic, raw, sizeof(magic));
+    CopyMemory(&version, raw + 4, sizeof(version));
+    CopyMemory(&metadataBytes, raw + 8, sizeof(metadataBytes));
+    CopyMemory(&algorithm, raw + 12, sizeof(algorithm));
+    CopyMemory(&keyLength, raw + 16, sizeof(keyLength));
+    CopyMemory(&kdfIterations, raw + 20, sizeof(kdfIterations));
     CopyMemory(&storedCrc, raw + DPUSB_UNLOCK_METADATA_BYTES - sizeof(DWORD), sizeof(storedCrc));
     actualCrc = Crc32Bytes(raw, DPUSB_UNLOCK_METADATA_BYTES - sizeof(DWORD));
+
+    SetMetadataDiagnostic(L"path=%s offset=%I64u magic=0x%08lX version=%lu bytes=%lu algorithm=%lu key=%lu kdf=%lu storedCrc=0x%08lX calcCrc=0x%08lX",
+                          physicalPath,
+                          DPUSB_UNLOCK_METADATA_OFFSET_BYTES,
+                          magic,
+                          version,
+                          metadataBytes,
+                          algorithm,
+                          keyLength,
+                          kdfIterations,
+                          storedCrc,
+                          actualCrc);
 
     if (manifest->Magic != DPUSB_UNLOCK_METADATA_MAGIC ||
         (manifest->Version != DPUSB_UNLOCK_METADATA_VERSION_LEGACY &&
@@ -1138,6 +1179,8 @@ static BOOL ValidateUsbSourceRoot(const wchar_t *root, DWORD *win32Error)
 
     ZeroMemory(&manifest, sizeof(manifest));
     if (!ReadManifestFromPhysicalPath(physicalPath, &manifest, &error)) {
+        wcsncpy_s(g_UsbSourceRoot, sizeof(g_UsbSourceRoot) / sizeof(g_UsbSourceRoot[0]), root, _TRUNCATE);
+        g_UsbSourceRootSet = TRUE;
         if (win32Error != NULL) {
             *win32Error = error;
         }
@@ -3338,6 +3381,22 @@ static DWORD Crc32Bytes(const BYTE *bytes, DWORD count)
     return ~crc;
 }
 
+static void SetMetadataDiagnostic(const wchar_t *format, ...)
+{
+    va_list args;
+
+    va_start(args, format);
+    if (format == NULL) {
+        g_LastMetadataDiagnostic[0] = L'\0';
+    } else {
+        vswprintf_s(g_LastMetadataDiagnostic,
+                    sizeof(g_LastMetadataDiagnostic) / sizeof(g_LastMetadataDiagnostic[0]),
+                    format,
+                    args);
+    }
+    va_end(args);
+}
+
 static BOOL ReadUnlockManifest(DPUSB_UNLOCK_MANIFEST *manifest, DWORD *win32Error)
 {
     wchar_t physicalPath[MAX_PATH];
@@ -3798,6 +3857,9 @@ static DWORD WINAPI UnlockWorkerThread(LPVOID parameter)
 
         FormatErrorMessage(error, message, sizeof(message) / sizeof(message[0]));
         AppendLog(L"USB metadata validation failed: %s", message);
+        if (g_LastMetadataDiagnostic[0] != L'\0') {
+            AppendLog(L"USB metadata diagnostic: %s", g_LastMetadataDiagnostic);
+        }
         PostMessageW(g_Ui.Window, DPUSB_WM_UNLOCK_DONE, 0, (LPARAM)result);
         return 0;
     }
@@ -4556,7 +4618,14 @@ static void CreateUi(HWND hwnd)
         g_UsbSourceRootSet = TRUE;
         AppendLog(L"UI started. DataProtector USB source detected by Windows API: %s", g_UsbSourceRoot);
     } else {
-        AppendLog(L"UI started. Enter the initialization password to unlock this USB workspace.");
+        if (g_UsbSourceRootSet && g_UsbSourceRoot[0] != L'\0') {
+            AppendLog(L"UI started. DataProtector USB source detected with invalid metadata: %s", g_UsbSourceRoot);
+            if (g_LastMetadataDiagnostic[0] != L'\0') {
+                AppendLog(L"USB metadata diagnostic: %s", g_LastMetadataDiagnostic);
+            }
+        } else {
+            AppendLog(L"UI started. Enter the initialization password to unlock this USB workspace.");
+        }
     }
     (VOID)UpdateTrayIcon(TRUE);
 }
