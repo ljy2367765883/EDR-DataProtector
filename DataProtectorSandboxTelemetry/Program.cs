@@ -24,7 +24,22 @@ namespace DataProtectorSandboxTelemetry
 
         private static int Main(string[] args)
         {
-            Options options = Options.Parse(args);
+            Options options = null;
+            try
+            {
+                options = Options.Parse(args);
+                return Run(options);
+            }
+            catch (Exception ex)
+            {
+                WriteCrashReport(options, ex);
+                Console.Error.WriteLine(ex.ToString());
+                return 1;
+            }
+        }
+
+        private static int Run(Options options)
+        {
             if (string.IsNullOrWhiteSpace(options.SamplePath) || string.IsNullOrWhiteSpace(options.ReportPath))
             {
                 Console.Error.WriteLine("Usage: DataProtectorSandboxTelemetry.exe --sample <path> --report <report.json> [--runtime <DataProtectorUserHookRuntime.dll>] [--timeout 120] [--arguments <args>]");
@@ -193,6 +208,39 @@ namespace DataProtectorSandboxTelemetry
             File.WriteAllText(options.ReportPath, Serializer.Serialize(report), new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(Path.GetDirectoryName(options.ReportPath) ?? ".", "report.done"), "done", new UTF8Encoding(false));
             return 0;
+        }
+
+        private static void WriteCrashReport(Options options, Exception exception)
+        {
+            try
+            {
+                string reportPath = options == null ? string.Empty : options.ReportPath;
+                if (string.IsNullOrWhiteSpace(reportPath))
+                {
+                    return;
+                }
+
+                string reportDirectory = Path.GetDirectoryName(reportPath) ?? ".";
+                Directory.CreateDirectory(reportDirectory);
+                Dictionary<string, object> report = new Dictionary<string, object>
+                {
+                    { "schema", "dataprotector.sandbox.report.v2" },
+                    { "error", "Telemetry runner crashed" },
+                    { "runId", options.RunId ?? string.Empty },
+                    { "samplePath", options.SamplePath ?? string.Empty },
+                    { "runtimePath", options.RuntimePath ?? string.Empty },
+                    { "kernelDriverPath", options.KernelDriverPath ?? string.Empty },
+                    { "policyApiPath", options.PolicyApiPath ?? string.Empty },
+                    { "exceptionType", exception.GetType().FullName },
+                    { "message", exception.Message },
+                    { "stackTrace", exception.ToString() }
+                };
+                File.WriteAllText(reportPath, Serializer.Serialize(report), new UTF8Encoding(false));
+                File.WriteAllText(Path.Combine(reportDirectory, "report.done"), "done", new UTF8Encoding(false));
+            }
+            catch
+            {
+            }
         }
 
         private static void ObserveProcess(Process process, int timeoutSeconds, List<BehaviorRecord> behaviors, List<string> errors, out bool timedOut, out int exitCode)
