@@ -459,6 +459,8 @@ namespace DataProtectorWebBridge.Services
                 blockUntrustedRuntime = userHookDefensePolicy.blockUntrustedRuntime,
                 auditOnly = userHookDefensePolicy.auditOnly,
                 monitorSystemProcesses = userHookDefensePolicy.monitorSystemProcesses,
+                monitorRuntimeApiBehavior = userHookDefensePolicy.monitorRuntimeApiBehavior,
+                scanExecutableMemory = userHookDefensePolicy.scanExecutableMemory,
                 excludedProcessNames = userHookDefensePolicy.excludedProcessNames,
                 excludedProcessDirectories = userHookDefensePolicy.excludedProcessDirectories,
                 excludedProcessPaths = userHookDefensePolicy.excludedProcessPaths,

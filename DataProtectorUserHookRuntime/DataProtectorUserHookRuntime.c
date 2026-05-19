@@ -120,6 +120,8 @@ static WCHAR gCurrentProcessPath[MAX_PATH * 2];
 static DWORD gCurrentProcessId;
 static BOOL gAuditOnly = TRUE;
 static BOOL gEnabled = TRUE;
+static BOOL gMonitorRuntimeApiBehavior = TRUE;
+static BOOL gScanExecutableMemory = TRUE;
 static BOOL gMinHookInitialized;
 static BOOL gHooksEnabled;
 static HANDLE gInitThread;
@@ -708,6 +710,8 @@ DpRuntimeShouldExitByPolicy(VOID)
 
     gEnabled = DpRuntimeJsonBool(policy, L"enabled", TRUE);
     gAuditOnly = DpRuntimeJsonBool(policy, L"auditOnly", TRUE);
+    gMonitorRuntimeApiBehavior = DpRuntimeJsonBool(policy, L"monitorRuntimeApiBehavior", TRUE);
+    gScanExecutableMemory = DpRuntimeJsonBool(policy, L"scanExecutableMemory", TRUE);
 
     if (!gEnabled) {
         return TRUE;
@@ -1184,6 +1188,10 @@ DpRuntimeScanExecutableMemory(VOID)
     BYTE *maximumAddress;
     DWORD nowTick = GetTickCount();
     DWORD reports = 0;
+
+    if (!gScanExecutableMemory) {
+        return;
+    }
 
     if (gLastMemoryScanTick != 0 &&
         nowTick - gLastMemoryScanTick < DP_RUNTIME_MEMORY_SCAN_INTERVAL_MS) {
@@ -1923,31 +1931,35 @@ DpRuntimeInitializeOnce(
     }
     gMinHookInitialized = TRUE;
 
-    DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThread", DpHookCreateRemoteThread, (LPVOID *)&gRealCreateRemoteThread);
-    DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThreadEx", DpHookCreateRemoteThreadEx, (LPVOID *)&gRealCreateRemoteThreadEx);
-    DpRuntimeHookApi(L"kernel32.dll", "CreateProcessW", DpHookCreateProcessW, (LPVOID *)&gRealCreateProcessW);
-    DpRuntimeHookApi(L"kernel32.dll", "WriteProcessMemory", DpHookWriteProcessMemory, (LPVOID *)&gRealWriteProcessMemory);
-    DpRuntimeHookApi(L"kernel32.dll", "VirtualAllocEx", DpHookVirtualAllocEx, (LPVOID *)&gRealVirtualAllocEx);
-    DpRuntimeHookApi(L"kernel32.dll", "VirtualProtectEx", DpHookVirtualProtectEx, (LPVOID *)&gRealVirtualProtectEx);
-    DpRuntimeHookApi(L"kernel32.dll", "QueueUserAPC", DpHookQueueUserAPC, (LPVOID *)&gRealQueueUserAPC);
-    DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryW", DpHookLoadLibraryW, (LPVOID *)&gRealLoadLibraryW);
-    DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryExW", DpHookLoadLibraryExW, (LPVOID *)&gRealLoadLibraryExW);
-    DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExW", DpHookSetWindowsHookExW, (LPVOID *)&gRealSetWindowsHookExW);
-    DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExA", DpHookSetWindowsHookExA, (LPVOID *)&gRealSetWindowsHookExA);
-    DpRuntimeHookApi(L"advapi32.dll", "RegSetValueExW", DpHookRegSetValueExW, (LPVOID *)&gRealRegSetValueExW);
-    DpRuntimeHookApi(L"ws2_32.dll", "connect", DpHookConnect, (LPVOID *)&gRealConnect);
-    DpRuntimeHookApi(L"ws2_32.dll", "WSAConnect", DpHookWSAConnect, (LPVOID *)&gRealWSAConnect);
-    DpRuntimeHookApi(L"ntdll.dll", "NtCreateThreadEx", DpHookNtCreateThreadEx, (LPVOID *)&gRealNtCreateThreadEx);
-    DpRuntimeHookApi(L"ntdll.dll", "NtWriteVirtualMemory", DpHookNtWriteVirtualMemory, (LPVOID *)&gRealNtWriteVirtualMemory);
-    DpRuntimeHookApi(L"ntdll.dll", "NtAllocateVirtualMemory", DpHookNtAllocateVirtualMemory, (LPVOID *)&gRealNtAllocateVirtualMemory);
-    DpRuntimeHookApi(L"ntdll.dll", "NtProtectVirtualMemory", DpHookNtProtectVirtualMemory, (LPVOID *)&gRealNtProtectVirtualMemory);
+    if (gMonitorRuntimeApiBehavior) {
+        DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThread", DpHookCreateRemoteThread, (LPVOID *)&gRealCreateRemoteThread);
+        DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThreadEx", DpHookCreateRemoteThreadEx, (LPVOID *)&gRealCreateRemoteThreadEx);
+        DpRuntimeHookApi(L"kernel32.dll", "CreateProcessW", DpHookCreateProcessW, (LPVOID *)&gRealCreateProcessW);
+        DpRuntimeHookApi(L"kernel32.dll", "WriteProcessMemory", DpHookWriteProcessMemory, (LPVOID *)&gRealWriteProcessMemory);
+        DpRuntimeHookApi(L"kernel32.dll", "VirtualAllocEx", DpHookVirtualAllocEx, (LPVOID *)&gRealVirtualAllocEx);
+        DpRuntimeHookApi(L"kernel32.dll", "VirtualProtectEx", DpHookVirtualProtectEx, (LPVOID *)&gRealVirtualProtectEx);
+        DpRuntimeHookApi(L"kernel32.dll", "QueueUserAPC", DpHookQueueUserAPC, (LPVOID *)&gRealQueueUserAPC);
+        DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryW", DpHookLoadLibraryW, (LPVOID *)&gRealLoadLibraryW);
+        DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryExW", DpHookLoadLibraryExW, (LPVOID *)&gRealLoadLibraryExW);
+        DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExW", DpHookSetWindowsHookExW, (LPVOID *)&gRealSetWindowsHookExW);
+        DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExA", DpHookSetWindowsHookExA, (LPVOID *)&gRealSetWindowsHookExA);
+        DpRuntimeHookApi(L"advapi32.dll", "RegSetValueExW", DpHookRegSetValueExW, (LPVOID *)&gRealRegSetValueExW);
+        DpRuntimeHookApi(L"ws2_32.dll", "connect", DpHookConnect, (LPVOID *)&gRealConnect);
+        DpRuntimeHookApi(L"ws2_32.dll", "WSAConnect", DpHookWSAConnect, (LPVOID *)&gRealWSAConnect);
+        DpRuntimeHookApi(L"ntdll.dll", "NtCreateThreadEx", DpHookNtCreateThreadEx, (LPVOID *)&gRealNtCreateThreadEx);
+        DpRuntimeHookApi(L"ntdll.dll", "NtWriteVirtualMemory", DpHookNtWriteVirtualMemory, (LPVOID *)&gRealNtWriteVirtualMemory);
+        DpRuntimeHookApi(L"ntdll.dll", "NtAllocateVirtualMemory", DpHookNtAllocateVirtualMemory, (LPVOID *)&gRealNtAllocateVirtualMemory);
+        DpRuntimeHookApi(L"ntdll.dll", "NtProtectVirtualMemory", DpHookNtProtectVirtualMemory, (LPVOID *)&gRealNtProtectVirtualMemory);
 
-    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
-        DpRuntimeWriteEvent(L"userhook.runtime.enable-hooks-failed", L"MinHook", GetLastError(), FALSE);
-        return TRUE;
+        if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+            DpRuntimeWriteEvent(L"userhook.runtime.enable-hooks-failed", L"MinHook", GetLastError(), FALSE);
+            return TRUE;
+        }
+        gHooksEnabled = TRUE;
+        DpRuntimeCaptureHookBytes();
+    } else {
+        DpRuntimeWriteEvent(L"userhook.runtime.api-monitor-disabled", L"policy", ERROR_SUCCESS, FALSE);
     }
-    gHooksEnabled = TRUE;
-    DpRuntimeCaptureHookBytes();
 
     if (gIntegrityThread == NULL) {
         InterlockedExchange(&gRuntimeShuttingDown, 0);

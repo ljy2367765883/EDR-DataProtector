@@ -831,7 +831,11 @@ const local: App.I18n.Schema = {
         blockUntrustedDesc: 'Reserves policy intent for rejecting unsigned or mismatched runtime components.',
         systemProcesses: 'Include system processes',
         systemProcessesDesc: 'Extends monitoring to PID 4 and protected system startup surfaces.',
-        controls: 'Controls: {count}/6',
+        runtimeApiBehavior: 'Dangerous API behavior monitor',
+        runtimeApiBehaviorDesc: 'Monitors remote threads, cross-process memory writes, executable memory and global hook behavior inside controlled processes.',
+        memoryScan: 'Memory anomaly scanning',
+        memoryScanDesc: 'Periodically scans private executable pages, RWX pages, manual-mapped PE images and private syscall stubs.',
+        controls: 'Controls: {count}/8',
         active: 'Active: {count}',
         excludedProcesses: 'Do-not-control process names',
         excludedProcessPlaceholder: 'One process per line, for example chrome.exe',
@@ -854,7 +858,11 @@ const local: App.I18n.Schema = {
           runtimeTitle: 'Signed runtime gate',
           runtimeDetail: 'Keeps the user-mode protection component tied to central policy and signing requirements.',
           auditTitle: 'Measured rollout mode',
-          auditDetail: 'Lets the endpoint report what would be protected before stronger enforcement is enabled.'
+          auditDetail: 'Lets the endpoint report what would be protected before stronger enforcement is enabled.',
+          apiTitle: 'Dangerous API behavior chain',
+          apiDetail: 'Monitors injection, cross-process writes, executable memory and global hook calls.',
+          memoryTitle: 'Executable memory anomaly',
+          memoryDetail: 'Detects private executable, RWX, manual-mapped module and syscall-stub bypass indicators.'
         }
       },
       dlp: {

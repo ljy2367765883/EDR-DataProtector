@@ -638,7 +638,9 @@ namespace DataProtectorWebBridge.Services
                     !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessNames, normalized.excludedProcessNames) ||
                     !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessDirectories, normalized.excludedProcessDirectories) ||
                     !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessPaths, normalized.excludedProcessPaths) ||
-                    !StringArrayEquals(state.UserHookDefensePolicy.trustedSignerSubjects, normalized.trustedSignerSubjects))
+                    !StringArrayEquals(state.UserHookDefensePolicy.trustedSignerSubjects, normalized.trustedSignerSubjects) ||
+                    state.UserHookDefensePolicy.monitorRuntimeApiBehavior != normalized.monitorRuntimeApiBehavior ||
+                    state.UserHookDefensePolicy.scanExecutableMemory != normalized.scanExecutableMemory)
                 {
                     state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
                     state.PolicyVersion++;

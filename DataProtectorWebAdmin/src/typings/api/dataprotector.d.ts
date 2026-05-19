@@ -211,6 +211,8 @@ declare namespace Api {
       blockUntrustedRuntime: boolean;
       auditOnly: boolean;
       monitorSystemProcesses: boolean;
+      monitorRuntimeApiBehavior: boolean;
+      scanExecutableMemory: boolean;
       excludedProcessNames: string[];
       excludedProcessDirectories: string[];
       excludedProcessPaths: string[];

@@ -101,6 +101,8 @@ const userHookDefensePolicy = reactive<Api.DataProtector.UserHookDefensePolicy>(
   blockUntrustedRuntime: false,
   auditOnly: true,
   monitorSystemProcesses: false,
+  monitorRuntimeApiBehavior: true,
+  scanExecutableMemory: true,
   excludedProcessNames: [],
   excludedProcessDirectories: [],
   excludedProcessPaths: [],
@@ -358,7 +360,9 @@ const userHookDefenseGroups = computed(() => {
     userHookDefensePolicy.requireSignedRuntime,
     userHookDefensePolicy.blockUntrustedRuntime,
     userHookDefensePolicy.auditOnly,
-    userHookDefensePolicy.monitorSystemProcesses
+    userHookDefensePolicy.monitorSystemProcesses,
+    userHookDefensePolicy.monitorRuntimeApiBehavior,
+    userHookDefensePolicy.scanExecutableMemory
   ].filter(Boolean).length;
 
   return {
@@ -504,6 +508,20 @@ const userHookDefenseSurfaces = computed(() => [
     detail: $t('dataprotector.policy.userhook.surfacesList.auditDetail'),
     enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.auditOnly,
     icon: 'mdi:clipboard-pulse-outline'
+  },
+  {
+    key: 'runtime-api',
+    title: $t('dataprotector.policy.userhook.surfacesList.apiTitle'),
+    detail: $t('dataprotector.policy.userhook.surfacesList.apiDetail'),
+    enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.monitorRuntimeApiBehavior,
+    icon: 'mdi:api'
+  },
+  {
+    key: 'memory-scan',
+    title: $t('dataprotector.policy.userhook.surfacesList.memoryTitle'),
+    detail: $t('dataprotector.policy.userhook.surfacesList.memoryDetail'),
+    enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.scanExecutableMemory,
+    icon: 'mdi:memory'
   }
 ]);
 
@@ -954,6 +972,8 @@ function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePo
   userHookDefensePolicy.blockUntrustedRuntime = Boolean(policy.blockUntrustedRuntime);
   userHookDefensePolicy.auditOnly = Boolean(policy.auditOnly);
   userHookDefensePolicy.monitorSystemProcesses = Boolean(policy.monitorSystemProcesses);
+  userHookDefensePolicy.monitorRuntimeApiBehavior = policy.monitorRuntimeApiBehavior !== false;
+  userHookDefensePolicy.scanExecutableMemory = policy.scanExecutableMemory !== false;
   userHookDefensePolicy.excludedProcessNames = policy.excludedProcessNames || [];
   userHookDefensePolicy.excludedProcessDirectories = policy.excludedProcessDirectories || [];
   userHookDefensePolicy.excludedProcessPaths = policy.excludedProcessPaths || [];
@@ -976,6 +996,8 @@ function calculateUserHookDefenseFlags() {
   if (userHookDefensePolicy.blockUntrustedRuntime) flags |= 0x00000010;
   if (userHookDefensePolicy.auditOnly) flags |= 0x00000020;
   if (userHookDefensePolicy.monitorSystemProcesses) flags |= 0x00000040;
+  if (userHookDefensePolicy.monitorRuntimeApiBehavior) flags |= 0x00000080;
+  if (userHookDefensePolicy.scanExecutableMemory) flags |= 0x00000100;
   return flags;
 }
 
@@ -995,7 +1017,9 @@ function setUserHookDefenseFeature(
     | 'requireSignedRuntime'
     | 'blockUntrustedRuntime'
     | 'auditOnly'
-    | 'monitorSystemProcesses',
+    | 'monitorSystemProcesses'
+    | 'monitorRuntimeApiBehavior'
+    | 'scanExecutableMemory',
   value: boolean
 ) {
   userHookDefensePolicy[key] = value;
@@ -1360,6 +1384,8 @@ async function saveUserHookDefensePolicy() {
       blockUntrustedRuntime: userHookDefensePolicy.blockUntrustedRuntime,
       auditOnly: userHookDefensePolicy.auditOnly,
       monitorSystemProcesses: userHookDefensePolicy.monitorSystemProcesses,
+      monitorRuntimeApiBehavior: userHookDefensePolicy.monitorRuntimeApiBehavior,
+      scanExecutableMemory: userHookDefensePolicy.scanExecutableMemory,
       excludedProcessNames: linesToList(userHookExcludedProcessesText.value),
       excludedProcessDirectories: linesToList(userHookExcludedDirectoriesText.value),
       excludedProcessPaths: linesToList(userHookExcludedPathsText.value),
@@ -2018,6 +2044,32 @@ onMounted(refresh);
                         />
                       </div>
                       <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.systemProcessesDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.runtimeApiBehavior') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.monitorRuntimeApiBehavior"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('monitorRuntimeApiBehavior', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.runtimeApiBehaviorDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.memoryScan') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.scanExecutableMemory"
+                          :disabled="!userHookDefensePolicy.enabled"
+                          @update:value="value => setUserHookDefenseFeature('scanExecutableMemory', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.memoryScanDesc') }}</div>
                     </div>
                   </NGi>
                 </NGrid>

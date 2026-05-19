@@ -100,6 +100,8 @@ namespace DataProtectorWebBridge.Services
         private const uint UserHookDefenseFlagBlockUntrustedRuntime = 0x00000010;
         private const uint UserHookDefenseFlagAuditOnly = 0x00000020;
         private const uint UserHookDefenseFlagMonitorSystemProcesses = 0x00000040;
+        private const uint UserHookDefenseFlagRuntimeApiBehavior = 0x00000080;
+        private const uint UserHookDefenseFlagRuntimeMemoryScan = 0x00000100;
         private const uint UserHookDefenseAllowedFlags =
             UserHookDefenseFlagEnabled |
             UserHookDefenseFlagEarlyProcessInjection |
@@ -107,7 +109,9 @@ namespace DataProtectorWebBridge.Services
             UserHookDefenseFlagRequireSignedRuntime |
             UserHookDefenseFlagBlockUntrustedRuntime |
             UserHookDefenseFlagAuditOnly |
-            UserHookDefenseFlagMonitorSystemProcesses;
+            UserHookDefenseFlagMonitorSystemProcesses |
+            UserHookDefenseFlagRuntimeApiBehavior |
+            UserHookDefenseFlagRuntimeMemoryScan;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -1956,6 +1960,8 @@ namespace DataProtectorWebBridge.Services
                 blockUntrustedRuntime = (flags & UserHookDefenseFlagBlockUntrustedRuntime) != 0,
                 auditOnly = (flags & UserHookDefenseFlagAuditOnly) != 0,
                 monitorSystemProcesses = (flags & UserHookDefenseFlagMonitorSystemProcesses) != 0,
+                monitorRuntimeApiBehavior = (flags & UserHookDefenseFlagRuntimeApiBehavior) != 0,
+                scanExecutableMemory = (flags & UserHookDefenseFlagRuntimeMemoryScan) != 0,
                 excludedProcessNames = DefaultUserHookExcludedProcessNames(),
                 excludedProcessDirectories = DefaultUserHookExcludedProcessDirectories(),
                 excludedProcessPaths = DefaultUserHookExcludedProcessPaths(),
@@ -1973,6 +1979,8 @@ namespace DataProtectorWebBridge.Services
                        UserHookDefenseFlagEarlyProcessInjection |
                        UserHookDefenseFlagImageLoadMonitor |
                        UserHookDefenseFlagRequireSignedRuntime |
+                       UserHookDefenseFlagRuntimeApiBehavior |
+                       UserHookDefenseFlagRuntimeMemoryScan |
                        UserHookDefenseFlagAuditOnly;
             }
 
@@ -1984,6 +1992,8 @@ namespace DataProtectorWebBridge.Services
             if (policy.blockUntrustedRuntime) flags |= UserHookDefenseFlagBlockUntrustedRuntime;
             if (policy.auditOnly) flags |= UserHookDefenseFlagAuditOnly;
             if (policy.monitorSystemProcesses) flags |= UserHookDefenseFlagMonitorSystemProcesses;
+            if (policy.monitorRuntimeApiBehavior != false) flags |= UserHookDefenseFlagRuntimeApiBehavior;
+            if (policy.scanExecutableMemory != false) flags |= UserHookDefenseFlagRuntimeMemoryScan;
             return flags & UserHookDefenseAllowedFlags;
         }
 
@@ -1994,6 +2004,8 @@ namespace DataProtectorWebBridge.Services
                 UserHookDefenseFlagEarlyProcessInjection |
                 UserHookDefenseFlagImageLoadMonitor |
                 UserHookDefenseFlagRequireSignedRuntime |
+                UserHookDefenseFlagRuntimeApiBehavior |
+                UserHookDefenseFlagRuntimeMemoryScan |
                 UserHookDefenseFlagAuditOnly);
         }
 
@@ -2009,6 +2021,8 @@ namespace DataProtectorWebBridge.Services
                 blockUntrustedRuntime = source.blockUntrustedRuntime,
                 auditOnly = source.auditOnly,
                 monitorSystemProcesses = source.monitorSystemProcesses,
+                monitorRuntimeApiBehavior = source.monitorRuntimeApiBehavior != false,
+                scanExecutableMemory = source.scanExecutableMemory != false,
                 excludedProcessNames = NormalizeStringList(source.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
                 excludedProcessDirectories = NormalizeStringList(source.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
                 excludedProcessPaths = NormalizeStringList(source.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
@@ -2035,6 +2049,8 @@ namespace DataProtectorWebBridge.Services
                 blockUntrustedRuntime = request.blockUntrustedRuntime,
                 auditOnly = request.auditOnly,
                 monitorSystemProcesses = request.monitorSystemProcesses,
+                monitorRuntimeApiBehavior = request.monitorRuntimeApiBehavior != false,
+                scanExecutableMemory = request.scanExecutableMemory != false,
                 excludedProcessNames = NormalizeStringList(request.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
                 excludedProcessDirectories = NormalizeStringList(request.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
                 excludedProcessPaths = NormalizeStringList(request.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
@@ -2052,7 +2068,7 @@ namespace DataProtectorWebBridge.Services
             UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};excludedNames={7};excludedDirs={8};excludedPaths={9};trustedSigners={10};flags=0x{11:X8}",
+                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};runtimeApi={7};memoryScan={8};excludedNames={9};excludedDirs={10};excludedPaths={11};trustedSigners={12};flags=0x{13:X8}",
                 normalized.enabled,
                 normalized.monitorEarlyProcesses,
                 normalized.monitorImageLoads,
@@ -2060,6 +2076,8 @@ namespace DataProtectorWebBridge.Services
                 normalized.blockUntrustedRuntime,
                 normalized.auditOnly,
                 normalized.monitorSystemProcesses,
+                normalized.monitorRuntimeApiBehavior,
+                normalized.scanExecutableMemory,
                 normalized.excludedProcessNames.Length,
                 normalized.excludedProcessDirectories.Length,
                 normalized.excludedProcessPaths.Length,
@@ -3224,6 +3242,8 @@ namespace DataProtectorWebBridge.Services
             public bool blockUntrustedRuntime { get; set; }
             public bool auditOnly { get; set; }
             public bool monitorSystemProcesses { get; set; }
+            public bool? monitorRuntimeApiBehavior { get; set; }
+            public bool? scanExecutableMemory { get; set; }
             public string[] excludedProcessNames { get; set; }
             public string[] excludedProcessDirectories { get; set; }
             public string[] excludedProcessPaths { get; set; }

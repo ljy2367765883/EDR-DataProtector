@@ -827,7 +827,11 @@
         blockUntrustedDesc: '运行时可阻断远程线程、跨进程写内存等高危行为。',
         systemProcesses: '包含系统进程',
         systemProcessesDesc: '将监控扩展到 PID 4 和系统启动面。',
-        controls: '控制项：{count}/6',
+        runtimeApiBehavior: '危险 API 行为监控',
+        runtimeApiBehaviorDesc: '在已接管进程内监控远程线程、跨进程写内存、可执行内存和全局 Hook 等行为。',
+        memoryScan: '内存异常扫描',
+        memoryScanDesc: '周期扫描私有可执行页、RWX 页、手工映射 PE 和私有 syscall stub。',
+        controls: '控制项：{count}/8',
         active: '生效：{count}',
         excludedProcesses: '不接管进程名',
         excludedProcessPlaceholder: '每行一个进程，例如 chrome.exe',
@@ -850,7 +854,11 @@
           runtimeTitle: '签名运行时门禁',
           runtimeDetail: '将用户态防护组件与中央策略和签名要求绑定。',
           auditTitle: '度量推广模式',
-          auditDetail: '在启用更强防护前，让终端上报将要接管的面。'
+          auditDetail: '在启用更强防护前，让终端上报将要接管的面。',
+          apiTitle: '危险 API 行为链',
+          apiDetail: '监控注入、跨进程写入、可执行内存和全局 Hook 等高危调用。',
+          memoryTitle: '可执行内存异常',
+          memoryDetail: '识别私有可执行、RWX、手工映射模块和 syscall stub 绕过迹象。'
         }
       },      dlp: {
         title: '截图和剪贴板防泄密',
