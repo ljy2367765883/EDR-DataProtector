@@ -20,6 +20,11 @@
 #define DP_RUNTIME_HOOK_PROBE_BYTES 32
 #define DP_RUNTIME_INTEGRITY_INTERVAL_MS 1500
 #define DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS 30000
+#define DP_RUNTIME_MEMORY_SCAN_INTERVAL_MS 10000
+#define DP_RUNTIME_MEMORY_REPORT_INTERVAL_MS 60000
+#define DP_RUNTIME_MEMORY_REPORT_CACHE_SIZE 128
+#define DP_RUNTIME_MEMORY_SCAN_MAX_REPORTS 16
+#define DP_RUNTIME_MEMORY_SAMPLE_BYTES 512
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -51,6 +56,21 @@ typedef struct _DP_RUNTIME_HOOK_ENTRY {
     BOOL SyscallRiskActive;
     DWORD LastReportTick;
 } DP_RUNTIME_HOOK_ENTRY;
+
+typedef enum _DP_RUNTIME_MEMORY_FINDING {
+    DpRuntimeMemoryFindingPrivateExecutable = 1,
+    DpRuntimeMemoryFindingRwx = 2,
+    DpRuntimeMemoryFindingManualMap = 3,
+    DpRuntimeMemoryFindingPrivateSyscallStub = 4
+} DP_RUNTIME_MEMORY_FINDING;
+
+typedef struct _DP_RUNTIME_MEMORY_REPORT_ENTRY {
+    PVOID BaseAddress;
+    PVOID AllocationBase;
+    DWORD Finding;
+    DWORD LastReportTick;
+    BOOL Used;
+} DP_RUNTIME_MEMORY_REPORT_ENTRY;
 
 typedef HANDLE (WINAPI *PFN_CreateRemoteThread)(
     HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
@@ -108,6 +128,8 @@ static HANDLE gIntegrityThread;
 static volatile LONG gRuntimeShuttingDown;
 static DP_RUNTIME_HOOK_ENTRY gHookEntries[DP_RUNTIME_MAX_HOOKS];
 static DWORD gHookEntryCount;
+static DP_RUNTIME_MEMORY_REPORT_ENTRY gMemoryReportCache[DP_RUNTIME_MEMORY_REPORT_CACHE_SIZE];
+static DWORD gLastMemoryScanTick;
 
 static VOID
 DpRuntimeWriteEvent(
@@ -853,7 +875,21 @@ DpRuntimeIsExecutableProtection(
     _In_ DWORD Protection
     )
 {
-    return (Protection & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+    DWORD baseProtection = Protection & 0xFFu;
+    return (baseProtection == PAGE_EXECUTE ||
+            baseProtection == PAGE_EXECUTE_READ ||
+            baseProtection == PAGE_EXECUTE_READWRITE ||
+            baseProtection == PAGE_EXECUTE_WRITECOPY);
+}
+
+static BOOL
+DpRuntimeIsWritableExecutableProtection(
+    _In_ DWORD Protection
+    )
+{
+    DWORD baseProtection = Protection & 0xFFu;
+    return baseProtection == PAGE_EXECUTE_READWRITE ||
+           baseProtection == PAGE_EXECUTE_WRITECOPY;
 }
 
 static BOOL
@@ -891,6 +927,332 @@ DpRuntimeIsLikelySyscallStub(
     }
 
     return FALSE;
+}
+
+static BOOL
+DpRuntimeMemoryHasLikelySyscallStub(
+    _In_reads_(Length) const BYTE *Bytes,
+    _In_ SIZE_T Length
+    )
+{
+    SIZE_T i;
+
+    if (Bytes == NULL || Length < 11) {
+        return FALSE;
+    }
+
+    for (i = 0; i + 11 <= Length; i++) {
+        if (Bytes[i] == 0x4C &&
+            Bytes[i + 1] == 0x8B &&
+            Bytes[i + 2] == 0xD1 &&
+            Bytes[i + 3] == 0xB8 &&
+            Bytes[i + 8] == 0x0F &&
+            Bytes[i + 9] == 0x05 &&
+            Bytes[i + 10] == 0xC3) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeReadMemorySample(
+    _In_ PVOID Address,
+    _Out_writes_(Length) BYTE *Buffer,
+    _In_ SIZE_T Length
+    )
+{
+    SIZE_T bytesRead = 0;
+
+    if (Address == NULL || Buffer == NULL || Length == 0) {
+        return FALSE;
+    }
+
+    if (ReadProcessMemory(GetCurrentProcess(), Address, Buffer, Length, &bytesRead) &&
+        bytesRead == Length) {
+        return TRUE;
+    }
+
+    __try {
+        CopyMemory(Buffer, Address, Length);
+        return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ZeroMemory(Buffer, Length);
+        return FALSE;
+    }
+}
+
+static BOOL
+DpRuntimeSampleLooksLikePeImage(
+    _In_reads_(Length) const BYTE *Bytes,
+    _In_ SIZE_T Length
+    )
+{
+    const IMAGE_DOS_HEADER *dosHeader;
+    const DWORD *signature;
+
+    if (Bytes == NULL || Length < sizeof(IMAGE_DOS_HEADER)) {
+        return FALSE;
+    }
+
+    dosHeader = (const IMAGE_DOS_HEADER *)Bytes;
+    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE ||
+        dosHeader->e_lfanew <= 0 ||
+        (SIZE_T)dosHeader->e_lfanew + sizeof(DWORD) > Length) {
+        return FALSE;
+    }
+
+    signature = (const DWORD *)(const VOID *)(Bytes + dosHeader->e_lfanew);
+    return *signature == IMAGE_NT_SIGNATURE;
+}
+
+static DWORD
+DpRuntimeMemoryFindingSeverityRank(
+    _In_ DWORD Finding
+    )
+{
+    if (Finding == DpRuntimeMemoryFindingManualMap) {
+        return 4;
+    }
+
+    if (Finding == DpRuntimeMemoryFindingRwx) {
+        return 3;
+    }
+
+    if (Finding == DpRuntimeMemoryFindingPrivateSyscallStub) {
+        return 2;
+    }
+
+    return 1;
+}
+
+static DWORD
+DpRuntimeSelectMemoryFinding(
+    _In_ DWORD ExistingFinding,
+    _In_ DWORD CandidateFinding
+    )
+{
+    if (ExistingFinding == 0 ||
+        DpRuntimeMemoryFindingSeverityRank(CandidateFinding) > DpRuntimeMemoryFindingSeverityRank(ExistingFinding)) {
+        return CandidateFinding;
+    }
+
+    return ExistingFinding;
+}
+
+static LPCWSTR
+DpRuntimeMemoryFindingAction(
+    _In_ DWORD Finding
+    )
+{
+    if (Finding == DpRuntimeMemoryFindingManualMap) {
+        return L"userhook.runtime.memory-manual-map";
+    }
+
+    if (Finding == DpRuntimeMemoryFindingRwx) {
+        return L"userhook.runtime.memory-rwx";
+    }
+
+    if (Finding == DpRuntimeMemoryFindingPrivateSyscallStub) {
+        return L"userhook.runtime.memory-private-syscall-stub";
+    }
+
+    return L"userhook.runtime.memory-private-executable";
+}
+
+static BOOL
+DpRuntimeMemoryRegionContainsOwnHookTrampoline(
+    _In_ const MEMORY_BASIC_INFORMATION *MemoryInfo
+    )
+{
+    DWORD i;
+    BYTE *regionStart;
+    BYTE *regionEnd;
+
+    if (MemoryInfo == NULL || MemoryInfo->BaseAddress == NULL || MemoryInfo->RegionSize == 0) {
+        return FALSE;
+    }
+
+    regionStart = (BYTE *)MemoryInfo->BaseAddress;
+    regionEnd = regionStart + MemoryInfo->RegionSize;
+
+    for (i = 0; i < gHookEntryCount; i++) {
+        LPVOID trampoline;
+        DP_RUNTIME_HOOK_ENTRY *entry = &gHookEntries[i];
+
+        if (!entry->Created || entry->OriginalSlot == NULL || *entry->OriginalSlot == NULL) {
+            continue;
+        }
+
+        trampoline = *entry->OriginalSlot;
+        if ((BYTE *)trampoline >= regionStart && (BYTE *)trampoline < regionEnd) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeShouldReportMemoryFinding(
+    _In_ PVOID BaseAddress,
+    _In_ PVOID AllocationBase,
+    _In_ DWORD Finding,
+    _In_ DWORD NowTick
+    )
+{
+    DWORD i;
+    DWORD replacementIndex = 0;
+    DWORD oldestTick = 0;
+
+    for (i = 0; i < DP_RUNTIME_MEMORY_REPORT_CACHE_SIZE; i++) {
+        DP_RUNTIME_MEMORY_REPORT_ENTRY *entry = &gMemoryReportCache[i];
+        if (!entry->Used) {
+            replacementIndex = i;
+            oldestTick = 0;
+            break;
+        }
+
+        if (entry->BaseAddress == BaseAddress &&
+            entry->AllocationBase == AllocationBase &&
+            entry->Finding == Finding) {
+            if (NowTick - entry->LastReportTick < DP_RUNTIME_MEMORY_REPORT_INTERVAL_MS) {
+                return FALSE;
+            }
+
+            entry->LastReportTick = NowTick;
+            return TRUE;
+        }
+
+        if (oldestTick == 0 || entry->LastReportTick - oldestTick > 0x80000000u) {
+            oldestTick = entry->LastReportTick;
+            replacementIndex = i;
+        }
+    }
+
+    gMemoryReportCache[replacementIndex].BaseAddress = BaseAddress;
+    gMemoryReportCache[replacementIndex].AllocationBase = AllocationBase;
+    gMemoryReportCache[replacementIndex].Finding = Finding;
+    gMemoryReportCache[replacementIndex].LastReportTick = NowTick;
+    gMemoryReportCache[replacementIndex].Used = TRUE;
+    return TRUE;
+}
+
+static VOID
+DpRuntimeReportMemoryFinding(
+    _In_ const MEMORY_BASIC_INFORMATION *MemoryInfo,
+    _In_ DWORD Finding,
+    _In_ DWORD NowTick
+    )
+{
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+    SIZE_T regionSizeKb;
+
+    if (MemoryInfo == NULL || Finding == 0) {
+        return;
+    }
+
+    if (!DpRuntimeShouldReportMemoryFinding(MemoryInfo->BaseAddress,
+                                            MemoryInfo->AllocationBase,
+                                            Finding,
+                                            NowTick)) {
+        return;
+    }
+
+    regionSizeKb = (MemoryInfo->RegionSize + 1023) / 1024;
+    if (FAILED(StringCchPrintfW(target,
+                                ARRAYSIZE(target),
+                                L"base=0x%p allocation=0x%p sizeKb=%Iu protect=0x%08X type=0x%08X state=0x%08X",
+                                MemoryInfo->BaseAddress,
+                                MemoryInfo->AllocationBase,
+                                regionSizeKb,
+                                MemoryInfo->Protect,
+                                MemoryInfo->Type,
+                                MemoryInfo->State))) {
+        return;
+    }
+
+    DpRuntimeWriteEvent(DpRuntimeMemoryFindingAction(Finding), target, ERROR_SUCCESS, FALSE);
+}
+
+static VOID
+DpRuntimeScanExecutableMemory(VOID)
+{
+    SYSTEM_INFO systemInfo;
+    BYTE *address;
+    BYTE *maximumAddress;
+    DWORD nowTick = GetTickCount();
+    DWORD reports = 0;
+
+    if (gLastMemoryScanTick != 0 &&
+        nowTick - gLastMemoryScanTick < DP_RUNTIME_MEMORY_SCAN_INTERVAL_MS) {
+        return;
+    }
+    gLastMemoryScanTick = nowTick;
+
+    GetNativeSystemInfo(&systemInfo);
+    address = (BYTE *)systemInfo.lpMinimumApplicationAddress;
+    maximumAddress = (BYTE *)systemInfo.lpMaximumApplicationAddress;
+
+    while (address != NULL && address < maximumAddress) {
+        MEMORY_BASIC_INFORMATION memoryInfo;
+        SIZE_T queryBytes;
+        DWORD finding = 0;
+
+        if (InterlockedCompareExchange(&gRuntimeShuttingDown, 0, 0) != 0 ||
+            reports >= DP_RUNTIME_MEMORY_SCAN_MAX_REPORTS) {
+            return;
+        }
+
+        queryBytes = VirtualQuery(address, &memoryInfo, sizeof(memoryInfo));
+        if (queryBytes == 0) {
+            address += systemInfo.dwPageSize;
+            continue;
+        }
+
+        if (memoryInfo.RegionSize == 0 ||
+            (BYTE *)memoryInfo.BaseAddress + memoryInfo.RegionSize <= address) {
+            address += systemInfo.dwPageSize;
+            continue;
+        }
+
+        address = (BYTE *)memoryInfo.BaseAddress + memoryInfo.RegionSize;
+
+        if (memoryInfo.State != MEM_COMMIT ||
+            (memoryInfo.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0 ||
+            !DpRuntimeIsExecutableProtection(memoryInfo.Protect)) {
+            continue;
+        }
+
+        if (DpRuntimeMemoryRegionContainsOwnHookTrampoline(&memoryInfo)) {
+            continue;
+        }
+
+        if (DpRuntimeIsWritableExecutableProtection(memoryInfo.Protect)) {
+            finding = DpRuntimeSelectMemoryFinding(finding, DpRuntimeMemoryFindingRwx);
+        }
+
+        if (memoryInfo.Type == MEM_PRIVATE) {
+            BYTE sample[DP_RUNTIME_MEMORY_SAMPLE_BYTES];
+            SIZE_T sampleLength = min((SIZE_T)memoryInfo.RegionSize, (SIZE_T)sizeof(sample));
+
+            finding = DpRuntimeSelectMemoryFinding(finding, DpRuntimeMemoryFindingPrivateExecutable);
+
+            if (DpRuntimeReadMemorySample(memoryInfo.BaseAddress, sample, sampleLength)) {
+                if (DpRuntimeSampleLooksLikePeImage(sample, sampleLength)) {
+                    finding = DpRuntimeSelectMemoryFinding(finding, DpRuntimeMemoryFindingManualMap);
+                } else if (DpRuntimeMemoryHasLikelySyscallStub(sample, sampleLength)) {
+                    finding = DpRuntimeSelectMemoryFinding(finding, DpRuntimeMemoryFindingPrivateSyscallStub);
+                }
+            }
+        }
+
+        if (finding != 0) {
+            DpRuntimeReportMemoryFinding(&memoryInfo, finding, nowTick);
+            reports++;
+        }
+    }
 }
 
 static VOID
@@ -1035,6 +1397,7 @@ DpRuntimeIntegrityThreadProc(
 
     while (WaitForSingleObject(gIntegrityStopEvent, DP_RUNTIME_INTEGRITY_INTERVAL_MS) == WAIT_TIMEOUT) {
         DpRuntimeCheckHookIntegrity();
+        DpRuntimeScanExecutableMemory();
     }
 
     return ERROR_SUCCESS;
