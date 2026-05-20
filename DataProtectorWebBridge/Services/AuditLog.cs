@@ -137,11 +137,21 @@ namespace DataProtectorWebBridge.Services
                 return record.Actor;
             }
 
+            if (!string.IsNullOrWhiteSpace(record.SourceHost))
+            {
+                return record.SourceHost;
+            }
+
             return string.Empty;
         }
 
         public static string ResolveSeverity(AuditRecord record)
         {
+            if (record != null && !string.IsNullOrWhiteSpace(record.Severity))
+            {
+                return record.Severity;
+            }
+
             string action = record == null || record.Action == null ? string.Empty : record.Action;
             string message = record == null || record.Message == null ? string.Empty : record.Message;
             string status = record == null || record.Status == null ? string.Empty : record.Status;
@@ -190,6 +200,11 @@ namespace DataProtectorWebBridge.Services
 
         public static string ResolveDisposition(AuditRecord record)
         {
+            if (record != null && !string.IsNullOrWhiteSpace(record.Disposition))
+            {
+                return record.Disposition;
+            }
+
             string action = record == null || record.Action == null ? string.Empty : record.Action;
             string status = record == null || record.Status == null ? string.Empty : record.Status;
             string message = record == null || record.Message == null ? string.Empty : record.Message;
@@ -304,6 +319,18 @@ namespace DataProtectorWebBridge.Services
                     ResolveHost(record),
                     ResolveSeverity(record),
                     ResolveDisposition(record),
+                    ResolveSourceDisplay(record),
+                    ResolveTargetDisplay(record),
+                    record.SourceProcess ?? string.Empty,
+                    record.SourceUser ?? string.Empty,
+                    record.SourcePid ?? string.Empty,
+                    record.SourceHost ?? string.Empty,
+                    record.TargetProcess ?? string.Empty,
+                    record.TargetPid ?? string.Empty,
+                    record.TargetHost ?? string.Empty,
+                    record.ObjectType ?? string.Empty,
+                    record.ObjectName ?? string.Empty,
+                    record.ObjectFormat ?? string.Empty,
                     record.Action ?? string.Empty,
                     record.Target ?? string.Empty,
                     record.Extension ?? string.Empty,
@@ -371,6 +398,7 @@ namespace DataProtectorWebBridge.Services
             record.Extension = record.Extension ?? string.Empty;
             record.Status = record.Status ?? "0x00000000";
             record.Message = record.Message ?? string.Empty;
+            EnrichRecord(record);
 
             string line = serializer.Serialize(record);
 
@@ -496,9 +524,17 @@ namespace DataProtectorWebBridge.Services
             int page = NormalizePage(query.Page);
             int pageSize = NormalizePageSize(query.PageSize, query.Limit);
             int skip = Math.Max(0, (page - 1) * pageSize);
+            List<AuditRecord> enrichedRecords = (records ?? Enumerable.Empty<AuditRecord>())
+                .Select(record =>
+                {
+                    EnrichRecord(record);
+                    return record;
+                })
+                .Where(record => record != null)
+                .ToList();
 
             AuditQueryOptions categoryNeutral = CopyWithoutCategory(query);
-            List<AuditRecord> baseMatches = (records ?? Enumerable.Empty<AuditRecord>())
+            List<AuditRecord> baseMatches = enrichedRecords
                 .Where(record => Matches(record, categoryNeutral))
                 .ToList();
 
@@ -529,6 +565,389 @@ namespace DataProtectorWebBridge.Services
                     .Take(pageSize)
                     .ToArray()
             };
+        }
+
+        public static void EnrichRecord(AuditRecord record)
+        {
+            if (record == null)
+            {
+                return;
+            }
+
+            record.Host = record.Host ?? string.Empty;
+            record.Actor = record.Actor ?? string.Empty;
+            record.Action = record.Action ?? string.Empty;
+            record.Target = record.Target ?? string.Empty;
+            record.Extension = record.Extension ?? string.Empty;
+            record.Status = record.Status ?? "0x00000000";
+            record.Message = record.Message ?? string.Empty;
+
+            Dictionary<string, string> fields = ParseAuditFields(record.Message);
+            string action = record.Action ?? string.Empty;
+            record.Severity = NormalizeAuditSeverity(string.IsNullOrWhiteSpace(record.Severity)
+                ? FirstNonEmpty(GetField(fields, "severity"), ResolveSeverity(record))
+                : record.Severity);
+            record.Disposition = NormalizeAuditDisposition(string.IsNullOrWhiteSpace(record.Disposition)
+                ? FirstNonEmpty(GetField(fields, "disposition"), ResolveDisposition(record))
+                : record.Disposition);
+
+            if (string.IsNullOrWhiteSpace(record.SourceProcess))
+            {
+                record.SourceProcess = FirstNonEmpty(
+                    GetField(fields, "process"),
+                    GetField(fields, "source"),
+                    GetField(fields, "sourceProcess"),
+                    record.Extension);
+            }
+
+            if (string.IsNullOrWhiteSpace(record.SourcePid))
+            {
+                record.SourcePid = FirstNonEmpty(GetField(fields, "pid"), GetField(fields, "sourcePid"));
+            }
+
+            if (string.IsNullOrWhiteSpace(record.SourceUser))
+            {
+                record.SourceUser = record.Actor;
+            }
+
+            if (string.IsNullOrWhiteSpace(record.SourceHost))
+            {
+                record.SourceHost = ResolveHost(record);
+            }
+
+            if (string.IsNullOrWhiteSpace(record.TargetProcess))
+            {
+                record.TargetProcess = FirstNonEmpty(GetField(fields, "targetProcess"), GetField(fields, "target"));
+            }
+
+            if (string.IsNullOrWhiteSpace(record.TargetPid))
+            {
+                record.TargetPid = GetField(fields, "targetPid");
+            }
+
+            if (string.IsNullOrWhiteSpace(record.TargetHost))
+            {
+                record.TargetHost = GetField(fields, "targetHost");
+            }
+
+            if (string.IsNullOrWhiteSpace(record.ObjectType))
+            {
+                record.ObjectType = InferObjectType(record, fields);
+            }
+
+            if (string.IsNullOrWhiteSpace(record.ObjectName))
+            {
+                record.ObjectName = InferObjectName(record, fields);
+            }
+
+            if (string.IsNullOrWhiteSpace(record.ObjectFormat))
+            {
+                record.ObjectFormat = FirstNonEmpty(GetField(fields, "formats"), GetField(fields, "format"));
+            }
+
+            if (string.IsNullOrWhiteSpace(record.PolicyName))
+            {
+                record.PolicyName = InferPolicyName(action);
+            }
+
+            if (string.IsNullOrWhiteSpace(record.EventDetails))
+            {
+                record.EventDetails = record.Message;
+            }
+
+            if (string.IsNullOrWhiteSpace(record.TargetProcess) && LooksLikeProcess(record.Target))
+            {
+                record.TargetProcess = record.Target;
+            }
+        }
+
+        public static string ResolveSourceDisplay(AuditRecord record)
+        {
+            if (record == null)
+            {
+                return string.Empty;
+            }
+
+            EnrichRecord(record);
+            string process = FirstNonEmpty(record.SourceProcess, record.Extension);
+            string pid = string.IsNullOrWhiteSpace(record.SourcePid) ? string.Empty : "PID " + record.SourcePid;
+            string user = record.SourceUser ?? string.Empty;
+            string host = record.SourceHost ?? string.Empty;
+            return JoinCompact(" / ", process, pid, user, host);
+        }
+
+        public static string ResolveTargetDisplay(AuditRecord record)
+        {
+            if (record == null)
+            {
+                return string.Empty;
+            }
+
+            EnrichRecord(record);
+            string target = FirstNonEmpty(record.ObjectName, record.TargetProcess, record.Target);
+            string type = record.ObjectType ?? string.Empty;
+            string format = record.ObjectFormat ?? string.Empty;
+            string pid = string.IsNullOrWhiteSpace(record.TargetPid) ? string.Empty : "PID " + record.TargetPid;
+            return JoinCompact(" / ", type, target, format, pid);
+        }
+
+        private static Dictionary<string, string> ParseAuditFields(string message)
+        {
+            Dictionary<string, string> fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return fields;
+            }
+
+            foreach (string part in message.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int index = part.IndexOf('=');
+                if (index <= 0)
+                {
+                    continue;
+                }
+
+                string key = part.Substring(0, index).Trim();
+                string value = part.Substring(index + 1).Trim();
+                if (!string.IsNullOrWhiteSpace(key) && !fields.ContainsKey(key))
+                {
+                    fields[key] = value;
+                }
+            }
+
+            ExtractLabeledField(message, fields, "Process", "process");
+            ExtractLabeledField(message, fields, "Parent", "parentProcess");
+            ExtractLabeledField(message, fields, "Command", "commandLine");
+            ExtractLabeledField(message, fields, "TargetPID", "targetPid");
+            ExtractPidField(message, fields);
+            return fields;
+        }
+
+        private static void ExtractLabeledField(string message, Dictionary<string, string> fields, string label, string key)
+        {
+            if (fields.ContainsKey(key))
+            {
+                return;
+            }
+
+            string prefix = label + ": ";
+            int index = message.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return;
+            }
+
+            index += prefix.Length;
+            int end = FindLabeledFieldEnd(message, index);
+            string value = end < 0 ? message.Substring(index) : message.Substring(index, end - index);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                fields[key] = value.Trim();
+            }
+        }
+
+        private static int FindLabeledFieldEnd(string message, int startIndex)
+        {
+            if (string.IsNullOrEmpty(message) || startIndex < 0 || startIndex >= message.Length)
+            {
+                return -1;
+            }
+
+            for (int index = startIndex; index < message.Length; index++)
+            {
+                char current = message[index];
+                if (current == ';')
+                {
+                    return index;
+                }
+
+                if (current != '.')
+                {
+                    continue;
+                }
+
+                bool nextIsSeparator = index + 1 >= message.Length || char.IsWhiteSpace(message[index + 1]);
+                bool previousIsPathOrExtension = index > startIndex && index + 1 < message.Length &&
+                    char.IsLetterOrDigit(message[index - 1]) &&
+                    char.IsLetterOrDigit(message[index + 1]);
+                if (nextIsSeparator && !previousIsPathOrExtension)
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        private static void ExtractPidField(string message, Dictionary<string, string> fields)
+        {
+            if (fields.ContainsKey("pid"))
+            {
+                return;
+            }
+
+            string marker = "PID ";
+            int index = message.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return;
+            }
+
+            index += marker.Length;
+            int end = index;
+            while (end < message.Length && char.IsDigit(message[end]))
+            {
+                end++;
+            }
+
+            if (end > index)
+            {
+                fields["pid"] = message.Substring(index, end - index);
+            }
+        }
+
+        private static string GetField(Dictionary<string, string> fields, string key)
+        {
+            string value;
+            return fields != null && fields.TryGetValue(key, out value) ? value : string.Empty;
+        }
+
+        private static string InferObjectType(AuditRecord record, Dictionary<string, string> fields)
+        {
+            string action = record.Action ?? string.Empty;
+            string channel = GetField(fields, "channel");
+            string objectKind = GetField(fields, "object");
+
+            if (!string.IsNullOrWhiteSpace(channel) || action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase))
+            {
+                if (action.IndexOf("screenshot", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    channel.IndexOf("image", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "screenshot";
+                }
+
+                if (action.IndexOf("clipboard", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    channel.IndexOf("clipboard", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "clipboard";
+                }
+
+                return FirstNonEmpty(objectKind, channel, "dlp");
+            }
+
+            if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase)) return "file";
+            if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase)) return "credential";
+            if (action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase)) return "lateral-target";
+            if (action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase)) return "smtp";
+            if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase)) return "process-behavior";
+            return string.Empty;
+        }
+
+        private static string InferObjectName(AuditRecord record, Dictionary<string, string> fields)
+        {
+            string action = record.Action ?? string.Empty;
+            string objectKind = GetField(fields, "object");
+            string window = GetField(fields, "window");
+
+            if (action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase))
+            {
+                return JoinCompact(" / ", FirstNonEmpty(objectKind, record.Target), window);
+            }
+
+            return record.Target ?? string.Empty;
+        }
+
+        private static string InferPolicyName(string action)
+        {
+            if (string.IsNullOrWhiteSpace(action))
+            {
+                return string.Empty;
+            }
+
+            if (action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase)) return "dlp";
+            if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase)) return "webshell";
+            if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase)) return "hash-protect";
+            if (action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase)) return "lateral-defense";
+            if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase)) return "process-threat-insight";
+            return string.Empty;
+        }
+
+        private static string NormalizeAuditSeverity(string value)
+        {
+            if (string.Equals(value, "critical", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "warning", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "info", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "operational", StringComparison.OrdinalIgnoreCase))
+            {
+                return value.ToLowerInvariant();
+            }
+
+            if (string.Equals(value, "high", StringComparison.OrdinalIgnoreCase))
+            {
+                return "critical";
+            }
+
+            if (string.Equals(value, "medium", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "low", StringComparison.OrdinalIgnoreCase))
+            {
+                return "warning";
+            }
+
+            return string.IsNullOrWhiteSpace(value) ? "operational" : value;
+        }
+
+        private static string NormalizeAuditDisposition(string value)
+        {
+            if (string.Equals(value, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "observed", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "completed", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "failed", StringComparison.OrdinalIgnoreCase))
+            {
+                return value.ToLowerInvariant();
+            }
+
+            if (string.Equals(value, "malicious", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "suspicious", StringComparison.OrdinalIgnoreCase))
+            {
+                return "observed";
+            }
+
+            return string.IsNullOrWhiteSpace(value) ? "completed" : value;
+        }
+
+        private static bool LooksLikeProcess(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            return value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                   value.IndexOf("\\", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            if (values == null)
+            {
+                return string.Empty;
+            }
+
+            foreach (string value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string JoinCompact(string separator, params string[] values)
+        {
+            return string.Join(separator, (values ?? new string[0]).Where(value => !string.IsNullOrWhiteSpace(value)).ToArray());
         }
 
         private static bool TryParseUtc(string value, out DateTime timestampUtc)
@@ -745,6 +1164,20 @@ namespace DataProtectorWebBridge.Services
             public bool Succeeded { get; set; }
             public string Status { get; set; }
             public string Message { get; set; }
+            public string SourceHost { get; set; }
+            public string SourceUser { get; set; }
+            public string SourceProcess { get; set; }
+            public string SourcePid { get; set; }
+            public string TargetHost { get; set; }
+            public string TargetProcess { get; set; }
+            public string TargetPid { get; set; }
+            public string ObjectType { get; set; }
+            public string ObjectName { get; set; }
+            public string ObjectFormat { get; set; }
+            public string PolicyName { get; set; }
+            public string Disposition { get; set; }
+            public string Severity { get; set; }
+            public string EventDetails { get; set; }
         }
     }
 

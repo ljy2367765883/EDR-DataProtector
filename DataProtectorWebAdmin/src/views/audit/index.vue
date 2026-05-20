@@ -78,6 +78,7 @@ const categoryOptions = computed<CategoryOption[]>(() => [
   { label: $t('dataprotector.audit.webshell'), value: 'webshell', icon: 'mdi:webhook', tagType: 'error' },
   { label: $t('dataprotector.audit.hashdump'), value: 'hashdump', icon: 'mdi:account-lock-outline', tagType: 'error' },
   { label: $t('dataprotector.audit.lateral'), value: 'lateral', icon: 'mdi:lan-disconnect', tagType: 'error' },
+  { label: $t('dataprotector.audit.userhook'), value: 'userhook', icon: 'mdi:vector-polyline', tagType: 'error' },
   { label: $t('dataprotector.audit.dlp'), value: 'dlp', icon: 'mdi:clipboard-lock-outline', tagType: 'warning' },
   { label: $t('dataprotector.audit.remoteOps'), value: 'remote', icon: 'mdi:remote-desktop', tagType: 'info' },
   { label: $t('dataprotector.audit.agentSync'), value: 'agent', icon: 'mdi:desktop-classic', tagType: 'success' },
@@ -305,8 +306,31 @@ const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => 
       );
     }
   },
-  { title: $t('dataprotector.audit.columns.action'), key: 'Action', width: 240, ellipsis: { tooltip: true } },
-  { title: $t('dataprotector.audit.columns.target'), key: 'Target', minWidth: 260, ellipsis: { tooltip: true } },
+  {
+    title: $t('dataprotector.audit.columns.source'),
+    key: 'SourceProcess',
+    minWidth: 300,
+    render(row) {
+      const source = resolveSourceInfo(row);
+      return h('div', { class: 'audit-cell-stack' }, [
+        h('div', { class: 'audit-cell-strong' }, source.primary || '-'),
+        h('div', { class: 'audit-cell-muted' }, source.secondary || '-')
+      ]);
+    }
+  },
+  {
+    title: $t('dataprotector.audit.columns.object'),
+    key: 'ObjectName',
+    minWidth: 320,
+    render(row) {
+      const target = resolveTargetInfo(row);
+      return h('div', { class: 'audit-cell-stack' }, [
+        h('div', { class: 'audit-cell-strong' }, target.primary || '-'),
+        h('div', { class: 'audit-cell-muted' }, target.secondary || '-')
+      ]);
+    }
+  },
+  { title: $t('dataprotector.audit.columns.action'), key: 'Action', width: 220, ellipsis: { tooltip: true } },
   { title: $t('dataprotector.audit.columns.status'), key: 'Status', width: 130 },
   { title: $t('dataprotector.audit.columns.message'), key: 'Message', minWidth: 320, ellipsis: { tooltip: true } },
   {
@@ -338,6 +362,15 @@ function classifyAudit(record: Api.DataProtector.AuditRecord): AuditCategory {
   if (action.startsWith('lateral.') || action.startsWith('policy.lateral') || action.startsWith('central.policy.lateral') || action.includes('.lateral.')) {
     return 'lateral';
   }
+  if (
+    action.startsWith('userhook.') ||
+    action.startsWith('behavior.chain.') ||
+    action.startsWith('policy.userhook') ||
+    action.startsWith('central.policy.userhook') ||
+    action.includes('.userhook.')
+  ) {
+    return 'userhook';
+  }
   if (action.startsWith('dlp.') || action.startsWith('policy.dlp') || action.startsWith('central.policy.dlp') || action.includes('.dlp.')) {
     return 'dlp';
   }
@@ -356,7 +389,108 @@ function resolveHost(record: Api.DataProtector.AuditRecord) {
   return record.Host || record.Actor || '';
 }
 
+function resolveSourceInfo(record: Api.DataProtector.AuditRecord) {
+  const fields = parseMessageFields(record.Message);
+  const process = firstText(record.SourceProcess, fields.process, fields.source, record.Extension);
+  const pid = firstText(record.SourcePid, fields.pid, fields.sourcePid);
+  const user = firstText(record.SourceUser, record.Actor);
+  const host = firstText(record.SourceHost, record.Host);
+  const primary = process || user || host || '-';
+  const secondary = [pid ? `PID ${pid}` : '', user, host].filter(Boolean).join(' / ');
+  return { primary, secondary };
+}
+
+function resolveTargetInfo(record: Api.DataProtector.AuditRecord) {
+  const fields = parseMessageFields(record.Message);
+  const objectType = firstText(record.ObjectType, inferObjectType(record, fields));
+  const objectName = firstText(record.ObjectName, record.TargetProcess, record.Target, fields.object);
+  const objectFormat = firstText(record.ObjectFormat, fields.formats);
+  const targetPid = firstText(record.TargetPid, fields.targetPid);
+  const windowTitle = fields.window;
+  const primary = [objectType, objectName].filter(Boolean).join(' / ') || '-';
+  const secondary = [objectFormat, targetPid ? `PID ${targetPid}` : '', windowTitle].filter(Boolean).join(' / ');
+  return { primary, secondary };
+}
+
+function parseMessageFields(message?: string) {
+  const fields: Record<string, string> = {};
+  const text = message || '';
+  for (const part of text.split(';')) {
+    const index = part.indexOf('=');
+    if (index <= 0) continue;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key && value && !fields[key]) fields[key] = value;
+  }
+  const labeled = [
+    ['Process: ', 'process'],
+    ['Parent: ', 'parentProcess'],
+    ['Command: ', 'commandLine'],
+    ['TargetPID: ', 'targetPid'],
+    ['Severity=', 'severity'],
+    ['disposition=', 'disposition'],
+    ['score=', 'score'],
+    ['events=', 'events']
+  ] as const;
+  for (const [prefix, key] of labeled) {
+    if (fields[key]) continue;
+    const index = text.toLowerCase().indexOf(prefix.toLowerCase());
+    if (index < 0) continue;
+    const start = index + prefix.length;
+    const semicolonEnd = text.indexOf(';', start);
+    const fieldEnd = findLabeledFieldEnd(text, start);
+    const candidates = [fieldEnd, semicolonEnd].filter(item => item >= 0);
+    const end = candidates.length ? Math.min(...candidates) : -1;
+    fields[key] = (end < 0 ? text.slice(start) : text.slice(start, end)).trim();
+  }
+  if (!fields.pid) {
+    const match = /\bPID\s+(\d+)/i.exec(text);
+    if (match) fields.pid = match[1];
+  }
+  return fields;
+}
+
+function findLabeledFieldEnd(text: string, start: number) {
+  for (let index = start; index < text.length; index += 1) {
+    const current = text[index];
+    if (current === ';') return index;
+    if (current !== '.') continue;
+
+    const next = text[index + 1] || '';
+    const previous = text[index - 1] || '';
+    const nextIsSeparator = !next || /\s/.test(next);
+    const previousIsPathOrExtension = /[a-z0-9]/i.test(previous) && /[a-z0-9]/i.test(next);
+    if (nextIsSeparator && !previousIsPathOrExtension) return index;
+  }
+
+  return -1;
+}
+
+function inferObjectType(record: Api.DataProtector.AuditRecord, fields: Record<string, string>) {
+  const action = record.Action || '';
+  const channel = fields.channel || '';
+  if (action.startsWith('dlp.') || channel) {
+    if (action.includes('screenshot') || channel.includes('image')) return 'screenshot';
+    if (action.includes('clipboard') || channel.includes('clipboard')) return 'clipboard';
+    return fields.object || channel || 'dlp';
+  }
+  if (action.startsWith('webshell.')) return 'file';
+  if (action.startsWith('hashdump.')) return 'credential';
+  if (action.startsWith('lateral.')) return 'lateral-target';
+  if (action.startsWith('network.smtp')) return 'smtp';
+  if (action.startsWith('userhook.') || action.startsWith('behavior.chain.')) return 'process-behavior';
+  return '';
+}
+
+function firstText(...values: Array<string | undefined>) {
+  return values.find(value => value && value.trim())?.trim() || '';
+}
+
 function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSeverity, 'all'> {
+  if (record.Severity && ['critical', 'warning', 'info', 'operational'].includes(record.Severity)) {
+    return record.Severity as Exclude<AuditSeverity, 'all'>;
+  }
+
   const action = record.Action || '';
   const message = record.Message || '';
   const status = record.Status || '';
@@ -365,6 +499,14 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
     action.startsWith('webshell.danger') ||
     action.startsWith('hashdump.blocked') ||
     action.startsWith('lateral.blocked') ||
+    action.startsWith('userhook.blocked') ||
+    action.startsWith('behavior.chain.') ||
+    action.startsWith('userhook.runtime.unhook-detected') ||
+    action.startsWith('userhook.runtime.hook-overwrite-detected') ||
+    action.startsWith('userhook.runtime.syscall-bypass-risk') ||
+    action.startsWith('userhook.runtime.memory-manual-map') ||
+    action.startsWith('userhook.runtime.memory-rwx') ||
+    action.startsWith('userhook.runtime.memory-private-syscall-stub') ||
     action.startsWith('dlp.clipboard.blocked') ||
     action.startsWith('dlp.screenshot.blocked') ||
     action.includes('.blocked') ||
@@ -377,7 +519,7 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
     return 'warning';
   }
 
-  if (action.startsWith('webshell.notice') || action.startsWith('network.smtp')) {
+  if (action.startsWith('webshell.notice') || action.startsWith('network.smtp') || action.startsWith('userhook.')) {
     return 'info';
   }
 
@@ -385,13 +527,26 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
 }
 
 function resolveDisposition(record: Api.DataProtector.AuditRecord): Exclude<AuditDisposition, 'all'> {
+  if (record.Disposition && ['blocked', 'observed', 'completed', 'failed'].includes(record.Disposition)) {
+    return record.Disposition as Exclude<AuditDisposition, 'all'>;
+  }
+
   const action = record.Action || '';
   const message = record.Message || '';
   const status = record.Status || '';
 
   if (status.toUpperCase() === '0XC0000022' || /blocked|denied/i.test(message)) return 'blocked';
   if (!record.Succeeded) return 'failed';
-  if (action.startsWith('webshell.') || action.startsWith('hashdump.') || action.startsWith('lateral.') || action.startsWith('dlp.') || action.startsWith('network.smtp')) return 'observed';
+  if (
+    action.startsWith('webshell.') ||
+    action.startsWith('hashdump.') ||
+    action.startsWith('lateral.') ||
+    action.startsWith('userhook.') ||
+    action.startsWith('behavior.chain.') ||
+    action.startsWith('dlp.') ||
+    action.startsWith('network.smtp')
+  )
+    return 'observed';
 
   return 'completed';
 }
@@ -739,3 +894,30 @@ onMounted(refresh);
     </NCard>
   </NSpace>
 </template>
+
+<style scoped>
+.audit-cell-stack {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.audit-cell-strong,
+.audit-cell-muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-cell-strong {
+  color: var(--n-text-color);
+  font-weight: 700;
+}
+
+.audit-cell-muted {
+  color: var(--n-text-color-3);
+  font-size: 12px;
+}
+</style>

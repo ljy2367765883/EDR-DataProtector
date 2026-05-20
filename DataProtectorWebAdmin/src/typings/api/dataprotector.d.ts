@@ -486,9 +486,23 @@ declare namespace Api {
       Succeeded: boolean;
       Status: string;
       Message: string;
+      SourceHost?: string;
+      SourceUser?: string;
+      SourceProcess?: string;
+      SourcePid?: string;
+      TargetHost?: string;
+      TargetProcess?: string;
+      TargetPid?: string;
+      ObjectType?: string;
+      ObjectName?: string;
+      ObjectFormat?: string;
+      PolicyName?: string;
+      Disposition?: string;
+      Severity?: string;
+      EventDetails?: string;
     }
 
-    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'hashdump' | 'lateral' | 'dlp' | 'remote' | 'agent' | 'system';
+    type AuditCategory = 'all' | 'policy' | 'network' | 'smtp' | 'webshell' | 'hashdump' | 'lateral' | 'userhook' | 'dlp' | 'remote' | 'agent' | 'system';
     type AuditResult = 'all' | 'success' | 'failed';
     type AuditSeverity = 'all' | 'critical' | 'warning' | 'info' | 'operational';
     type AuditDisposition = 'all' | 'blocked' | 'observed' | 'completed' | 'failed';

@@ -441,7 +441,18 @@ namespace DataProtectorWebBridge.Services
                     Extension = extension ?? string.Empty,
                     Succeeded = succeeded,
                     Status = status ?? "0x00000000",
-                    Message = message ?? string.Empty
+                    Message = message ?? string.Empty,
+                    SourceHost = Environment.MachineName,
+                    SourceUser = Environment.UserName,
+                    SourceProcess = ExtractMessageValue(message, "process"),
+                    SourcePid = ExtractMessageValue(message, "pid"),
+                    ObjectType = InferDlpObjectType(action, target),
+                    ObjectName = target ?? string.Empty,
+                    ObjectFormat = ExtractMessageValue(message, "formats"),
+                    PolicyName = "dlp",
+                    Disposition = succeeded ? "observed" : "blocked",
+                    Severity = succeeded ? "info" : "critical",
+                    EventDetails = message ?? string.Empty
                 });
             }
         }
@@ -455,6 +466,43 @@ namespace DataProtectorWebBridge.Services
                    ";process=" + Sanitize(process.path) +
                    ";window=" + Sanitize(process.windowTitle) +
                    ";formats=" + Sanitize(formats);
+        }
+
+        private static string ExtractMessageValue(string message, string key)
+        {
+            if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(key))
+            {
+                return string.Empty;
+            }
+
+            string prefix = key + "=";
+            foreach (string part in message.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string item = part.Trim();
+                if (item.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return item.Substring(prefix.Length).Trim();
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string InferDlpObjectType(string action, string target)
+        {
+            string text = (action ?? string.Empty) + " " + (target ?? string.Empty);
+            if (text.IndexOf("screenshot", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                text.IndexOf("image", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "screenshot";
+            }
+
+            if (text.IndexOf("clipboard", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "clipboard";
+            }
+
+            return "dlp";
         }
 
         private static bool IsTrustedProcess(PolicyBridgeService.DlpProtectionPolicyDto snapshot, ProcessIdentity process)

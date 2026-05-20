@@ -1335,7 +1335,18 @@ namespace DataProtectorWebBridge.Services
                     Extension = item.processImage,
                     Succeeded = item.status == SuccessStatus || item.status == 0x00000103,
                     Status = item.statusText,
-                    Message = message
+                    Message = message,
+                    SourceHost = Environment.MachineName,
+                    SourceProcess = item.processImage,
+                    SourcePid = item.processId.ToString(CultureInfo.InvariantCulture),
+                    TargetProcess = item.target,
+                    ObjectType = "process-behavior",
+                    ObjectName = item.target,
+                    ObjectFormat = "flags=0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture),
+                    PolicyName = "process-threat-insight",
+                    Disposition = (item.status == SuccessStatus || item.status == 0x00000103) ? "observed" : "blocked",
+                    Severity = (item.status == SuccessStatus || item.status == 0x00000103) ? "info" : "critical",
+                    EventDetails = message
                 };
 
                 records.Add(record);
@@ -1427,7 +1438,19 @@ namespace DataProtectorWebBridge.Services
                         Extension = runtimeEvent.processImage ?? string.Empty,
                         Succeeded = !blocked,
                         Status = string.IsNullOrWhiteSpace(runtimeEvent.status) ? "0x00000000" : runtimeEvent.status,
-                        Message = BuildUserHookRuntimeMessage(runtimeEvent)
+                        Message = BuildUserHookRuntimeMessage(runtimeEvent),
+                        SourceHost = string.IsNullOrWhiteSpace(runtimeEvent.host) ? Environment.MachineName : runtimeEvent.host,
+                        SourceProcess = runtimeEvent.processImage ?? string.Empty,
+                        SourcePid = runtimeEvent.pid.ToString(CultureInfo.InvariantCulture),
+                        TargetPid = runtimeEvent.targetPid == 0 ? string.Empty : runtimeEvent.targetPid.ToString(CultureInfo.InvariantCulture),
+                        TargetProcess = runtimeEvent.target ?? string.Empty,
+                        ObjectType = FirstNonEmpty(runtimeEvent.category, "process-behavior"),
+                        ObjectName = FirstNonEmpty(runtimeEvent.target, runtimeEvent.api, runtimeEvent.action),
+                        ObjectFormat = BuildUserHookRuntimeObjectFormat(runtimeEvent),
+                        PolicyName = "process-threat-insight",
+                        Disposition = blocked ? "blocked" : "observed",
+                        Severity = ResolveUserHookRuntimeSeverity(runtimeEvent, blocked),
+                        EventDetails = BuildUserHookRuntimeMessage(runtimeEvent)
                     };
 
                     records.Add(record);
@@ -1480,6 +1503,70 @@ namespace DataProtectorWebBridge.Services
             }
 
             return message;
+        }
+
+        private static string BuildUserHookRuntimeObjectFormat(UserHookRuntimeEvent runtimeEvent)
+        {
+            List<string> parts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(runtimeEvent.api))
+            {
+                parts.Add("api=" + runtimeEvent.api);
+            }
+
+            if (runtimeEvent.size != 0)
+            {
+                parts.Add("size=" + runtimeEvent.size.ToString(CultureInfo.InvariantCulture));
+            }
+
+            if (runtimeEvent.flags != 0)
+            {
+                parts.Add("flags=0x" + runtimeEvent.flags.ToString("X8", CultureInfo.InvariantCulture));
+            }
+
+            return string.Join(";", parts.ToArray());
+        }
+
+        private static string ResolveUserHookRuntimeSeverity(UserHookRuntimeEvent runtimeEvent, bool blocked)
+        {
+            string action = runtimeEvent == null ? string.Empty : (runtimeEvent.action ?? string.Empty);
+            string category = runtimeEvent == null ? string.Empty : (runtimeEvent.category ?? string.Empty);
+
+            if (blocked ||
+                action.IndexOf(".blocked.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.IndexOf("unhook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.IndexOf("syscall-bypass", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.IndexOf("manual-map", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                category.IndexOf("injection", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "critical";
+            }
+
+            if (action.IndexOf("memory-private-executable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.IndexOf("etw", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                category.IndexOf("memory", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "warning";
+            }
+
+            return "info";
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            if (values == null)
+            {
+                return string.Empty;
+            }
+
+            foreach (string value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return string.Empty;
         }
 
         private AuditLog.AuditRecord[] TryDrainSecurityAuditSource(string source, Func<AuditLog.AuditRecord[]> drain)
@@ -3714,9 +3801,88 @@ namespace DataProtectorWebBridge.Services
                     Extension = atom.ProcessImage,
                     Succeeded = !string.Equals(rule.disposition, "malicious", StringComparison.OrdinalIgnoreCase),
                     Status = string.Equals(rule.severity, "critical", StringComparison.OrdinalIgnoreCase) ? "0xE0020001" : "0xE0020000",
-                    Message = BuildRuleMatchMessage(rule, matchedActions, candidates.Count, score)
+                    Message = BuildRuleMatchMessage(rule, matchedActions, candidates.Count, score),
+                    SourceHost = atom.Host,
+                    SourceProcess = atom.ProcessImage,
+                    SourcePid = atom.ProcessPid,
+                    TargetProcess = atom.Target,
+                    TargetPid = atom.TargetPid,
+                    ObjectType = "behavior-chain",
+                    ObjectName = string.IsNullOrWhiteSpace(rule.name) ? rule.ruleId : rule.name,
+                    ObjectFormat = BuildRuleObjectFormat(rule, matchedActions, candidates.Count, score),
+                    PolicyName = "process-threat-insight",
+                    Disposition = NormalizeBehaviorDisposition(rule.disposition),
+                    Severity = NormalizeBehaviorSeverity(rule.severity),
+                    EventDetails = BuildRuleMatchMessage(rule, matchedActions, candidates.Count, score)
                 };
                 return true;
+            }
+
+            private static string BuildRuleObjectFormat(UserHookBehaviorRule rule, HashSet<string> matchedActions, int eventCount, int score)
+            {
+                List<string> parts = new List<string>();
+                if (!string.IsNullOrWhiteSpace(rule.ruleId))
+                {
+                    parts.Add("rule=" + rule.ruleId);
+                }
+
+                if (!string.IsNullOrWhiteSpace(rule.tactic))
+                {
+                    parts.Add("tactic=" + rule.tactic);
+                }
+
+                if (!string.IsNullOrWhiteSpace(rule.technique))
+                {
+                    parts.Add("technique=" + rule.technique);
+                }
+
+                parts.Add("score=" + score.ToString(CultureInfo.InvariantCulture));
+                parts.Add("events=" + eventCount.ToString(CultureInfo.InvariantCulture));
+                parts.Add("actions=" + string.Join(",", matchedActions.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()));
+                return string.Join(";", parts.ToArray());
+            }
+
+            private static string NormalizeBehaviorSeverity(string value)
+            {
+                if (string.Equals(value, "critical", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "warning", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "info", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "operational", StringComparison.OrdinalIgnoreCase))
+                {
+                    return value.ToLowerInvariant();
+                }
+
+                if (string.Equals(value, "high", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "critical";
+                }
+
+                if (string.Equals(value, "medium", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "low", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "warning";
+                }
+
+                return "warning";
+            }
+
+            private static string NormalizeBehaviorDisposition(string value)
+            {
+                if (string.Equals(value, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "observed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "completed", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "failed", StringComparison.OrdinalIgnoreCase))
+                {
+                    return value.ToLowerInvariant();
+                }
+
+                if (string.Equals(value, "malicious", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "suspicious", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "observed";
+                }
+
+                return "observed";
             }
 
             private static string BuildRuleMatchMessage(UserHookBehaviorRule rule, HashSet<string> matchedActions, int eventCount, int score)
@@ -3851,7 +4017,9 @@ namespace DataProtectorWebBridge.Services
                     Target = record.Target ?? string.Empty,
                     ProcessImage = record.Extension ?? string.Empty,
                     CommandLine = ExtractMessageField(record.Message, "Command: "),
-                    ParentImage = ExtractMessageField(record.Message, "Parent: ")
+                    ParentImage = ExtractMessageField(record.Message, "Parent: "),
+                    ProcessPid = FirstNonEmpty(record.SourcePid, ExtractPid(record.Message)),
+                    TargetPid = record.TargetPid ?? string.Empty
                 };
                 atom.ProcessKey = string.IsNullOrWhiteSpace(atom.ProcessImage)
                     ? atom.Host + "|" + ExtractPid(record.Message)
@@ -3911,6 +4079,8 @@ namespace DataProtectorWebBridge.Services
             public string CommandLine { get; set; }
             public string ParentImage { get; set; }
             public string ProcessKey { get; set; }
+            public string ProcessPid { get; set; }
+            public string TargetPid { get; set; }
         }
 
         public class HashProtectPolicyRequest

@@ -1478,6 +1478,7 @@ namespace DataProtectorWebBridge.Services
                         normalized.Target = string.IsNullOrWhiteSpace(normalized.Target)
                             ? device.DeviceId
                             : normalized.Target;
+                        AuditLog.EnrichRecord(normalized);
 
                         if (TryIngestNetworkObservation(deviceId, device, normalized))
                         {
@@ -1621,7 +1622,7 @@ namespace DataProtectorWebBridge.Services
 
         private void AppendAudit(string actor, string action, string target, string extension, bool succeeded, string status, string message)
         {
-            state.Audit.Add(new AuditLog.AuditRecord
+            AuditLog.AuditRecord record = new AuditLog.AuditRecord
             {
                 TimestampUtc = DateTime.UtcNow.ToString("o"),
                 Host = Environment.MachineName,
@@ -1632,7 +1633,9 @@ namespace DataProtectorWebBridge.Services
                 Succeeded = succeeded,
                 Status = status ?? "0x00000000",
                 Message = message ?? string.Empty
-            });
+            };
+            AuditLog.EnrichRecord(record);
+            state.Audit.Add(record);
         }
 
         private void EnsureHashProtectPolicy()
@@ -4551,7 +4554,7 @@ namespace DataProtectorWebBridge.Services
                 return new AuditLog.AuditRecord();
             }
 
-            return new AuditLog.AuditRecord
+            AuditLog.AuditRecord clone = new AuditLog.AuditRecord
             {
                 TimestampUtc = string.IsNullOrWhiteSpace(record.TimestampUtc) ? DateTime.UtcNow.ToString("o") : record.TimestampUtc,
                 Host = record.Host ?? string.Empty,
@@ -4561,8 +4564,24 @@ namespace DataProtectorWebBridge.Services
                 Extension = record.Extension ?? string.Empty,
                 Succeeded = record.Succeeded,
                 Status = record.Status ?? string.Empty,
-                Message = record.Message ?? string.Empty
+                Message = record.Message ?? string.Empty,
+                SourceHost = record.SourceHost ?? string.Empty,
+                SourceUser = record.SourceUser ?? string.Empty,
+                SourceProcess = record.SourceProcess ?? string.Empty,
+                SourcePid = record.SourcePid ?? string.Empty,
+                TargetHost = record.TargetHost ?? string.Empty,
+                TargetProcess = record.TargetProcess ?? string.Empty,
+                TargetPid = record.TargetPid ?? string.Empty,
+                ObjectType = record.ObjectType ?? string.Empty,
+                ObjectName = record.ObjectName ?? string.Empty,
+                ObjectFormat = record.ObjectFormat ?? string.Empty,
+                PolicyName = record.PolicyName ?? string.Empty,
+                Disposition = record.Disposition ?? string.Empty,
+                Severity = record.Severity ?? string.Empty,
+                EventDetails = record.EventDetails ?? string.Empty
             };
+            AuditLog.EnrichRecord(clone);
+            return clone;
         }
 
         private static bool IsAuditDeleteMatch(AuditLog.AuditRecord record, AuditLog.AuditDeleteOptions options)

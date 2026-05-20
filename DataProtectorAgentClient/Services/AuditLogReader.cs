@@ -74,12 +74,53 @@ namespace DataProtectorAgentClient.Services
                 Category = TranslateCategory(ClassifyCategory(record)),
                 Severity = TranslateSeverity(severity),
                 Disposition = TranslateDisposition(disposition),
-                Target = record.Target ?? string.Empty,
-                Source = string.IsNullOrWhiteSpace(record.Actor) ? (record.Host ?? string.Empty) : record.Actor,
+                Target = ResolveTargetDisplay(record),
+                Source = ResolveSourceDisplay(record),
                 Message = record.Message ?? string.Empty,
                 Status = record.Status ?? string.Empty,
                 SeverityBrushKey = SeverityBrushKey(severity, disposition)
             };
+        }
+
+        private static string ResolveSourceDisplay(AuditRecord record)
+        {
+            string process = FirstNonEmpty(record.SourceProcess, record.Extension);
+            string pid = string.IsNullOrWhiteSpace(record.SourcePid) ? string.Empty : "PID " + record.SourcePid;
+            string user = FirstNonEmpty(record.SourceUser, record.Actor);
+            string host = FirstNonEmpty(record.SourceHost, record.Host);
+            return JoinCompact(" / ", process, pid, user, host);
+        }
+
+        private static string ResolveTargetDisplay(AuditRecord record)
+        {
+            string target = FirstNonEmpty(record.ObjectName, record.TargetProcess, record.Target);
+            string type = record.ObjectType ?? string.Empty;
+            string format = record.ObjectFormat ?? string.Empty;
+            string pid = string.IsNullOrWhiteSpace(record.TargetPid) ? string.Empty : "PID " + record.TargetPid;
+            return JoinCompact(" / ", type, target, format, pid);
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            if (values == null)
+            {
+                return string.Empty;
+            }
+
+            foreach (string value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string JoinCompact(string separator, params string[] values)
+        {
+            return string.Join(separator, (values ?? new string[0]).Where(value => !string.IsNullOrWhiteSpace(value)).ToArray());
         }
 
         private static bool IsSecurityEvent(AuditRecord record)
@@ -93,6 +134,7 @@ namespace DataProtectorAgentClient.Services
             if (category == "webshell" ||
                 category == "hashdump" ||
                 category == "lateral" ||
+                category == "userhook" ||
                 category == "dlp" ||
                 category == "smtp")
             {
@@ -130,6 +172,15 @@ namespace DataProtectorAgentClient.Services
                 return "lateral";
             }
 
+            if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("policy.userhook", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("central.policy.userhook", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".userhook.", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "userhook";
+            }
+
             if (action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("policy.dlp", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("central.policy.dlp", StringComparison.OrdinalIgnoreCase) ||
@@ -155,6 +206,11 @@ namespace DataProtectorAgentClient.Services
 
         private static string ResolveSeverity(AuditRecord record)
         {
+            if (record != null && !string.IsNullOrWhiteSpace(record.Severity))
+            {
+                return record.Severity;
+            }
+
             string action = record == null || record.Action == null ? string.Empty : record.Action;
             string message = record == null || record.Message == null ? string.Empty : record.Message;
             string status = record == null || record.Status == null ? string.Empty : record.Status;
@@ -162,6 +218,14 @@ namespace DataProtectorAgentClient.Services
             if (action.StartsWith("webshell.danger", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("hashdump.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.blocked", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.blocked", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.unhook-detected", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.hook-overwrite-detected", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.syscall-bypass-risk", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.memory-manual-map", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.memory-rwx", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.memory-private-syscall-stub", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.clipboard.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.screenshot.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.IndexOf(".blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -189,6 +253,11 @@ namespace DataProtectorAgentClient.Services
 
         private static string ResolveDisposition(AuditRecord record)
         {
+            if (record != null && !string.IsNullOrWhiteSpace(record.Disposition))
+            {
+                return record.Disposition;
+            }
+
             string action = record == null || record.Action == null ? string.Empty : record.Action;
             string status = record == null || record.Status == null ? string.Empty : record.Status;
             string message = record == null || record.Message == null ? string.Empty : record.Message;
@@ -208,6 +277,8 @@ namespace DataProtectorAgentClient.Services
             if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
             {
