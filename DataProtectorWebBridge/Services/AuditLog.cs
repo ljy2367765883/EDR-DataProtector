@@ -156,6 +156,11 @@ namespace DataProtectorWebBridge.Services
             string message = record == null || record.Message == null ? string.Empty : record.Message;
             string status = record == null || record.Status == null ? string.Empty : record.Status;
 
+            if (IsUserHookCoverageRecord(record))
+            {
+                return "warning";
+            }
+
             if (action.StartsWith("webshell.danger", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("hashdump.blocked", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.blocked", StringComparison.OrdinalIgnoreCase) ||
@@ -203,6 +208,11 @@ namespace DataProtectorWebBridge.Services
             string action = record == null || record.Action == null ? string.Empty : record.Action;
             string status = record == null || record.Status == null ? string.Empty : record.Status;
             string message = record == null || record.Message == null ? string.Empty : record.Message;
+
+            if (IsUserHookCoverageRecord(record))
+            {
+                return "observed";
+            }
 
             if (status.Equals("0xC0000022", StringComparison.OrdinalIgnoreCase) ||
                 message.IndexOf("blocked", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -834,6 +844,7 @@ namespace DataProtectorWebBridge.Services
             if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase)) return "credential";
             if (action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase)) return "lateral-target";
             if (action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase)) return "smtp";
+            if (IsUserHookCoverageRecord(record)) return "sensor-health";
             if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase)) return "process-behavior";
             return string.Empty;
@@ -864,8 +875,37 @@ namespace DataProtectorWebBridge.Services
             if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase)) return "webshell";
             if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase)) return "hash-protect";
             if (action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase)) return "lateral-defense";
+            if (action.StartsWith("userhook.health.", StringComparison.OrdinalIgnoreCase)) return "process-protection-coverage";
             if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase)) return "process-threat-insight";
             return string.Empty;
+        }
+
+        public static bool IsUserHookCoverageRecord(AuditRecord record)
+        {
+            if (record == null)
+            {
+                return false;
+            }
+
+            string action = record.Action ?? string.Empty;
+            string objectType = record.ObjectType ?? string.Empty;
+            if (string.Equals(objectType, "sensor-health", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.health.", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string operation = action.Substring("userhook.".Length);
+            return string.Equals(operation, "runtime-required", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-missing", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-injection-required", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-injection-queued", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-injection-skipped", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string NormalizeAuditSeverity(string value)

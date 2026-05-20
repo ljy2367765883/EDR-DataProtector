@@ -1679,6 +1679,11 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 AuditLog.EnrichRecord(record);
+                if (ShouldExcludeFromAttackFlow(record))
+                {
+                    continue;
+                }
+
                 AuditAttackFlowEvent flowEvent = BuildAttackFlowEvent(record);
                 if (flowEvent == null)
                 {
@@ -1754,6 +1759,11 @@ namespace DataProtectorWebBridge.Services
 
         private static AuditAttackFlowEvent BuildAttackFlowEvent(AuditLog.AuditRecord record)
         {
+            if (ShouldExcludeFromAttackFlow(record))
+            {
+                return null;
+            }
+
             string action = record.Action ?? string.Empty;
             string stage = ClassifyAttackStage(record);
             string severity = AuditLog.ResolveSeverity(record);
@@ -1828,6 +1838,11 @@ namespace DataProtectorWebBridge.Services
             string action = record == null ? string.Empty : record.Action ?? string.Empty;
             string objectType = record == null ? string.Empty : record.ObjectType ?? string.Empty;
             string message = record == null ? string.Empty : record.Message ?? string.Empty;
+
+            if (AuditLog.IsUserHookCoverageRecord(record))
+            {
+                return "health";
+            }
 
             if (action.StartsWith("sandbox.sample", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
@@ -1918,6 +1933,11 @@ namespace DataProtectorWebBridge.Services
         {
             int activeStages = (stages ?? new AuditAttackFlowStage[0]).Count(item => item.active);
             int critical = (events ?? new AuditAttackFlowEvent[0]).Count(item => string.Equals(item.severity, "critical", StringComparison.OrdinalIgnoreCase));
+            if (events == null || events.Length == 0)
+            {
+                return "No high-confidence attack chain was reconstructed from the selected audit scope.";
+            }
+
             if (incidents != null && incidents.Length > 0)
             {
                 return "Detected " + incidents.Length.ToString(CultureInfo.InvariantCulture) +
@@ -1926,6 +1946,30 @@ namespace DataProtectorWebBridge.Services
             }
 
             return "No high-confidence attack chain was reconstructed from the selected audit scope.";
+        }
+
+        private static bool ShouldExcludeFromAttackFlow(AuditLog.AuditRecord record)
+        {
+            if (record == null)
+            {
+                return true;
+            }
+
+            if (AuditLog.IsUserHookCoverageRecord(record))
+            {
+                return true;
+            }
+
+            string action = record.Action ?? string.Empty;
+            string objectType = record.ObjectType ?? string.Empty;
+            if (string.Equals(objectType, "sensor-health", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return action.StartsWith("security.audit.drain.failed", StringComparison.OrdinalIgnoreCase) ||
+                   action.StartsWith("userhook.runtime.drain.failed", StringComparison.OrdinalIgnoreCase) ||
+                   action.StartsWith("userhook.runtime.parse.failed", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void AddToIncident(Dictionary<string, AttackIncidentAccumulator> incidents, AuditAttackFlowEvent item)

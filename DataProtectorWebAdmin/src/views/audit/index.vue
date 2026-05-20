@@ -57,6 +57,12 @@ interface AuditTimelineItem {
   count?: number;
 }
 
+interface AuditEvidenceRow {
+  label: string;
+  value: string;
+  muted?: boolean;
+}
+
 interface AuditGraphPoint {
   id: string;
   x: number;
@@ -165,6 +171,10 @@ const auditDetailGraph = computed(() => buildAuditDetailGraph());
 const selectedDetailEvent = computed(
   () => attackStoryEvents.value.find(item => item.id === selectedDetailEventId.value) || attackStoryEvents.value[0] || null
 );
+const selectedAuditTitle = computed(() => (selectedAuditRecord.value ? auditActionLabel(selectedAuditRecord.value) : '-'));
+const selectedAuditSummary = computed(() => (selectedAuditRecord.value ? auditRecordSummary(selectedAuditRecord.value) : '-'));
+const selectedAuditEvidenceRows = computed(() => (selectedAuditRecord.value ? buildAuditEvidenceRows(selectedAuditRecord.value) : []));
+const selectedDetailEvidenceRows = computed(() => (selectedDetailEvent.value ? buildTimelineEvidenceRows(selectedDetailEvent.value) : []));
 
 const categorySummaries = computed<AuditSummary[]>(() =>
   categoryOptions.value.filter(item => item.value !== 'all').map(item => {
@@ -386,9 +396,25 @@ const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => 
       ]);
     }
   },
-  { title: $t('dataprotector.audit.columns.action'), key: 'Action', width: 220, ellipsis: { tooltip: true } },
+  {
+    title: $t('dataprotector.audit.columns.action'),
+    key: 'Action',
+    width: 220,
+    ellipsis: { tooltip: true },
+    render(row) {
+      return auditActionLabel(row);
+    }
+  },
   { title: $t('dataprotector.audit.columns.status'), key: 'Status', width: 130 },
-  { title: $t('dataprotector.audit.columns.message'), key: 'Message', minWidth: 320, ellipsis: { tooltip: true } },
+  {
+    title: $t('dataprotector.audit.columns.message'),
+    key: 'Message',
+    minWidth: 320,
+    ellipsis: { tooltip: true },
+    render(row) {
+      return auditRecordSummary(row);
+    }
+  },
   {
     title: $t('dataprotector.common.action'),
     key: 'actions',
@@ -475,14 +501,293 @@ function resolveTargetInfo(record: Api.DataProtector.AuditRecord) {
   return { primary, secondary };
 }
 
+function isUserHookCoverageRecord(record?: Api.DataProtector.AuditRecord | null) {
+  if (!record) return false;
+  const action = record.Action || '';
+  const objectType = record.ObjectType || '';
+  if (objectType === 'sensor-health' || action.startsWith('userhook.health.')) return true;
+  if (!action.startsWith('userhook.')) return false;
+  const operation = action.slice('userhook.'.length);
+  return ['runtime-required', 'runtime-missing', 'runtime-injection-required', 'runtime-injection-queued', 'runtime-injection-skipped'].includes(operation);
+}
+
+function normalizeActionToken(action?: string) {
+  return (action || '')
+    .replace(/^userhook\.health\./, 'userhook.')
+    .replace(/^userhook\.runtime\./, 'runtime.')
+    .replace(/^userhook\./, '')
+    .replace(/^hashdump\.blocked\./, 'hashdump.')
+    .replace(/^lateral\.blocked\./, 'lateral.')
+    .replace(/^dlp\./, '')
+    .replace(/^behavior\.chain\./, 'behavior.chain.');
+}
+
+function auditActionLabel(record: Api.DataProtector.AuditRecord) {
+  const action = record.Action || '';
+  const token = normalizeActionToken(action);
+  const labels = localizedActionLabels();
+  if (labels[token]) return labels[token];
+  if (action.startsWith('behavior.chain.')) return firstText(record.ObjectName, record.PolicyName, textByLocale('行为链命中', 'Behavior chain matched'));
+  if (action.startsWith('webshell.')) return textByLocale('WebShell 写入拦截', 'WebShell write blocked');
+  if (action.startsWith('policy.') || action.startsWith('central.policy.')) return textByLocale('策略变更', 'Policy change');
+  return action || '-';
+}
+
+function localizedActionLabels(): Record<string, string> {
+  if (!isChineseLocale()) {
+    return {
+      'runtime-missing': 'Protection runtime not loaded',
+      'runtime-required': 'Runtime takeover required',
+      'runtime-injection-required': 'Runtime injection requested',
+      'runtime-injection-queued': 'Runtime injection queued',
+      'runtime-injection-skipped': 'Runtime injection skipped',
+      'runtime-injection-failed': 'Runtime injection failed',
+      'runtime-rejected': 'Runtime signature rejected',
+      'behavior-process-access': 'Cross-process handle access',
+      'behavior-thread-access': 'Cross-thread handle access',
+      'behavior-remote-thread-create': 'Remote thread creation',
+      'process-create': 'Process creation',
+      'suspended-process-create': 'Suspended process creation',
+      'remote-executable-memory': 'Remote executable memory',
+      'write-process-memory': 'Cross-process memory write',
+      'nt-write-virtual-memory': 'NT remote memory write',
+      'nt-create-thread-ex': 'NT remote thread',
+      'queue-user-apc': 'APC injection indicator',
+      'set-thread-context': 'Thread context modified',
+      'resume-thread': 'Thread resumed',
+      'nt-unmap-view': 'Process image unmapped',
+      'registry-set-value': 'Registry value written',
+      'network-connect': 'Network connection',
+      'network-wsaconnect': 'Network connection',
+      'runtime.unhook-detected': 'Hook removed',
+      'runtime.hook-overwrite-detected': 'Hook entry overwritten',
+      'runtime.syscall-bypass-risk': 'Direct syscall risk',
+      'runtime.memory-manual-map': 'Manual memory mapping',
+      'runtime.memory-rwx': 'RWX memory region',
+      'runtime.memory-private-syscall-stub': 'Private syscall stub',
+      'runtime.memory-private-executable': 'Private executable memory',
+      'runtime.etw-prepatched-detected': 'ETW entry abnormal',
+      'runtime.etw-return-patch-detected': 'ETW return patch',
+      'runtime.etw-jump-patch-detected': 'ETW jump patch',
+      'hashdump.lsass-handle': 'LSASS access blocked',
+      'hashdump.credential-file': 'Credential file access blocked',
+      'hashdump.registry-hive': 'Registry credential export blocked',
+      'hashdump.raw-extents': 'Credential disk range read blocked',
+      'smb-executable-create': 'SMB executable drop',
+      'smb-executable-write': 'SMB executable write',
+      'smb-executable-rename': 'SMB executable rename',
+      'ipc-task-scheduler': 'IPC scheduled task lateral movement',
+      'ipc-service-control': 'IPC service-control lateral movement',
+      'remote-scheduled-task-tool': 'Remote scheduled task tool',
+      'remote-service-tool': 'Remote service tool',
+      'wmi-process-create': 'WMI remote process creation',
+      'powershell-remote-task': 'PowerShell remote task',
+      'clipboard.blocked': 'Clipboard leak blocked',
+      'screenshot.blocked': 'Screenshot leak blocked'
+    };
+  }
+
+  return {
+    'runtime-missing': '防护运行时未加载',
+    'runtime-required': '进程需要运行时接管',
+    'runtime-injection-required': '已请求运行时注入',
+    'runtime-injection-queued': '运行时注入已排队',
+    'runtime-injection-skipped': '运行时注入已跳过',
+    'runtime-injection-failed': '运行时注入失败',
+    'runtime-rejected': '运行时签名校验失败',
+    'behavior-process-access': '跨进程句柄访问',
+    'behavior-thread-access': '跨线程句柄访问',
+    'behavior-remote-thread-create': '远程线程创建',
+    'process-create': '进程创建',
+    'suspended-process-create': '挂起进程创建',
+    'remote-executable-memory': '远程可执行内存',
+    'write-process-memory': '跨进程写内存',
+    'nt-write-virtual-memory': 'NT 写入远程内存',
+    'nt-create-thread-ex': 'NT 远程线程',
+    'queue-user-apc': 'APC 注入迹象',
+    'set-thread-context': '线程上下文修改',
+    'resume-thread': '线程恢复执行',
+    'nt-unmap-view': '进程映像卸载',
+    'registry-set-value': '注册表写入',
+    'network-connect': '网络连接',
+    'network-wsaconnect': '网络连接',
+    'runtime.unhook-detected': 'Hook 被移除',
+    'runtime.hook-overwrite-detected': 'Hook 入口被覆盖',
+    'runtime.syscall-bypass-risk': '直接系统调用风险',
+    'runtime.memory-manual-map': '内存手工映射',
+    'runtime.memory-rwx': 'RWX 内存区域',
+    'runtime.memory-private-syscall-stub': '私有 syscall stub',
+    'runtime.memory-private-executable': '私有可执行内存',
+    'runtime.etw-prepatched-detected': 'ETW 入口异常',
+    'runtime.etw-return-patch-detected': 'ETW 返回补丁',
+    'runtime.etw-jump-patch-detected': 'ETW 跳转补丁',
+    'hashdump.lsass-handle': 'LSASS 访问拦截',
+    'hashdump.credential-file': '凭据文件访问拦截',
+    'hashdump.registry-hive': '注册表凭据导出拦截',
+    'hashdump.raw-extents': '磁盘凭据区域读取拦截',
+    'smb-executable-create': 'SMB 可执行文件投递',
+    'smb-executable-write': 'SMB 可执行文件写入',
+    'smb-executable-rename': 'SMB 可执行文件重命名',
+    'ipc-task-scheduler': 'IPC 计划任务横向',
+    'ipc-service-control': 'IPC 服务控制横向',
+    'remote-scheduled-task-tool': '远程计划任务工具',
+    'remote-service-tool': '远程服务工具',
+    'wmi-process-create': 'WMI 远程进程创建',
+    'powershell-remote-task': 'PowerShell 远程任务',
+    'clipboard.blocked': '剪贴板泄露拦截',
+    'screenshot.blocked': '截屏泄露拦截'
+  };
+}
+
+function auditRecordSummary(record: Api.DataProtector.AuditRecord) {
+  if (isUserHookCoverageRecord(record)) {
+    const source = resolveSourceInfo(record);
+    if ((record.Action || '').includes('runtime-missing')) {
+      return textByLocale(
+        `进程未加载用户态防护运行时，表示该进程当前只有覆盖状态异常，不等同于已经确认攻击。进程：${source.primary || '-'}`,
+        `The process did not load the user-mode protection runtime. This is a coverage issue, not a confirmed attack. Process: ${source.primary || '-'}`
+      );
+    }
+    return textByLocale(
+      `进程防护运行时状态变化，用于排查接管覆盖面，不直接作为攻击告警。进程：${source.primary || '-'}`,
+      `Process protection runtime coverage changed. This helps verify coverage and is not a direct attack alert. Process: ${source.primary || '-'}`
+    );
+  }
+
+  if ((record.Action || '').startsWith('behavior.chain.')) {
+    return firstText(
+      record.EventDetails,
+      record.Message,
+      textByLocale('多条行为在时间窗口内形成可疑链路，已按规则聚合判定。', 'Multiple behaviors formed a suspicious chain within the rule window.')
+    );
+  }
+
+  const source = resolveSourceInfo(record);
+  const target = resolveTargetInfo(record);
+  const action = auditActionLabel(record);
+  const disposition = dispositionLabel(resolveDisposition(record));
+  return textByLocale(
+    `${action}，处置：${disposition}。来源：${source.primary || '-'}。对象：${target.primary || '-'}`,
+    `${action}. Disposition: ${disposition}. Source: ${source.primary || '-'}. Object: ${target.primary || '-'}`
+  );
+}
+
+function timelineActionLabel(event: AuditTimelineItem) {
+  return auditActionLabel({
+    TimestampUtc: event.timeUtc,
+    Actor: '',
+    Action: event.action,
+    Target: event.target,
+    Extension: event.source,
+    Succeeded: event.disposition !== 'blocked' && event.disposition !== 'failed',
+    Status: '',
+    Message: event.raw || event.detail,
+    ObjectType: event.object,
+    ObjectName: event.target,
+    Disposition: event.disposition,
+    Severity: event.severity,
+    EventDetails: event.detail
+  });
+}
+
+function auditStageSummary() {
+  if (isUserHookCoverageRecord(selectedAuditRecord.value)) {
+    return textByLocale('这是防护覆盖状态，不进入攻击链判定', 'Protection coverage status only; excluded from attack-chain scoring');
+  }
+
+  if (attackFlow.value?.eventTotal) {
+    return textByLocale(
+      `已关联 ${attackFlow.value.eventTotal} 条证据，按时间线展示关键行为`,
+      `${attackFlow.value.eventTotal} correlated evidence item(s), shown in chronological order`
+    );
+  }
+
+  return textByLocale('当前范围没有重建出高置信攻击链，已展示单条事件证据', 'No high-confidence attack chain was reconstructed; showing this event only');
+}
+
+function buildAuditEvidenceRows(record: Api.DataProtector.AuditRecord): AuditEvidenceRow[] {
+  const source = resolveSourceInfo(record);
+  const target = resolveTargetInfo(record);
+  const rows: AuditEvidenceRow[] = [
+    { label: textByLocale('发生时间', 'Time'), value: formatAttackTime(record.TimestampUtc) },
+    { label: textByLocale('事件结论', 'Conclusion'), value: auditActionLabel(record) },
+    { label: textByLocale('主机', 'Host'), value: resolveHost(record) || '-' },
+    { label: textByLocale('来源进程', 'Source process'), value: source.primary || '-' },
+    { label: textByLocale('来源身份', 'Source identity'), value: source.secondary || '-' },
+    { label: textByLocale('目标对象', 'Target object'), value: target.primary || '-' },
+    { label: textByLocale('目标细节', 'Target detail'), value: target.secondary || '-' },
+    { label: textByLocale('处置结果', 'Disposition'), value: dispositionLabel(resolveDisposition(record)) },
+    { label: textByLocale('风险级别', 'Severity'), value: severityLabel(resolveSeverity(record)) },
+    { label: textByLocale('策略模块', 'Policy module'), value: policyDisplayName(record.PolicyName || '') || '-' },
+    { label: textByLocale('原始动作', 'Raw action'), value: record.Action || '-', muted: true },
+    { label: textByLocale('状态码', 'Status'), value: record.Status || '-', muted: true },
+    { label: textByLocale('原始消息', 'Raw message'), value: record.Message || record.EventDetails || '-', muted: true }
+  ];
+
+  return rows.filter(row => row.value && row.value !== '-');
+}
+
+function buildTimelineEvidenceRows(event: AuditTimelineItem): AuditEvidenceRow[] {
+  const rows: AuditEvidenceRow[] = [
+    { label: textByLocale('发生时间', 'Time'), value: formatAttackTime(event.timeUtc) },
+    { label: textByLocale('事件结论', 'Conclusion'), value: timelineActionLabel(event) },
+    { label: textByLocale('阶段', 'Stage'), value: stageLabel(event.stage) },
+    { label: textByLocale('来源', 'Source'), value: event.source || '-' },
+    { label: textByLocale('对象', 'Object'), value: event.target || event.object || '-' },
+    { label: textByLocale('远端', 'Remote'), value: event.remote || '-' },
+    { label: textByLocale('处置结果', 'Disposition'), value: timelineDispositionLabel(event.disposition) },
+    { label: textByLocale('风险级别', 'Severity'), value: attackSeverityLabel(event.severity) },
+    { label: textByLocale('原始动作', 'Raw action'), value: event.action || '-', muted: true },
+    { label: textByLocale('原始证据', 'Raw evidence'), value: event.raw || event.detail || '-', muted: true }
+  ];
+
+  return rows.filter(row => row.value && row.value !== '-');
+}
+
+function policyDisplayName(value: string) {
+  const labels: Record<string, string> = {
+    'process-threat-insight': textByLocale('进程威胁感知', 'Process threat insight'),
+    'process-protection-coverage': textByLocale('进程防护覆盖', 'Process protection coverage'),
+    'hash-protect': textByLocale('凭据防御', 'Credential protection'),
+    'lateral-defense': textByLocale('内网横向防御', 'Lateral movement defense'),
+    webshell: textByLocale('WebShell 防护', 'WebShell protection'),
+    dlp: textByLocale('防泄密', 'Data leak prevention'),
+    'network-awareness': textByLocale('网络感知', 'Network awareness')
+  };
+  return labels[value] || value;
+}
+
+function isChineseLocale() {
+  return String(appStore.locale || '').toLowerCase().startsWith('zh');
+}
+
+function textByLocale(zh: string, en: string) {
+  return isChineseLocale() ? zh : en;
+}
+
 function normalizeAttackFlowEvent(event: Api.DataProtector.AuditAttackFlowEvent): AuditTimelineItem {
+  const label = auditActionLabel({
+    TimestampUtc: event.timeUtc || '',
+    Actor: '',
+    Action: event.action || '',
+    Target: firstText(event.objectName, event.targetProcess, event.remoteIdentity),
+    Extension: event.sourceProcess || '',
+    Succeeded: event.disposition !== 'blocked' && event.disposition !== 'failed',
+    Status: '',
+    Message: firstText(event.rawMessage, event.detail),
+    ObjectType: event.objectType,
+    ObjectName: event.objectName,
+    Disposition: event.disposition,
+    Severity: event.severity,
+    EventDetails: event.detail
+  });
   return {
     id: event.id || `${event.timeUtc}-${event.action}-${event.objectName}`,
     timeUtc: event.timeUtc || '',
     stage: event.stage || '',
     category: event.category || '',
     action: event.action || '',
-    title: conciseEventTitle(firstText(event.title, event.action, event.objectName, event.remoteIdentity), event.stage),
+    title: conciseEventTitle(label || firstText(event.title, event.action, event.objectName, event.remoteIdentity), event.stage),
     detail: conciseEventDetail(firstText(event.detail, event.rawMessage)),
     severity: event.severity || 'info',
     disposition: event.disposition || 'observed',
@@ -505,8 +810,8 @@ function normalizeAuditRecordEvent(record: Api.DataProtector.AuditRecord): Audit
     stage,
     category,
     action: record.Action || '',
-    title: conciseEventTitle(firstText(target.primary, record.Action), stage),
-    detail: conciseEventDetail(firstText(record.EventDetails, record.Message, target.secondary)),
+    title: conciseEventTitle(auditActionLabel(record), stage),
+    detail: conciseEventDetail(auditRecordSummary(record)),
     severity: resolveSeverity(record),
     disposition: resolveDisposition(record),
     source: [source.primary, source.secondary].filter(item => item && item !== '-').join(' / '),
@@ -580,6 +885,7 @@ function inferTimelineStage(record: Api.DataProtector.AuditRecord) {
   const action = record.Action || '';
   const objectType = record.ObjectType || '';
   const message = record.Message || '';
+  if (isUserHookCoverageRecord(record)) return 'health';
   if (action.startsWith('webshell.') || objectType.includes('file')) return 'delivery';
   if (action.includes('process-create')) return 'execution';
   if (action.startsWith('hashdump.') || objectType.includes('credential')) return 'credential';
@@ -591,6 +897,19 @@ function inferTimelineStage(record: Api.DataProtector.AuditRecord) {
 }
 
 function buildDetailQuery(record: Api.DataProtector.AuditRecord): Api.DataProtector.AuditQuery {
+  if (isUserHookCoverageRecord(record)) {
+    return {
+      page: 1,
+      pageSize: 1,
+      limit: 1,
+      category: 'system',
+      host: resolveHost(record) || 'all',
+      severity: 'all',
+      disposition: 'all',
+      search: `__coverage_event_${record.TimestampUtc || Date.now()}`
+    };
+  }
+
   const parsedCenter = record.TimestampUtc ? new Date(record.TimestampUtc).getTime() : Number.NaN;
   const center = Number.isFinite(parsedCenter) ? parsedCenter : Date.now();
   const from = new Date(center - 15 * 60 * 1000).toISOString();
@@ -710,6 +1029,8 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
     return record.Severity as Exclude<AuditSeverity, 'all'>;
   }
 
+  if (isUserHookCoverageRecord(record)) return 'warning';
+
   const action = record.Action || '';
   const message = record.Message || '';
   const status = record.Status || '';
@@ -759,6 +1080,7 @@ function resolveDisposition(record: Api.DataProtector.AuditRecord): Exclude<Audi
   const message = record.Message || '';
   const status = record.Status || '';
 
+  if (isUserHookCoverageRecord(record)) return 'observed';
   if (status.toUpperCase() === '0XC0000022' || /blocked|denied/i.test(message)) return 'blocked';
   if (!record.Succeeded) return 'failed';
   if (
@@ -828,7 +1150,8 @@ function stageLabel(stage: string) {
     lateral: $t('dataprotector.audit.attackFlow.stages.lateral'),
     network: $t('dataprotector.audit.attackFlow.stages.network'),
     persistence: $t('dataprotector.audit.attackFlow.stages.persistence'),
-    impact: $t('dataprotector.audit.attackFlow.stages.impact')
+    impact: $t('dataprotector.audit.attackFlow.stages.impact'),
+    health: $t('dataprotector.audit.attackFlow.stages.health')
   };
 
   return labels[stage] || stage || '-';
@@ -893,7 +1216,7 @@ function buildAuditDetailGraph(): AuditGraph {
   const nodes: NonNullable<FlowGraphData['nodes']> = [];
   const edges: NonNullable<FlowGraphData['edges']> = [];
   const miniPoints: AuditGraphPoint[] = [];
-  const mainX = 168;
+  const mainX = 118;
   const topY = 62;
   const rowGap = 76;
 
@@ -927,12 +1250,12 @@ function buildAuditDetailGraph(): AuditGraph {
     type: 'rect',
     x: mainX,
     y: topY,
-    text: {
-      x: mainX,
-      y: topY,
-      value: 'START',
-      ...graphTextStyle(58, 14, '#334155', 11)
-    },
+      text: {
+        x: mainX,
+        y: topY,
+        value: '开始',
+        ...graphTextStyle(58, 14, '#334155', 11)
+      },
     properties: {
       width: 74,
       height: 34,
@@ -1468,8 +1791,8 @@ onBeforeUnmount(() => {
             <div class="attack-flow-header">
               <div>
                 <div class="eyebrow">{{ $t('dataprotector.audit.detail.eventOverview') }}</div>
-                <h3>{{ selectedAuditRecord.Action || '-' }}</h3>
-                <p>{{ attackFlow?.summary || selectedAuditRecord.Message || selectedAuditRecord.EventDetails || '-' }}</p>
+                <h3>{{ selectedAuditTitle }}</h3>
+                <p>{{ selectedAuditSummary }}</p>
               </div>
               <NSpace>
                 <NTag :type="severityTagType(resolveSeverity(selectedAuditRecord))" :bordered="false">
@@ -1482,8 +1805,9 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="story-stage-summary">
+              <span class="stage-summary-text">{{ auditStageSummary() }}</span>
               <NTag
-                v-for="stage in attackFlowStages"
+                v-for="stage in attackFlowStages.filter(item => item.active)"
                 :key="stage.key"
                 size="small"
                 :type="stage.active ? attackSeverityTagType(stage.severity) : 'default'"
@@ -1560,7 +1884,7 @@ onBeforeUnmount(() => {
                           x{{ event.count }}
                         </NTag>
                       </span>
-                      <strong>{{ event.title || event.action || '-' }}</strong>
+                      <strong>{{ event.title || timelineActionLabel(event) || '-' }}</strong>
                       <small>{{ stageLabel(event.stage) }}</small>
                       <span class="event-target">{{ event.detail || event.raw || event.target || '-' }}</span>
                       <span class="event-meta">
@@ -1580,7 +1904,7 @@ onBeforeUnmount(() => {
                     <span>{{ $t('dataprotector.audit.detail.selectedEvidence') }}</span>
                   </div>
                   <div class="detail-title-row">
-                    <h4>{{ selectedDetailEvent.title || selectedDetailEvent.action || '-' }}</h4>
+                    <h4>{{ selectedDetailEvent.title || timelineActionLabel(selectedDetailEvent) || '-' }}</h4>
                     <NTag :type="attackSeverityTagType(selectedDetailEvent.severity)" :bordered="false">
                       {{ attackSeverityLabel(selectedDetailEvent.severity) }}
                     </NTag>
@@ -1588,42 +1912,32 @@ onBeforeUnmount(() => {
                   <div class="detail-subtitle">
                     {{ stageLabel(selectedDetailEvent.stage) }} / {{ timelineDispositionLabel(selectedDetailEvent.disposition) }}
                   </div>
-                  <p class="detail-description">{{ selectedDetailEvent.detail || selectedDetailEvent.raw || '-' }}</p>
-                  <div class="detail-tabs">
-                    <span class="active">{{ $t('dataprotector.audit.detail.processTab') }}</span>
-                    <span>{{ $t('dataprotector.audit.detail.objectTab') }}</span>
-                    <span>{{ $t('dataprotector.audit.detail.policyTab') }}</span>
-                  </div>
+                  <p class="detail-description">{{ selectedDetailEvent.detail || selectedAuditSummary || '-' }}</p>
                   <div class="detail-fields">
-                    <div>
-                      <span>{{ $t('dataprotector.audit.columns.time') }}</span>
-                      <strong>{{ formatAttackTime(selectedDetailEvent.timeUtc) }}</strong>
-                    </div>
-                    <div>
-                      <span>{{ $t('dataprotector.audit.columns.action') }}</span>
-                      <strong>{{ selectedDetailEvent.action || '-' }}</strong>
-                    </div>
-                    <div>
-                      <span>{{ $t('dataprotector.audit.columns.source') }}</span>
-                      <strong>{{ selectedDetailEvent.source || '-' }}</strong>
-                    </div>
-                    <div>
-                      <span>{{ $t('dataprotector.audit.columns.object') }}</span>
-                      <strong>{{ selectedDetailEvent.target || selectedDetailEvent.object || '-' }}</strong>
-                    </div>
-                    <div>
-                      <span>{{ $t('dataprotector.audit.detail.remote') }}</span>
-                      <strong>{{ selectedDetailEvent.remote || '-' }}</strong>
-                    </div>
-                    <div>
-                      <span>{{ $t('dataprotector.audit.disposition') }}</span>
-                      <strong>{{ timelineDispositionLabel(selectedDetailEvent.disposition) }}</strong>
+                    <div
+                      v-for="row in selectedDetailEvidenceRows"
+                      :key="row.label"
+                      :class="{ muted: row.muted }"
+                    >
+                      <span>{{ row.label }}</span>
+                      <strong>{{ row.value }}</strong>
                     </div>
                   </div>
                   <div class="attack-tactics">
                     <div>{{ $t('dataprotector.audit.detail.evidenceInfo') }}</div>
                     <NTag size="small" :bordered="false">{{ stageLabel(selectedDetailEvent.stage) }}</NTag>
                     <NTag size="small" :bordered="false">{{ selectedDetailEvent.category || classifyAudit(selectedAuditRecord) }}</NTag>
+                  </div>
+                  <div class="raw-evidence-panel">
+                    <div>{{ $t('dataprotector.audit.detail.rawEvidence') }}</div>
+                    <div
+                      v-for="row in selectedAuditEvidenceRows.filter(item => item.muted)"
+                      :key="row.label"
+                      class="raw-evidence-row"
+                    >
+                      <span>{{ row.label }}</span>
+                      <code>{{ row.value }}</code>
+                    </div>
                   </div>
                 </template>
                 <NEmpty v-else :description="$t('dataprotector.audit.detail.singleEventHint')" />
@@ -1725,14 +2039,22 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+  align-items: center;
   padding: 12px 16px;
   background: #ffffff;
   border-bottom: 1px solid rgb(226 232 240);
 }
 
+.stage-summary-text {
+  margin-right: 8px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .attack-investigation-layout {
   display: grid;
-  grid-template-columns: 330px minmax(420px, 1fr) 360px;
+  grid-template-columns: 260px minmax(460px, 1fr) 430px;
   min-height: 620px;
 }
 
@@ -2007,25 +2329,6 @@ onBeforeUnmount(() => {
   line-height: 1.65;
 }
 
-.detail-tabs {
-  display: flex;
-  gap: 28px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid rgb(226 232 240);
-}
-
-.detail-tabs span {
-  padding-bottom: 9px;
-  color: #94a3b8;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.detail-tabs span.active {
-  color: #2563eb;
-  border-bottom: 2px solid #60a5fa;
-}
-
 .detail-fields {
   display: grid;
   gap: 11px;
@@ -2051,6 +2354,11 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.detail-fields div.muted strong,
+.detail-fields div.muted span {
+  color: #94a3b8;
+}
+
 .attack-tactics {
   display: flex;
   flex-wrap: wrap;
@@ -2065,6 +2373,43 @@ onBeforeUnmount(() => {
   color: #475569;
   font-size: 13px;
   font-weight: 800;
+}
+
+.raw-evidence-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgb(226 232 240);
+}
+
+.raw-evidence-panel > div:first-child {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.raw-evidence-row {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.raw-evidence-row span {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.raw-evidence-row code {
+  min-width: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  white-space: normal;
+  background: transparent;
 }
 
 @media (max-width: 1100px) {

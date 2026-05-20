@@ -595,6 +595,7 @@
         objectTab: '对象',
         policyTab: '策略',
         evidenceInfo: '证据信息',
+        rawEvidence: '原始证据',
         singleEventHint: '当前事件暂无更多关联证据，已按单事件展示。'
       },
       attackFlow: {
@@ -616,7 +617,8 @@
           lateral: '横向移动',
           network: '外联 / C2',
           persistence: '持久化',
-          impact: '影响 / 数据'
+          impact: '影响 / 数据',
+          health: '防护状态'
         },
         columns: {
           root: '根进程',

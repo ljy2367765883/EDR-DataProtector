@@ -1327,16 +1327,18 @@ namespace DataProtectorWebBridge.Services
             foreach (UserHookDefenseEventDto item in events)
             {
                 string message = BuildUserHookAuditMessage(item);
+                bool coverageEvent = IsUserHookCoverageOperation(item.operation);
+                bool successLikeStatus = item.status == SuccessStatus || item.status == 0x00000103;
 
                 AuditLog.AuditRecord record = new AuditLog.AuditRecord
                 {
                     TimestampUtc = DateTime.UtcNow.ToString("o"),
                     Host = Environment.MachineName,
-                    Actor = "user-hook-defense-sensor",
-                    Action = "userhook." + item.operation,
+                    Actor = coverageEvent ? "process-protection" : "user-hook-defense-sensor",
+                    Action = coverageEvent ? "userhook.health." + item.operation : "userhook." + item.operation,
                     Target = item.target,
                     Extension = item.processImage,
-                    Succeeded = item.status == SuccessStatus || item.status == 0x00000103,
+                    Succeeded = coverageEvent || successLikeStatus,
                     Status = item.statusText,
                     Message = message,
                     SourceHost = Environment.MachineName,
@@ -1344,12 +1346,12 @@ namespace DataProtectorWebBridge.Services
                     SourcePid = item.processId.ToString(CultureInfo.InvariantCulture),
                     TargetProcess = ExtractKernelTargetProcess(item.target),
                     TargetPid = ExtractKernelDecimalField(item.target, "targetPid="),
-                    ObjectType = "process-behavior",
+                    ObjectType = coverageEvent ? "sensor-health" : "process-behavior",
                     ObjectName = FirstNonEmpty(ExtractKernelTargetProcess(item.target), item.target),
                     ObjectFormat = "flags=0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture),
-                    PolicyName = "process-threat-insight",
-                    Disposition = (item.status == SuccessStatus || item.status == 0x00000103) ? "observed" : "blocked",
-                    Severity = (item.status == SuccessStatus || item.status == 0x00000103) ? "info" : "critical",
+                    PolicyName = coverageEvent ? "process-protection-coverage" : "process-threat-insight",
+                    Disposition = coverageEvent || successLikeStatus ? "observed" : "blocked",
+                    Severity = coverageEvent ? "warning" : (successLikeStatus ? "info" : "critical"),
                     EventDetails = message
                 };
 
@@ -1427,6 +1429,11 @@ namespace DataProtectorWebBridge.Services
             string disposition = record.Disposition ?? string.Empty;
             string status = record.Status ?? string.Empty;
 
+            if (IsUserHookCoverageAction(action))
+            {
+                return action.IndexOf("runtime-missing", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
             if (action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
@@ -1453,6 +1460,24 @@ namespace DataProtectorWebBridge.Services
 
         private static string BuildUserHookAuditMessage(UserHookDefenseEventDto item)
         {
+            if (item != null && IsUserHookCoverageOperation(item.operation))
+            {
+                string coverage = "User hook coverage state: " + item.operation + " for PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
+                if (!string.IsNullOrWhiteSpace(item.processImage))
+                {
+                    coverage += " Process: " + item.processImage + ".";
+                }
+
+                coverage += " This records protection coverage, not a confirmed malicious behavior.";
+                if (!string.IsNullOrWhiteSpace(item.target))
+                {
+                    coverage += " Target: " + item.target + ".";
+                }
+
+                coverage += " Flags: 0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture) + ".";
+                return coverage;
+            }
+
             string message = "Process threat insight " + item.operation + " for PID " + item.processId.ToString(CultureInfo.InvariantCulture) + ".";
             if (!string.IsNullOrWhiteSpace(item.processImage))
             {
@@ -1643,6 +1668,40 @@ namespace DataProtectorWebBridge.Services
             }
 
             return message;
+        }
+
+        private static bool IsUserHookCoverageOperation(string operation)
+        {
+            if (string.IsNullOrWhiteSpace(operation))
+            {
+                return false;
+            }
+
+            return string.Equals(operation, "runtime-required", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-missing", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-injection-required", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-injection-queued", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(operation, "runtime-injection-skipped", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsUserHookCoverageAction(string action)
+        {
+            if (string.IsNullOrWhiteSpace(action))
+            {
+                return false;
+            }
+
+            if (action.StartsWith("userhook.health.", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return IsUserHookCoverageOperation(action.Substring("userhook.".Length));
         }
 
         private static string BuildUserHookRuntimeObjectFormat(UserHookRuntimeEvent runtimeEvent)
@@ -4557,6 +4616,12 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 if (!record.Action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                if (IsUserHookCoverageAction(record.Action) ||
+                    string.Equals(record.ObjectType, "sensor-health", StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
                 }

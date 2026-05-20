@@ -599,6 +599,7 @@ const local: App.I18n.Schema = {
         objectTab: 'Object',
         policyTab: 'Policy',
         evidenceInfo: 'Evidence info',
+        rawEvidence: 'Raw evidence',
         singleEventHint: 'No additional correlated evidence is available for this event, so it is shown as a single-event timeline.'
       },
       attackFlow: {
@@ -620,7 +621,8 @@ const local: App.I18n.Schema = {
           lateral: 'Lateral Movement',
           network: 'Network / C2',
           persistence: 'Persistence',
-          impact: 'Impact / Data'
+          impact: 'Impact / Data',
+          health: 'Protection Health'
         },
         columns: {
           root: 'Root Process',
