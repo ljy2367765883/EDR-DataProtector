@@ -87,6 +87,8 @@ typedef HHOOK (WINAPI *PFN_SetWindowsHookExA)(int, HOOKPROC, HINSTANCE, DWORD);
 typedef HMODULE (WINAPI *PFN_LoadLibraryW)(LPCWSTR);
 typedef HMODULE (WINAPI *PFN_LoadLibraryExW)(LPCWSTR, HANDLE, DWORD);
 typedef LONG (WINAPI *PFN_RegSetValueExW)(HKEY, LPCWSTR, DWORD, DWORD, const BYTE *, DWORD);
+typedef BOOL (WINAPI *PFN_SetThreadContext)(HANDLE, const CONTEXT *);
+typedef DWORD (WINAPI *PFN_ResumeThread)(HANDLE);
 typedef int (WSAAPI *PFN_connect)(SOCKET, const struct sockaddr *, int);
 typedef int (WSAAPI *PFN_WSAConnect)(SOCKET, const struct sockaddr *, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
 typedef NTSTATUS (NTAPI *PFN_NtCreateThreadEx)(
@@ -94,6 +96,7 @@ typedef NTSTATUS (NTAPI *PFN_NtCreateThreadEx)(
 typedef NTSTATUS (NTAPI *PFN_NtWriteVirtualMemory)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
 typedef NTSTATUS (NTAPI *PFN_NtAllocateVirtualMemory)(HANDLE, PVOID *, ULONG_PTR, PSIZE_T, ULONG, ULONG);
 typedef NTSTATUS (NTAPI *PFN_NtProtectVirtualMemory)(HANDLE, PVOID *, PSIZE_T, ULONG, PULONG);
+typedef NTSTATUS (NTAPI *PFN_NtUnmapViewOfSection)(HANDLE, PVOID);
 
 static PFN_CreateRemoteThread gRealCreateRemoteThread;
 static PFN_CreateRemoteThreadEx gRealCreateRemoteThreadEx;
@@ -107,12 +110,15 @@ static PFN_SetWindowsHookExA gRealSetWindowsHookExA;
 static PFN_LoadLibraryW gRealLoadLibraryW;
 static PFN_LoadLibraryExW gRealLoadLibraryExW;
 static PFN_RegSetValueExW gRealRegSetValueExW;
+static PFN_SetThreadContext gRealSetThreadContext;
+static PFN_ResumeThread gRealResumeThread;
 static PFN_connect gRealConnect;
 static PFN_WSAConnect gRealWSAConnect;
 static PFN_NtCreateThreadEx gRealNtCreateThreadEx;
 static PFN_NtWriteVirtualMemory gRealNtWriteVirtualMemory;
 static PFN_NtAllocateVirtualMemory gRealNtAllocateVirtualMemory;
 static PFN_NtProtectVirtualMemory gRealNtProtectVirtualMemory;
+static PFN_NtUnmapViewOfSection gRealNtUnmapViewOfSection;
 
 static INIT_ONCE gInitializeOnce = INIT_ONCE_STATIC_INIT;
 static SRWLOCK gEventLock = SRWLOCK_INIT;
@@ -139,6 +145,20 @@ DpRuntimeWriteEvent(
     _In_opt_z_ LPCWSTR Target,
     _In_ DWORD Status,
     _In_ BOOL Blocked
+    );
+
+static VOID
+DpRuntimeWriteBehaviorEvent(
+    _In_z_ LPCWSTR Action,
+    _In_opt_z_ LPCWSTR Category,
+    _In_opt_z_ LPCWSTR Api,
+    _In_opt_z_ LPCWSTR Target,
+    _In_ DWORD Status,
+    _In_ BOOL Blocked,
+    _In_ DWORD TargetPid,
+    _In_ SIZE_T Size,
+    _In_ DWORD Flags,
+    _In_opt_z_ LPCWSTR CommandLine
     );
 
 static BOOL
@@ -780,9 +800,29 @@ DpRuntimeWriteEvent(
     _In_ BOOL Blocked
     )
 {
+    DpRuntimeWriteBehaviorEvent(Action, L"behavior", NULL, Target, Status, Blocked, 0, 0, 0, NULL);
+}
+
+static VOID
+DpRuntimeWriteBehaviorEvent(
+    _In_z_ LPCWSTR Action,
+    _In_opt_z_ LPCWSTR Category,
+    _In_opt_z_ LPCWSTR Api,
+    _In_opt_z_ LPCWSTR Target,
+    _In_ DWORD Status,
+    _In_ BOOL Blocked,
+    _In_ DWORD TargetPid,
+    _In_ SIZE_T Size,
+    _In_ DWORD Flags,
+    _In_opt_z_ LPCWSTR CommandLine
+    )
+{
     WCHAR directory[MAX_PATH];
     WCHAR processEscaped[DP_RUNTIME_MAX_TEXT * 2];
     WCHAR targetEscaped[DP_RUNTIME_MAX_TEXT * 2];
+    WCHAR categoryEscaped[128];
+    WCHAR apiEscaped[128];
+    WCHAR commandEscaped[DP_RUNTIME_MAX_TEXT * 2];
     WCHAR line[4096];
     CHAR utf8[8192];
     HANDLE file;
@@ -801,12 +841,15 @@ DpRuntimeWriteEvent(
     CreateDirectoryW(directory, NULL);
     DpRuntimeEscapeJson(gCurrentProcessPath, processEscaped, ARRAYSIZE(processEscaped));
     DpRuntimeEscapeJson(Target, targetEscaped, ARRAYSIZE(targetEscaped));
+    DpRuntimeEscapeJson(Category == NULL ? L"behavior" : Category, categoryEscaped, ARRAYSIZE(categoryEscaped));
+    DpRuntimeEscapeJson(Api, apiEscaped, ARRAYSIZE(apiEscaped));
+    DpRuntimeEscapeJson(CommandLine, commandEscaped, ARRAYSIZE(commandEscaped));
     GetSystemTime(&now);
 
     if (FAILED(StringCchPrintfW(
             line,
             ARRAYSIZE(line),
-            L"{\"timestampUtc\":\"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\",\"host\":\"%s\",\"pid\":%lu,\"action\":\"%s\",\"target\":\"%s\",\"processImage\":\"%s\",\"status\":\"0x%08X\",\"blocked\":%s}\r\n",
+            L"{\"timestampUtc\":\"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\",\"host\":\"%s\",\"pid\":%lu,\"targetPid\":%lu,\"action\":\"%s\",\"category\":\"%s\",\"api\":\"%s\",\"target\":\"%s\",\"processImage\":\"%s\",\"commandLine\":\"%s\",\"status\":\"0x%08X\",\"size\":%Iu,\"flags\":%lu,\"blocked\":%s}\r\n",
             now.wYear,
             now.wMonth,
             now.wDay,
@@ -816,10 +859,16 @@ DpRuntimeWriteEvent(
             now.wMilliseconds,
             L"",
             gCurrentProcessId,
+            TargetPid,
             Action,
+            categoryEscaped,
+            apiEscaped,
             targetEscaped,
             processEscaped,
+            commandEscaped,
             Status,
+            Size,
+            Flags,
             Blocked ? L"true" : L"false"))) {
         return;
     }
@@ -859,6 +908,22 @@ DpRuntimeShouldBlockInjectionPrimitive(
     return targetPid != 0 && targetPid != gCurrentProcessId;
 }
 
+static DWORD
+DpRuntimeGetTargetProcessId(
+    _In_opt_ HANDLE ProcessHandle
+    )
+{
+    if (ProcessHandle == NULL) {
+        return 0;
+    }
+
+    if (ProcessHandle == GetCurrentProcess()) {
+        return gCurrentProcessId;
+    }
+
+    return GetProcessId(ProcessHandle);
+}
+
 static BOOL
 DpRuntimeShouldBlockThreadPrimitive(
     _In_ HANDLE ThreadHandle
@@ -872,6 +937,18 @@ DpRuntimeShouldBlockThreadPrimitive(
 
     targetPid = GetProcessIdOfThread(ThreadHandle);
     return targetPid != 0 && targetPid != gCurrentProcessId;
+}
+
+static DWORD
+DpRuntimeGetTargetThreadProcessId(
+    _In_opt_ HANDLE ThreadHandle
+    )
+{
+    if (ThreadHandle == NULL) {
+        return 0;
+    }
+
+    return GetProcessIdOfThread(ThreadHandle);
 }
 
 static BOOL
@@ -1443,13 +1520,14 @@ DpHookCreateRemoteThread(
     LPDWORD threadId
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
         SetLastError(ERROR_ACCESS_DENIED);
-        DpRuntimeWriteEvent(L"userhook.blocked.create-remote-thread", L"CreateRemoteThread", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.create-remote-thread", L"injection", L"CreateRemoteThread", L"CreateRemoteThread", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, stackSize, creationFlags, NULL);
         return NULL;
     }
 
-    DpRuntimeWriteEvent(L"userhook.observed.create-remote-thread", L"CreateRemoteThread", ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.create-remote-thread", L"injection", L"CreateRemoteThread", L"CreateRemoteThread", ERROR_SUCCESS, FALSE, targetPid, stackSize, creationFlags, NULL);
     return gRealCreateRemoteThread(processHandle, threadAttributes, stackSize, startAddress, parameter, creationFlags, threadId);
 }
 
@@ -1465,13 +1543,14 @@ DpHookCreateRemoteThreadEx(
     LPDWORD threadId
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
         SetLastError(ERROR_ACCESS_DENIED);
-        DpRuntimeWriteEvent(L"userhook.blocked.create-remote-thread-ex", L"CreateRemoteThreadEx", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.create-remote-thread-ex", L"injection", L"CreateRemoteThreadEx", L"CreateRemoteThreadEx", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, stackSize, creationFlags, NULL);
         return NULL;
     }
 
-    DpRuntimeWriteEvent(L"userhook.observed.create-remote-thread-ex", L"CreateRemoteThreadEx", ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.create-remote-thread-ex", L"injection", L"CreateRemoteThreadEx", L"CreateRemoteThreadEx", ERROR_SUCCESS, FALSE, targetPid, stackSize, creationFlags, NULL);
     return gRealCreateRemoteThreadEx(processHandle,
                                      threadAttributes,
                                      stackSize,
@@ -1491,13 +1570,14 @@ DpHookWriteProcessMemory(
     SIZE_T *bytesWritten
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
         SetLastError(ERROR_ACCESS_DENIED);
-        DpRuntimeWriteEvent(L"userhook.blocked.write-process-memory", L"WriteProcessMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.write-process-memory", L"injection", L"WriteProcessMemory", L"WriteProcessMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, size, 0, NULL);
         return FALSE;
     }
 
-    DpRuntimeWriteEvent(L"userhook.observed.write-process-memory", L"WriteProcessMemory", ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.write-process-memory", L"injection", L"WriteProcessMemory", L"WriteProcessMemory", ERROR_SUCCESS, FALSE, targetPid, size, 0, NULL);
     return gRealWriteProcessMemory(processHandle, baseAddress, buffer, size, bytesWritten);
 }
 
@@ -1510,14 +1590,15 @@ DpHookVirtualAllocEx(
     DWORD protect
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeIsExecutableProtection(protect)) {
         if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
             SetLastError(ERROR_ACCESS_DENIED);
-            DpRuntimeWriteEvent(L"userhook.blocked.remote-executable-memory", L"VirtualAllocEx", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+            DpRuntimeWriteBehaviorEvent(L"userhook.blocked.remote-executable-memory", L"injection", L"VirtualAllocEx", L"VirtualAllocEx", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, size, protect, NULL);
             return NULL;
         }
 
-        DpRuntimeWriteEvent(L"userhook.observed.remote-executable-memory", L"VirtualAllocEx", ERROR_SUCCESS, FALSE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.remote-executable-memory", L"injection", L"VirtualAllocEx", L"VirtualAllocEx", ERROR_SUCCESS, FALSE, targetPid, size, protect, NULL);
     }
 
     return gRealVirtualAllocEx(processHandle, address, size, allocationType, protect);
@@ -1532,14 +1613,15 @@ DpHookVirtualProtectEx(
     PDWORD oldProtect
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeIsExecutableProtection(newProtect)) {
         if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
             SetLastError(ERROR_ACCESS_DENIED);
-            DpRuntimeWriteEvent(L"userhook.blocked.remote-executable-protect", L"VirtualProtectEx", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+            DpRuntimeWriteBehaviorEvent(L"userhook.blocked.remote-executable-protect", L"injection", L"VirtualProtectEx", L"VirtualProtectEx", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, size, newProtect, NULL);
             return FALSE;
         }
 
-        DpRuntimeWriteEvent(L"userhook.observed.remote-executable-protect", L"VirtualProtectEx", ERROR_SUCCESS, FALSE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.remote-executable-protect", L"injection", L"VirtualProtectEx", L"VirtualProtectEx", ERROR_SUCCESS, FALSE, targetPid, size, newProtect, NULL);
     }
 
     return gRealVirtualProtectEx(processHandle, address, size, newProtect, oldProtect);
@@ -1552,13 +1634,14 @@ DpHookQueueUserAPC(
     ULONG_PTR data
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetThreadProcessId(threadHandle);
     if (DpRuntimeShouldBlockThreadPrimitive(threadHandle)) {
         SetLastError(ERROR_ACCESS_DENIED);
-        DpRuntimeWriteEvent(L"userhook.blocked.queue-user-apc", L"QueueUserAPC", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.queue-user-apc", L"injection", L"QueueUserAPC", L"QueueUserAPC", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, 0, 0, NULL);
         return 0;
     }
 
-    DpRuntimeWriteEvent(L"userhook.observed.queue-user-apc", L"QueueUserAPC", ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.queue-user-apc", L"injection", L"QueueUserAPC", L"QueueUserAPC", ERROR_SUCCESS, FALSE, targetPid, 0, 0, NULL);
     return gRealQueueUserAPC(apcRoutine, threadHandle, data);
 }
 
@@ -1628,9 +1711,9 @@ DpHookCreateProcessW(
     }
 
     if ((creationFlags & CREATE_SUSPENDED) != 0) {
-        DpRuntimeWriteEvent(L"userhook.observed.suspended-process-create", target, ERROR_SUCCESS, FALSE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.suspended-process-create", L"process", L"CreateProcessW", target, ERROR_SUCCESS, FALSE, 0, 0, creationFlags, commandLine);
     } else {
-        DpRuntimeWriteEvent(L"userhook.observed.process-create", target, ERROR_SUCCESS, FALSE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.process-create", L"process", L"CreateProcessW", target, ERROR_SUCCESS, FALSE, 0, 0, creationFlags, commandLine);
     }
 
     return gRealCreateProcessW(applicationName,
@@ -1650,7 +1733,7 @@ DpHookLoadLibraryW(
     LPCWSTR fileName
     )
 {
-    DpRuntimeWriteEvent(L"userhook.observed.load-library", fileName, ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.load-library", L"module", L"LoadLibraryW", fileName, ERROR_SUCCESS, FALSE, 0, 0, 0, NULL);
     return gRealLoadLibraryW(fileName);
 }
 
@@ -1661,7 +1744,7 @@ DpHookLoadLibraryExW(
     DWORD flags
     )
 {
-    DpRuntimeWriteEvent(L"userhook.observed.load-library-ex", fileName, ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.load-library-ex", L"module", L"LoadLibraryExW", fileName, ERROR_SUCCESS, FALSE, 0, 0, flags, NULL);
     return gRealLoadLibraryExW(fileName, file, flags);
 }
 
@@ -1681,8 +1764,37 @@ DpHookRegSetValueExW(
     UNREFERENCED_PARAMETER(data);
     UNREFERENCED_PARAMETER(dataBytes);
 
-    DpRuntimeWriteEvent(L"userhook.observed.registry-set-value", valueName, ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-set-value", L"registry", L"RegSetValueExW", valueName, ERROR_SUCCESS, FALSE, 0, dataBytes, type, NULL);
     return gRealRegSetValueExW(key, valueName, reserved, type, data, dataBytes);
+}
+
+static BOOL WINAPI
+DpHookSetThreadContext(
+    HANDLE threadHandle,
+    const CONTEXT *context
+    )
+{
+    DWORD targetPid = DpRuntimeGetTargetThreadProcessId(threadHandle);
+
+    UNREFERENCED_PARAMETER(context);
+    if (DpRuntimeShouldBlockThreadPrimitive(threadHandle)) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.set-thread-context", L"injection", L"SetThreadContext", L"SetThreadContext", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, 0, 0, NULL);
+        return FALSE;
+    }
+
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.set-thread-context", L"injection", L"SetThreadContext", L"SetThreadContext", ERROR_SUCCESS, FALSE, targetPid, 0, 0, NULL);
+    return gRealSetThreadContext(threadHandle, context);
+}
+
+static DWORD WINAPI
+DpHookResumeThread(
+    HANDLE threadHandle
+    )
+{
+    DWORD targetPid = DpRuntimeGetTargetThreadProcessId(threadHandle);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.resume-thread", L"process", L"ResumeThread", L"ResumeThread", ERROR_SUCCESS, FALSE, targetPid, 0, 0, NULL);
+    return gRealResumeThread(threadHandle);
 }
 
 static VOID
@@ -1728,7 +1840,7 @@ DpHookConnect(
 
     UNREFERENCED_PARAMETER(nameLength);
     DpRuntimeFormatSockaddr(name, target, ARRAYSIZE(target));
-    DpRuntimeWriteEvent(L"userhook.observed.network-connect", target, ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.network-connect", L"network", L"connect", target, ERROR_SUCCESS, FALSE, 0, 0, 0, NULL);
     return gRealConnect(socketHandle, name, nameLength);
 }
 
@@ -1747,7 +1859,7 @@ DpHookWSAConnect(
 
     UNREFERENCED_PARAMETER(nameLength);
     DpRuntimeFormatSockaddr(name, target, ARRAYSIZE(target));
-    DpRuntimeWriteEvent(L"userhook.observed.network-wsaconnect", target, ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.network-wsaconnect", L"network", L"WSAConnect", target, ERROR_SUCCESS, FALSE, 0, 0, 0, NULL);
     return gRealWSAConnect(socketHandle, name, nameLength, callerData, calleeData, sqos, gqos);
 }
 
@@ -1766,12 +1878,13 @@ DpHookNtCreateThreadEx(
     PVOID attributeList
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
-        DpRuntimeWriteEvent(L"userhook.blocked.nt-create-thread-ex", L"NtCreateThreadEx", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-create-thread-ex", L"injection", L"NtCreateThreadEx", L"NtCreateThreadEx", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, stackSize, createFlags, NULL);
         return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
     }
 
-    DpRuntimeWriteEvent(L"userhook.observed.nt-create-thread-ex", L"NtCreateThreadEx", ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-create-thread-ex", L"injection", L"NtCreateThreadEx", L"NtCreateThreadEx", ERROR_SUCCESS, FALSE, targetPid, stackSize, createFlags, NULL);
     return gRealNtCreateThreadEx(threadHandle,
                                  desiredAccess,
                                  objectAttributes,
@@ -1794,12 +1907,13 @@ DpHookNtWriteVirtualMemory(
     PSIZE_T bytesWritten
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
-        DpRuntimeWriteEvent(L"userhook.blocked.nt-write-virtual-memory", L"NtWriteVirtualMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-write-virtual-memory", L"injection", L"NtWriteVirtualMemory", L"NtWriteVirtualMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, size, 0, NULL);
         return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
     }
 
-    DpRuntimeWriteEvent(L"userhook.observed.nt-write-virtual-memory", L"NtWriteVirtualMemory", ERROR_SUCCESS, FALSE);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-write-virtual-memory", L"injection", L"NtWriteVirtualMemory", L"NtWriteVirtualMemory", ERROR_SUCCESS, FALSE, targetPid, size, 0, NULL);
     return gRealNtWriteVirtualMemory(processHandle, baseAddress, buffer, size, bytesWritten);
 }
 
@@ -1813,13 +1927,14 @@ DpHookNtAllocateVirtualMemory(
     ULONG protect
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeIsExecutableProtection(protect)) {
         if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
-            DpRuntimeWriteEvent(L"userhook.blocked.nt-allocate-executable-memory", L"NtAllocateVirtualMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+            DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-allocate-executable-memory", L"injection", L"NtAllocateVirtualMemory", L"NtAllocateVirtualMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, regionSize == NULL ? 0 : *regionSize, protect, NULL);
             return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
         }
 
-        DpRuntimeWriteEvent(L"userhook.observed.nt-allocate-executable-memory", L"NtAllocateVirtualMemory", ERROR_SUCCESS, FALSE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-allocate-executable-memory", L"injection", L"NtAllocateVirtualMemory", L"NtAllocateVirtualMemory", ERROR_SUCCESS, FALSE, targetPid, regionSize == NULL ? 0 : *regionSize, protect, NULL);
     }
 
     return gRealNtAllocateVirtualMemory(processHandle, baseAddress, zeroBits, regionSize, allocationType, protect);
@@ -1834,13 +1949,14 @@ DpHookNtProtectVirtualMemory(
     PULONG oldAccessProtection
     )
 {
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
     if (DpRuntimeIsExecutableProtection(newAccessProtection)) {
         if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
-            DpRuntimeWriteEvent(L"userhook.blocked.nt-protect-executable-memory", L"NtProtectVirtualMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE);
+            DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-protect-executable-memory", L"injection", L"NtProtectVirtualMemory", L"NtProtectVirtualMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, numberOfBytesToProtect == NULL ? 0 : *numberOfBytesToProtect, newAccessProtection, NULL);
             return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
         }
 
-        DpRuntimeWriteEvent(L"userhook.observed.nt-protect-executable-memory", L"NtProtectVirtualMemory", ERROR_SUCCESS, FALSE);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-protect-executable-memory", L"injection", L"NtProtectVirtualMemory", L"NtProtectVirtualMemory", ERROR_SUCCESS, FALSE, targetPid, numberOfBytesToProtect == NULL ? 0 : *numberOfBytesToProtect, newAccessProtection, NULL);
     }
 
     return gRealNtProtectVirtualMemory(processHandle,
@@ -1848,6 +1964,17 @@ DpHookNtProtectVirtualMemory(
                                        numberOfBytesToProtect,
                                        newAccessProtection,
                                        oldAccessProtection);
+}
+
+static NTSTATUS NTAPI
+DpHookNtUnmapViewOfSection(
+    HANDLE processHandle,
+    PVOID baseAddress
+    )
+{
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-unmap-view", L"injection", L"NtUnmapViewOfSection", L"NtUnmapViewOfSection", ERROR_SUCCESS, FALSE, targetPid, 0, 0, NULL);
+    return gRealNtUnmapViewOfSection(processHandle, baseAddress);
 }
 
 static BOOL
@@ -1941,6 +2068,8 @@ DpRuntimeInitializeOnce(
         DpRuntimeHookApi(L"kernel32.dll", "QueueUserAPC", DpHookQueueUserAPC, (LPVOID *)&gRealQueueUserAPC);
         DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryW", DpHookLoadLibraryW, (LPVOID *)&gRealLoadLibraryW);
         DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryExW", DpHookLoadLibraryExW, (LPVOID *)&gRealLoadLibraryExW);
+        DpRuntimeHookApi(L"kernel32.dll", "SetThreadContext", DpHookSetThreadContext, (LPVOID *)&gRealSetThreadContext);
+        DpRuntimeHookApi(L"kernel32.dll", "ResumeThread", DpHookResumeThread, (LPVOID *)&gRealResumeThread);
         DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExW", DpHookSetWindowsHookExW, (LPVOID *)&gRealSetWindowsHookExW);
         DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExA", DpHookSetWindowsHookExA, (LPVOID *)&gRealSetWindowsHookExA);
         DpRuntimeHookApi(L"advapi32.dll", "RegSetValueExW", DpHookRegSetValueExW, (LPVOID *)&gRealRegSetValueExW);
@@ -1950,6 +2079,7 @@ DpRuntimeInitializeOnce(
         DpRuntimeHookApi(L"ntdll.dll", "NtWriteVirtualMemory", DpHookNtWriteVirtualMemory, (LPVOID *)&gRealNtWriteVirtualMemory);
         DpRuntimeHookApi(L"ntdll.dll", "NtAllocateVirtualMemory", DpHookNtAllocateVirtualMemory, (LPVOID *)&gRealNtAllocateVirtualMemory);
         DpRuntimeHookApi(L"ntdll.dll", "NtProtectVirtualMemory", DpHookNtProtectVirtualMemory, (LPVOID *)&gRealNtProtectVirtualMemory);
+        DpRuntimeHookApi(L"ntdll.dll", "NtUnmapViewOfSection", DpHookNtUnmapViewOfSection, (LPVOID *)&gRealNtUnmapViewOfSection);
 
         if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
             DpRuntimeWriteEvent(L"userhook.runtime.enable-hooks-failed", L"MinHook", GetLastError(), FALSE);

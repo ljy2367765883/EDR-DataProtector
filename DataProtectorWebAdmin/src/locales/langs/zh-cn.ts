@@ -1065,6 +1065,12 @@
         runtimePathPending: '保存策略后由 Agent 自动准备',
         save: '保存进程威胁感知',
         surfaces: '受保护的进程行为面',
+        behaviorRules: '行为链判定规则',
+        behaviorRulesDesc: '基于公开 EDR/Sigma/MITRE 思路，将原子行为按时间窗口、权重和阈值组合成恶意判定。',
+        activeRules: '启用规则：{count}',
+        ruleWindow: '窗口 {seconds}s',
+        ruleThreshold: '阈值 {count}',
+        ruleWeight: '权重 {score}',
         saved: '进程威胁感知策略已保存到中央策略。',
         surfacesList: {
           earlyTitle: '内核早鸟进程阶段',

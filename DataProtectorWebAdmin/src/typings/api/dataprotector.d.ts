@@ -218,12 +218,34 @@ declare namespace Api {
       excludedProcessPaths: string[];
       trustedSignerSubjects: string[];
       runtimePath: string;
+      behaviorRules: UserHookBehaviorRule[];
       flags: number;
       actor?: string;
     }
 
     interface UserHookDefensePolicyRequest extends Omit<UserHookDefensePolicy, 'flags'> {
       flags?: number;
+    }
+
+    interface UserHookBehaviorRule {
+      ruleId: string;
+      name: string;
+      enabled: boolean;
+      actions: string[];
+      anyActions: string[];
+      processNames: string[];
+      parentProcessNames: string[];
+      targetContains: string[];
+      commandLineContains: string[];
+      windowSeconds: number;
+      threshold: number;
+      weight: number;
+      severity: 'critical' | 'warning' | 'info' | 'operational';
+      disposition: 'malicious' | 'suspicious' | 'observed' | 'blocked';
+      tactic: string;
+      technique: string;
+      description: string;
+      references: string[];
     }
 
     interface UsbCryptPolicy {

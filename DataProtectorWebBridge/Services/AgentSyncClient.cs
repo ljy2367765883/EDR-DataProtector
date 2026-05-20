@@ -43,6 +43,7 @@ namespace DataProtectorWebBridge.Services
         private string lastApplyStatus = "0x00000000";
         private string lastApplyMessage = "Agent started.";
         private long heartbeatIndex;
+        private PolicyBridgeService.UserHookDefensePolicyDto currentUserHookDefensePolicy = PolicyBridgeService.DefaultUserHookDefensePolicy();
 
         public AgentSyncClient(string serverBaseUrl, TimeSpan interval, PolicyBridgeService policyService)
         {
@@ -227,7 +228,7 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
             AuditLog.AuditRecord[] hashProtectRecords = DrainAuditSource("hashprotect", policyService.DrainHashProtectAuditRecords);
             AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
-            AuditLog.AuditRecord[] userHookRecords = DrainAuditSource("userhook", policyService.DrainUserHookDefenseAuditRecords);
+            AuditLog.AuditRecord[] userHookRecords = DrainAuditSource("userhook", () => policyService.DrainUserHookDefenseAuditRecords(currentUserHookDefensePolicy));
             AuditLog.AuditRecord[] dlpRecords = DrainAuditSource("dlp", dlpProtectionService.DrainAuditRecords);
             if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0 || userHookRecords.Length > 0 || dlpRecords.Length > 0)
             {
@@ -945,6 +946,7 @@ namespace DataProtectorWebBridge.Services
                 return;
             }
 
+            currentUserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(userHookDefensePolicy);
             PersistUsbCryptPolicy(usbCryptPolicy);
             dlpProtectionService.UpdatePolicy(dlpProtectionPolicy);
 

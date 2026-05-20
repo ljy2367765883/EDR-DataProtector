@@ -112,6 +112,9 @@ namespace DataProtectorWebBridge.Services
             UserHookDefenseFlagMonitorSystemProcesses |
             UserHookDefenseFlagRuntimeApiBehavior |
             UserHookDefenseFlagRuntimeMemoryScan;
+        private const int MaxBehaviorChainRules = 64;
+        private const int MaxBehaviorAtomsPerRule = 16;
+        private const int MaxBehaviorRuleText = 256;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
 
@@ -1307,8 +1310,14 @@ namespace DataProtectorWebBridge.Services
 
         public AuditLog.AuditRecord[] DrainUserHookDefenseAuditRecords()
         {
+            return DrainUserHookDefenseAuditRecords(null);
+        }
+
+        public AuditLog.AuditRecord[] DrainUserHookDefenseAuditRecords(UserHookDefensePolicyDto policy)
+        {
             UserHookDefenseEventDto[] events = QueryUserHookDefenseEvents();
             List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+            UserHookBehaviorCorrelator correlator = new UserHookBehaviorCorrelator(policy);
 
             foreach (UserHookDefenseEventDto item in events)
             {
@@ -1329,9 +1338,14 @@ namespace DataProtectorWebBridge.Services
 
                 records.Add(record);
                 TryAppendAudit(record);
+                records.AddRange(correlator.Observe(record));
             }
 
-            records.AddRange(DrainUserHookRuntimeAuditRecords());
+            foreach (AuditLog.AuditRecord record in DrainUserHookRuntimeAuditRecords(policy))
+            {
+                records.Add(record);
+                records.AddRange(correlator.Observe(record));
+            }
 
             return records.ToArray();
         }
@@ -1349,7 +1363,7 @@ namespace DataProtectorWebBridge.Services
             return message;
         }
 
-        private AuditLog.AuditRecord[] DrainUserHookRuntimeAuditRecords()
+        private AuditLog.AuditRecord[] DrainUserHookRuntimeAuditRecords(UserHookDefensePolicyDto policy)
         {
             string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             string path = Path.Combine(dataRoot, "DataProtector", "UserHookRuntimeEvents.jsonl");
@@ -1411,7 +1425,7 @@ namespace DataProtectorWebBridge.Services
                         Extension = runtimeEvent.processImage ?? string.Empty,
                         Succeeded = !blocked,
                         Status = string.IsNullOrWhiteSpace(runtimeEvent.status) ? "0x00000000" : runtimeEvent.status,
-                        Message = "Process threat runtime event from PID " + runtimeEvent.pid.ToString(CultureInfo.InvariantCulture) + "."
+                        Message = BuildUserHookRuntimeMessage(runtimeEvent)
                     };
 
                     records.Add(record);
@@ -1437,6 +1451,33 @@ namespace DataProtectorWebBridge.Services
             }
 
             return records.ToArray();
+        }
+
+        private static string BuildUserHookRuntimeMessage(UserHookRuntimeEvent runtimeEvent)
+        {
+            string message = "Process threat runtime event from PID " + runtimeEvent.pid.ToString(CultureInfo.InvariantCulture) + ".";
+            message += " Category: " + (runtimeEvent.category ?? "behavior") + ".";
+            if (!string.IsNullOrWhiteSpace(runtimeEvent.api))
+            {
+                message += " API: " + runtimeEvent.api + ".";
+            }
+
+            if (runtimeEvent.targetPid != 0)
+            {
+                message += " TargetPID: " + runtimeEvent.targetPid.ToString(CultureInfo.InvariantCulture) + ".";
+            }
+
+            if (!string.IsNullOrWhiteSpace(runtimeEvent.commandLine))
+            {
+                message += " Command: " + runtimeEvent.commandLine + ".";
+            }
+
+            if (runtimeEvent.size != 0)
+            {
+                message += " Size: " + runtimeEvent.size.ToString(CultureInfo.InvariantCulture) + ".";
+            }
+
+            return message;
         }
 
         private AuditLog.AuditRecord[] TryDrainSecurityAuditSource(string source, Func<AuditLog.AuditRecord[]> drain)
@@ -1967,6 +2008,7 @@ namespace DataProtectorWebBridge.Services
                 excludedProcessPaths = DefaultUserHookExcludedProcessPaths(),
                 trustedSignerSubjects = DefaultUserHookTrustedSignerSubjects(),
                 runtimePath = GetPreparedUserHookRuntimePath(),
+                behaviorRules = DefaultUserHookBehaviorRules(),
                 flags = flags & UserHookDefenseAllowedFlags
             };
         }
@@ -2028,6 +2070,7 @@ namespace DataProtectorWebBridge.Services
                 excludedProcessPaths = NormalizeStringList(source.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
                 trustedSignerSubjects = NormalizeStringList(source.trustedSignerSubjects, DefaultUserHookTrustedSignerSubjects()),
                 runtimePath = string.IsNullOrWhiteSpace(source.runtimePath) ? GetPreparedUserHookRuntimePath() : source.runtimePath,
+                behaviorRules = NormalizeUserHookBehaviorRules(source.behaviorRules),
                 flags = ToUserHookDefenseFlags(source),
                 actor = source.actor
             };
@@ -2056,6 +2099,7 @@ namespace DataProtectorWebBridge.Services
                 excludedProcessPaths = NormalizeStringList(request.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
                 trustedSignerSubjects = NormalizeStringList(request.trustedSignerSubjects, DefaultUserHookTrustedSignerSubjects()),
                 runtimePath = GetPreparedUserHookRuntimePath(),
+                behaviorRules = NormalizeUserHookBehaviorRules(request.behaviorRules),
                 actor = request.actor
             };
 
@@ -2068,7 +2112,7 @@ namespace DataProtectorWebBridge.Services
             UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};runtimeApi={7};memoryScan={8};excludedNames={9};excludedDirs={10};excludedPaths={11};trustedSigners={12};flags=0x{13:X8}",
+                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};runtimeApi={7};memoryScan={8};rules={9};excludedNames={10};excludedDirs={11};excludedPaths={12};trustedSigners={13};flags=0x{14:X8}",
                 normalized.enabled,
                 normalized.monitorEarlyProcesses,
                 normalized.monitorImageLoads,
@@ -2078,6 +2122,7 @@ namespace DataProtectorWebBridge.Services
                 normalized.monitorSystemProcesses,
                 normalized.monitorRuntimeApiBehavior,
                 normalized.scanExecutableMemory,
+                normalized.behaviorRules == null ? 0 : normalized.behaviorRules.Count(rule => rule != null && rule.enabled),
                 normalized.excludedProcessNames.Length,
                 normalized.excludedProcessDirectories.Length,
                 normalized.excludedProcessPaths.Length,
@@ -2137,6 +2182,354 @@ namespace DataProtectorWebBridge.Services
         private static string[] DefaultUserHookTrustedSignerSubjects()
         {
             return new string[0];
+        }
+
+        internal static UserHookBehaviorRule[] DefaultUserHookBehaviorRules()
+        {
+            return new[]
+            {
+                NewBehaviorRule(
+                    "dp.behavior.injection-chain",
+                    "跨进程注入链",
+                    new[] { "userhook.behavior-process-access", "userhook.observed.remote-executable-memory", "userhook.observed.write-process-memory", "userhook.behavior-remote-thread-create", "userhook.observed.nt-create-thread-ex" },
+                    null,
+                    90,
+                    4,
+                    100,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion / Privilege Escalation",
+                    "T1055 Process Injection",
+                    "OpenProcess/VirtualAllocEx/WriteProcessMemory/CreateRemoteThread 类行为在同一进程窗口内连续出现，按注入链判定。"),
+                NewBehaviorRule(
+                    "dp.behavior.process-hollowing",
+                    "进程空洞化链",
+                    new[] { "userhook.observed.suspended-process-create", "userhook.observed.nt-unmap-view", "userhook.observed.write-process-memory", "userhook.observed.set-thread-context", "userhook.observed.resume-thread" },
+                    null,
+                    120,
+                    4,
+                    95,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion",
+                    "T1093 Process Hollowing",
+                    "挂起创建、卸载映像、写入内存、改线程上下文、恢复线程组成典型空洞化行为。"),
+                NewBehaviorRule(
+                    "dp.behavior.apc-injection",
+                    "APC 注入链",
+                    new[] { "userhook.observed.queue-user-apc" },
+                    new[] { "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory" },
+                    90,
+                    2,
+                    80,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion / Execution",
+                    "T1055.004 APC Injection",
+                    "跨进程写入或分配可执行内存后排队 APC，属于常见无远程线程注入变体。"),
+                NewBehaviorRule(
+                    "dp.behavior.hook-bypass",
+                    "Hook 绕过与直接系统调用",
+                    new[] { "userhook.runtime.unhook-detected", "userhook.runtime.hook-overwrite-detected", "userhook.runtime.syscall-bypass-risk", "userhook.runtime.memory-private-syscall-stub" },
+                    null,
+                    120,
+                    1,
+                    90,
+                    "critical",
+                    "suspicious",
+                    "Defense Evasion",
+                    "T1562 Impair Defenses",
+                    "检测到 hook 被还原/覆盖、私有 syscall stub 或直接系统调用迹象。"),
+                NewBehaviorRule(
+                    "dp.behavior.manual-map",
+                    "内存驻留载荷",
+                    new[] { "userhook.runtime.memory-manual-map", "userhook.runtime.memory-rwx", "userhook.runtime.memory-private-executable" },
+                    null,
+                    180,
+                    1,
+                    80,
+                    "critical",
+                    "suspicious",
+                    "Defense Evasion",
+                    "T1620 Reflective Code Loading",
+                    "发现私有可执行内存、RWX 区域或疑似手工映射 PE。"),
+                NewBehaviorRule(
+                    "dp.behavior.lolbin-download-exec",
+                    "LOLBIN 下载执行",
+                    new[] { "userhook.observed.process-create", "userhook.observed.network-connect", "userhook.observed.network-wsaconnect" },
+                    null,
+                    180,
+                    2,
+                    70,
+                    "warning",
+                    "suspicious",
+                    "Command and Control / Execution",
+                    "T1105 / T1218",
+                    "certutil、bitsadmin、mshta、regsvr32、rundll32、msiexec、installutil 等 LOLBin 启动后建立外联。"),
+                NewBehaviorRule(
+                    "dp.behavior.office-script-exec",
+                    "Office 脚本执行链",
+                    new[] { "userhook.observed.process-create" },
+                    null,
+                    60,
+                    1,
+                    75,
+                    "critical",
+                    "suspicious",
+                    "Initial Access / Execution",
+                    "T1204 / T1059",
+                    "Office 进程拉起 powershell、cmd、wscript、cscript、mshta 等脚本解释器。"),
+                NewBehaviorRule(
+                    "dp.behavior.recovery-inhibit",
+                    "系统恢复破坏",
+                    new[] { "userhook.observed.process-create" },
+                    null,
+                    60,
+                    1,
+                    85,
+                    "critical",
+                    "malicious",
+                    "Impact",
+                    "T1490 Inhibit System Recovery",
+                    "vssadmin、wbadmin、bcdedit、wmic shadowcopy、reagentc 等恢复破坏命令。"),
+                NewBehaviorRule(
+                    "dp.behavior.persistence-autostart",
+                    "自启动持久化",
+                    new[] { "userhook.observed.registry-set-value", "userhook.observed.process-create" },
+                    null,
+                    180,
+                    1,
+                    55,
+                    "warning",
+                    "suspicious",
+                    "Persistence",
+                    "T1060 Registry Run Keys / Startup Folder",
+                    "Run/RunOnce、启动目录、计划任务或服务创建相关行为。"),
+                NewBehaviorRule(
+                    "dp.behavior.script-network",
+                    "脚本解释器外联",
+                    new[] { "userhook.observed.process-create", "userhook.observed.network-connect", "userhook.observed.network-wsaconnect" },
+                    null,
+                    180,
+                    2,
+                    60,
+                    "warning",
+                    "suspicious",
+                    "Execution / Command and Control",
+                    "T1059 Command and Scripting Interpreter",
+                    "powershell、wscript、cscript、mshta、cmd 等脚本宿主启动后外联。")
+            };
+        }
+
+        private static UserHookBehaviorRule NewBehaviorRule(
+            string ruleId,
+            string name,
+            string[] actions,
+            string[] anyActions,
+            int windowSeconds,
+            int threshold,
+            int weight,
+            string severity,
+            string disposition,
+            string tactic,
+            string technique,
+            string description)
+        {
+            return new UserHookBehaviorRule
+            {
+                ruleId = ruleId,
+                name = name,
+                enabled = true,
+                actions = actions ?? new string[0],
+                anyActions = anyActions ?? new string[0],
+                processNames = DefaultRuleProcessNames(ruleId),
+                parentProcessNames = DefaultRuleParentProcessNames(ruleId),
+                targetContains = DefaultRuleTargetTokens(ruleId),
+                commandLineContains = DefaultRuleCommandTokens(ruleId),
+                windowSeconds = windowSeconds,
+                threshold = threshold,
+                weight = weight,
+                severity = severity,
+                disposition = disposition,
+                tactic = tactic,
+                technique = technique,
+                description = description,
+                references = DefaultRuleReferences(ruleId)
+            };
+        }
+
+        private static string[] DefaultRuleProcessNames(string ruleId)
+        {
+            if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "certutil.exe", "bitsadmin.exe", "mshta.exe", "regsvr32.exe", "rundll32.exe", "msiexec.exe", "installutil.exe", "regasm.exe", "regsvcs.exe", "wmic.exe", "powershell.exe", "pwsh.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.office-script-exec", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "vssadmin.exe", "wbadmin.exe", "bcdedit.exe", "wmic.exe", "powershell.exe", "cmd.exe", "reagentc.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.script-network", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe", "cmd.exe", "rundll32.exe", "regsvr32.exe" };
+            }
+
+            return new string[0];
+        }
+
+        private static string[] DefaultRuleParentProcessNames(string ruleId)
+        {
+            if (string.Equals(ruleId, "dp.behavior.office-script-exec", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "visio.exe", "msaccess.exe", "onenote.exe" };
+            }
+
+            return new string[0];
+        }
+
+        private static string[] DefaultRuleTargetTokens(string ruleId)
+        {
+            if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "\\run", "\\runonce", "currentversion\\run", "startup", "schtasks", "create service", "new-service", "sc.exe create" };
+            }
+
+            return new string[0];
+        }
+
+        private static string[] DefaultRuleCommandTokens(string ruleId)
+        {
+            if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "http://", "https://", "urlcache", "download", "scrobj.dll", "javascript:", "vbscript:", "/i:", "-url", "http" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.office-script-exec", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "-enc", "-encodedcommand", "downloadstring", "frombase64string", "iex", "invoke-expression", "http://", "https://", "rundll32", "regsvr32", "mshta" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete", "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "disable", "reagentc /disable" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "schtasks", "/create", "sc create", "new-service", "currentversion\\run", "runonce", "startup" };
+            }
+
+            return new string[0];
+        }
+
+        private static string[] DefaultRuleReferences(string ruleId)
+        {
+            if (string.Equals(ruleId, "dp.behavior.injection-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1055", "MITRE DET0106", "Sysmon Event ID 8/10" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1490", "Sigma/Elastic recovery inhibition rules" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "LOLBAS", "MITRE ATT&CK T1218/T1105" };
+            }
+
+            return new[] { "MITRE ATT&CK", "Sigma / Elastic public detection engineering patterns" };
+        }
+
+        private static UserHookBehaviorRule[] NormalizeUserHookBehaviorRules(UserHookBehaviorRule[] rules)
+        {
+            IEnumerable<UserHookBehaviorRule> source = rules == null || rules.Length == 0
+                ? DefaultUserHookBehaviorRules()
+                : rules;
+
+            return source
+                .Where(rule => rule != null)
+                .Select(NormalizeUserHookBehaviorRule)
+                .Where(rule => !string.IsNullOrWhiteSpace(rule.ruleId))
+                .GroupBy(rule => rule.ruleId, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .Take(MaxBehaviorChainRules)
+                .ToArray();
+        }
+
+        private static UserHookBehaviorRule NormalizeUserHookBehaviorRule(UserHookBehaviorRule rule)
+        {
+            string ruleId = NormalizeRuleText(rule == null ? string.Empty : rule.ruleId, MaxBehaviorRuleText);
+            string name = NormalizeRuleText(rule == null ? string.Empty : rule.name, MaxBehaviorRuleText);
+            return new UserHookBehaviorRule
+            {
+                ruleId = ruleId,
+                name = string.IsNullOrWhiteSpace(name) ? ruleId : name,
+                enabled = rule == null || rule.enabled,
+                actions = NormalizeRuleList(rule == null ? null : rule.actions),
+                anyActions = NormalizeRuleList(rule == null ? null : rule.anyActions),
+                processNames = NormalizeRuleList(rule == null ? null : rule.processNames),
+                parentProcessNames = NormalizeRuleList(rule == null ? null : rule.parentProcessNames),
+                targetContains = NormalizeRuleList(rule == null ? null : rule.targetContains),
+                commandLineContains = NormalizeRuleList(rule == null ? null : rule.commandLineContains),
+                windowSeconds = Clamp(rule == null ? 120 : rule.windowSeconds, 5, 3600),
+                threshold = Clamp(rule == null ? 1 : rule.threshold, 1, 64),
+                weight = Clamp(rule == null ? 50 : rule.weight, 1, 100),
+                severity = NormalizeSeverity(rule == null ? string.Empty : rule.severity),
+                disposition = NormalizeDisposition(rule == null ? string.Empty : rule.disposition),
+                tactic = NormalizeRuleText(rule == null ? string.Empty : rule.tactic, MaxBehaviorRuleText),
+                technique = NormalizeRuleText(rule == null ? string.Empty : rule.technique, MaxBehaviorRuleText),
+                description = NormalizeRuleText(rule == null ? string.Empty : rule.description, 1024),
+                references = NormalizeRuleList(rule == null ? null : rule.references)
+            };
+        }
+
+        private static string[] NormalizeRuleList(string[] values)
+        {
+            return (values ?? new string[0])
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => NormalizeRuleText(item, MaxBehaviorRuleText))
+                .Where(item => item.Length != 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(MaxBehaviorAtomsPerRule)
+                .ToArray();
+        }
+
+        private static string NormalizeRuleText(string value, int maxChars)
+        {
+            string text = (value ?? string.Empty).Trim();
+            if (text.Length > maxChars)
+            {
+                text = text.Substring(0, maxChars);
+            }
+
+            return text.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+        }
+
+        private static string NormalizeSeverity(string value)
+        {
+            string text = (value ?? string.Empty).Trim().ToLowerInvariant();
+            return text == "critical" || text == "warning" || text == "info" || text == "operational" ? text : "warning";
+        }
+
+        private static string NormalizeDisposition(string value)
+        {
+            string text = (value ?? string.Empty).Trim().ToLowerInvariant();
+            return text == "malicious" || text == "suspicious" || text == "observed" || text == "blocked" ? text : "suspicious";
+        }
+
+        private static int Clamp(int value, int min, int max)
+        {
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
         }
 
         private static string[] NormalizeStringList(string[] values, string[] fallback)
@@ -3196,11 +3589,299 @@ namespace DataProtectorWebBridge.Services
             public string timestampUtc { get; set; }
             public string host { get; set; }
             public uint pid { get; set; }
+            public uint targetPid { get; set; }
             public string action { get; set; }
+            public string category { get; set; }
+            public string api { get; set; }
             public string target { get; set; }
             public string processImage { get; set; }
+            public string commandLine { get; set; }
             public string status { get; set; }
+            public ulong size { get; set; }
+            public uint flags { get; set; }
             public bool blocked { get; set; }
+        }
+
+        private sealed class UserHookBehaviorCorrelator
+        {
+            private readonly UserHookBehaviorRule[] rules;
+            private readonly List<UserHookBehaviorAtom> atoms = new List<UserHookBehaviorAtom>();
+            private readonly HashSet<string> emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            public UserHookBehaviorCorrelator(UserHookDefensePolicyDto policy)
+            {
+                UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
+                rules = NormalizeUserHookBehaviorRules(normalized.behaviorRules);
+            }
+
+            public AuditLog.AuditRecord[] Observe(AuditLog.AuditRecord record)
+            {
+                List<AuditLog.AuditRecord> matches = new List<AuditLog.AuditRecord>();
+                UserHookBehaviorAtom atom;
+                if (!TryBuildAtom(record, out atom))
+                {
+                    return matches.ToArray();
+                }
+
+                atoms.Add(atom);
+                TrimAtoms(atom.TimestampUtc);
+
+                foreach (UserHookBehaviorRule rule in rules)
+                {
+                    AuditLog.AuditRecord match;
+                    if (TryMatchRule(rule, atom, out match))
+                    {
+                        matches.Add(match);
+                    }
+                }
+
+                return matches.ToArray();
+            }
+
+            private bool TryMatchRule(UserHookBehaviorRule rule, UserHookBehaviorAtom atom, out AuditLog.AuditRecord record)
+            {
+                DateTime windowStart;
+                List<UserHookBehaviorAtom> candidates;
+                HashSet<string> matchedActions;
+                int score;
+                string dedupKey;
+
+                record = null;
+                if (rule == null || !rule.enabled || !AtomMatchesRule(rule, atom))
+                {
+                    return false;
+                }
+
+                windowStart = atom.TimestampUtc.AddSeconds(-Clamp(rule.windowSeconds, 5, 3600));
+                candidates = atoms
+                    .Where(item => item.TimestampUtc >= windowStart)
+                    .Where(item => string.Equals(item.ProcessKey, atom.ProcessKey, StringComparison.OrdinalIgnoreCase))
+                    .Where(item => AtomMatchesRule(rule, item))
+                    .ToList();
+
+                matchedActions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (UserHookBehaviorAtom item in candidates)
+                {
+                    matchedActions.Add(item.Action);
+                }
+
+                score = matchedActions.Count * Clamp(rule.weight, 1, 100);
+                if (matchedActions.Count < Clamp(rule.threshold, 1, 64))
+                {
+                    return false;
+                }
+
+                dedupKey = rule.ruleId + "|" + atom.ProcessKey + "|" + (long)(atom.TimestampUtc.Subtract(DateTime.MinValue).TotalSeconds / Clamp(rule.windowSeconds, 5, 3600));
+                if (!emitted.Add(dedupKey))
+                {
+                    return false;
+                }
+
+                record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = atom.TimestampUtc.ToString("o"),
+                    Host = atom.Host,
+                    Actor = "behavior-chain-engine",
+                    Action = "behavior.chain." + rule.ruleId,
+                    Target = atom.Target,
+                    Extension = atom.ProcessImage,
+                    Succeeded = !string.Equals(rule.disposition, "malicious", StringComparison.OrdinalIgnoreCase),
+                    Status = string.Equals(rule.severity, "critical", StringComparison.OrdinalIgnoreCase) ? "0xE0020001" : "0xE0020000",
+                    Message = BuildRuleMatchMessage(rule, matchedActions, candidates.Count, score)
+                };
+                return true;
+            }
+
+            private static string BuildRuleMatchMessage(UserHookBehaviorRule rule, HashSet<string> matchedActions, int eventCount, int score)
+            {
+                string message = "Behavior chain matched: " + rule.name + ".";
+                message += " Severity=" + rule.severity + "; disposition=" + rule.disposition + "; score=" + score.ToString(CultureInfo.InvariantCulture) + "; events=" + eventCount.ToString(CultureInfo.InvariantCulture) + ".";
+                if (!string.IsNullOrWhiteSpace(rule.technique))
+                {
+                    message += " Technique: " + rule.technique + ".";
+                }
+
+                message += " Actions: " + string.Join(",", matchedActions.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()) + ".";
+                if (!string.IsNullOrWhiteSpace(rule.description))
+                {
+                    message += " " + rule.description;
+                }
+
+                return message;
+            }
+
+            private static bool AtomMatchesRule(UserHookBehaviorRule rule, UserHookBehaviorAtom atom)
+            {
+                if (!MatchesAction(rule.actions, atom.Action) && !MatchesAction(rule.anyActions, atom.Action))
+                {
+                    return false;
+                }
+
+                if (!MatchesOptionalList(rule.processNames, atom.ProcessImage))
+                {
+                    return false;
+                }
+
+                if (!MatchesOptionalList(rule.parentProcessNames, atom.ParentImage))
+                {
+                    return false;
+                }
+
+                if (!ContainsOptionalToken(rule.targetContains, atom.Target))
+                {
+                    return false;
+                }
+
+                if (!ContainsOptionalToken(rule.commandLineContains, atom.CommandLine))
+                {
+                    return false;
+                }
+
+                return true;
+            }
+
+            private static bool MatchesAction(string[] actions, string action)
+            {
+                if (actions == null || actions.Length == 0)
+                {
+                    return false;
+                }
+
+                return actions.Any(item => string.Equals(item, action, StringComparison.OrdinalIgnoreCase));
+            }
+
+            private static bool MatchesOptionalList(string[] values, string source)
+            {
+                if (values == null || values.Length == 0)
+                {
+                    return true;
+                }
+
+                string name = ExtractFileName(source);
+                return values.Any(item =>
+                    string.Equals(item, name, StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrWhiteSpace(source) && source.IndexOf(item, StringComparison.OrdinalIgnoreCase) >= 0));
+            }
+
+            private static bool ContainsOptionalToken(string[] tokens, string source)
+            {
+                if (tokens == null || tokens.Length == 0)
+                {
+                    return true;
+                }
+
+                if (string.IsNullOrWhiteSpace(source))
+                {
+                    return false;
+                }
+
+                return tokens.Any(token => source.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static string ExtractFileName(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return string.Empty;
+                }
+
+                try
+                {
+                    return Path.GetFileName(value.Trim().Trim('"'));
+                }
+                catch
+                {
+                    return value;
+                }
+            }
+
+            private static bool TryBuildAtom(AuditLog.AuditRecord record, out UserHookBehaviorAtom atom)
+            {
+                DateTime timestamp;
+                atom = null;
+                if (record == null || string.IsNullOrWhiteSpace(record.Action))
+                {
+                    return false;
+                }
+
+                if (!record.Action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                if (!DateTime.TryParse(record.TimestampUtc, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out timestamp))
+                {
+                    timestamp = DateTime.UtcNow;
+                }
+
+                atom = new UserHookBehaviorAtom
+                {
+                    TimestampUtc = timestamp.ToUniversalTime(),
+                    Host = record.Host ?? Environment.MachineName,
+                    Action = record.Action ?? string.Empty,
+                    Target = record.Target ?? string.Empty,
+                    ProcessImage = record.Extension ?? string.Empty,
+                    CommandLine = ExtractMessageField(record.Message, "Command: "),
+                    ParentImage = ExtractMessageField(record.Message, "Parent: ")
+                };
+                atom.ProcessKey = string.IsNullOrWhiteSpace(atom.ProcessImage)
+                    ? atom.Host + "|" + ExtractPid(record.Message)
+                    : atom.Host + "|" + atom.ProcessImage;
+                return true;
+            }
+
+            private static string ExtractMessageField(string message, string prefix)
+            {
+                int index;
+                int end;
+                if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(prefix))
+                {
+                    return string.Empty;
+                }
+
+                index = message.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                {
+                    return string.Empty;
+                }
+
+                index += prefix.Length;
+                end = message.IndexOf(".", index, StringComparison.Ordinal);
+                if (end < 0)
+                {
+                    end = message.Length;
+                }
+
+                return message.Substring(index, end - index).Trim();
+            }
+
+            private static string ExtractPid(string message)
+            {
+                string value = ExtractMessageField(message, "PID ");
+                return string.IsNullOrWhiteSpace(value) ? "unknown" : value;
+            }
+
+            private void TrimAtoms(DateTime now)
+            {
+                DateTime cutoff = now.AddHours(-1);
+                atoms.RemoveAll(item => item.TimestampUtc < cutoff);
+                if (atoms.Count > 2048)
+                {
+                    atoms.RemoveRange(0, atoms.Count - 2048);
+                }
+            }
+        }
+
+        private sealed class UserHookBehaviorAtom
+        {
+            public DateTime TimestampUtc { get; set; }
+            public string Host { get; set; }
+            public string Action { get; set; }
+            public string Target { get; set; }
+            public string ProcessImage { get; set; }
+            public string CommandLine { get; set; }
+            public string ParentImage { get; set; }
+            public string ProcessKey { get; set; }
         }
 
         public class HashProtectPolicyRequest
@@ -3249,12 +3930,35 @@ namespace DataProtectorWebBridge.Services
             public string[] excludedProcessPaths { get; set; }
             public string[] trustedSignerSubjects { get; set; }
             public string runtimePath { get; set; }
+            public UserHookBehaviorRule[] behaviorRules { get; set; }
             public string actor { get; set; }
         }
 
         public sealed class UserHookDefensePolicyDto : UserHookDefensePolicyRequest
         {
             public uint flags { get; set; }
+        }
+
+        public sealed class UserHookBehaviorRule
+        {
+            public string ruleId { get; set; }
+            public string name { get; set; }
+            public bool enabled { get; set; }
+            public string[] actions { get; set; }
+            public string[] anyActions { get; set; }
+            public string[] processNames { get; set; }
+            public string[] parentProcessNames { get; set; }
+            public string[] targetContains { get; set; }
+            public string[] commandLineContains { get; set; }
+            public int windowSeconds { get; set; }
+            public int threshold { get; set; }
+            public int weight { get; set; }
+            public string severity { get; set; }
+            public string disposition { get; set; }
+            public string tactic { get; set; }
+            public string technique { get; set; }
+            public string description { get; set; }
+            public string[] references { get; set; }
         }
 
         public class UsbCryptPolicyRequest

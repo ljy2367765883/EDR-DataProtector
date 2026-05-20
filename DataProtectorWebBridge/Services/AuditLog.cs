@@ -72,6 +72,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("policy.userhook", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("central.policy.userhook", StringComparison.OrdinalIgnoreCase) ||
                 action.IndexOf(".userhook.", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -155,6 +156,7 @@ namespace DataProtectorWebBridge.Services
                 action.StartsWith("userhook.runtime.memory-manual-map", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.runtime.memory-rwx", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.runtime.memory-private-syscall-stub", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.behavior-process-access", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.behavior-thread-access", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.behavior-remote-thread-create", StringComparison.OrdinalIgnoreCase) ||
@@ -208,6 +210,7 @@ namespace DataProtectorWebBridge.Services
                 action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
             {

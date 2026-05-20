@@ -1069,6 +1069,12 @@ const local: App.I18n.Schema = {
         runtimePathPending: 'Prepared automatically by the agent after policy save',
         save: 'Save Process Threat Insight',
         surfaces: 'Protected Process Behavior Surfaces',
+        behaviorRules: 'Behavior Chain Rules',
+        behaviorRulesDesc: 'Combines atomic behavior into verdicts with windows, weights and thresholds based on public EDR, Sigma and MITRE patterns.',
+        activeRules: 'Enabled rules: {count}',
+        ruleWindow: 'Window {seconds}s',
+        ruleThreshold: 'Threshold {count}',
+        ruleWeight: 'Weight {score}',
         saved: 'Process threat insight policy saved to central policy.',
         surfacesList: {
           earlyTitle: 'Kernel early-bird process stage',

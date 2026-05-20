@@ -108,6 +108,7 @@ const userHookDefensePolicy = reactive<Api.DataProtector.UserHookDefensePolicy>(
   excludedProcessPaths: [],
   trustedSignerSubjects: [],
   runtimePath: '',
+  behaviorRules: [],
   flags: 0x0000002f,
   actor: 'web-admin'
 });
@@ -369,6 +370,7 @@ const userHookDefenseGroups = computed(() => {
     mode: userHookDefensePolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
     enabledFeatures,
     activeControls: userHookDefensePolicy.enabled ? enabledFeatures : 0,
+    activeRules: (userHookDefensePolicy.behaviorRules || []).filter(rule => rule.enabled).length,
     flags: `0x${userHookDefensePolicy.flags.toString(16).toUpperCase().padStart(8, '0')}`
   };
 });
@@ -979,6 +981,7 @@ function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePo
   userHookDefensePolicy.excludedProcessPaths = policy.excludedProcessPaths || [];
   userHookDefensePolicy.trustedSignerSubjects = policy.trustedSignerSubjects || [];
   userHookDefensePolicy.runtimePath = policy.runtimePath || '';
+  userHookDefensePolicy.behaviorRules = policy.behaviorRules || [];
   userHookDefensePolicy.flags = policy.flags ?? calculateUserHookDefenseFlags();
   userHookDefensePolicy.actor = 'web-admin';
   userHookExcludedProcessesText.value = userHookDefensePolicy.excludedProcessNames.join('\n');
@@ -1030,6 +1033,17 @@ function setUserHookDefenseFeature(
     userHookDefensePolicy.blockUntrustedRuntime = false;
   }
   syncUserHookDefenseFlags();
+}
+
+function setBehaviorRuleEnabled(rule: Api.DataProtector.UserHookBehaviorRule, value: boolean) {
+  rule.enabled = value;
+}
+
+function behaviorSeverityTagType(value: string) {
+  if (value === 'critical') return 'error';
+  if (value === 'warning') return 'warning';
+  if (value === 'info') return 'info';
+  return 'default';
 }
 
 function applyUsbCryptPolicy(policy?: Api.DataProtector.UsbCryptPolicy) {
@@ -1391,6 +1405,7 @@ async function saveUserHookDefensePolicy() {
       excludedProcessPaths: linesToList(userHookExcludedPathsText.value),
       trustedSignerSubjects: linesToList(userHookTrustedSignersText.value),
       runtimePath: userHookDefensePolicy.runtimePath,
+      behaviorRules: userHookDefensePolicy.behaviorRules,
       actor: 'web-admin'
     });
 
@@ -2144,24 +2159,76 @@ onMounted(refresh);
 
           <NGi span="24 m:15">
             <NCard :title="$t('dataprotector.policy.userhook.surfaces')" :bordered="false" class="card-wrapper">
-              <NGrid :x-gap="12" :y-gap="12" cols="1 l:2 xl:4">
-                <NGi v-for="surface in userHookDefenseSurfaces" :key="surface.key">
-                  <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
-                    <div class="flex items-start justify-between gap-12px">
-                      <div class="flex min-w-0 items-center gap-10px">
-                        <SvgIcon :icon="surface.icon" class="text-22px text-primary" />
-                        <div class="min-w-0">
-                          <div class="truncate text-15px font-700">{{ surface.title }}</div>
-                          <div class="m-t-6px text-12px leading-5 text-gray-500">{{ surface.detail }}</div>
+              <NSpace vertical :size="16">
+                <NGrid :x-gap="12" :y-gap="12" cols="1 l:2 xl:4">
+                  <NGi v-for="surface in userHookDefenseSurfaces" :key="surface.key">
+                    <div class="h-full rounded-8px border border-gray-200 p-16px dark:border-gray-700">
+                      <div class="flex items-start justify-between gap-12px">
+                        <div class="flex min-w-0 items-center gap-10px">
+                          <SvgIcon :icon="surface.icon" class="text-22px text-primary" />
+                          <div class="min-w-0">
+                            <div class="truncate text-15px font-700">{{ surface.title }}</div>
+                            <div class="m-t-6px text-12px leading-5 text-gray-500">{{ surface.detail }}</div>
+                          </div>
+                        </div>
+                        <NTag :type="surface.enabled ? 'success' : 'default'" :bordered="false">
+                          {{ surface.enabled ? $t('dataprotector.common.active') : $t('dataprotector.common.inactiveState') }}
+                        </NTag>
+                      </div>
+                    </div>
+                  </NGi>
+                </NGrid>
+
+                <div class="rounded-8px border border-gray-200 p-16px dark:border-gray-700">
+                  <div class="flex flex-wrap items-center justify-between gap-12px">
+                    <div>
+                      <div class="text-15px font-700">{{ $t('dataprotector.policy.userhook.behaviorRules') }}</div>
+                      <div class="m-t-4px text-12px text-gray-500">
+                        {{ $t('dataprotector.policy.userhook.behaviorRulesDesc') }}
+                      </div>
+                    </div>
+                    <NTag type="info" :bordered="false">
+                      {{ $t('dataprotector.policy.userhook.activeRules', { count: userHookDefenseGroups.activeRules }) }}
+                    </NTag>
+                  </div>
+
+                  <NGrid class="m-t-14px" :x-gap="12" :y-gap="12" cols="1 xl:2">
+                    <NGi v-for="rule in userHookDefensePolicy.behaviorRules" :key="rule.ruleId">
+                      <div class="h-full rounded-8px bg-gray-50 p-14px dark:bg-dark-3">
+                        <div class="flex items-start justify-between gap-12px">
+                          <div class="min-w-0">
+                            <div class="flex flex-wrap items-center gap-8px">
+                              <div class="font-700">{{ rule.name }}</div>
+                              <NTag :type="behaviorSeverityTagType(rule.severity)" :bordered="false" size="small">
+                                {{ rule.severity }}
+                              </NTag>
+                              <NTag type="default" :bordered="false" size="small">{{ rule.disposition }}</NTag>
+                            </div>
+                            <div class="m-t-6px text-12px leading-5 text-gray-500">{{ rule.description }}</div>
+                          </div>
+                          <NSwitch
+                            :value="rule.enabled"
+                            :disabled="!userHookDefensePolicy.enabled"
+                            @update:value="value => setBehaviorRuleEnabled(rule, value)"
+                          />
+                        </div>
+                        <div class="m-t-12px flex flex-wrap gap-8px text-12px">
+                          <NTag size="small" :bordered="false">{{ rule.technique || rule.tactic }}</NTag>
+                          <NTag size="small" :bordered="false">
+                            {{ $t('dataprotector.policy.userhook.ruleWindow', { seconds: rule.windowSeconds }) }}
+                          </NTag>
+                          <NTag size="small" :bordered="false">
+                            {{ $t('dataprotector.policy.userhook.ruleThreshold', { count: rule.threshold }) }}
+                          </NTag>
+                          <NTag size="small" :bordered="false">
+                            {{ $t('dataprotector.policy.userhook.ruleWeight', { score: rule.weight }) }}
+                          </NTag>
                         </div>
                       </div>
-                      <NTag :type="surface.enabled ? 'success' : 'default'" :bordered="false">
-                        {{ surface.enabled ? $t('dataprotector.common.active') : $t('dataprotector.common.inactiveState') }}
-                      </NTag>
-                    </div>
-                  </div>
-                </NGi>
-              </NGrid>
+                    </NGi>
+                  </NGrid>
+                </div>
+              </NSpace>
             </NCard>
           </NGi>
         </NGrid>

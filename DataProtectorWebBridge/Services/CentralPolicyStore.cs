@@ -647,7 +647,8 @@ namespace DataProtectorWebBridge.Services
                     !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessPaths, normalized.excludedProcessPaths) ||
                     !StringArrayEquals(state.UserHookDefensePolicy.trustedSignerSubjects, normalized.trustedSignerSubjects) ||
                     state.UserHookDefensePolicy.monitorRuntimeApiBehavior != normalized.monitorRuntimeApiBehavior ||
-                    state.UserHookDefensePolicy.scanExecutableMemory != normalized.scanExecutableMemory)
+                    state.UserHookDefensePolicy.scanExecutableMemory != normalized.scanExecutableMemory ||
+                    !SameBehaviorRules(state.UserHookDefensePolicy.behaviorRules, normalized.behaviorRules))
                 {
                     state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
                     state.PolicyVersion++;
@@ -674,6 +675,15 @@ namespace DataProtectorWebBridge.Services
         private static bool StringArrayEquals(string[] left, string[] right)
         {
             return (left ?? new string[0]).SequenceEqual(right ?? new string[0], StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static bool SameBehaviorRules(PolicyBridgeService.UserHookBehaviorRule[] left, PolicyBridgeService.UserHookBehaviorRule[] right)
+        {
+            JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+            return string.Equals(
+                serializer.Serialize(left ?? new PolicyBridgeService.UserHookBehaviorRule[0]),
+                serializer.Serialize(right ?? new PolicyBridgeService.UserHookBehaviorRule[0]),
+                StringComparison.Ordinal);
         }
 
         public PolicyBridgeService.OperationResult UpdateUsbCryptPolicy(PolicyBridgeService.UsbCryptPolicyRequest request)
@@ -1551,6 +1561,10 @@ namespace DataProtectorWebBridge.Services
                     if (loaded != null && loaded.UserHookDefensePolicy == null)
                     {
                         loaded.UserHookDefensePolicy = PolicyBridgeService.DefaultUserHookDefensePolicy();
+                    }
+                    if (loaded != null && (loaded.UserHookDefensePolicy.behaviorRules == null || loaded.UserHookDefensePolicy.behaviorRules.Length == 0))
+                    {
+                        loaded.UserHookDefensePolicy.behaviorRules = PolicyBridgeService.DefaultUserHookBehaviorRules();
                     }
                     if (loaded != null && loaded.UsbCryptPolicy == null)
                     {
