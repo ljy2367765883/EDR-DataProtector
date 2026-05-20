@@ -860,6 +860,16 @@ namespace DataProtectorWebBridge.Services
 
         public UserHookDefensePolicyDto QueryUserHookDefensePolicy()
         {
+            return QueryUserHookDefensePolicy(usePreparedRuntimeFallback: true);
+        }
+
+        internal UserHookDefensePolicyDto QueryKernelUserHookDefensePolicy()
+        {
+            return QueryUserHookDefensePolicy(usePreparedRuntimeFallback: false);
+        }
+
+        private UserHookDefensePolicyDto QueryUserHookDefensePolicy(bool usePreparedRuntimeFallback)
+        {
             DataProtectorPolicyNative.NativeUserHookDefensePolicy nativePolicy;
             uint status = DataProtectorPolicyNative.DpPolicyQueryUserHookDefensePolicy(out nativePolicy);
             if (status != SuccessStatus)
@@ -881,9 +891,9 @@ namespace DataProtectorWebBridge.Services
                 SplitUserHookPolicyList(Marshal.PtrToStringUni(nativePolicy.TrustedSignerSubjects)),
                 DefaultUserHookTrustedSignerSubjects());
             string runtimePath = Marshal.PtrToStringUni(nativePolicy.RuntimeDllPath);
-            policy.runtimePath = string.IsNullOrWhiteSpace(runtimePath)
+            policy.runtimePath = usePreparedRuntimeFallback && string.IsNullOrWhiteSpace(runtimePath)
                 ? GetPreparedUserHookRuntimePath()
-                : runtimePath;
+                : (runtimePath ?? string.Empty);
             return policy;
         }
 
@@ -1431,7 +1441,7 @@ namespace DataProtectorWebBridge.Services
 
             if (IsUserHookCoverageAction(action))
             {
-                return action.IndexOf("runtime-missing", StringComparison.OrdinalIgnoreCase) >= 0;
+                return false;
             }
 
             if (action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase))
@@ -3025,12 +3035,17 @@ namespace DataProtectorWebBridge.Services
             Directory.CreateDirectory(runtimeDirectory);
             if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
             {
-                return runtimePath;
+                throw new BridgeException(1, "User hook runtime DLL was not found beside the agent/server executable. Expected DataProtectorUserHookRuntime.dll in " + AppDomain.CurrentDomain.BaseDirectory + " or " + Environment.CurrentDirectory + ".");
             }
 
             if (!File.Exists(runtimePath) || !FileHashesEqual(sourcePath, runtimePath))
             {
                 File.Copy(sourcePath, runtimePath, true);
+            }
+
+            if (!File.Exists(runtimePath))
+            {
+                throw new BridgeException(1, "User hook runtime DLL could not be prepared at " + runtimePath + ".");
             }
 
             return runtimePath;

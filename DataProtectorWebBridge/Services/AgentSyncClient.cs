@@ -152,8 +152,16 @@ namespace DataProtectorWebBridge.Services
                 SaveState();
             }
 
-            if (response.policyVersion != appliedPolicyVersion)
+            string localPolicyRefreshReason = string.Empty;
+            bool shouldApplyPolicy = response.policyVersion != appliedPolicyVersion ||
+                                     ShouldRefreshLocalUserHookPolicy(response, rawStatus, out localPolicyRefreshReason);
+            if (shouldApplyPolicy)
             {
+                if (response.policyVersion == appliedPolicyVersion && !string.IsNullOrWhiteSpace(localPolicyRefreshReason))
+                {
+                    Console.WriteLine(DateTime.Now.ToString("s") + " Local process threat insight policy refresh required: " + localPolicyRefreshReason);
+                }
+
                 ApplyPolicy(
                     response.rules ?? new PolicyBridgeService.PolicyRuleDto[0],
                     response.networkRules ?? new PolicyBridgeService.NetworkRuleDto[0],
@@ -174,6 +182,102 @@ namespace DataProtectorWebBridge.Services
                 FlushTaskResults();
             }
             Console.WriteLine(DateTime.Now.ToString("s") + " Agent synchronized. Policy version " + appliedPolicyVersion + ", uploaded audit " + auditRecords.Length + ", network " + networkConnections.Length + ", removable volumes " + removableDevices.Length + ", sandbox samples " + sandboxSamples.Length + ".");
+        }
+
+        private bool ShouldRefreshLocalUserHookPolicy(CentralPolicyStore.AgentSyncResponse response, object rawStatus, out string reason)
+        {
+            reason = string.Empty;
+            if (response == null || !GetBool(rawStatus, "connected"))
+            {
+                return false;
+            }
+
+            PolicyBridgeService.UserHookDefensePolicyDto desired = response.userHookDefensePolicy ?? PolicyBridgeService.DefaultUserHookDefensePolicy();
+            try
+            {
+                PolicyBridgeService.UserHookDefensePolicyDto actual = policyService.QueryKernelUserHookDefensePolicy();
+                uint desiredFlags = PolicyBridgeService.ToUserHookDefenseFlags(desired);
+                if (actual.flags != desiredFlags)
+                {
+                    reason = "kernel flags are 0x" + actual.flags.ToString("X8") + ", expected 0x" + desiredFlags.ToString("X8");
+                    return true;
+                }
+
+                if (desired.enabled && desired.monitorEarlyProcesses)
+                {
+                    if (string.IsNullOrWhiteSpace(actual.runtimePath))
+                    {
+                        reason = "kernel runtime DLL path is empty";
+                        return true;
+                    }
+
+                    if (!RuntimeDllPathExists(actual.runtimePath))
+                    {
+                        reason = "configured runtime DLL is missing: " + actual.runtimePath;
+                        return true;
+                    }
+                }
+
+                if (!StringSetsEqual(actual.excludedProcessNames, desired.excludedProcessNames) ||
+                    !StringSetsEqual(actual.trustedSignerSubjects, desired.trustedSignerSubjects))
+                {
+                    reason = "kernel allowlist does not match central policy";
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (desired.enabled)
+                {
+                    reason = "kernel policy query failed: " + ex.Message;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool RuntimeDllPathExists(string runtimePath)
+        {
+            string normalized = NormalizeRuntimeDllPath(runtimePath);
+            if (!string.IsNullOrWhiteSpace(normalized) && File.Exists(normalized))
+            {
+                return true;
+            }
+
+            string prepared = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "DataProtector",
+                "Runtime",
+                "DataProtectorUserHookRuntime.dll");
+            return File.Exists(prepared);
+        }
+
+        private static string NormalizeRuntimeDllPath(string runtimePath)
+        {
+            string value = (runtimePath ?? string.Empty).Trim();
+            if (value.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
+            {
+                value = value.Substring(4);
+            }
+
+            return value;
+        }
+
+        private static bool StringSetsEqual(string[] left, string[] right)
+        {
+            string[] normalizedLeft = (left ?? new string[0])
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => item.Trim())
+                .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            string[] normalizedRight = (right ?? new string[0])
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => item.Trim())
+                .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return normalizedLeft.SequenceEqual(normalizedRight, StringComparer.OrdinalIgnoreCase);
         }
 
         private void ExecuteTasks(CentralPolicyStore.RemoteTaskDto[] tasks)

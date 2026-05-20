@@ -252,6 +252,11 @@ namespace DataProtectorWebBridge.Services
                 return false;
             }
 
+            if (IsHiddenOperationalRecord(record))
+            {
+                return false;
+            }
+
             if (options == null)
             {
                 return true;
@@ -536,6 +541,7 @@ namespace DataProtectorWebBridge.Services
                     return record;
                 })
                 .Where(record => record != null)
+                .Where(record => !IsHiddenOperationalRecord(record))
                 .ToList();
 
             AuditQueryOptions categoryNeutral = CopyWithoutCategory(query);
@@ -906,6 +912,22 @@ namespace DataProtectorWebBridge.Services
                    string.Equals(operation, "runtime-injection-required", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(operation, "runtime-injection-queued", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(operation, "runtime-injection-skipped", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsHiddenOperationalRecord(AuditRecord record)
+        {
+            if (record == null)
+            {
+                return false;
+            }
+
+            if (IsUserHookCoverageRecord(record))
+            {
+                return true;
+            }
+
+            string action = record.Action ?? string.Empty;
+            return action.StartsWith("userhook.health.", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string NormalizeAuditSeverity(string value)

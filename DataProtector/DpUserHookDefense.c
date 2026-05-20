@@ -295,6 +295,12 @@ DpUserHookBoundedStringBytes(
 
 static
 BOOLEAN
+DpUserHookRuntimePathConfigured(
+    VOID
+    );
+
+static
+BOOLEAN
 DpUserHookFeatureEnabled(
     _In_ ULONG FeatureFlag
     )
@@ -844,6 +850,14 @@ DpUserHookShouldInjectProcess(
         return FALSE;
     }
 
+    if (!DpUserHookRuntimePathConfigured()) {
+        DP_USER_HOOK_TRACE("inject skip runtime path missing pid=%Iu image=%wZ flags=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           ImagePath,
+                           flags);
+        return FALSE;
+    }
+
     if (!FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_MONITOR_SYSTEM_PROCESSES) &&
         (ProcessId == NULL || ProcessId == (HANDLE)(ULONG_PTR)4)) {
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionSkipped,
@@ -858,6 +872,10 @@ DpUserHookShouldInjectProcess(
 
     if (DpUserHookIsBuiltInExcludedImage(ImagePath) ||
         DpUserHookIsPolicyExcludedImage(ImagePath)) {
+        DP_USER_HOOK_TRACE("inject skip excluded pid=%Iu image=%wZ flags=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           ImagePath,
+                           flags);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionSkipped,
                              ProcessId,
                              NULL,
@@ -2022,20 +2040,6 @@ DpUserHookTryQueueRuntimeInjection(
         return;
     }
 
-    if (!DpUserHookRuntimePathConfigured()) {
-        UNICODE_STRING missingTarget;
-        RtlInitUnicodeString(&missingTarget, L"DataProtectorUserHookRuntime.dll");
-        DpUserHookMarkTargetInjectionComplete(ProcessId, FALSE);
-        DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeMissing,
-                             ProcessId,
-                             NULL,
-                             (ULONG)STATUS_OBJECT_NAME_NOT_FOUND,
-                             &missingTarget,
-                             NULL,
-                             DpUserHookReadPolicyFlags());
-        return;
-    }
-
     if (!DpUserHookMarkTargetInjectionQueued(ProcessId, &attemptCount)) {
         return;
     }
@@ -2281,18 +2285,6 @@ DpUserHookDefenseObserveProcessCreate(
     DpUserHookTrackTargetProcess(ProcessId);
 
     RtlInitUnicodeString(&runtimeTarget, L"DataProtectorUserHookRuntime.dll");
-
-    if (!DpUserHookRuntimePathConfigured()) {
-        DpUserHookMarkTargetInjectionComplete(ProcessId, FALSE);
-        DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeMissing,
-                             ProcessId,
-                             parentProcessId,
-                             (ULONG)STATUS_OBJECT_NAME_NOT_FOUND,
-                             &runtimeTarget,
-                             CreateInfo->ImageFileName,
-                             DpUserHookReadPolicyFlags());
-        return;
-    }
 
     DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionRequired,
                          ProcessId,
