@@ -192,7 +192,7 @@ namespace DataProtectorWebBridge.Services
                 return false;
             }
 
-            PolicyBridgeService.UserHookDefensePolicyDto desired = response.userHookDefensePolicy ?? PolicyBridgeService.DefaultUserHookDefensePolicy();
+            PolicyBridgeService.UserHookDefensePolicyDto desired = NormalizeAgentUserHookPolicy(response.userHookDefensePolicy);
             try
             {
                 PolicyBridgeService.UserHookDefensePolicyDto actual = policyService.QueryKernelUserHookDefensePolicy();
@@ -870,6 +870,9 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.DlpProtectionPolicyDto dlpProtectionPolicy,
             long policyVersion)
         {
+            userHookDefensePolicy = NormalizeAgentUserHookPolicy(userHookDefensePolicy);
+            uint desiredUserHookFlags = PolicyBridgeService.ToUserHookDefenseFlags(userHookDefensePolicy);
+
             PolicyBridgeService.OperationResult clear = policyService.ClearRules("central-agent");
             if (!clear.succeeded)
             {
@@ -1026,7 +1029,7 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.OperationResult userHookPolicyResult = policyService.SetUserHookDefensePolicy(new PolicyBridgeService.UserHookDefensePolicyRequest
             {
                 enabled = userHookDefensePolicy.enabled,
-                monitorEarlyProcesses = userHookDefensePolicy.monitorEarlyProcesses,
+                monitorEarlyProcesses = userHookDefensePolicy.enabled || userHookDefensePolicy.monitorEarlyProcesses,
                 monitorImageLoads = userHookDefensePolicy.monitorImageLoads,
                 requireSignedRuntime = userHookDefensePolicy.requireSignedRuntime,
                 blockUntrustedRuntime = userHookDefensePolicy.blockUntrustedRuntime,
@@ -1051,6 +1054,33 @@ namespace DataProtectorWebBridge.Services
                 return;
             }
 
+            try
+            {
+                PolicyBridgeService.UserHookDefensePolicyDto kernelUserHookPolicy = policyService.QueryKernelUserHookDefensePolicy();
+                uint kernelFlags = kernelUserHookPolicy.flags;
+                string message = "Process threat insight policy written. desiredFlags=0x" +
+                                 desiredUserHookFlags.ToString("X8") +
+                                 "; kernelFlags=0x" +
+                                 kernelFlags.ToString("X8") +
+                                 "; " +
+                                 PolicyBridgeService.UserHookDefensePolicySummary(kernelUserHookPolicy);
+                Console.WriteLine(DateTime.Now.ToString("s") + " " + message);
+                if (kernelFlags != desiredUserHookFlags)
+                {
+                    lastApplyStatus = "0x00000001";
+                    lastApplyMessage = "Central process threat insight policy write mismatch: " + message;
+                    SaveState();
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                lastApplyStatus = "0x00000001";
+                lastApplyMessage = "Cannot verify local process threat insight policy after apply: " + ex.Message;
+                SaveState();
+                return;
+            }
+
             currentUserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(userHookDefensePolicy);
             PersistUsbCryptPolicy(usbCryptPolicy);
             dlpProtectionService.UpdatePolicy(dlpProtectionPolicy);
@@ -1059,6 +1089,19 @@ namespace DataProtectorWebBridge.Services
             lastApplyStatus = "0x00000000";
             lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", process threat insight: " + PolicyBridgeService.UserHookDefensePolicySummary(userHookDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
             SaveState();
+        }
+
+        private static PolicyBridgeService.UserHookDefensePolicyDto NormalizeAgentUserHookPolicy(PolicyBridgeService.UserHookDefensePolicyDto policy)
+        {
+            PolicyBridgeService.UserHookDefensePolicyDto normalized = PolicyBridgeService.CloneUserHookDefensePolicy(
+                policy ?? PolicyBridgeService.DefaultUserHookDefensePolicy());
+            if (normalized.enabled)
+            {
+                normalized.monitorEarlyProcesses = true;
+                normalized.flags = PolicyBridgeService.ToUserHookDefenseFlags(normalized);
+            }
+
+            return normalized;
         }
 
         private void PersistUsbCryptPolicy(PolicyBridgeService.UsbCryptPolicyDto policy)
