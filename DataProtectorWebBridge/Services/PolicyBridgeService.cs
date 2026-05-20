@@ -3029,15 +3029,49 @@ namespace DataProtectorWebBridge.Services
         private static string GetPreparedUserHookRuntimePath()
         {
             string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            return Path.Combine(dataRoot, "DataProtector", "Runtime", "DataProtectorUserHookRuntime.dll");
+            string runtimeDirectory = Path.Combine(dataRoot, "DataProtector", "Runtime");
+            string sourcePath = FindUserHookRuntimeSource();
+
+            if (!string.IsNullOrWhiteSpace(sourcePath) && File.Exists(sourcePath))
+            {
+                try
+                {
+                    return BuildVersionedUserHookRuntimePath(runtimeDirectory, ComputeFileSha256Hex(sourcePath));
+                }
+                catch
+                {
+                    // SetUserHookDefensePolicy will report the concrete copy/hash error.
+                }
+            }
+
+            try
+            {
+                DirectoryInfo directory = new DirectoryInfo(runtimeDirectory);
+                FileInfo newestRuntime = directory.Exists
+                    ? directory.GetFiles("DataProtectorUserHookRuntime.dll", SearchOption.AllDirectories)
+                        .OrderByDescending(file => file.LastWriteTimeUtc)
+                        .FirstOrDefault()
+                    : null;
+                if (newestRuntime != null)
+                {
+                    return newestRuntime.FullName;
+                }
+            }
+            catch
+            {
+                // Best-effort status fallback only.
+            }
+
+            return Path.Combine(runtimeDirectory, "DataProtectorUserHookRuntime.dll");
         }
 
         private static string PrepareUserHookRuntimeDll()
         {
             string dataRoot = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             string runtimeDirectory = Path.Combine(dataRoot, "DataProtector", "Runtime");
-            string runtimePath = GetPreparedUserHookRuntimePath();
             string sourcePath = FindUserHookRuntimeSource();
+            string sourceHash;
+            string runtimePath;
 
             Directory.CreateDirectory(runtimeDirectory);
             if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
@@ -3045,9 +3079,20 @@ namespace DataProtectorWebBridge.Services
                 throw new BridgeException(1, "User hook runtime DLL was not found beside the agent/server executable. Expected DataProtectorUserHookRuntime.dll in " + AppDomain.CurrentDomain.BaseDirectory + " or " + Environment.CurrentDirectory + ".");
             }
 
-            if (!File.Exists(runtimePath) || !FileHashesEqual(sourcePath, runtimePath))
+            sourceHash = ComputeFileSha256Hex(sourcePath);
+            runtimePath = BuildVersionedUserHookRuntimePath(runtimeDirectory, sourceHash);
+            Directory.CreateDirectory(Path.GetDirectoryName(runtimePath));
+
+            if (File.Exists(runtimePath))
             {
-                File.Copy(sourcePath, runtimePath, true);
+                if (!FileHashEquals(runtimePath, sourceHash))
+                {
+                    throw new BridgeException(1, "Versioned user hook runtime DLL hash mismatch at " + runtimePath + ". Remove the stale version directory and retry.");
+                }
+            }
+            else
+            {
+                File.Copy(sourcePath, runtimePath, false);
             }
 
             if (!File.Exists(runtimePath))
@@ -3056,6 +3101,14 @@ namespace DataProtectorWebBridge.Services
             }
 
             return runtimePath;
+        }
+
+        private static string BuildVersionedUserHookRuntimePath(string runtimeDirectory, string sha256Hex)
+        {
+            string version = string.IsNullOrWhiteSpace(sha256Hex)
+                ? "unknown"
+                : sha256Hex.Trim().ToLowerInvariant();
+            return Path.Combine(runtimeDirectory, version, "DataProtectorUserHookRuntime.dll");
         }
 
         private static string FindUserHookRuntimeSource()
@@ -3085,8 +3138,8 @@ namespace DataProtectorWebBridge.Services
             try
             {
                 using (SHA256 sha256 = SHA256.Create())
-                using (FileStream left = File.OpenRead(leftPath))
-                using (FileStream right = File.OpenRead(rightPath))
+                using (FileStream left = OpenReadShared(leftPath))
+                using (FileStream right = OpenReadShared(rightPath))
                 {
                     byte[] leftHash = sha256.ComputeHash(left);
                     byte[] rightHash = sha256.ComputeHash(right);
@@ -3097,6 +3150,48 @@ namespace DataProtectorWebBridge.Services
             {
                 return false;
             }
+        }
+
+        private static bool FileHashEquals(string path, string expectedSha256Hex)
+        {
+            try
+            {
+                return string.Equals(ComputeFileSha256Hex(path), expectedSha256Hex, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string ComputeFileSha256Hex(string path)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream stream = OpenReadShared(path))
+            {
+                return BytesToHex(sha256.ComputeHash(stream));
+            }
+        }
+
+        private static FileStream OpenReadShared(string path)
+        {
+            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        }
+
+        private static string BytesToHex(byte[] bytes)
+        {
+            StringBuilder builder = new StringBuilder((bytes == null ? 0 : bytes.Length) * 2);
+            if (bytes == null)
+            {
+                return string.Empty;
+            }
+
+            foreach (byte value in bytes)
+            {
+                builder.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+            }
+
+            return builder.ToString();
         }
 
         internal static UsbCryptPolicyDto DefaultUsbCryptPolicy()

@@ -279,12 +279,25 @@ namespace DataProtectorWebBridge.Services
                 return true;
             }
 
-            string prepared = Path.Combine(
+            string runtimeDirectory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "DataProtector",
-                "Runtime",
-                "DataProtectorUserHookRuntime.dll");
-            return File.Exists(prepared);
+                "Runtime");
+            string prepared = Path.Combine(runtimeDirectory, "DataProtectorUserHookRuntime.dll");
+            if (File.Exists(prepared))
+            {
+                return true;
+            }
+
+            try
+            {
+                return Directory.Exists(runtimeDirectory) &&
+                       Directory.EnumerateFiles(runtimeDirectory, "DataProtectorUserHookRuntime.dll", SearchOption.AllDirectories).Any();
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static string NormalizeRuntimeDllPath(string runtimePath)
