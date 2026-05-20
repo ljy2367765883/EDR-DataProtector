@@ -25,6 +25,7 @@ namespace DataProtectorWebBridge.Services
             byte[] bytes = File.ReadAllBytes(filePath);
             context.Response.StatusCode = (int)HttpStatusCode.OK;
             context.Response.ContentType = GetContentType(filePath);
+            ApplyCacheHeaders(context.Response, filePath);
             context.Response.ContentLength64 = bytes.Length;
 
             if (!headersOnly)
@@ -107,6 +108,20 @@ namespace DataProtectorWebBridge.Services
                 default:
                     return "application/octet-stream";
             }
+        }
+
+        private static void ApplyCacheHeaders(HttpListenerResponse response, string filePath)
+        {
+            string extension = Path.GetExtension(filePath).ToLowerInvariant();
+            if (extension == ".html")
+            {
+                response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+                response.Headers["Pragma"] = "no-cache";
+                response.Headers["Expires"] = "0";
+                return;
+            }
+
+            response.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
         }
     }
 }
