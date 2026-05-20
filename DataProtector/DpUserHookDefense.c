@@ -24,6 +24,12 @@ PsGetProcessImageFileName(
     _In_ PEPROCESS Process
     );
 
+NTSTATUS
+SeLocateProcessImageName(
+    _Inout_ PEPROCESS Process,
+    _Outptr_ PUNICODE_STRING *pImageFileName
+    );
+
 #if DP_ENABLE_USER_HOOK_DEFENSE_TRACE
 #define DP_USER_HOOK_TRACE(_format, ...) \
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "DataProtector[UserHook] " _format, __VA_ARGS__)
@@ -66,8 +72,16 @@ PsGetProcessImageFileName(
 #define PROCESS_SET_INFORMATION           (0x0200)
 #endif
 
+#ifndef PROCESS_QUERY_INFORMATION
+#define PROCESS_QUERY_INFORMATION         (0x0400)
+#endif
+
 #ifndef PROCESS_SUSPEND_RESUME
 #define PROCESS_SUSPEND_RESUME            (0x0800)
+#endif
+
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+#define PROCESS_QUERY_LIMITED_INFORMATION (0x1000)
 #endif
 
 #ifndef THREAD_TERMINATE
@@ -338,6 +352,45 @@ DpUserHookAsciiEqualsInsensitive(
 
 static
 BOOLEAN
+DpUserHookAsciiStartsWithInsensitive(
+    _In_z_ const CHAR *Value,
+    _In_z_ const CHAR *Prefix
+    )
+{
+    CHAR valueChar;
+    CHAR prefixChar;
+
+    if (Value == NULL || Prefix == NULL) {
+        return FALSE;
+    }
+
+    for (;;) {
+        prefixChar = *Prefix++;
+        if (prefixChar == '\0') {
+            return TRUE;
+        }
+
+        valueChar = *Value++;
+        if (valueChar == '\0') {
+            return FALSE;
+        }
+
+        if (valueChar >= 'A' && valueChar <= 'Z') {
+            valueChar = (CHAR)(valueChar - 'A' + 'a');
+        }
+
+        if (prefixChar >= 'A' && prefixChar <= 'Z') {
+            prefixChar = (CHAR)(prefixChar - 'A' + 'a');
+        }
+
+        if (valueChar != prefixChar) {
+            return FALSE;
+        }
+    }
+}
+
+static
+BOOLEAN
 DpUserHookIsTrustedBehaviorSource(
     _In_opt_ PEPROCESS Process
     )
@@ -354,8 +407,11 @@ DpUserHookIsTrustedBehaviorSource(
            DpUserHookAsciiEqualsInsensitive(imageName, "lsass.exe") ||
            DpUserHookAsciiEqualsInsensitive(imageName, "services.exe") ||
            DpUserHookAsciiEqualsInsensitive(imageName, "svchost.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "wininit.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "smss.exe") ||
            DpUserHookAsciiEqualsInsensitive(imageName, "DataProtectorWebBridge.exe") ||
-           DpUserHookAsciiEqualsInsensitive(imageName, "DataProtectorAgentClient.exe");
+           DpUserHookAsciiEqualsInsensitive(imageName, "DataProtectorAgentClient.exe") ||
+           DpUserHookAsciiStartsWithInsensitive(imageName, "DataProtectorS");
 }
 
 static
@@ -473,6 +529,133 @@ DpUserHookUnicodeContainsLiteral(
     }
 
     return FALSE;
+}
+
+static
+BOOLEAN
+DpUserHookLocateProcessImagePath(
+    _In_opt_ PEPROCESS Process,
+    _Outptr_result_maybenull_ PUNICODE_STRING *ImagePath
+    )
+{
+    if (ImagePath != NULL) {
+        *ImagePath = NULL;
+    }
+
+    if (Process == NULL ||
+        ImagePath == NULL ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL) {
+
+        return FALSE;
+    }
+
+    return NT_SUCCESS(SeLocateProcessImageName(Process, ImagePath)) &&
+           *ImagePath != NULL &&
+           (*ImagePath)->Buffer != NULL &&
+           (*ImagePath)->Length != 0;
+}
+
+static
+BOOLEAN
+DpUserHookIsWindowsImagePath(
+    _In_opt_ PCUNICODE_STRING ImagePath
+    )
+{
+    if (ImagePath == NULL || ImagePath->Buffer == NULL || ImagePath->Length == 0) {
+        return FALSE;
+    }
+
+    return DpUserHookUnicodeContainsLiteral(ImagePath, L"\\Windows\\System32\\") ||
+           DpUserHookUnicodeContainsLiteral(ImagePath, L"\\Windows\\SysWOW64\\") ||
+           DpUserHookUnicodeContainsLiteral(ImagePath, L"\\Windows\\WinSxS\\") ||
+           DpUserHookUnicodeContainsLiteral(ImagePath, L"\\Windows\\SystemApps\\") ||
+           DpUserHookUnicodeEndsWithLiteral(ImagePath, L"\\Windows\\explorer.exe");
+}
+
+static
+BOOLEAN
+DpUserHookIsCoreProcessName(
+    _In_opt_z_ const CHAR *ImageName
+    )
+{
+    return DpUserHookAsciiEqualsInsensitive(ImageName, "System") ||
+           DpUserHookAsciiEqualsInsensitive(ImageName, "smss.exe") ||
+           DpUserHookAsciiEqualsInsensitive(ImageName, "csrss.exe") ||
+           DpUserHookAsciiEqualsInsensitive(ImageName, "wininit.exe") ||
+           DpUserHookAsciiEqualsInsensitive(ImageName, "services.exe") ||
+           DpUserHookAsciiEqualsInsensitive(ImageName, "lsass.exe");
+}
+
+static
+BOOLEAN
+DpUserHookIsProtectedTargetProcess(
+    _In_opt_ PEPROCESS Process
+    )
+{
+    const CHAR *imageName;
+
+    if (Process == NULL) {
+        return FALSE;
+    }
+
+    imageName = (const CHAR *)PsGetProcessImageFileName(Process);
+    return DpUserHookAsciiEqualsInsensitive(imageName, "lsass.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "wininit.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "services.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "csrss.exe") ||
+           DpUserHookAsciiEqualsInsensitive(imageName, "smss.exe");
+}
+
+static
+BOOLEAN
+DpUserHookIsReadQueryProcessAccess(
+    _In_ ACCESS_MASK DesiredAccess
+    )
+{
+    const ACCESS_MASK readQueryMask = PROCESS_VM_READ |
+                                      PROCESS_QUERY_INFORMATION |
+                                      PROCESS_QUERY_LIMITED_INFORMATION |
+                                      SYNCHRONIZE |
+                                      READ_CONTROL;
+
+    return DesiredAccess != 0 &&
+           (DesiredAccess & ~readQueryMask) == 0;
+}
+
+static
+ACCESS_MASK
+DpUserHookProcessAccessDenyMask(
+    VOID
+    )
+{
+    return PROCESS_CREATE_THREAD |
+           PROCESS_VM_OPERATION |
+           PROCESS_VM_READ |
+           PROCESS_VM_WRITE |
+           PROCESS_DUP_HANDLE |
+           PROCESS_CREATE_PROCESS |
+           PROCESS_SET_INFORMATION |
+           PROCESS_SUSPEND_RESUME |
+           WRITE_DAC |
+           WRITE_OWNER;
+}
+
+static
+ACCESS_MASK
+DpUserHookThreadAccessDenyMask(
+    VOID
+    )
+{
+    return THREAD_TERMINATE |
+           THREAD_SUSPEND_RESUME |
+           THREAD_GET_CONTEXT |
+           THREAD_SET_CONTEXT |
+           THREAD_SET_INFORMATION |
+           THREAD_SET_THREAD_TOKEN |
+           THREAD_IMPERSONATE |
+           THREAD_DIRECT_IMPERSONATION |
+           WRITE_DAC |
+           WRITE_OWNER;
 }
 
 static
@@ -1185,6 +1368,8 @@ DpUserHookObPreOperationCallback(
     HANDLE sourceProcessId;
     ACCESS_MASK desiredAccess = 0;
     ACCESS_MASK sensitiveAccess;
+    ACCESS_MASK filteredAccess;
+    ACCESS_MASK denyMask;
     WCHAR target[DP_USER_HOOK_DEFENSE_TARGET_CHARS];
     UNICODE_STRING targetString;
     DP_USER_HOOK_DEFENSE_OPERATION operation;
@@ -1192,6 +1377,10 @@ DpUserHookObPreOperationCallback(
     HANDLE targetProcessId = NULL;
     const CHAR *sourceImageName;
     const CHAR *targetImageName = "";
+    PUNICODE_STRING sourceImagePath = NULL;
+    BOOLEAN sourceWindowsImage = FALSE;
+    BOOLEAN shouldQueue = TRUE;
+    ULONG eventStatus = STATUS_SUCCESS;
 
     UNREFERENCED_PARAMETER(RegistrationContext);
 
@@ -1206,29 +1395,60 @@ DpUserHookObPreOperationCallback(
     sourceProcess = PsGetCurrentProcess();
     sourceProcessId = PsGetCurrentProcessId();
     sourceImageName = (const CHAR *)PsGetProcessImageFileName(sourceProcess);
+    if (DpUserHookLocateProcessImagePath(sourceProcess, &sourceImagePath)) {
+        sourceWindowsImage = DpUserHookIsWindowsImagePath(sourceImagePath);
+    }
+
     if (sourceProcessId == NULL ||
         sourceProcessId == (HANDLE)(ULONG_PTR)4 ||
-        DpUserHookIsTrustedBehaviorSource(sourceProcess)) {
+        DpUserHookIsCoreProcessName(sourceImageName)) {
 
-        return OB_PREOP_SUCCESS;
+        goto Exit;
     }
 
     if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
         desiredAccess = OperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
     } else if (OperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
         desiredAccess = OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+    } else {
+        goto Exit;
     }
 
     if (OperationInformation->ObjectType == *PsProcessType) {
         targetProcess = (PEPROCESS)OperationInformation->Object;
         targetProcessId = PsGetProcessId(targetProcess);
         if (targetProcessId == sourceProcessId) {
-            return OB_PREOP_SUCCESS;
+            goto Exit;
         }
 
         sensitiveAccess = desiredAccess & DpUserHookSensitiveProcessAccessMask();
         if (sensitiveAccess == 0) {
-            return OB_PREOP_SUCCESS;
+            goto Exit;
+        }
+
+        denyMask = DpUserHookProcessAccessDenyMask();
+        filteredAccess = desiredAccess;
+        if (DpUserHookIsProtectedTargetProcess(targetProcess)) {
+            filteredAccess = sourceWindowsImage && DpUserHookIsReadQueryProcessAccess(desiredAccess)
+                ? (desiredAccess & ~PROCESS_VM_READ)
+                : (desiredAccess & ~denyMask);
+        } else if (sourceWindowsImage && DpUserHookIsReadQueryProcessAccess(desiredAccess)) {
+            shouldQueue = FALSE;
+        }
+
+        if (filteredAccess != desiredAccess) {
+            eventStatus = (ULONG)STATUS_ACCESS_DENIED;
+            if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+                OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = filteredAccess;
+            } else {
+                OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = filteredAccess;
+            }
+
+            if (sourceWindowsImage && DpUserHookIsReadQueryProcessAccess(desiredAccess)) {
+                shouldQueue = FALSE;
+            }
+        } else if (sourceWindowsImage && DpUserHookIsReadQueryProcessAccess(desiredAccess)) {
+            shouldQueue = FALSE;
         }
 
         targetImageName = (const CHAR *)PsGetProcessImageFileName(targetProcess);
@@ -1246,12 +1466,27 @@ DpUserHookObPreOperationCallback(
         targetProcess = IoThreadToProcess(targetThread);
         targetProcessId = PsGetProcessId(targetProcess);
         if (targetProcessId == sourceProcessId) {
-            return OB_PREOP_SUCCESS;
+            goto Exit;
         }
 
         sensitiveAccess = desiredAccess & DpUserHookSensitiveThreadAccessMask();
         if (sensitiveAccess == 0) {
-            return OB_PREOP_SUCCESS;
+            goto Exit;
+        }
+
+        denyMask = DpUserHookThreadAccessDenyMask();
+        filteredAccess = desiredAccess;
+        if (DpUserHookIsProtectedTargetProcess(targetProcess)) {
+            filteredAccess = desiredAccess & ~denyMask;
+        }
+
+        if (filteredAccess != desiredAccess) {
+            eventStatus = (ULONG)STATUS_ACCESS_DENIED;
+            if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+                OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = filteredAccess;
+            } else {
+                OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = filteredAccess;
+            }
         }
 
         targetImageName = (const CHAR *)PsGetProcessImageFileName(targetProcess);
@@ -1265,17 +1500,24 @@ DpUserHookObPreOperationCallback(
                                           targetImageName);
         operation = DpUserHookDefenseOperationBehaviorThreadAccess;
     } else {
-        return OB_PREOP_SUCCESS;
+        goto Exit;
     }
 
-    RtlInitUnicodeString(&targetString, target);
-    DpUserHookQueueEvent(operation,
-                         sourceProcessId,
-                         targetProcessId,
-                         STATUS_SUCCESS,
-                         &targetString,
-                         NULL,
-                         DpUserHookReadPolicyFlags());
+    if (shouldQueue) {
+        RtlInitUnicodeString(&targetString, target);
+        DpUserHookQueueEvent(operation,
+                             sourceProcessId,
+                             targetProcessId,
+                             eventStatus,
+                             &targetString,
+                             sourceImagePath,
+                             DpUserHookReadPolicyFlags());
+    }
+
+Exit:
+    if (sourceImagePath != NULL) {
+        ExFreePool(sourceImagePath);
+    }
 
     return OB_PREOP_SUCCESS;
 }

@@ -1342,9 +1342,10 @@ namespace DataProtectorWebBridge.Services
                     SourceHost = Environment.MachineName,
                     SourceProcess = item.processImage,
                     SourcePid = item.processId.ToString(CultureInfo.InvariantCulture),
-                    TargetProcess = item.target,
+                    TargetProcess = ExtractKernelTargetProcess(item.target),
+                    TargetPid = ExtractKernelDecimalField(item.target, "targetPid="),
                     ObjectType = "process-behavior",
-                    ObjectName = item.target,
+                    ObjectName = FirstNonEmpty(ExtractKernelTargetProcess(item.target), item.target),
                     ObjectFormat = "flags=0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture),
                     PolicyName = "process-threat-insight",
                     Disposition = (item.status == SuccessStatus || item.status == 0x00000103) ? "observed" : "blocked",
@@ -1459,8 +1460,62 @@ namespace DataProtectorWebBridge.Services
             }
 
             message += " ParentPID: " + item.parentProcessId.ToString(CultureInfo.InvariantCulture) + ".";
+            string targetPid = ExtractKernelDecimalField(item.target, "targetPid=");
+            if (!string.IsNullOrWhiteSpace(targetPid))
+            {
+                message += " TargetPID: " + targetPid + ".";
+            }
+
+            string targetProcess = ExtractKernelTargetProcess(item.target);
+            if (!string.IsNullOrWhiteSpace(targetProcess))
+            {
+                message += " TargetProcess: " + targetProcess + ".";
+            }
+
             message += " Flags: 0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture) + ".";
             return message;
+        }
+
+        private static string ExtractKernelTargetProcess(string target)
+        {
+            return ExtractKernelTextField(target, "target=");
+        }
+
+        private static string ExtractKernelDecimalField(string text, string prefix)
+        {
+            string value = ExtractKernelTextField(text, prefix);
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            long parsed;
+            return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed)
+                ? parsed.ToString(CultureInfo.InvariantCulture)
+                : value;
+        }
+
+        private static string ExtractKernelTextField(string text, string prefix)
+        {
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(prefix))
+            {
+                return string.Empty;
+            }
+
+            int index = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return string.Empty;
+            }
+
+            index += prefix.Length;
+            int end = text.IndexOf(' ', index);
+            if (end < 0)
+            {
+                end = text.Length;
+            }
+
+            return text.Substring(index, end - index).Trim();
         }
 
         private AuditLog.AuditRecord[] DrainUserHookRuntimeAuditRecords(UserHookDefensePolicyDto policy)
@@ -4737,6 +4792,7 @@ namespace DataProtectorWebBridge.Services
             private static bool IsInternalTelemetryProcess(string name)
             {
                 return name.IndexOf("dataprotectorsandbox", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       name.IndexOf("dataprotectors", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        name.IndexOf("dataprotectorwebbridge", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        name.IndexOf("dataprotectoragentclient", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        name.IndexOf("dataprotectorwebadmin", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -4751,7 +4807,10 @@ namespace DataProtectorWebBridge.Services
 
                 string text = value.ToLowerInvariant();
                 return text.Contains("dataprotectorsandbox") ||
+                       text.Contains("dataprotectors") ||
                        text.Contains("dataprotectoruserhookruntime") ||
+                       text.Contains("dataprotectorwebbridge") ||
+                       text.Contains("dataprotectoragentclient") ||
                        text.Contains("dataprotectorpolicyapi") ||
                        text.Contains("runtime-injection-queued") ||
                        text.Contains("runtime-injection-skipped") ||

@@ -1343,7 +1343,10 @@ namespace DataProtectorSandboxTelemetry
             string text = value.ToLowerInvariant();
             return text.Contains("dataprotectorsandboxtelemetry") ||
                    text.Contains("dataprotectorsandbox") ||
+                   text.Contains("dataprotectors") ||
                    text.Contains("dataprotectoruserhookruntime") ||
+                   text.Contains("dataprotectorwebbridge") ||
+                   text.Contains("dataprotectoragentclient") ||
                    text.Contains("dataprotectorpolicyapi") ||
                    text.Contains("dataprotector.sys") ||
                    text.Contains("dataprotectorsandbox.sys") ||

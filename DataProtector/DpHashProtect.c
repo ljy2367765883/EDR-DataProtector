@@ -242,6 +242,43 @@ DpHashProtectIsSystemPid(
 
 static
 BOOLEAN
+DpHashProtectUnicodeContainsLiteral(
+    _In_opt_ PCUNICODE_STRING Value,
+    _In_z_ PCWSTR Needle
+    )
+{
+    UNICODE_STRING needleString;
+    SIZE_T valueChars;
+    SIZE_T needleChars;
+    SIZE_T index;
+
+    if (Value == NULL || Value->Buffer == NULL || Needle == NULL || Needle[0] == L'\0') {
+        return FALSE;
+    }
+
+    RtlInitUnicodeString(&needleString, Needle);
+    valueChars = Value->Length / sizeof(WCHAR);
+    needleChars = needleString.Length / sizeof(WCHAR);
+    if (valueChars < needleChars) {
+        return FALSE;
+    }
+
+    for (index = 0; index <= valueChars - needleChars; index++) {
+        UNICODE_STRING candidate;
+        candidate.Buffer = Value->Buffer + index;
+        candidate.Length = (USHORT)(needleChars * sizeof(WCHAR));
+        candidate.MaximumLength = candidate.Length;
+
+        if (RtlEqualUnicodeString(&candidate, &needleString, TRUE)) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
 DpHashProtectImagePathIsSystem32Suffix(
     _In_ PCUNICODE_STRING ImagePath,
     _In_z_ PCWSTR FileName
@@ -264,6 +301,60 @@ DpHashProtectImagePathIsSystem32Suffix(
 
     RtlInitUnicodeString(&suffix, suffixBuffer);
     return RtlSuffixUnicodeString(&suffix, ImagePath, TRUE);
+}
+
+static
+BOOLEAN
+DpHashProtectIsWindowsImagePath(
+    _In_opt_ PCUNICODE_STRING ImagePath
+    )
+{
+    if (ImagePath == NULL || ImagePath->Buffer == NULL || ImagePath->Length == 0) {
+        return FALSE;
+    }
+
+    return DpHashProtectUnicodeContainsLiteral(ImagePath, L"\\Windows\\System32\\") ||
+           DpHashProtectUnicodeContainsLiteral(ImagePath, L"\\Windows\\SysWOW64\\") ||
+           DpHashProtectUnicodeContainsLiteral(ImagePath, L"\\Windows\\WinSxS\\") ||
+           DpHashProtectUnicodeContainsLiteral(ImagePath, L"\\Windows\\SystemApps\\") ||
+           DpHashProtectUnicodeContainsLiteral(ImagePath, L"\\Windows\\explorer.exe");
+}
+
+static
+BOOLEAN
+DpHashProtectIsWindowsCurrentProcess(
+    VOID
+    )
+{
+    PUNICODE_STRING imagePath = NULL;
+    BOOLEAN windowsImage = FALSE;
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return FALSE;
+    }
+
+    if (NT_SUCCESS(SeLocateProcessImageName(PsGetCurrentProcess(), &imagePath)) && imagePath != NULL) {
+        windowsImage = DpHashProtectIsWindowsImagePath(imagePath);
+        ExFreePool(imagePath);
+    }
+
+    return windowsImage;
+}
+
+static
+BOOLEAN
+DpHashProtectIsReadQueryProcessAccess(
+    _In_ ACCESS_MASK DesiredAccess
+    )
+{
+    const ACCESS_MASK readQueryMask = PROCESS_VM_READ |
+                                      PROCESS_QUERY_INFORMATION |
+                                      PROCESS_QUERY_LIMITED_INFORMATION |
+                                      SYNCHRONIZE |
+                                      READ_CONTROL;
+
+    return DesiredAccess != 0 &&
+           (DesiredAccess & ~readQueryMask) == 0;
 }
 
 static
@@ -849,21 +940,33 @@ DpHashProtectFilterLsassAccess(
     ACCESS_MASK desiredAccess;
     ACCESS_MASK filteredAccess;
     ACCESS_MASK dangerousAccess;
+    BOOLEAN suppressReadOnlyWindowsEvent;
+    BOOLEAN windowsReadOnlyAccess;
 
     dangerousAccess = DpHashProtectDangerousProcessAccess();
+    suppressReadOnlyWindowsEvent = FALSE;
+    windowsReadOnlyAccess = FALSE;
 
     if (Operation == OB_OPERATION_HANDLE_CREATE) {
         desiredAccess = Parameters->CreateHandleInformation.DesiredAccess;
-        filteredAccess = desiredAccess & ~dangerousAccess;
+        windowsReadOnlyAccess =
+            DpHashProtectIsWindowsCurrentProcess() &&
+            DpHashProtectIsReadQueryProcessAccess(desiredAccess);
+        filteredAccess = windowsReadOnlyAccess
+            ? (desiredAccess & ~PROCESS_VM_READ)
+            : (desiredAccess & ~dangerousAccess);
 
         if (filteredAccess != desiredAccess) {
+            suppressReadOnlyWindowsEvent = windowsReadOnlyAccess;
             Parameters->CreateHandleInformation.DesiredAccess = filteredAccess;
-            DpHashProtectQueueEventAsciiTarget(DpHashProtectOperationLsassHandle,
-                                               PsGetCurrentProcessId(),
-                                               (ULONG)STATUS_ACCESS_DENIED,
-                                               desiredAccess,
-                                               L"lsass.exe",
-                                               (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()));
+            if (!suppressReadOnlyWindowsEvent) {
+                DpHashProtectQueueEventAsciiTarget(DpHashProtectOperationLsassHandle,
+                                                   PsGetCurrentProcessId(),
+                                                   (ULONG)STATUS_ACCESS_DENIED,
+                                                   desiredAccess,
+                                                   L"lsass.exe",
+                                                   (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()));
+            }
             DP_HASH_TRACE("blocked lsass handle create pid=%p access=0x%08X filtered=0x%08X image=%s\n",
                           PsGetCurrentProcessId(),
                           desiredAccess,
@@ -872,16 +975,24 @@ DpHashProtectFilterLsassAccess(
         }
     } else if (Operation == OB_OPERATION_HANDLE_DUPLICATE) {
         desiredAccess = Parameters->DuplicateHandleInformation.DesiredAccess;
-        filteredAccess = desiredAccess & ~dangerousAccess;
+        windowsReadOnlyAccess =
+            DpHashProtectIsWindowsCurrentProcess() &&
+            DpHashProtectIsReadQueryProcessAccess(desiredAccess);
+        filteredAccess = windowsReadOnlyAccess
+            ? (desiredAccess & ~PROCESS_VM_READ)
+            : (desiredAccess & ~dangerousAccess);
 
         if (filteredAccess != desiredAccess) {
+            suppressReadOnlyWindowsEvent = windowsReadOnlyAccess;
             Parameters->DuplicateHandleInformation.DesiredAccess = filteredAccess;
-            DpHashProtectQueueEventAsciiTarget(DpHashProtectOperationLsassHandle,
-                                               PsGetCurrentProcessId(),
-                                               (ULONG)STATUS_ACCESS_DENIED,
-                                               desiredAccess,
-                                               L"lsass.exe",
-                                               (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()));
+            if (!suppressReadOnlyWindowsEvent) {
+                DpHashProtectQueueEventAsciiTarget(DpHashProtectOperationLsassHandle,
+                                                   PsGetCurrentProcessId(),
+                                                   (ULONG)STATUS_ACCESS_DENIED,
+                                                   desiredAccess,
+                                                   L"lsass.exe",
+                                                   (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()));
+            }
             DP_HASH_TRACE("blocked lsass handle duplicate pid=%p access=0x%08X filtered=0x%08X image=%s\n",
                           PsGetCurrentProcessId(),
                           desiredAccess,
