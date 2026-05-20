@@ -590,9 +590,11 @@ const local: App.I18n.Schema = {
         empty: 'No correlated attack flow in the current audit scope.',
         activeStages: '{count} stages',
         events: '{count} evidence events',
+        stagesTitle: 'Stage Chain',
         incidents: 'Correlated Incidents',
         processes: 'Process Profile',
         timeline: 'Evidence Timeline',
+        storyCaption: 'LogicFlow is showing the latest {count} evidence events. Continue tracing in the audit table below.',
         entities: 'Key Entities',
         stages: {
           delivery: 'Delivery / Landing',

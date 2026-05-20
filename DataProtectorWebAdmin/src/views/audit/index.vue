@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref, watch } from 'vue';
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import LogicFlow from '@logicflow/core';
+import '@logicflow/core/dist/index.css';
 import { NButton, NTag, type DataTableColumns, type PaginationProps } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
 import { fetchAuditAttackFlow, fetchAuditEvents, fetchClearAuditEvents, fetchDevices, fetchRemoveAuditEvent } from '@/service/api';
@@ -36,6 +38,8 @@ interface HostSummary {
   blocked: number;
 }
 
+type FlowGraphData = Parameters<LogicFlow['render']>[0];
+
 const loading = ref(false);
 const appStore = useAppStore();
 const auditResponse = ref<Api.DataProtector.AuditQueryResponse | null>(null);
@@ -43,6 +47,10 @@ const attackFlow = ref<Api.DataProtector.AuditAttackFlowResponse | null>(null);
 const devices = ref<Api.DataProtector.Device[]>([]);
 const activeCategory = ref<AuditCategory>('all');
 const timeRange = ref<[number, number] | null>(null);
+const attackStageFlowRef = ref<HTMLElement | null>(null);
+const attackStoryFlowRef = ref<HTMLElement | null>(null);
+let attackStageFlow: LogicFlow | null = null;
+let attackStoryFlow: LogicFlow | null = null;
 
 const filters = reactive({
   host: 'all',
@@ -116,6 +124,7 @@ const attackFlowIncidents = computed(() => attackFlow.value?.incidents ?? []);
 const attackFlowProcesses = computed(() => attackFlow.value?.processes ?? []);
 const attackFlowEntities = computed(() => attackFlow.value?.entities ?? []);
 const activeAttackStageCount = computed(() => attackFlowStages.value.filter(item => item.active).length);
+const attackStoryEvents = computed(() => attackFlowEvents.value.slice(0, 40));
 
 const categorySummaries = computed<AuditSummary[]>(() =>
   categoryOptions.value.filter(item => item.value !== 'all').map(item => {
@@ -674,21 +683,6 @@ function stageLabel(stage: string) {
   return labels[stage] || stage || '-';
 }
 
-function stageIcon(stage: string) {
-  const icons: Record<string, string> = {
-    delivery: 'mdi:download-network-outline',
-    execution: 'mdi:play-circle-outline',
-    behavior: 'mdi:vector-polyline',
-    credential: 'mdi:key-chain',
-    lateral: 'mdi:lan-disconnect',
-    network: 'mdi:access-point-network',
-    persistence: 'mdi:shield-key-outline',
-    impact: 'mdi:database-alert-outline'
-  };
-
-  return icons[stage] || 'mdi:timeline-clock-outline';
-}
-
 function attackSeverityTagType(value?: string) {
   if (value === 'critical' || value === 'high') return 'error';
   if (value === 'warning' || value === 'medium') return 'warning';
@@ -705,6 +699,170 @@ function attackSeverityLabel(value?: string) {
 
 function formatAttackTime(value?: string) {
   return value ? new Date(value).toLocaleString() : '-';
+}
+
+function compactFlowText(value?: string, fallback = '-') {
+  const text = (value || fallback).replace(/\s+/g, ' ').trim();
+  if (text.length <= 28) return text;
+  return `${text.slice(0, 25)}...`;
+}
+
+function flowTextStyle() {
+  return {
+    fontSize: 12,
+    textWidth: 132,
+    overflowMode: 'ellipsis' as const,
+    lineHeight: 16
+  };
+}
+
+function buildStageFlowData(): FlowGraphData {
+  const stages = attackFlowStages.value.length
+    ? attackFlowStages.value
+    : [
+        {
+          key: 'empty',
+          label: $t('dataprotector.audit.attackFlow.empty'),
+          active: false,
+          count: 0,
+          severity: 'info',
+          firstSeenUtc: '',
+          lastSeenUtc: '',
+          detail: ''
+        }
+      ];
+
+  const nodes = stages.map((stage, index) => ({
+    id: `stage-${stage.key || index}`,
+    type: 'rect',
+    x: 96 + index * 190,
+    y: 76,
+    text: {
+      x: 96 + index * 190,
+      y: 76,
+      value: `${stageLabel(stage.key)}\n${stage.count || 0} ${$t('dataprotector.audit.attackFlow.columns.events')}`,
+      ...flowTextStyle()
+    },
+    properties: {
+      width: 150,
+      height: 64
+    }
+  }));
+
+  const edges = stages.slice(1).map((stage, index) => ({
+    id: `stage-edge-${index}`,
+    type: 'polyline',
+    sourceNodeId: `stage-${stages[index].key || index}`,
+    targetNodeId: `stage-${stage.key || index + 1}`
+  }));
+
+  return { nodes, edges };
+}
+
+function buildStoryFlowData(): FlowGraphData {
+  const events = attackStoryEvents.value;
+
+  if (!events.length) {
+    return {
+      nodes: [
+        {
+          id: 'story-empty',
+          type: 'rect',
+          x: 120,
+          y: 90,
+          text: {
+            x: 120,
+            y: 90,
+            value: $t('dataprotector.audit.attackFlow.empty'),
+            ...flowTextStyle()
+          },
+          properties: {
+            width: 180,
+            height: 56
+          }
+        }
+      ],
+      edges: []
+    };
+  }
+
+  const nodes = events.map((event, index) => {
+    const row = Math.floor(index / 8);
+    const column = index % 8;
+    const x = 116 + column * 184;
+    const y = 86 + row * 116;
+    const title = compactFlowText(event.title || event.action || stageLabel(event.stage));
+    const meta = compactFlowText(event.sourceProcess || event.host || event.remoteIdentity || event.objectName || '-', '');
+
+    return {
+      id: `story-${event.id || index}`,
+      type: 'rect',
+      x,
+      y,
+      text: {
+        x,
+        y,
+        value: `${title}\n${formatAttackTime(event.timeUtc)}${meta ? `\n${meta}` : ''}`,
+        ...flowTextStyle(),
+        textWidth: 142,
+        lineHeight: 15
+      },
+      properties: {
+        width: 158,
+        height: 76
+      }
+    };
+  });
+
+  const edges = events.slice(1).map((event, index) => ({
+    id: `story-edge-${index}`,
+    type: 'polyline',
+    sourceNodeId: `story-${events[index].id || index}`,
+    targetNodeId: `story-${event.id || index + 1}`
+  }));
+
+  return { nodes, edges };
+}
+
+function createLogicFlow(container: HTMLElement) {
+  const lf = new LogicFlow({
+    container,
+    grid: false,
+    isSilentMode: true,
+    stopScrollGraph: true,
+    stopZoomGraph: true,
+    stopMoveGraph: false,
+    adjustEdge: false,
+    history: false,
+    keyboard: { enabled: false },
+    edgeType: 'polyline'
+  });
+
+  return lf;
+}
+
+function renderLogicFlow(lf: LogicFlow, data: FlowGraphData) {
+  lf.render(data);
+  nextTick(() => {
+    window.setTimeout(() => {
+      lf.fitView(24, 24);
+      lf.translateCenter();
+    }, 0);
+  });
+}
+
+function renderAttackFlows() {
+  nextTick(() => {
+    if (attackStageFlowRef.value) {
+      attackStageFlow ??= createLogicFlow(attackStageFlowRef.value);
+      renderLogicFlow(attackStageFlow, buildStageFlowData());
+    }
+
+    if (attackStoryFlowRef.value) {
+      attackStoryFlow ??= createLogicFlow(attackStoryFlowRef.value);
+      renderLogicFlow(attackStoryFlow, buildStoryFlowData());
+    }
+  });
 }
 
 function updateCharts() {
@@ -852,8 +1010,19 @@ async function removeAuditEvent(record: Api.DataProtector.AuditRecord) {
 }
 
 watch([auditResponse, () => appStore.locale], updateCharts, { deep: true });
+watch([attackFlow, () => appStore.locale], renderAttackFlows, { deep: true });
 
-onMounted(refresh);
+onMounted(() => {
+  renderAttackFlows();
+  refresh();
+});
+
+onBeforeUnmount(() => {
+  attackStageFlow?.destroy();
+  attackStoryFlow?.destroy();
+  attackStageFlow = null;
+  attackStoryFlow = null;
+});
 </script>
 
 <template>
@@ -1009,22 +1178,9 @@ onMounted(refresh);
       </template>
 
       <NSpace vertical :size="16">
-        <div class="attack-stage-rail">
-          <div
-            v-for="stage in attackFlowStages"
-            :key="stage.key"
-            class="attack-stage"
-            :class="{ active: stage.active, critical: stage.severity === 'critical' || stage.severity === 'high' }"
-          >
-            <div class="stage-icon">
-              <SvgIcon :icon="stageIcon(stage.key)" />
-            </div>
-            <div class="stage-body">
-              <div class="stage-title">{{ stageLabel(stage.key) }}</div>
-              <div class="stage-detail">{{ stage.detail }}</div>
-            </div>
-            <NTag size="small" :type="attackSeverityTagType(stage.severity)" :bordered="false">{{ stage.count }}</NTag>
-          </div>
+        <div>
+          <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.stagesTitle') }}</div>
+          <div ref="attackStageFlowRef" class="logic-flow-panel logic-flow-stage"></div>
         </div>
 
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
@@ -1053,28 +1209,9 @@ onMounted(refresh);
         <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <NGi span="24 l:15">
             <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.timeline') }}</div>
-            <div class="attack-timeline">
-              <div
-                v-for="event in attackFlowEvents.slice(0, 80)"
-                :key="event.id"
-                class="attack-event"
-                :class="`severity-${event.severity}`"
-              >
-                <div class="event-dot">
-                  <SvgIcon :icon="stageIcon(event.stage)" />
-                </div>
-                <div class="event-card">
-                  <div class="event-title-row">
-                    <span>{{ event.title }}</span>
-                    <small>{{ formatAttackTime(event.timeUtc) }}</small>
-                  </div>
-                  <div class="event-detail">{{ event.detail || event.rawMessage || '-' }}</div>
-                  <div class="event-meta">
-                    {{ event.host || '-' }} · {{ event.sourceProcess || '-' }} · PID {{ event.sourcePid || '-' }} · {{ stageLabel(event.stage) }}
-                  </div>
-                </div>
-              </div>
-              <NEmpty v-if="!attackFlowEvents.length" :description="$t('dataprotector.audit.attackFlow.empty')" />
+            <div ref="attackStoryFlowRef" class="logic-flow-panel logic-flow-story"></div>
+            <div v-if="attackStoryEvents.length" class="flow-story-caption">
+              {{ $t('dataprotector.audit.attackFlow.storyCaption', { count: attackStoryEvents.length }) }}
             </div>
           </NGi>
           <NGi span="24 l:9">
@@ -1143,62 +1280,12 @@ onMounted(refresh);
   font-size: 12px;
 }
 
-.attack-stage-rail {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
-}
-
-.attack-stage {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 8px;
-  padding: 12px;
-  background: rgba(15, 23, 42, 0.03);
-  opacity: 0.72;
-}
-
-.attack-stage.active {
-  border-color: rgba(32, 128, 240, 0.4);
-  background: rgba(32, 128, 240, 0.08);
-  opacity: 1;
-}
-
-.attack-stage.critical {
-  border-color: rgba(208, 48, 80, 0.45);
-  background: rgba(208, 48, 80, 0.08);
-}
-
-.stage-icon,
-.event-dot {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  color: #fff;
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
-}
-
-.stage-body {
-  min-width: 0;
-  flex: 1;
-}
-
-.stage-title,
 .story-panel-title,
 .entity-label {
   font-weight: 700;
 }
 
-.stage-detail,
-.entity-type,
-.event-meta {
+.entity-type {
   min-width: 0;
   overflow: hidden;
   color: var(--n-text-color-3);
@@ -1212,67 +1299,31 @@ onMounted(refresh);
   font-size: 14px;
 }
 
+.logic-flow-panel {
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.logic-flow-stage {
+  height: 180px;
+}
+
+.logic-flow-story {
+  height: 520px;
+}
+
+.flow-story-caption {
+  margin-top: 8px;
+  color: var(--n-text-color-3);
+  font-size: 12px;
+}
+
 .attack-tag-list {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.attack-timeline {
-  position: relative;
-  display: flex;
-  max-height: 520px;
-  flex-direction: column;
-  gap: 10px;
-  overflow: auto;
-  padding-right: 6px;
-}
-
-.attack-event {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  gap: 10px;
-}
-
-.event-card {
-  min-width: 0;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.56);
-}
-
-.event-title-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-weight: 700;
-}
-
-.event-title-row small {
-  flex: 0 0 auto;
-  color: var(--n-text-color-3);
-  font-weight: 400;
-}
-
-.event-detail {
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--n-text-color-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.attack-event.severity-critical .event-dot,
-.attack-event.severity-high .event-dot {
-  background: linear-gradient(135deg, #dc2626, #9333ea);
-}
-
-.attack-event.severity-warning .event-dot,
-.attack-event.severity-medium .event-dot {
-  background: linear-gradient(135deg, #f59e0b, #dc2626);
 }
 
 .attack-entity-list {

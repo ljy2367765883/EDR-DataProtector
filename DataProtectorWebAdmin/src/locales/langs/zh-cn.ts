@@ -586,9 +586,11 @@
         empty: '当前筛选范围内暂无可关联的攻击流程。',
         activeStages: '{count} 个阶段',
         events: '{count} 条证据',
+        stagesTitle: '阶段链路',
         incidents: '关联事件簇',
         processes: '进程画像',
         timeline: '证据时间线',
+        storyCaption: '已用 LogicFlow 展示最近 {count} 条证据，完整记录可在下方审计表继续追溯。',
         entities: '关键实体',
         stages: {
           delivery: '落地 / 投递',
