@@ -210,8 +210,30 @@ type AttackGraphNodeDetail = {
   target?: string;
   status?: string;
   time?: string;
+  lastTime?: string;
+  count?: number;
   stage?: string;
   source?: string;
+};
+
+type AttackTimelineBucket = {
+  key: string;
+  title: string;
+  stage: string;
+  category: string;
+  severity: string;
+  source: string;
+  time?: string;
+  lastTime?: string;
+  pid?: number;
+  parentPid?: number;
+  path?: string;
+  command?: string;
+  signer?: string;
+  target?: string;
+  status?: string;
+  descriptions: string[];
+  count: number;
 };
 
 type AttackGraphMiniPoint = {
@@ -285,8 +307,10 @@ const rawReport = computed(() => parseJson<SandboxReport | null>(selectedSample.
 const report = computed(() => sanitizeSandboxReport(rawReport.value));
 const attackStory = computed(() => buildAttackStory(report.value));
 const attackGraph = computed(() => buildSandboxAttackGraph(report.value, selectedSample.value));
+const attackTimelineEvents = computed(() => attackGraph.value.details.filter(item => item.kind === 'event'));
+const defaultAttackNodeId = computed(() => attackTimelineEvents.value[0]?.id || attackGraph.value.details[0]?.id || '');
 const selectedAttackNode = computed(
-  () => attackGraph.value.details.find(item => item.id === selectedAttackNodeId.value) || attackGraph.value.details[0] || null
+  () => attackGraph.value.details.find(item => item.id === selectedAttackNodeId.value) || attackTimelineEvents.value[0] || attackGraph.value.details[0] || null
 );
 const activeAttackFlowStageCount = computed(() => attackStory.value.stages.filter(item => item.active).length);
 const reportParseFailed = computed(() => Boolean(selectedSample.value?.reportJson && !rawReport.value));
@@ -312,7 +336,18 @@ const reportSignalTotal = computed(
 );
 const reportRiskSeverity = computed(() => calculateReportRiskSeverity(report.value, selectedSample.value));
 const reportSummaryText = computed(() => buildReportSummaryText(report.value, selectedSample.value));
-const reportTopFindings = computed(() => attackStory.value.events.slice(0, 3));
+const reportTopFindings = computed(() =>
+  attackTimelineEvents.value.slice(0, 3).map(event => ({
+    id: event.id,
+    time: event.time || '',
+    type: event.category,
+    title: event.title,
+    detail: event.target || event.description,
+    severity: event.severity,
+    icon: eventIcon(event.stage || event.title),
+    pid: event.pid || 0
+  }))
+);
 const stats = computed(() => ({
   total: response.value?.total ?? 0,
   queued: response.value?.queuedTotal ?? 0,
@@ -872,47 +907,19 @@ function buildAttackStory(value: SandboxReport | null): AttackStory {
 }
 
 function buildAttackFlowStages(value: SandboxReport | null): AttackFlowStage[] {
-  const behaviors = value?.behaviors || [];
-  const processes = value?.processes || [];
-  const network = value?.network || [];
-  const artifacts = value?.fileArtifacts || [];
-  const runtimeEvents = value?.runtimeEvents || [];
-  const kernelEvents = value?.kernelEvents || [];
-  const services = value?.services || [];
-  const tasks = value?.scheduledTasks || [];
-
-  const childProcessCount = processes.filter(process => process.parentPid && process.pid !== value?.execution?.pid).length;
-  const commandCount = countTextMatches(
-    [...behaviors.map(item => `${item.type} ${item.detail}`), ...processes.map(item => item.commandLine)],
-    ['process', 'command', 'powershell', 'cmd.exe', 'rundll32', 'regsvr32', 'wscript', 'cscript', 'mshta']
-  );
-  const memoryCount = countTextMatches(
-    [
-      ...behaviors.map(item => `${item.type} ${item.detail}`),
-      ...runtimeEvents.map(item => `${item.action} ${item.target}`),
-      ...kernelEvents.map(item => `${item.operationName} ${item.description} ${item.target}`)
-    ],
-    ['virtualalloc', 'writeprocessmemory', 'createremotethread', 'syscall', 'unhook', 'executable memory', 'module reload', 'native-module']
-  );
-  const persistenceCount =
-    services.length +
-    tasks.length +
-    countTextMatches(
-      [...behaviors.map(item => `${item.type} ${item.detail}`), ...runtimeEvents.map(item => `${item.action} ${item.target}`)],
-      ['registry', 'autorun', 'run key', 'scheduled task', 'service', 'driver']
-    );
-  const artifactCount =
-    artifacts.length +
-    countTextMatches(
-      [...behaviors.map(item => `${item.type} ${item.detail}`), ...kernelEvents.map(item => `${item.operationName} ${item.target}`)],
-      ['file-artifacts', 'drop', 'write-file', 'driver']
-    );
+  const events = buildDetailedAttackEvents(value);
+  const countByStage = (stage: string) => events.filter(event => event.stage === stage).length;
+  const processCount = countByStage($t('dataprotector.sandbox.attackFlow.stages.process'));
+  const memoryCount = countByStage($t('dataprotector.sandbox.attackFlow.stages.apiMemory'));
+  const networkCount = countByStage($t('dataprotector.sandbox.attackFlow.stages.network'));
+  const persistenceCount = countByStage($t('dataprotector.sandbox.attackFlow.stages.persistence'));
+  const artifactCount = countByStage($t('dataprotector.sandbox.attackFlow.stages.artifact'));
 
   return [
     createAttackFlowStage('launch', true, 1, 'medium', 'mdi:rocket-launch-outline'),
-    createAttackFlowStage('process', childProcessCount > 0 || commandCount > 0, childProcessCount + commandCount, 'high', 'mdi:family-tree'),
+    createAttackFlowStage('process', processCount > 0, processCount, 'high', 'mdi:family-tree'),
     createAttackFlowStage('apiMemory', memoryCount > 0, memoryCount, 'critical', 'mdi:memory'),
-    createAttackFlowStage('network', network.length > 0, network.length, 'medium', 'mdi:access-point-network'),
+    createAttackFlowStage('network', networkCount > 0, networkCount, 'medium', 'mdi:access-point-network'),
     createAttackFlowStage('persistence', persistenceCount > 0, persistenceCount, 'critical', 'mdi:shield-key-outline'),
     createAttackFlowStage('artifact', artifactCount > 0, artifactCount, 'high', 'mdi:file-cog-outline')
   ];
@@ -1154,6 +1161,255 @@ function eventIcon(value?: string) {
   return 'mdi:radar';
 }
 
+function normalizeBehaviorTimelineEvent(type?: string, detail?: string) {
+  const text = `${type || ''} ${detail || ''}`.toLowerCase();
+  if (isLowLevelSandboxTelemetry(text)) return null;
+
+  if (text.includes('kernel-injection-primitive') || text.includes('process-access') || text.includes('remote-thread')) {
+    return normalizeKernelTimelineEvent(type, detail, '');
+  }
+  if (text.includes('file-artifacts')) {
+    return {
+      key: 'behavior:file-artifacts',
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.fileArtifacts'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.artifact'),
+      severity: 'medium',
+      target: detail,
+      description: detail
+    };
+  }
+  if (text.includes('executable-memory') || text.includes('memory-rwx')) {
+    return {
+      key: 'behavior:executable-memory',
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.executableMemory'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: 'high',
+      target: detail,
+      description: detail
+    };
+  }
+  if (text.includes('module-reload') || text.includes('abnormal-path')) {
+    return {
+      key: 'behavior:module-reload',
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.moduleReload'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: 'critical',
+      target: detail,
+      description: detail
+    };
+  }
+
+  return {
+    key: `behavior:${normalizeFoldText(type || detail)}`,
+    title: normalizeEventTitle(type || 'behavior'),
+    stage: eventStageLabel(type, detail),
+    severity: undefined,
+    target: detail,
+    description: detail
+  };
+}
+
+function normalizeRuntimeTimelineEvent(action?: string, target?: string, blocked?: boolean) {
+  const text = `${action || ''} ${target || ''}`.toLowerCase();
+  if (isLowLevelSandboxTelemetry(text)) return null;
+  if (text.includes('writeprocessmemory') || text.includes('write-process-memory')) {
+    return {
+      key: 'runtime:write-process-memory',
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.processMemoryWrite'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: blocked ? 'critical' : 'high',
+      target,
+      description: target
+    };
+  }
+  if (text.includes('remote-thread') || text.includes('createremotethread') || text.includes('nt-create-thread')) {
+    return {
+      key: 'runtime:remote-thread',
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.remoteThread'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: blocked ? 'critical' : 'high',
+      target,
+      description: target
+    };
+  }
+  if (text.includes('registry') || text.includes('scheduled') || text.includes('service')) {
+    return {
+      key: `runtime:persistence:${normalizeFoldText(action)}`,
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.persistenceChange'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.persistence'),
+      severity: blocked ? 'critical' : 'high',
+      target,
+      description: target
+    };
+  }
+
+  return {
+    key: `runtime:${normalizeFoldText(action || target)}`,
+    title: normalizeEventTitle(action || 'runtime'),
+    stage: eventStageLabel(action, target),
+    severity: blocked ? 'high' : 'medium',
+    target,
+    description: target
+  };
+}
+
+function normalizeKernelTimelineEvent(operation?: string, target?: string, processImage?: string) {
+  const text = `${operation || ''} ${target || ''} ${processImage || ''}`.toLowerCase();
+  if (isLowLevelSandboxTelemetry(text)) return null;
+
+  const sourceName = extractKernelField(target, 'source') || basename(processImage) || $t('dataprotector.sandbox.attackFlow.timelineEvents.unknownProcess');
+  const sourcePid = extractKernelField(target, 'sourcePid');
+  const targetName = extractKernelField(target, 'target') || basename(target) || target;
+  const targetPid = extractKernelField(target, 'targetPid');
+  const access = extractKernelField(target, 'access');
+  const detail = buildKernelReadableDetail(sourceName, sourcePid, targetName, targetPid, access);
+
+  if (text.includes('process-access')) {
+    if (isCredentialTarget(targetName)) {
+      return {
+        key: `kernel:process-access:credential:${sourceName}:${sourcePid || ''}`,
+        title: $t('dataprotector.sandbox.attackFlow.timelineEvents.credentialAccess'),
+        stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+        severity: 'critical',
+        target: targetName,
+        description: detail
+      };
+    }
+    if (isPersistenceTarget(targetName)) {
+      return {
+        key: `kernel:process-access:persistence:${sourceName}:${sourcePid || ''}`,
+        title: $t('dataprotector.sandbox.attackFlow.timelineEvents.persistenceProcessAccess'),
+        stage: $t('dataprotector.sandbox.attackFlow.stages.persistence'),
+        severity: 'high',
+        target: targetName,
+        description: detail
+      };
+    }
+    return {
+      key: `kernel:process-access:sweep:${sourceName}:${sourcePid || ''}`,
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.processAccessSweep'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.process'),
+      severity: 'high',
+      target: targetName,
+      description: detail
+    };
+  }
+
+  if (text.includes('thread-access')) {
+    return {
+      key: `kernel:thread-access:${sourceName}:${sourcePid || ''}`,
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.threadAccess'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: 'high',
+      target: targetName,
+      description: detail
+    };
+  }
+
+  if (text.includes('remote-thread')) {
+    return {
+      key: `kernel:remote-thread:${sourceName}:${sourcePid || ''}`,
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.remoteThread'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: 'critical',
+      target: targetName,
+      description: detail
+    };
+  }
+
+  if (text.includes('sensitive-image') || text.includes('module-reload')) {
+    return {
+      key: `kernel:module-reload:${normalizeFoldText(target)}`,
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.moduleReload'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: 'critical',
+      target,
+      description: target
+    };
+  }
+
+  if (text.includes('suspicious-hook')) {
+    return {
+      key: `kernel:hook-tamper:${sourceName}:${sourcePid || ''}`,
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.hookTamper'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.apiMemory'),
+      severity: 'critical',
+      target,
+      description: target
+    };
+  }
+
+  if (text.includes('process-create')) {
+    return {
+      key: `kernel:process-create:${normalizeFoldText(target)}`,
+      title: $t('dataprotector.sandbox.attackFlow.timelineEvents.processCreate'),
+      stage: $t('dataprotector.sandbox.attackFlow.stages.process'),
+      severity: 'medium',
+      target,
+      description: target
+    };
+  }
+
+  return null;
+}
+
+function isLowLevelSandboxTelemetry(value?: string) {
+  const text = String(value || '').toLowerCase();
+  return [
+    'runtime-injection-required',
+    'runtime-injection-queued',
+    'runtime-injection-skipped',
+    'runtime-injection-failed',
+    'runtime-required',
+    'runtime-missing',
+    'runtime-rejected',
+    'hook-surface-image-load',
+    'create-hook-failed',
+    'etweventwrite',
+    'etweventwritetransfer',
+    'kernel-process-telemetry',
+    'kernel-early-injection-queued',
+    'kernel-runtime-injection-risk'
+  ].some(token => text.includes(token));
+}
+
+function extractKernelField(value: string | undefined, name: string) {
+  const match = String(value || '').match(new RegExp(`${name}=([^\\s]+)`, 'i'));
+  return match?.[1] || '';
+}
+
+function isCredentialTarget(value?: string) {
+  const text = String(value || '').toLowerCase();
+  return ['lsass.exe', 'sam', 'system', 'security', 'ntds.dit'].some(token => text.includes(token));
+}
+
+function isPersistenceTarget(value?: string) {
+  const text = String(value || '').toLowerCase();
+  return ['schtasks.exe', 'taskeng.exe', 'taskhost', 'services.exe', 'reg.exe', 'powershell.exe'].some(token => text.includes(token));
+}
+
+function buildKernelReadableDetail(sourceName?: string, sourcePid?: string, targetName?: string, targetPid?: string, access?: string) {
+  return $t('dataprotector.sandbox.attackFlow.timelineEvents.kernelAccessDetail', {
+    source: sourceName || '-',
+    sourcePid: sourcePid || '-',
+    target: targetName || '-',
+    targetPid: targetPid || '-',
+    access: access || '-'
+  });
+}
+
+function minTimelineTime(left?: string, right?: string) {
+  if (!left) return right;
+  if (!right) return left;
+  return (Date.parse(right) || 0) < (Date.parse(left) || 0) ? right : left;
+}
+
+function maxTimelineTime(left?: string, right?: string) {
+  if (!left) return right;
+  if (!right) return left;
+  return (Date.parse(right) || 0) > (Date.parse(left) || 0) ? right : left;
+}
+
 function compactFlowText(value?: string, fallback = '-') {
   const text = (value || fallback).replace(/\s+/g, ' ').trim();
   if (text.length <= 30) return text;
@@ -1207,17 +1463,17 @@ function buildSandboxAttackGraph(value: SandboxReport | null, sample: Api.DataPr
     nodes.push({
       id: emptyId,
       type: 'rect',
-      x: 450,
-      y: 260,
+      x: 190,
+      y: 190,
       text: {
-        x: 450,
-        y: 260,
-        value: $t('dataprotector.sandbox.attackFlow.empty'),
-        ...graphTextStyle(220, 16, '#64748b', 12)
+        x: 190,
+        y: 190,
+        value: '-',
+        ...graphTextStyle(28, 14, '#64748b', 12)
       },
       properties: {
-        width: 260,
-        height: 58,
+        width: 52,
+        height: 52,
         radius: 6,
         style: { fill: '#ffffff', stroke: '#cbd5e1', strokeWidth: 1 }
       }
@@ -1232,54 +1488,25 @@ function buildSandboxAttackGraph(value: SandboxReport | null, sample: Api.DataPr
       description: $t('dataprotector.sandbox.summary.noReport')
     });
     miniPoints.push({ id: emptyId, x: 50, y: 50, severity: 'info' });
-    return { flow: { nodes, edges }, details, miniPoints, height: 560 };
+    return { flow: { nodes, edges }, details, miniPoints, height: 380 };
   }
 
-  const orderedProcesses = buildAttackProcessGraph(value).slice(0, 8);
   const processSource = new Map((value.processes || []).map(process => [process.pid, process]));
-  const graphProcesses = orderedProcesses.length
-    ? orderedProcesses
-    : [
-        {
-          pid: value.execution?.pid || 0,
-          parentPid: 0,
-          name: sample.fileName || basename(sample.processPath) || 'sample',
-          path: sample.processPath || sample.fileName || '-',
-          risk: reportRiskSeverity.value,
-          depth: 0,
-          order: 1
-        }
-      ];
-  const processDetails = new Map<number, AttackGraphNodeDetail>();
-  graphProcesses.forEach(process => {
-    const source = processSource.get(process.pid);
-    processDetails.set(process.pid, {
-      id: '',
-      kind: 'process',
-      title: process.name || `PID ${process.pid}`,
-      subtitle: `PID ${process.pid || '-'} / PPID ${process.parentPid || '-'}`,
-      severity: process.risk || 'info',
-      category: $t('dataprotector.sandbox.attackFlow.detailsPanel.process'),
-      description: source?.commandLine || process.path || '-',
-      pid: process.pid,
-      parentPid: process.parentPid,
-      path: source?.path || process.path,
-      command: source?.commandLine,
-      signer: source?.signature?.signer || source?.signature?.status,
-      time: source?.createdUtc,
-      stage: $t('dataprotector.sandbox.attackFlow.stages.process'),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.processSource')
-    });
+  const rawEvents = buildDetailedAttackEvents(value).map((event, index) => {
+    const process = event.pid ? processSource.get(event.pid) : undefined;
+    return {
+      ...event,
+      id: `sandbox-timeline-raw-${index}`,
+      parentPid: event.parentPid || process?.parentPid,
+      path: event.path || process?.path,
+      command: event.command || process?.commandLine,
+      signer: event.signer || process?.signature?.signer || process?.signature?.status
+    };
   });
-
-  const rawEvents = buildDetailedAttackEvents(value);
-  const visibleEvents = compactAttackEvents(rawEvents, 18);
-  const mainX = 520;
-  const leftX = 330;
-  const rightX = 710;
-  const topY = 84;
+  const visibleEvents = compactAttackEvents(rawEvents, 24);
+  const mainX = 190;
+  const topY = 62;
   const rowGap = 76;
-  const rows: AttackGraphNodeDetail[] = [];
 
   const sampleId = 'sandbox-graph-sample';
   const sampleDetail: AttackGraphNodeDetail = {
@@ -1296,23 +1523,7 @@ function buildSandboxAttackGraph(value: SandboxReport | null, sample: Api.DataPr
     source: sourceLabel(sample.source),
     stage: $t('dataprotector.sandbox.attackFlow.stages.launch')
   };
-  rows.push(sampleDetail);
-
-  const seenProcessPids = new Set<number>();
-  for (const event of visibleEvents) {
-    const pid = event.pid || 0;
-    const process = processDetails.get(pid);
-    if (process && !seenProcessPids.has(pid)) {
-      seenProcessPids.add(pid);
-      rows.push({ ...process, id: `sandbox-graph-process-${pid || seenProcessPids.size}` });
-    }
-    rows.push(event);
-  }
-  for (const process of graphProcesses) {
-    if (!seenProcessPids.has(process.pid)) {
-      rows.push({ ...processDetails.get(process.pid)!, id: `sandbox-graph-process-${process.pid || rows.length}` });
-    }
-  }
+  details.push(sampleDetail, ...visibleEvents);
 
   nodes.push({
     id: sampleId,
@@ -1322,40 +1533,35 @@ function buildSandboxAttackGraph(value: SandboxReport | null, sample: Api.DataPr
     text: {
       x: mainX,
       y: topY,
-      value: `${compactNodeText(sample.fileName, 'sample', 24)}\n${sample.architecture || sample.source || '-'}`,
-      ...graphTextStyle(168, 13, '#334155', 11)
+      value: 'START',
+      ...graphTextStyle(58, 14, '#334155', 11)
     },
     properties: {
-      width: 190,
-      height: 48,
+      width: 74,
+      height: 34,
       radius: 4,
-      style: { fill: '#ffffff', stroke: '#d1d5db', strokeWidth: 1 },
+      style: { fill: '#ffffff', stroke: '#94a3b8', strokeWidth: 1.4 },
       textStyle: { fontWeight: 700 }
     }
   });
-  details.push(sampleDetail);
 
   let previousMainId = sampleId;
-  rows.slice(1).forEach((row, index) => {
+  visibleEvents.forEach((row, index) => {
     const y = topY + (index + 1) * rowGap;
     const eventIndex = index + 1;
-    const isProcess = row.kind === 'process';
-    const nodeId = row.id || `sandbox-graph-row-${index}`;
-    const laneX = isProcess ? mainX : eventIndex % 2 === 0 ? leftX : rightX;
-    const labelX = isProcess ? mainX : laneX + (laneX < mainX ? -108 : 108);
-    const labelAnchor = laneX < mainX ? 'end' : 'start';
+    const nodeId = row.id;
     const active = row.severity !== 'info';
 
     nodes.push({
       id: `sandbox-graph-time-${index}`,
       type: 'text',
-      x: mainX - 28,
+      x: mainX - 74,
       y,
       text: {
-        x: mainX - 28,
+        x: mainX - 74,
         y,
-        value: String(eventIndex),
-        ...graphTextStyle(42, 12, '#b6c1cf', 10)
+        value: formatTimelineNodeTime(row.time) || String(eventIndex).padStart(2, '0'),
+        ...graphTextStyle(62, 12, '#94a3b8', 10)
       },
       properties: {
         textStyle: { textAnchor: 'end' }
@@ -1364,56 +1570,34 @@ function buildSandboxAttackGraph(value: SandboxReport | null, sample: Api.DataPr
 
     nodes.push({
       id: nodeId,
-      type: isProcess ? 'circle' : 'circle',
-      x: laneX,
+      type: 'circle',
+      x: mainX,
       y,
-      text: '',
+      text: {
+        x: mainX,
+        y,
+        value: String(eventIndex),
+        ...graphTextStyle(24, 13, '#ffffff', 10)
+      },
       properties: {
-        r: isProcess ? 16 : active ? 9 : 6,
+        r: active ? 15 : 12,
         style: {
           fill: graphNodeFill(row.severity, active),
           stroke: '#ffffff',
-          strokeWidth: isProcess ? 3 : 2,
+          strokeWidth: 2.5,
           filter: active ? 'drop-shadow(0 5px 14px rgba(15, 23, 42, 0.22))' : undefined
-        }
-      }
-    });
-
-    nodes.push({
-      id: `${nodeId}-label`,
-      type: 'rect',
-      x: labelX,
-      y,
-      text: {
-        x: labelX,
-        y,
-        value: isProcess
-          ? `${compactNodeText(row.title, `PID ${row.pid}`, 24)} (${row.pid || '-'})`
-          : `${compactNodeText(row.title, row.category, 24)}\n${compactNodeText(row.stage || row.category, row.category, 24)}`,
-        ...graphTextStyle(isProcess ? 152 : 166, isProcess ? 12 : 13, isProcess ? '#334155' : '#475569', isProcess ? 11 : 10)
-      },
-      properties: {
-        width: isProcess ? 162 : 176,
-        height: isProcess ? 26 : 38,
-        radius: 3,
-        style: { fill: '#ffffff', stroke: '#e2e8f0', strokeWidth: 1, filter: 'drop-shadow(0 2px 7px rgba(15, 23, 42, 0.10))' },
+        },
         textStyle: {
-          textAnchor: isProcess ? 'middle' : labelAnchor
+          fontWeight: 800
         }
       }
     });
 
-    if (isProcess) {
-      edges.push(createGraphEdge(`sandbox-graph-main-edge-${index}`, previousMainId, nodeId, '#93c5fd', false));
-      previousMainId = nodeId;
-    } else {
-      edges.push(createGraphEdge(`sandbox-graph-event-edge-${index}`, previousMainId, nodeId, active ? '#cbd5e1' : '#e5e7eb', true));
-    }
-
-    details.push({ ...row, id: nodeId });
+    edges.push(createGraphEdge(`sandbox-graph-main-edge-${index}`, previousMainId, nodeId, active ? '#94a3b8' : '#cbd5e1', false));
+    previousMainId = nodeId;
   });
 
-  const graphHeight = Math.max(560, topY + Math.max(1, rows.length) * rowGap + 120);
+  const graphHeight = Math.max(380, topY + Math.max(1, visibleEvents.length + 1) * rowGap + 54);
   nodes.unshift({
     id: 'sandbox-graph-axis',
     type: 'rect',
@@ -1422,207 +1606,285 @@ function buildSandboxAttackGraph(value: SandboxReport | null, sample: Api.DataPr
     text: '',
     properties: {
       width: 2,
-      height: graphHeight - 110,
-      style: { fill: '#bfdbfe', stroke: '#bfdbfe', strokeWidth: 0 }
+      height: graphHeight - 96,
+      style: { fill: '#dbe4ee', stroke: '#dbe4ee', strokeWidth: 0 }
     }
   });
 
-  rows.forEach((row, index) => {
+  [sampleDetail, ...visibleEvents].forEach((row, index) => {
     const y = topY + index * rowGap;
     miniPoints.push({
-      id: row.id || (index === 0 ? sampleId : `sandbox-graph-row-${index}`),
-      x: row.kind === 'event' ? (index % 2 === 0 ? 34 : 66) : 50,
+      id: row.id,
+      x: 50,
       y: Math.min(94, Math.max(8, (y / graphHeight) * 100)),
       severity: row.severity
     });
-  });
-
-  const summaryY = graphHeight - 42;
-  attackStory.value.entities.forEach((entity, index) => {
-    const id = `sandbox-graph-entity-${entity.key}`;
-    const x = 292 + index * 152;
-    nodes.push({
-      id,
-      type: 'rect',
-      x,
-      y: summaryY,
-      text: {
-        x,
-        y: summaryY,
-        value: `${entity.label}\n${entity.value}`,
-        ...graphTextStyle(112, 13, '#475569', 11)
-      },
-      properties: {
-        width: 112,
-        height: 46,
-        radius: 4,
-        style: { fill: '#ffffff', stroke: '#e5e7eb', strokeWidth: 1 }
-      }
-    });
-    details.push({
-      id,
-      kind: 'summary',
-      title: entity.label,
-      subtitle: String(entity.value),
-      severity: entity.value > 0 ? 'medium' : 'info',
-      category: $t('dataprotector.sandbox.attackFlow.detailsPanel.entity'),
-      description: $t('dataprotector.sandbox.attackFlow.detailsPanel.entityDescription', { count: entity.value })
-    });
-    miniPoints.push({ id, x: 24 + index * 18, y: 96, severity: entity.value > 0 ? 'medium' : 'info' });
   });
 
   return { flow: { nodes, edges }, details, miniPoints, height: graphHeight };
 }
 
 function buildDetailedAttackEvents(value: SandboxReport | null): AttackGraphNodeDetail[] {
-  const events: AttackGraphNodeDetail[] = [];
+  const buckets = new Map<string, AttackTimelineBucket>();
+
+  const pushBucket = (bucket: Omit<AttackTimelineBucket, 'descriptions' | 'count'> & { description?: string; count?: number }) => {
+    if (isLowLevelSandboxTelemetry(`${bucket.key} ${bucket.title} ${bucket.target} ${bucket.description} ${bucket.source}`)) return;
+    const existing = buckets.get(bucket.key);
+    if (!existing) {
+      buckets.set(bucket.key, {
+        ...bucket,
+        descriptions: bucket.description ? [bucket.description] : [],
+        count: bucket.count || 1
+      });
+      return;
+    }
+
+    existing.count += bucket.count || 1;
+    existing.severity = maxSeverity(existing.severity, bucket.severity);
+    existing.lastTime = maxTimelineTime(existing.lastTime || existing.time, bucket.lastTime || bucket.time);
+    existing.time = minTimelineTime(existing.time, bucket.time);
+    if (bucket.description && !existing.descriptions.includes(bucket.description) && existing.descriptions.length < 5) {
+      existing.descriptions.push(bucket.description);
+    }
+    if (!existing.target && bucket.target) existing.target = bucket.target;
+    if (!existing.path && bucket.path) existing.path = bucket.path;
+    if (!existing.command && bucket.command) existing.command = bucket.command;
+    if (!existing.status && bucket.status) existing.status = bucket.status;
+    if (!existing.pid && bucket.pid) existing.pid = bucket.pid;
+    if (!existing.parentPid && bucket.parentPid) existing.parentPid = bucket.parentPid;
+  };
 
   for (const behavior of value?.behaviors || []) {
-    events.push({
-      id: `behavior-${events.length}`,
-      kind: 'event',
-      title: normalizeEventTitle(behavior.type || 'behavior'),
-      subtitle: formatTime(behavior.timeUtc),
-      severity: behavior.severity || 'info',
+    const normalized = normalizeBehaviorTimelineEvent(behavior.type, behavior.detail);
+    if (!normalized) continue;
+    pushBucket({
+      key: normalized.key,
+      title: normalized.title,
+      stage: normalized.stage,
       category: $t('dataprotector.sandbox.sections.behaviors'),
-      description: behavior.detail || '-',
-      pid: behavior.pid || 0,
-      target: behavior.detail,
+      severity: normalized.severity || behavior.severity || 'info',
+      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.behaviorSource'),
       time: behavior.timeUtc,
-      stage: eventStageLabel(behavior.type, behavior.detail),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.behaviorSource')
+      pid: behavior.pid || 0,
+      target: normalized.target || behavior.detail,
+      description: normalized.description || behavior.detail || '-'
     });
   }
 
   for (const runtime of value?.runtimeEvents || []) {
-    events.push({
-      id: `runtime-${events.length}`,
-      kind: 'event',
-      title: normalizeEventTitle(runtime.action || 'runtime'),
-      subtitle: runtime.blocked
-        ? $t('dataprotector.sandbox.attackFlow.detailsPanel.blocked')
-        : $t('dataprotector.sandbox.attackFlow.detailsPanel.observed'),
-      severity: runtime.blocked ? 'high' : 'medium',
+    const normalized = normalizeRuntimeTimelineEvent(runtime.action, runtime.target || runtime.processImage, runtime.blocked);
+    if (!normalized) continue;
+    pushBucket({
+      key: normalized.key,
+      title: normalized.title,
+      stage: normalized.stage,
       category: $t('dataprotector.sandbox.sections.runtime'),
-      description: runtime.target || runtime.processImage || '-',
-      pid: runtime.pid || 0,
-      target: runtime.target,
-      status: runtime.status,
+      severity: normalized.severity || (runtime.blocked ? 'high' : 'medium'),
+      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.runtimeSource'),
       time: runtime.timestampUtc,
-      stage: eventStageLabel(runtime.action, runtime.target),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.runtimeSource')
+      pid: runtime.pid || 0,
+      target: normalized.target || runtime.target,
+      status: runtime.status,
+      description: normalized.description || runtime.target || runtime.processImage || '-'
     });
   }
 
   for (const kernel of value?.kernelEvents || []) {
-    events.push({
-      id: `kernel-${events.length}`,
-      kind: 'event',
-      title: normalizeEventTitle(kernel.operationName || 'kernel'),
-      subtitle: kernel.status || '-',
-      severity: 'high',
+    const normalized = normalizeKernelTimelineEvent(kernel.operationName, kernel.target || kernel.description, kernel.processImage);
+    if (!normalized) continue;
+    pushBucket({
+      key: normalized.key,
+      title: normalized.title,
+      stage: normalized.stage,
       category: $t('dataprotector.sandbox.sections.kernel'),
-      description: kernel.description || kernel.target || '-',
+      severity: normalized.severity || 'high',
+      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.kernelSource'),
+      time: value?.completedUtc || value?.startedUtc,
       pid: kernel.pid || 0,
       parentPid: kernel.parentPid || 0,
-      target: kernel.target,
+      target: normalized.target || kernel.target,
       status: kernel.status,
-      time: value?.completedUtc || value?.startedUtc,
-      stage: eventStageLabel(kernel.operationName, `${kernel.description} ${kernel.target}`),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.kernelSource')
+      description: normalized.description || kernel.description || kernel.target || '-'
     });
   }
 
   for (const item of value?.network || []) {
-    events.push({
-      id: `network-${events.length}`,
-      kind: 'event',
+    pushBucket({
+      key: `network:${item.remoteAddress}:${item.remotePort}`,
       title: `${item.remoteAddress}:${item.remotePort}`,
-      subtitle: item.state || '-',
-      severity: 'medium',
+      stage: $t('dataprotector.sandbox.attackFlow.stages.network'),
       category: $t('dataprotector.sandbox.sections.network'),
-      description: `${item.localAddress}:${item.localPort} -> ${item.remoteAddress}:${item.remotePort}`,
+      severity: 'medium',
+      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.networkSource'),
+      time: item.timeUtc,
       pid: item.pid || 0,
       target: `${item.remoteAddress}:${item.remotePort}`,
       status: item.state,
-      time: item.timeUtc,
-      stage: $t('dataprotector.sandbox.attackFlow.stages.network'),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.networkSource')
+      description: `${item.localAddress}:${item.localPort} -> ${item.remoteAddress}:${item.remotePort}`
     });
   }
 
   for (const artifact of value?.fileArtifacts || []) {
-    events.push({
-      id: `artifact-${events.length}`,
-      kind: 'event',
+    pushBucket({
+      key: `artifact:${basename(artifact.path).toLowerCase() || artifact.sha256 || artifact.path}`,
       title: basename(artifact.path) || $t('dataprotector.sandbox.sections.artifacts'),
-      subtitle: formatBytes(artifact.size),
-      severity: 'medium',
-      category: $t('dataprotector.sandbox.sections.artifacts'),
-      description: artifact.path || '-',
-      target: artifact.path,
-      time: artifact.modifiedUtc,
       stage: $t('dataprotector.sandbox.attackFlow.stages.artifact'),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.fileSource')
+      category: $t('dataprotector.sandbox.sections.artifacts'),
+      severity: 'medium',
+      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.fileSource'),
+      time: artifact.modifiedUtc,
+      target: artifact.path,
+      status: formatBytes(artifact.size),
+      description: artifact.path || '-'
     });
   }
 
   for (const service of value?.services || []) {
-    events.push({
-      id: `service-${events.length}`,
-      kind: 'event',
+    pushBucket({
+      key: `service:${normalizeFoldText(service.name || service.displayName)}`,
       title: service.name || service.displayName || $t('dataprotector.sandbox.sections.services'),
-      subtitle: service.change || service.state || '-',
-      severity: 'high',
-      category: $t('dataprotector.sandbox.sections.services'),
-      description: service.pathName || service.displayName || '-',
-      target: service.pathName,
-      status: service.state,
       stage: $t('dataprotector.sandbox.attackFlow.stages.persistence'),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.serviceSource')
+      category: $t('dataprotector.sandbox.sections.services'),
+      severity: 'high',
+      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.serviceSource'),
+      target: service.pathName,
+      status: service.state || service.change,
+      description: service.pathName || service.displayName || '-'
     });
   }
 
   for (const task of value?.scheduledTasks || []) {
-    events.push({
-      id: `task-${events.length}`,
-      kind: 'event',
+    pushBucket({
+      key: `task:${normalizeFoldText(task.name || task.command)}`,
       title: task.name || $t('dataprotector.sandbox.sections.tasks'),
-      subtitle: task.change || task.state || '-',
-      severity: 'high',
-      category: $t('dataprotector.sandbox.sections.tasks'),
-      description: task.command || '-',
-      target: task.command,
-      status: task.state,
       stage: $t('dataprotector.sandbox.attackFlow.stages.persistence'),
-      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.taskSource')
+      category: $t('dataprotector.sandbox.sections.tasks'),
+      severity: 'high',
+      source: $t('dataprotector.sandbox.attackFlow.detailsPanel.taskSource'),
+      target: task.command,
+      status: task.state || task.change,
+      description: task.command || '-'
     });
   }
 
-  return events.sort((left, right) => (Date.parse(left.time || '') || 0) - (Date.parse(right.time || '') || 0));
+  return Array.from(buckets.values())
+    .map((bucket, index) => ({
+      id: `timeline-event-${index}`,
+      kind: 'event' as const,
+      title: bucket.title,
+      subtitle: bucket.count > 1 ? $t('dataprotector.sandbox.attackFlow.detailsPanel.repeatSubtitle', { count: bucket.count }) : bucket.status || formatTime(bucket.time),
+      severity: bucket.severity,
+      category: bucket.category,
+      description: bucket.descriptions.join('\n') || bucket.target || '-',
+      pid: bucket.pid || 0,
+      parentPid: bucket.parentPid,
+      path: bucket.path,
+      command: bucket.command,
+      signer: bucket.signer,
+      target: bucket.target,
+      status: bucket.status,
+      time: bucket.time,
+      lastTime: bucket.lastTime,
+      count: bucket.count,
+      stage: bucket.stage,
+      source: bucket.source
+    }))
+    .sort((left, right) => (Date.parse(left.time || '') || 0) - (Date.parse(right.time || '') || 0));
 }
 
 function compactAttackEvents(events: AttackGraphNodeDetail[], maxCount: number) {
-  const visible = events.filter(event => !isInternalTelemetryText(`${event.title} ${event.description} ${event.target} ${event.source}`));
-  if (visible.length <= maxCount) return visible;
+  const visible = events
+    .filter(event => !isInternalTelemetryText(`${event.title} ${event.description} ${event.target} ${event.source} ${event.path} ${event.command}`))
+    .map(event => ({ ...event, count: event.count || 1 }));
+  if (!visible.length) return visible;
 
-  const headCount = Math.max(1, Math.floor(maxCount * 0.58));
+  const grouped: AttackGraphNodeDetail[] = [];
+  const byKey = new Map<string, AttackGraphNodeDetail>();
+  for (const event of visible) {
+    const key = attackEventFoldKey(event);
+    const current = byKey.get(key);
+    if (!current) {
+      const cloned = { ...event };
+      byKey.set(key, cloned);
+      grouped.push(cloned);
+      continue;
+    }
+
+    current.count = (current.count || 1) + 1;
+    current.lastTime = event.time || current.lastTime;
+    current.severity = maxSeverity(current.severity, event.severity);
+    if (!current.target && event.target) current.target = event.target;
+    if (!current.path && event.path) current.path = event.path;
+    if (!current.command && event.command) current.command = event.command;
+    if (!current.status && event.status) current.status = event.status;
+    current.subtitle = $t('dataprotector.sandbox.attackFlow.detailsPanel.repeatSubtitle', { count: current.count });
+  }
+
+  const ordered = grouped.sort((left, right) => (Date.parse(left.time || '') || 0) - (Date.parse(right.time || '') || 0));
+  if (ordered.length <= maxCount) return ordered.map((event, index) => finalizeTimelineEvent(event, index));
+
+  const headCount = Math.max(1, Math.floor(maxCount * 0.62));
   const tailCount = Math.max(1, maxCount - headCount - 1);
-  const hiddenCount = visible.length - headCount - tailCount;
-  const head = visible.slice(0, headCount);
-  const tail = visible.slice(visible.length - tailCount);
+  const hidden = ordered.slice(headCount, ordered.length - tailCount);
+  const hiddenCount = hidden.reduce((sum, event) => sum + (event.count || 1), 0);
+  const foldedSeverity = hidden.reduce((severity, event) => maxSeverity(severity, event.severity), 'info');
   const folded: AttackGraphNodeDetail = {
-    id: 'sandbox-graph-folded-events',
+    id: 'sandbox-timeline-folded-events',
     kind: 'event',
     title: $t('dataprotector.sandbox.attackFlow.detailsPanel.foldedTitle', { count: hiddenCount }),
     subtitle: $t('dataprotector.sandbox.attackFlow.detailsPanel.foldedSubtitle'),
-    severity: 'info',
+    severity: foldedSeverity,
     category: $t('dataprotector.sandbox.attackFlow.detailsPanel.foldedCategory'),
     description: $t('dataprotector.sandbox.attackFlow.detailsPanel.foldedDescription', { count: hiddenCount }),
+    time: hidden[0]?.time,
+    lastTime: hidden[hidden.length - 1]?.lastTime || hidden[hidden.length - 1]?.time,
+    count: hiddenCount,
     stage: $t('dataprotector.sandbox.attackFlow.detailsPanel.foldedCategory'),
     source: $t('dataprotector.sandbox.attackFlow.detailsPanel.foldedCategory')
   };
-  return [...head, folded, ...tail];
+  return [...ordered.slice(0, headCount), folded, ...ordered.slice(ordered.length - tailCount)].map((event, index) =>
+    finalizeTimelineEvent(event, index)
+  );
+}
+
+function finalizeTimelineEvent(event: AttackGraphNodeDetail, index: number): AttackGraphNodeDetail {
+  const id = event.id.startsWith('sandbox-timeline-') ? event.id : `sandbox-timeline-${index}`;
+  const count = event.count || 1;
+  return {
+    ...event,
+    id,
+    subtitle:
+      count > 1
+        ? $t('dataprotector.sandbox.attackFlow.detailsPanel.repeatSubtitle', { count })
+        : event.subtitle || formatTime(event.time),
+    description:
+      count > 1
+        ? `${event.description || '-'}\n${$t('dataprotector.sandbox.attackFlow.detailsPanel.repeatDescription', { count })}`
+        : event.description
+  };
+}
+
+function attackEventFoldKey(event: AttackGraphNodeDetail) {
+  const source = normalizeFoldText(event.source || event.category);
+  const stage = normalizeFoldText(event.stage || event.category);
+  const title = normalizeFoldText(event.title);
+  const target = normalizeFoldText(event.target || event.description).slice(0, 120);
+  return [source, stage, title, event.pid || 0, target].join('|');
+}
+
+function normalizeFoldText(value?: string) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[0-9a-f]{32,}/g, '<hash>')
+    .replace(/\b\d{1,5}\b/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatTimelineNodeTime(value?: string) {
+  const timestamp = Date.parse(value || '');
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function eventStageLabel(type?: string, detail?: string) {
@@ -1728,7 +1990,9 @@ function createLogicFlow(container: HTMLElement) {
     hideAnchors: true
   });
   lf.on('node:click', ({ data }) => {
-    if (data?.id) selectedAttackNodeId.value = data.id;
+    if (data?.id && attackGraph.value.details.some(item => item.id === data.id)) {
+      selectedAttackNodeId.value = data.id;
+    }
   });
 
   return lf;
@@ -1739,12 +2003,7 @@ function renderLogicFlow(lf: LogicFlow, data: FlowGraphData) {
   nextTick(() => {
     window.setTimeout(() => {
       lf.resetZoom();
-      lf.fitView(72, 110);
-      const transform = lf.getTransform();
-      if (transform.SCALE_X > 1.08) {
-        lf.zoom(1 / transform.SCALE_X);
-        lf.translateCenter();
-      }
+      lf.translateCenter();
     }, 0);
   });
 }
@@ -1755,7 +2014,7 @@ function renderSandboxFlows() {
       sandboxAttackFlow ??= createLogicFlow(sandboxAttackFlowRef.value);
       renderLogicFlow(sandboxAttackFlow, attackGraph.value.flow);
       if (!selectedAttackNodeId.value || !attackGraph.value.details.some(item => item.id === selectedAttackNodeId.value)) {
-        selectedAttackNodeId.value = attackGraph.value.details[0]?.id || '';
+        selectedAttackNodeId.value = defaultAttackNodeId.value;
       }
     }
   });
@@ -2169,6 +2428,48 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
+            <div class="attack-event-timeline">
+              <div class="timeline-list-header">
+                <div>
+                  <strong>{{ $t('dataprotector.sandbox.attackFlow.timelineTitle') }}</strong>
+                  <span>{{ $t('dataprotector.sandbox.attackFlow.timelineCaption') }}</span>
+                </div>
+                <NTag :bordered="false">{{ $t('dataprotector.sandbox.attackFlow.events', { count: attackTimelineEvents.length }) }}</NTag>
+              </div>
+              <div v-if="attackTimelineEvents.length" class="timeline-event-list">
+                <button
+                  v-for="(event, index) in attackTimelineEvents"
+                  :key="event.id"
+                  class="timeline-event-card"
+                  :class="{ active: selectedAttackNodeId === event.id }"
+                  @click="selectedAttackNodeId = event.id"
+                >
+                  <span class="event-step" :style="{ background: graphSeverityColor(event.severity) }">
+                    {{ index + 1 }}
+                  </span>
+                  <span class="event-content">
+                    <span class="event-card-top">
+                      <span class="event-time">{{ formatTime(event.time) }}</span>
+                      <NTag size="small" :type="severityTagType(event.severity)" :bordered="false">
+                        {{ severityLabel(event.severity) }}
+                      </NTag>
+                      <NTag v-if="event.count && event.count > 1" size="small" :bordered="false">
+                        {{ $t('dataprotector.sandbox.attackFlow.detailsPanel.repeatTag', { count: event.count }) }}
+                      </NTag>
+                    </span>
+                    <strong>{{ event.title }}</strong>
+                    <small>{{ event.stage || event.category }}</small>
+                    <span class="event-target">{{ event.target || event.description }}</span>
+                    <span class="event-meta">
+                      <span>PID {{ event.pid || '-' }}</span>
+                      <span>{{ event.source || '-' }}</span>
+                    </span>
+                  </span>
+                </button>
+              </div>
+              <NEmpty v-else :description="$t('dataprotector.sandbox.attackFlow.empty')" />
+            </div>
+
             <aside class="attack-detail-panel">
               <template v-if="selectedAttackNode">
                 <div class="detail-back">
@@ -2230,20 +2531,6 @@ onBeforeUnmount(() => {
               </template>
               <NEmpty v-else :description="$t('dataprotector.sandbox.attackFlow.empty')" />
             </aside>
-          </div>
-
-          <div class="attack-evidence-strip">
-            <div
-              v-for="event in attackGraph.details.filter(item => item.kind === 'event' && item.id !== 'sandbox-graph-folded-events').slice(0, 8)"
-              :key="event.id"
-              class="evidence-chip"
-              :class="{ active: selectedAttackNodeId === event.id }"
-              @click="selectedAttackNodeId = event.id"
-            >
-              <span :style="{ background: graphSeverityColor(event.severity) }"></span>
-              <strong>{{ event.title }}</strong>
-              <small>PID {{ event.pid || '-' }}</small>
-            </div>
           </div>
         </div>
 
@@ -2659,26 +2946,27 @@ onBeforeUnmount(() => {
 
 .attack-investigation-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
-  min-height: 680px;
+  grid-template-columns: 330px minmax(420px, 1fr) 360px;
+  min-height: 620px;
 }
 
 .attack-graph-shell {
   position: relative;
   min-width: 0;
   max-height: 760px;
-  min-height: 560px;
+  min-height: 520px;
   overflow: auto;
   background:
-    linear-gradient(90deg, rgb(226 232 240 / 32%) 1px, transparent 1px),
-    linear-gradient(rgb(226 232 240 / 32%) 1px, transparent 1px),
-    #f5f7f9;
-  background-size: 42px 42px;
+    linear-gradient(90deg, rgb(226 232 240 / 22%) 1px, transparent 1px),
+    linear-gradient(rgb(226 232 240 / 22%) 1px, transparent 1px),
+    #f8fafc;
+  background-size: 36px 36px;
+  border-right: 1px solid rgb(226 232 240);
 }
 
 .attack-graph-canvas {
   width: 100%;
-  min-height: 560px;
+  min-height: 520px;
   border: 0;
   border-radius: 0;
 }
@@ -2702,7 +2990,7 @@ onBeforeUnmount(() => {
   position: absolute;
   bottom: 14px;
   left: 14px;
-  width: 170px;
+  width: 148px;
   padding: 8px;
   background: rgb(255 255 255 / 92%);
   border: 1px solid rgb(203 213 225);
@@ -2719,7 +3007,7 @@ onBeforeUnmount(() => {
 
 .mini-map-body {
   position: relative;
-  height: 118px;
+  height: 104px;
   overflow: hidden;
   background:
     linear-gradient(90deg, rgb(226 232 240 / 72%) 1px, transparent 1px),
@@ -2746,12 +3034,147 @@ onBeforeUnmount(() => {
   outline: 2px solid rgb(96 165 250 / 48%);
 }
 
+.attack-event-timeline {
+  min-width: 0;
+  max-height: 760px;
+  min-height: 520px;
+  overflow: auto;
+  background: #ffffff;
+  border-right: 1px solid rgb(226 232 240);
+}
+
+.timeline-list-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 16px 18px 12px;
+  background: rgb(255 255 255 / 94%);
+  border-bottom: 1px solid rgb(226 232 240);
+  backdrop-filter: blur(12px);
+}
+
+.timeline-list-header strong {
+  display: block;
+  color: #111827;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.timeline-list-header span {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.timeline-event-list {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px 18px;
+}
+
+.timeline-event-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  text-align: left;
+  cursor: pointer;
+  background: #f8fafc;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 8px;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.timeline-event-card:hover,
+.timeline-event-card.active {
+  background: #ffffff;
+  border-color: #93c5fd;
+  box-shadow: 0 10px 26px rgb(15 23 42 / 10%);
+}
+
+.event-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 5px 14px rgb(15 23 42 / 16%);
+}
+
+.event-content {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.event-card-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.event-time {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.event-content strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #172033;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.event-content small {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.event-target {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .attack-detail-panel {
   min-width: 0;
   padding: 18px 22px;
   overflow: auto;
   background: #ffffff;
-  border-left: 1px solid rgb(226 232 240);
 }
 
 .detail-back {
@@ -2854,56 +3277,6 @@ onBeforeUnmount(() => {
   font-weight: 800;
 }
 
-.attack-evidence-strip {
-  display: flex;
-  gap: 8px;
-  padding: 12px 16px 14px;
-  overflow: auto;
-  background: #ffffff;
-  border-top: 1px solid rgb(226 232 240);
-}
-
-.evidence-chip {
-  display: inline-grid;
-  grid-template-columns: auto minmax(120px, 1fr);
-  grid-template-rows: auto auto;
-  min-width: 178px;
-  max-width: 240px;
-  column-gap: 8px;
-  row-gap: 2px;
-  align-items: center;
-  padding: 8px 10px;
-  cursor: pointer;
-  background: #f8fafc;
-  border: 1px solid rgb(226 232 240);
-  border-radius: 4px;
-}
-
-.evidence-chip.active {
-  background: #eff6ff;
-  border-color: #93c5fd;
-}
-
-.evidence-chip span {
-  grid-row: 1 / span 2;
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-}
-
-.evidence-chip strong {
-  overflow: hidden;
-  color: #334155;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.evidence-chip small {
-  color: #94a3b8;
-  font-size: 11px;
-}
-
 .sandbox-output {
   max-height: 360px;
   padding: 14px;
@@ -2945,6 +3318,13 @@ onBeforeUnmount(() => {
     max-height: none;
     border-top: 1px solid rgb(226 232 240);
     border-left: 0;
+  }
+
+  .attack-graph-shell,
+  .attack-event-timeline {
+    max-height: none;
+    min-height: 360px;
+    border-right: 0;
   }
 
   .brief-main,

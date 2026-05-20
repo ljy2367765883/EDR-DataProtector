@@ -901,14 +901,33 @@ const local: App.I18n.Schema = {
       },
       attackFlow: {
         eyebrow: 'Attack Flow',
-        title: 'Incident Investigation Graph',
-        caption: 'Reconstruct sample landing, execution, process branches, and evidence points along the process chain. Select a node to inspect evidence.',
+        title: 'Sample Risk Event Timeline',
+        caption: 'Reconstruct what this EXE did from launch to exit as ordered risky actions. The left rail locates steps; the cards show the event story.',
         active: '{count} stage(s) hit',
         navigation: 'Navigation',
         stagesTitle: 'Stage Chain',
         processGraph: 'Process Graph',
         timeline: 'Behavior Timeline',
+        timelineTitle: 'Key Risky Actions',
+        timelineCaption: 'Each item is one sandbox time point. Repeated behavior is folded into a single event.',
+        events: '{count} event node(s)',
         empty: 'No sample behavior',
+        timelineEvents: {
+          fileArtifacts: 'Dropped or Modified Files',
+          executableMemory: 'Created Executable Memory',
+          moduleReload: 'Reloaded Sensitive Module',
+          processMemoryWrite: 'Wrote Remote Process Memory',
+          remoteThread: 'Created Remote Thread',
+          persistenceChange: 'Changed Persistence Location',
+          credentialAccess: 'Accessed Credential Process',
+          persistenceProcessAccess: 'Accessed Persistence Process',
+          processAccessSweep: 'Swept System Processes',
+          threadAccess: 'Accessed Remote Threads',
+          hookTamper: 'Attempted Hook Tampering',
+          processCreate: 'Created Child Process',
+          unknownProcess: 'Unknown process',
+          kernelAccessDetail: '{source}(PID {sourcePid}) accessed {target}(PID {targetPid}) with access {access}'
+        },
         entities: {
           processes: 'Processes',
           network: 'Network',
@@ -958,7 +977,10 @@ const local: App.I18n.Schema = {
           foldedTitle: '+{count} evidence',
           foldedSubtitle: 'Folded',
           foldedCategory: 'Folded Evidence',
-          foldedDescription: '{count} middle evidence record(s) were folded to keep the graph readable. See the tables below for the full record.'
+          foldedDescription: '{count} repeated or low-value evidence record(s) were folded to keep the timeline readable. See the tables below for the full record.',
+          repeatTag: 'Repeated {count}x',
+          repeatSubtitle: 'Same event x{count}',
+          repeatDescription: 'This timeline point groups {count} similar behaviors.'
         }
       },
       columns: {

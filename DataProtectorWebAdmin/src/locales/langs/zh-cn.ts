@@ -897,14 +897,33 @@
       },
       attackFlow: {
         eyebrow: 'Attack Flow',
-        title: '事件调查图谱',
-        caption: '按进程主链还原样本落地、执行、分支行为和证据点；点击节点可查看右侧取证详情。',
+        title: '样本危险行为时间线',
+        caption: '按时间节点还原这个 EXE 从启动到结束做过的危险操作；左侧节点定位步骤，中间卡片展示事件过程。',
         active: '{count} 个阶段命中',
         navigation: '导航',
         stagesTitle: '阶段链路',
         processGraph: '进程关系',
         timeline: '行为时间线',
+        timelineTitle: '关键危险操作',
+        timelineCaption: '每一项都是样本在沙箱中的一个时间节点，重复行为会自动合并。',
+        events: '{count} 个事件节点',
         empty: '暂无样本行为',
+        timelineEvents: {
+          fileArtifacts: '释放或修改文件',
+          executableMemory: '创建可执行内存',
+          moduleReload: '重载敏感模块',
+          processMemoryWrite: '写入远程进程内存',
+          remoteThread: '创建远程线程',
+          persistenceChange: '修改持久化位置',
+          credentialAccess: '访问凭据进程',
+          persistenceProcessAccess: '访问持久化相关进程',
+          processAccessSweep: '批量访问系统进程',
+          threadAccess: '访问远程线程',
+          hookTamper: '尝试破坏监控 Hook',
+          processCreate: '创建子进程',
+          unknownProcess: '未知进程',
+          kernelAccessDetail: '{source}(PID {sourcePid}) 访问 {target}(PID {targetPid})，权限 {access}'
+        },
         entities: {
           processes: '进程',
           network: '网络',
@@ -954,7 +973,10 @@
           foldedTitle: '+{count} 条证据',
           foldedSubtitle: '已折叠',
           foldedCategory: '折叠证据',
-          foldedDescription: '为保持图谱可读，已折叠中间 {count} 条证据；完整记录请查看下方明细表。'
+          foldedDescription: '为保持时间线可读，已折叠中间 {count} 条重复或低价值证据；完整记录请查看下方明细表。',
+          repeatTag: '重复 {count} 次',
+          repeatSubtitle: '同类事件 x{count}',
+          repeatDescription: '该时间节点聚合了 {count} 条同类行为。'
         }
       },
       columns: {
