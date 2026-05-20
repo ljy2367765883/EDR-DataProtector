@@ -554,9 +554,9 @@ namespace DataProtectorWebBridge.Services
 
             progress?.Invoke("scoring", "执行静态规则评分", 80, "规则数=" + (rules == null ? 0 : rules.Length).ToString(CultureInfo.InvariantCulture));
             StaticAnalysisRuleScore ruleScore = EvaluateRules(ghidraReport, rules);
-            progress?.Invoke("ai", config.aiEnabled ? "调用 AI 判定" : "跳过 AI 判定", config.aiEnabled ? 88 : 94, config.aiEnabled ? NormalizeAiEndpoint(config.baseUrl) : "AI 未启用。");
-            StaticAnalysisAiResult aiResult = RunAiAnalysis(config, sample, ghidraReport, ruleScore);
-            progress?.Invoke("report", "生成最终报告", 96, "规则分数=" + ruleScore.score.ToString(CultureInfo.InvariantCulture) + "，AI状态=" + aiResult.status);
+            progress?.Invoke("ai", config.aiEnabled ? "调用 AI 流式判定" : "跳过 AI 判定", config.aiEnabled ? 88 : 94, config.aiEnabled ? NormalizeAiEndpoint(config.baseUrl) : "AI 未启用。");
+            StaticAnalysisAiResult aiResult = RunAiAnalysis(config, sample, ghidraReport, ruleScore, progress);
+            progress?.Invoke("report", "生成最终报告", 96, "规则分数=" + ruleScore.score.ToString(CultureInfo.InvariantCulture) + "，AI状态=" + aiResult.status + "，AI判定=" + aiResult.verdict);
             Dictionary<string, object> report = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
             {
                 { "schema", "dataprotector.static.report.v1" },
@@ -827,7 +827,12 @@ namespace DataProtectorWebBridge.Services
             return candidates;
         }
 
-        private StaticAnalysisAiResult RunAiAnalysis(StaticAnalysisConfiguration config, StaticAnalysisSampleState sample, Dictionary<string, object> ghidraReport, StaticAnalysisRuleScore ruleScore)
+        private StaticAnalysisAiResult RunAiAnalysis(
+            StaticAnalysisConfiguration config,
+            StaticAnalysisSampleState sample,
+            Dictionary<string, object> ghidraReport,
+            StaticAnalysisRuleScore ruleScore,
+            Action<string, string, int, string> progress)
         {
             StaticAnalysisAiResult result = new StaticAnalysisAiResult
             {
@@ -837,7 +842,14 @@ namespace DataProtectorWebBridge.Services
                 verdict = string.Empty,
                 summary = string.Empty,
                 raw = string.Empty,
-                error = string.Empty
+                error = string.Empty,
+                endpoint = string.Empty,
+                streamed = false,
+                httpStatus = 0,
+                elapsedMs = 0,
+                requestBytes = 0,
+                responseBytes = 0,
+                contentChars = 0
             };
 
             if (!config.aiEnabled)
@@ -855,17 +867,19 @@ namespace DataProtectorWebBridge.Services
             try
             {
                 string endpoint = NormalizeAiEndpoint(config.baseUrl);
+                string model = string.IsNullOrWhiteSpace(config.model) ? "gpt-4.1-mini" : config.model;
                 string prompt = BuildAiPrompt(sample, ghidraReport, ruleScore);
                 Dictionary<string, object> body = new Dictionary<string, object>
                 {
-                    { "model", string.IsNullOrWhiteSpace(config.model) ? "gpt-4.1-mini" : config.model },
+                    { "model", model },
                     { "temperature", config.temperature },
+                    { "stream", true },
                     { "messages", new object[]
                         {
                             new Dictionary<string, object>
                             {
                                 { "role", "system" },
-                                { "content", "You are DataProtector Smart Static Analysis Master. Analyze reverse-engineering evidence, reduce false positives, and return concise Chinese security conclusions with verdict, score rationale, and analyst next steps." }
+                                { "content", "You are DataProtector Smart Static Analysis Master. Analyze reverse-engineering evidence, reduce false positives, and return standardized Chinese Markdown only. The first table must contain 判定, 置信度, 建议分数, 最终等级, 误报风险. 判定 must be one of malicious, suspicious, observed, clean with Chinese text." }
                             },
                             new Dictionary<string, object>
                             {
@@ -876,16 +890,48 @@ namespace DataProtectorWebBridge.Services
                     }
                 };
 
-                string response = PostJson(endpoint, config.token, serializer.Serialize(body), config.timeoutSeconds);
-                result.raw = Truncate(response, 200000);
-                result.summary = ExtractAiContent(response);
+                string requestJson = serializer.Serialize(body);
+                byte[] requestBytes = Encoding.UTF8.GetBytes(requestJson);
+                result.endpoint = endpoint;
+                result.requestBytes = requestBytes.Length;
+                progress?.Invoke("ai", "AI 流式请求已发送", 88, "endpoint=" + endpoint + "; model=" + model + "; stream=true; requestBytes=" + requestBytes.Length.ToString(CultureInfo.InvariantCulture) + "; timeoutSeconds=" + Math.Max(30, config.timeoutSeconds).ToString(CultureInfo.InvariantCulture));
+
+                DateTime lastDeltaLogUtc = DateTime.MinValue;
+                int deltaCount = 0;
+                int streamedChars = 0;
+                AiHttpResult response = PostJsonStream(endpoint, config.token, requestJson, config.timeoutSeconds, delta =>
+                {
+                    if (string.IsNullOrEmpty(delta))
+                    {
+                        return;
+                    }
+
+                    deltaCount++;
+                    streamedChars += delta.Length;
+                    DateTime now = DateTime.UtcNow;
+                    if ((now - lastDeltaLogUtc).TotalSeconds >= 2 || streamedChars < 80)
+                    {
+                        lastDeltaLogUtc = now;
+                        progress?.Invoke("ai", "AI 正在流式输出", 90, "chunks=" + deltaCount.ToString(CultureInfo.InvariantCulture) + "; chars=" + streamedChars.ToString(CultureInfo.InvariantCulture) + "; preview=" + Truncate(delta.Replace("\r", " ").Replace("\n", " "), 120));
+                    }
+                });
+
+                result.raw = Truncate(response.body, 200000);
+                result.summary = NormalizeAiMarkdownSummary(string.IsNullOrWhiteSpace(response.content) ? ExtractAiContent(response.body) : response.content);
                 result.status = "completed";
                 result.verdict = InferAiVerdict(result.summary);
+                result.streamed = response.streamed;
+                result.httpStatus = response.statusCode;
+                result.elapsedMs = response.elapsedMs;
+                result.responseBytes = response.responseBytes;
+                result.contentChars = string.IsNullOrEmpty(result.summary) ? 0 : result.summary.Length;
+                progress?.Invoke("ai", "AI 流式判定完成", 94, "http=" + response.statusCode.ToString(CultureInfo.InvariantCulture) + "; elapsedMs=" + response.elapsedMs.ToString(CultureInfo.InvariantCulture) + "; responseBytes=" + response.responseBytes.ToString(CultureInfo.InvariantCulture) + "; streamed=" + response.streamed.ToString(CultureInfo.InvariantCulture) + "; verdict=" + result.verdict + "; summaryChars=" + result.contentChars.ToString(CultureInfo.InvariantCulture));
             }
             catch (Exception ex)
             {
                 result.status = "failed";
                 result.error = ex.Message;
+                progress?.Invoke("ai", "AI 流式判定失败", 94, ex.Message);
             }
 
             return result;
@@ -901,6 +947,17 @@ namespace DataProtectorWebBridge.Services
             };
 
             return "请基于以下 Ghidra 源码架构分析结果判断样本是否恶意。重点关注导入表、字符串、反伪代码、调用图、规则命中之间是否构成完整恶意链路，避免把普通系统行为当作恶意。\n\n" +
+                   "必须按下面 Markdown 结构输出，禁止自由散文，禁止只给长段落：\n" +
+                   "## 结论\n" +
+                   "| 项目 | 结果 |\n| --- | --- |\n| 判定 | malicious/suspicious/observed/clean 之一，并附中文 |\n| 置信度 | 0.00-1.00 |\n| 建议分数 | 0-100 |\n| 最终等级 | 严重/警告/信息 |\n| 误报风险 | 高/中/低 |\n\n" +
+                   "## 证据矩阵\n" +
+                   "| 证据域 | 观察 | 支持恶意程度 | 可信度 | 说明 |\n| --- | --- | --- | --- | --- |\n\n" +
+                   "## 调用链判断\n" +
+                   "| 起点 | 关键调用 | 目标/资源 | 是否闭环 | 结论 |\n| --- | --- | --- | --- | --- |\n\n" +
+                   "## 规则复核\n" +
+                   "| 规则 | 原分 | 是否支持 | 调整建议 | 原因 |\n| --- | ---: | --- | --- | --- |\n\n" +
+                   "## 分析员下一步\n" +
+                   "| 优先级 | 验证动作 | 预期证据 |\n| --- | --- | --- |\n\n" +
                    Truncate(serializer.Serialize(compact), 70000);
         }
 
@@ -935,18 +992,19 @@ namespace DataProtectorWebBridge.Services
             return summary;
         }
 
-        private string PostJson(string endpoint, string token, string body, int timeoutSeconds)
+        private AiHttpResult PostJsonStream(string endpoint, string token, string body, int timeoutSeconds, Action<string> onDelta)
         {
             byte[] bytes = Encoding.UTF8.GetBytes(body);
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(endpoint);
             request.Method = "POST";
             request.ContentType = "application/json; charset=utf-8";
-            request.Accept = "application/json";
+            request.Accept = "text/event-stream, application/json";
             request.Timeout = Math.Max(30, timeoutSeconds) * 1000;
             request.ReadWriteTimeout = request.Timeout;
             request.Headers[HttpRequestHeader.Authorization] = "Bearer " + token;
             request.ContentLength = bytes.Length;
 
+            Stopwatch stopwatch = Stopwatch.StartNew();
             using (Stream stream = request.GetRequestStream())
             {
                 stream.Write(bytes, 0, bytes.Length);
@@ -957,21 +1015,158 @@ namespace DataProtectorWebBridge.Services
                 using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
                 using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
                 {
-                    return reader.ReadToEnd();
+                    string contentType = response.ContentType ?? string.Empty;
+                    if (contentType.IndexOf("text/event-stream", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return ReadSseResponse(response, reader, stopwatch, onDelta);
+                    }
+
+                    string responseBody = reader.ReadToEnd();
+                    stopwatch.Stop();
+                    string content = ExtractAiContent(responseBody);
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        onDelta?.Invoke(content);
+                    }
+
+                    return new AiHttpResult
+                    {
+                        statusCode = (int)response.StatusCode,
+                        statusDescription = response.StatusDescription ?? string.Empty,
+                        body = responseBody,
+                        content = content,
+                        elapsedMs = stopwatch.ElapsedMilliseconds,
+                        responseBytes = Encoding.UTF8.GetByteCount(responseBody ?? string.Empty),
+                        streamed = false
+                    };
                 }
             }
             catch (WebException ex)
             {
+                stopwatch.Stop();
                 string detail = string.Empty;
+                int statusCode = 0;
                 if (ex.Response != null)
                 {
+                    HttpWebResponse errorResponse = ex.Response as HttpWebResponse;
+                    if (errorResponse != null)
+                    {
+                        statusCode = (int)errorResponse.StatusCode;
+                    }
                     using (StreamReader reader = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
                     {
                         detail = reader.ReadToEnd();
                     }
                 }
-                throw new InvalidOperationException("AI static analysis request failed: " + ex.Message + " " + detail);
+                throw new InvalidOperationException("AI static analysis request failed: http=" + statusCode.ToString(CultureInfo.InvariantCulture) + "; elapsedMs=" + stopwatch.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) + "; " + ex.Message + "; body=" + Truncate(detail, 1200));
             }
+        }
+
+        private AiHttpResult ReadSseResponse(HttpWebResponse response, StreamReader reader, Stopwatch stopwatch, Action<string> onDelta)
+        {
+            StringBuilder raw = new StringBuilder();
+            StringBuilder content = new StringBuilder();
+            StringBuilder eventData = new StringBuilder();
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                raw.AppendLine(line);
+                if (line.Length == 0)
+                {
+                    FlushSseEvent(eventData, content, onDelta);
+                    continue;
+                }
+
+                if (line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                {
+                    eventData.AppendLine(line.Substring(5).TrimStart());
+                }
+            }
+
+            FlushSseEvent(eventData, content, onDelta);
+            stopwatch.Stop();
+            string rawText = raw.ToString();
+            return new AiHttpResult
+            {
+                statusCode = (int)response.StatusCode,
+                statusDescription = response.StatusDescription ?? string.Empty,
+                body = rawText,
+                content = content.ToString(),
+                elapsedMs = stopwatch.ElapsedMilliseconds,
+                responseBytes = Encoding.UTF8.GetByteCount(rawText),
+                streamed = true
+            };
+        }
+
+        private void FlushSseEvent(StringBuilder eventData, StringBuilder content, Action<string> onDelta)
+        {
+            if (eventData == null || eventData.Length == 0)
+            {
+                return;
+            }
+
+            string data = eventData.ToString().Trim();
+            eventData.Length = 0;
+            if (string.IsNullOrWhiteSpace(data) || string.Equals(data, "[DONE]", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            string delta = ExtractStreamingDelta(data);
+            if (string.IsNullOrEmpty(delta))
+            {
+                return;
+            }
+
+            content.Append(delta);
+            onDelta?.Invoke(delta);
+        }
+
+        private string ExtractStreamingDelta(string json)
+        {
+            try
+            {
+                Dictionary<string, object> root = serializer.DeserializeObject(json) as Dictionary<string, object>;
+                object choicesRaw;
+                if (root == null || !root.TryGetValue("choices", out choicesRaw))
+                {
+                    return string.Empty;
+                }
+
+                object[] choices = choicesRaw as object[];
+                if (choices == null || choices.Length == 0)
+                {
+                    return string.Empty;
+                }
+
+                Dictionary<string, object> choice = choices[0] as Dictionary<string, object>;
+                if (choice == null)
+                {
+                    return string.Empty;
+                }
+
+                Dictionary<string, object> delta = choice.ContainsKey("delta") ? choice["delta"] as Dictionary<string, object> : null;
+                if (delta != null && delta.ContainsKey("content"))
+                {
+                    return Convert.ToString(delta["content"], CultureInfo.InvariantCulture);
+                }
+
+                Dictionary<string, object> message = choice.ContainsKey("message") ? choice["message"] as Dictionary<string, object> : null;
+                if (message != null && message.ContainsKey("content"))
+                {
+                    return Convert.ToString(message["content"], CultureInfo.InvariantCulture);
+                }
+
+                if (choice.ContainsKey("text"))
+                {
+                    return Convert.ToString(choice["text"], CultureInfo.InvariantCulture);
+                }
+            }
+            catch
+            {
+            }
+
+            return string.Empty;
         }
 
         private string ExtractAiContent(string response)
@@ -1008,6 +1203,43 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Truncate(response, 4000);
+        }
+
+        private static string NormalizeAiMarkdownSummary(string text)
+        {
+            string value = (text ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "## 结论\n\n| 项目 | 结果 |\n| --- | --- |\n| 判定 | observed / 未得到 AI 正文 |\n| 置信度 | 0.00 |\n| 建议分数 | - |\n| 最终等级 | 信息 |\n| 误报风险 | 中 |\n";
+            }
+
+            if (value.IndexOf("| 项目 |", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                value.IndexOf("| 判定 |", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return value;
+            }
+
+            string verdict = InferAiVerdict(value);
+            string cnVerdict = verdict == "malicious" ? "恶意" :
+                verdict == "suspicious" ? "可疑" :
+                verdict == "clean" ? "干净" :
+                verdict == "observed" ? "观察" : "未知";
+
+            StringBuilder markdown = new StringBuilder();
+            markdown.AppendLine("## 结论");
+            markdown.AppendLine();
+            markdown.AppendLine("| 项目 | 结果 |");
+            markdown.AppendLine("| --- | --- |");
+            markdown.AppendLine("| 判定 | " + verdict + " / " + cnVerdict + " |");
+            markdown.AppendLine("| 置信度 | 未提取 |");
+            markdown.AppendLine("| 建议分数 | 未提取 |");
+            markdown.AppendLine("| 最终等级 | " + (verdict == "malicious" ? "严重" : verdict == "suspicious" ? "警告" : "信息") + " |");
+            markdown.AppendLine("| 误报风险 | 需人工复核 |");
+            markdown.AppendLine();
+            markdown.AppendLine("## 模型原始分析");
+            markdown.AppendLine();
+            markdown.AppendLine(value);
+            return markdown.ToString();
         }
 
         private Dictionary<string, object> BuildFallbackReport(StaticAnalysisSampleState sample, string message)
@@ -1496,10 +1728,20 @@ namespace DataProtectorWebBridge.Services
             if (aiResult != null && !string.IsNullOrWhiteSpace(aiResult.verdict) &&
                 !string.Equals(aiResult.verdict, "unknown", StringComparison.OrdinalIgnoreCase))
             {
-                if (ruleScore != null && ruleScore.score >= 50)
+                if (ruleScore == null || ruleScore.score < 50)
                 {
-                    return MoreSevereVerdict(ruleScore.verdict, aiResult.verdict);
+                    return aiResult.verdict;
                 }
+
+                if ((string.Equals(aiResult.verdict, "clean", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(aiResult.verdict, "observed", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(aiResult.verdict, "suspicious", StringComparison.OrdinalIgnoreCase)) &&
+                    AiMentionsInsufficientMaliciousEvidence(aiResult.summary))
+                {
+                    return aiResult.verdict;
+                }
+
+                return MoreSevereVerdict(ruleScore.verdict, aiResult.verdict);
             }
 
             return ruleScore == null ? "observed" : ruleScore.verdict;
@@ -1555,11 +1797,88 @@ namespace DataProtectorWebBridge.Services
 
         private static string InferAiVerdict(string text)
         {
-            string value = (text ?? string.Empty).ToLowerInvariant();
-            if (value.Contains("恶意") || value.Contains("malicious")) return "malicious";
+            string raw = text ?? string.Empty;
+            string value = raw.ToLowerInvariant();
+            Match tableVerdict = Regex.Match(raw, @"\|\s*判定\s*\|\s*([^|\r\n]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (tableVerdict.Success)
+            {
+                string cell = tableVerdict.Groups[1].Value.Trim().ToLowerInvariant();
+                string normalized = NormalizeAiVerdictToken(cell);
+                if (!string.Equals(normalized, "unknown", StringComparison.OrdinalIgnoreCase))
+                {
+                    return normalized;
+                }
+            }
+
+            Match explicitVerdict = Regex.Match(raw, @"(?:判定|安全结论|最终裁定|verdict|conclusion)\s*[:：]\s*([^\r\n|，,。;；]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (explicitVerdict.Success)
+            {
+                string normalized = NormalizeAiVerdictToken(explicitVerdict.Groups[1].Value);
+                if (!string.Equals(normalized, "unknown", StringComparison.OrdinalIgnoreCase))
+                {
+                    return normalized;
+                }
+            }
+
+            if (AiMentionsInsufficientMaliciousEvidence(raw) &&
+                (value.Contains("可疑") || value.Contains("suspicious") || value.Contains("待确认") || value.Contains("复核")))
+            {
+                return "suspicious";
+            }
+
+            if (HasPositiveVerdict(value, "malicious", "恶意")) return "malicious";
             if (value.Contains("可疑") || value.Contains("suspicious")) return "suspicious";
-            if (value.Contains("正常") || value.Contains("clean") || value.Contains("benign")) return "clean";
+            if (value.Contains("观察") || value.Contains("observed") || value.Contains("待确认") || value.Contains("复核")) return "observed";
+            if (value.Contains("正常") || value.Contains("干净") || value.Contains("良性") || value.Contains("clean") || value.Contains("benign")) return "clean";
             return "unknown";
+        }
+
+        private static string NormalizeAiVerdictToken(string token)
+        {
+            string value = (token ?? string.Empty).Trim().ToLowerInvariant();
+            if (value.Contains("malicious") || value.Contains("恶意")) return AiMentionsInsufficientMaliciousEvidence(value) ? "suspicious" : "malicious";
+            if (value.Contains("suspicious") || value.Contains("可疑")) return "suspicious";
+            if (value.Contains("observed") || value.Contains("观察") || value.Contains("待确认") || value.Contains("复核")) return "observed";
+            if (value.Contains("clean") || value.Contains("benign") || value.Contains("正常") || value.Contains("干净") || value.Contains("良性")) return "clean";
+            return "unknown";
+        }
+
+        private static bool HasPositiveVerdict(string value, string english, string chinese)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            if (AiMentionsInsufficientMaliciousEvidence(value))
+            {
+                return false;
+            }
+
+            return value.Contains("判定：" + chinese) ||
+                   value.Contains("判定:" + chinese) ||
+                   value.Contains("安全结论：" + chinese) ||
+                   value.Contains("安全结论:" + chinese) ||
+                   value.Contains("最终裁定：" + chinese) ||
+                   value.Contains("最终裁定:" + chinese) ||
+                   value.Contains("\"verdict\":\"" + english + "\"") ||
+                   value.Contains("| " + english + " ") ||
+                   value.Contains("| " + chinese + " ");
+        }
+
+        private static bool AiMentionsInsufficientMaliciousEvidence(string text)
+        {
+            string value = (text ?? string.Empty).ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            return Regex.IsMatch(value, "(证据不足|不足以支持|不能|不建议|暂不|无法|未形成|不能闭环|没有看到|缺失|不支持|下调|误报).{0,40}(恶意|malicious)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
+                   Regex.IsMatch(value, "(恶意|malicious).{0,40}(证据不足|不足以支持|不能|不建议|暂不|无法|未形成|不能闭环|没有看到|缺失|不支持|下调|误报)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
+                   value.Contains("非恶意") ||
+                   value.Contains("不是恶意") ||
+                   value.Contains("not malicious");
         }
 
         private static string NormalizeAiEndpoint(string baseUrl)
@@ -2137,6 +2456,17 @@ namespace DataProtectorWebBridge.Services
             public string stderr { get; set; }
         }
 
+        private sealed class AiHttpResult
+        {
+            public int statusCode { get; set; }
+            public string statusDescription { get; set; }
+            public string body { get; set; }
+            public string content { get; set; }
+            public long elapsedMs { get; set; }
+            public int responseBytes { get; set; }
+            public bool streamed { get; set; }
+        }
+
         public sealed class StaticAnalysisConfigurationDto
         {
             public bool enabled { get; set; }
@@ -2308,6 +2638,13 @@ namespace DataProtectorWebBridge.Services
             public string summary { get; set; }
             public string raw { get; set; }
             public string error { get; set; }
+            public string endpoint { get; set; }
+            public bool streamed { get; set; }
+            public int httpStatus { get; set; }
+            public long elapsedMs { get; set; }
+            public int requestBytes { get; set; }
+            public int responseBytes { get; set; }
+            public int contentChars { get; set; }
         }
 
         public sealed class StaticAnalysisSourceInfo

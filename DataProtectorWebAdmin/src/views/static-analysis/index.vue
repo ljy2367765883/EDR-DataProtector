@@ -1,5 +1,5 @@
 <script setup lang="tsx">
-import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import LogicFlow from '@logicflow/core';
 import '@logicflow/core/dist/index.css';
 import type { DataTableColumns, PaginationProps, UploadCustomRequestOptions } from 'naive-ui';
@@ -63,6 +63,13 @@ type StaticReport = {
     summary: string;
     raw: string;
     error: string;
+    endpoint?: string;
+    streamed?: boolean;
+    httpStatus?: number;
+    elapsedMs?: number;
+    requestBytes?: number;
+    responseBytes?: number;
+    contentChars?: number;
   };
 };
 
@@ -157,6 +164,21 @@ const highSignalFunctions = computed(() =>
 const featureHits = computed(() => report.value?.ghidra?.features?.hits?.slice(0, 120) || []);
 const ruleHits = computed(() => report.value?.ruleScore?.hits || []);
 const callGraph = computed<FlowGraphData>(() => buildCallGraph(report.value));
+const aiMarkdown = computed(() => renderMarkdown(report.value?.ai?.summary || '未启用 AI，当前仅展示规则评分和 Ghidra 证据。'));
+const aiMeta = computed(() => {
+  const ai = report.value?.ai;
+  if (!ai) return [];
+  return [
+    { label: '状态', value: ai.status || '-' },
+    { label: '模型', value: ai.model || '-' },
+    { label: '判定', value: ai.verdict || '-' },
+    { label: 'HTTP', value: ai.httpStatus ? String(ai.httpStatus) : '-' },
+    { label: '耗时', value: ai.elapsedMs ? `${ai.elapsedMs} ms` : '-' },
+    { label: '流式', value: ai.streamed ? '是' : '否' },
+    { label: '请求', value: ai.requestBytes ? formatBytes(ai.requestBytes) : '-' },
+    { label: '响应', value: ai.responseBytes ? formatBytes(ai.responseBytes) : '-' }
+  ];
+});
 
 const statusOptions = [
   { label: '全部状态', value: 'all' },
@@ -729,6 +751,115 @@ function renderCallGraph() {
   }, 0);
 }
 
+function renderMarkdown(value: string) {
+  const lines = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const html: string[] = [];
+  let paragraph: string[] = [];
+  let listOpen = false;
+
+  const closeParagraph = () => {
+    if (paragraph.length) {
+      html.push(`<p>${inlineMarkdown(paragraph.join(' '))}</p>`);
+      paragraph = [];
+    }
+  };
+  const closeList = () => {
+    if (listOpen) {
+      html.push('</ul>');
+      listOpen = false;
+    }
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    const line = raw.trim();
+    if (!line) {
+      closeParagraph();
+      closeList();
+      continue;
+    }
+
+    if (line.startsWith('|') && line.endsWith('|')) {
+      closeParagraph();
+      closeList();
+      const rows: string[] = [];
+      while (index < lines.length) {
+        const tableLine = lines[index].trim();
+        if (!tableLine.startsWith('|') || !tableLine.endsWith('|')) break;
+        rows.push(tableLine);
+        index += 1;
+      }
+      index -= 1;
+      html.push(renderMarkdownTable(rows));
+      continue;
+    }
+
+    const heading = /^(#{1,4})\s+(.+)$/.exec(line);
+    if (heading) {
+      closeParagraph();
+      closeList();
+      const level = Math.min(4, heading[1].length + 2);
+      html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const bullet = /^[-*]\s+(.+)$/.exec(line);
+    if (bullet) {
+      closeParagraph();
+      if (!listOpen) {
+        html.push('<ul>');
+        listOpen = true;
+      }
+      html.push(`<li>${inlineMarkdown(bullet[1])}</li>`);
+      continue;
+    }
+
+    paragraph.push(line);
+  }
+
+  closeParagraph();
+  closeList();
+  return html.join('');
+}
+
+function renderMarkdownTable(rows: string[]) {
+  const parsed = rows
+    .map(row =>
+      row
+        .split('|')
+        .slice(1, -1)
+        .map(cell => cell.trim())
+    )
+    .filter(cells => cells.length > 0);
+  if (!parsed.length) return '';
+  const [head, maybeDivider, ...rest] = parsed;
+  const body = (maybeDivider || []).every(cell => /^:?-{3,}:?$/.test(cell)) ? rest : parsed.slice(1);
+  return [
+    '<div class="markdown-table-wrap"><table>',
+    '<thead><tr>',
+    ...head.map(cell => `<th>${inlineMarkdown(cell)}</th>`),
+    '</tr></thead>',
+    '<tbody>',
+    ...body.map(row => `<tr>${row.map(cell => `<td>${inlineMarkdown(cell)}</td>`).join('')}</tr>`),
+    '</tbody></table></div>'
+  ].join('');
+}
+
+function inlineMarkdown(value: string) {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function escapeHtml(value: string) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function safeNodeId(value: string) {
   return `fn-${value.replace(/[^a-z0-9_:-]/gi, '_').slice(0, 80)}`;
 }
@@ -835,8 +966,17 @@ function severityTag(value?: string) {
 onMounted(async () => {
   await Promise.all([refreshConfig(), refreshRules(), refreshSamples(false)]);
   if (samples.value.some(item => item.status === 'running')) startPolling();
+  await nextTick();
   renderCallGraph();
 });
+
+watch(
+  () => selectedSample.value?.reportJson,
+  async () => {
+    await nextTick();
+    renderCallGraph();
+  }
+);
 
 onBeforeUnmount(() => {
   stopPolling();
@@ -1082,7 +1222,12 @@ onBeforeUnmount(() => {
           <NGi span="24 xl:10">
             <NCard :bordered="false" embedded title="AI 判定">
               <NAlert v-if="report.ai?.error" type="warning" :bordered="false">{{ report.ai.error }}</NAlert>
-              <pre class="analysis-text">{{ report.ai?.summary || '未启用 AI，当前仅展示规则评分和 Ghidra 证据。' }}</pre>
+              <div class="ai-meta">
+                <span v-for="item in aiMeta" :key="item.label">
+                  <b>{{ item.label }}</b>{{ item.value }}
+                </span>
+              </div>
+              <div class="analysis-markdown" v-html="aiMarkdown"></div>
             </NCard>
           </NGi>
           <NGi span="24 xl:14">
@@ -1322,18 +1467,98 @@ onBeforeUnmount(() => {
   font-size: 22px;
 }
 
-.analysis-text {
-  min-height: 220px;
-  max-height: 360px;
-  margin: 0;
+.ai-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ai-meta span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 9px;
+  color: #475569;
+  font-size: 12px;
+  background: #f8fafc;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 6px;
+}
+
+.ai-meta b {
+  color: #0f172a;
+}
+
+.analysis-markdown {
+  min-height: 260px;
+  max-height: 520px;
   padding: 14px;
   overflow: auto;
   color: #334155;
-  font-family: inherit;
-  line-height: 1.7;
-  white-space: pre-wrap;
+  line-height: 1.68;
   background: #f8fafc;
+  border: 1px solid rgb(226 232 240);
   border-radius: 8px;
+}
+
+.analysis-markdown :deep(h3),
+.analysis-markdown :deep(h4),
+.analysis-markdown :deep(h5),
+.analysis-markdown :deep(p) {
+  margin: 0 0 12px;
+}
+
+.analysis-markdown :deep(h3),
+.analysis-markdown :deep(h4),
+.analysis-markdown :deep(h5) {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.analysis-markdown :deep(ul) {
+  padding-left: 18px;
+  margin: 0 0 12px;
+}
+
+.analysis-markdown :deep(code) {
+  padding: 1px 5px;
+  color: #334155;
+  background: #e2e8f0;
+  border-radius: 4px;
+}
+
+.analysis-markdown :deep(.markdown-table-wrap) {
+  width: 100%;
+  margin: 0 0 14px;
+  overflow-x: auto;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 8px;
+}
+
+.analysis-markdown :deep(table) {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  background: #ffffff;
+}
+
+.analysis-markdown :deep(th),
+.analysis-markdown :deep(td) {
+  padding: 9px 11px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid rgb(226 232 240);
+}
+
+.analysis-markdown :deep(th) {
+  color: #0f172a;
+  font-weight: 650;
+  background: #f1f5f9;
+}
+
+.analysis-markdown :deep(tr:last-child td) {
+  border-bottom: 0;
 }
 
 .call-graph {
