@@ -2332,8 +2332,15 @@ namespace DataProtectorWebBridge.Services
             }
 
             uint flags = 0;
-            if (policy.enabled) flags |= UserHookDefenseFlagEnabled;
-            if (policy.monitorEarlyProcesses) flags |= UserHookDefenseFlagEarlyProcessInjection;
+            if (policy.enabled)
+            {
+                flags |= UserHookDefenseFlagEnabled;
+                flags |= UserHookDefenseFlagEarlyProcessInjection;
+            }
+            else if (policy.monitorEarlyProcesses)
+            {
+                flags |= UserHookDefenseFlagEarlyProcessInjection;
+            }
             if (policy.monitorImageLoads) flags |= UserHookDefenseFlagImageLoadMonitor;
             if (policy.requireSignedRuntime) flags |= UserHookDefenseFlagRequireSignedRuntime;
             if (policy.blockUntrustedRuntime) flags |= UserHookDefenseFlagBlockUntrustedRuntime;
@@ -2364,7 +2371,7 @@ namespace DataProtectorWebBridge.Services
             return new UserHookDefensePolicyDto
             {
                 enabled = source.enabled,
-                monitorEarlyProcesses = source.monitorEarlyProcesses,
+                monitorEarlyProcesses = source.enabled || source.monitorEarlyProcesses,
                 monitorImageLoads = source.monitorImageLoads,
                 requireSignedRuntime = source.requireSignedRuntime,
                 blockUntrustedRuntime = source.blockUntrustedRuntime,
@@ -2394,7 +2401,7 @@ namespace DataProtectorWebBridge.Services
             UserHookDefensePolicyDto normalized = new UserHookDefensePolicyDto
             {
                 enabled = request.enabled,
-                monitorEarlyProcesses = request.monitorEarlyProcesses,
+                monitorEarlyProcesses = request.enabled || request.monitorEarlyProcesses,
                 monitorImageLoads = request.monitorImageLoads,
                 requireSignedRuntime = request.requireSignedRuntime,
                 blockUntrustedRuntime = request.blockUntrustedRuntime,

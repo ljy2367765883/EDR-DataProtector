@@ -1197,6 +1197,7 @@ const local: App.I18n.Schema = {
         ruleWindow: 'Window {seconds}s',
         ruleThreshold: 'Threshold {count}',
         ruleWeight: 'Weight {score}',
+        earlyProcessRequired: 'Early process control must stay enabled while Process Threat Insight is enabled, otherwise the runtime cannot be injected.',
         saved: 'Process threat insight policy saved to central policy.',
         surfacesList: {
           earlyTitle: 'Kernel early-bird process stage',

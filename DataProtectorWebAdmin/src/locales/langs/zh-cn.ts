@@ -1193,6 +1193,7 @@
         ruleWindow: '窗口 {seconds}s',
         ruleThreshold: '阈值 {count}',
         ruleWeight: '权重 {score}',
+        earlyProcessRequired: '进程威胁感知启用时必须保持早鸟接管，否则 Runtime 无法注入。',
         saved: '进程威胁感知策略已保存到中央策略。',
         surfacesList: {
           earlyTitle: '内核早鸟进程阶段',

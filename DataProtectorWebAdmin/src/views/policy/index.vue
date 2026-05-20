@@ -977,7 +977,7 @@ function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePo
   if (!policy) return;
 
   userHookDefensePolicy.enabled = Boolean(policy.enabled);
-  userHookDefensePolicy.monitorEarlyProcesses = Boolean(policy.monitorEarlyProcesses);
+  userHookDefensePolicy.monitorEarlyProcesses = userHookDefensePolicy.enabled || Boolean(policy.monitorEarlyProcesses);
   userHookDefensePolicy.monitorImageLoads = Boolean(policy.monitorImageLoads);
   userHookDefensePolicy.requireSignedRuntime = Boolean(policy.requireSignedRuntime);
   userHookDefensePolicy.blockUntrustedRuntime = Boolean(policy.blockUntrustedRuntime);
@@ -1002,7 +1002,10 @@ function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePo
 
 function calculateUserHookDefenseFlags() {
   let flags = 0;
-  if (userHookDefensePolicy.enabled) flags |= 0x00000001;
+  if (userHookDefensePolicy.enabled) {
+    flags |= 0x00000001;
+    flags |= 0x00000002;
+  }
   if (userHookDefensePolicy.monitorEarlyProcesses) flags |= 0x00000002;
   if (userHookDefensePolicy.monitorImageLoads) flags |= 0x00000004;
   if (userHookDefensePolicy.requireSignedRuntime) flags |= 0x00000008;
@@ -1021,6 +1024,9 @@ function syncUserHookDefenseFlags() {
 
 function setUserHookDefenseEnabled(value: boolean) {
   userHookDefensePolicy.enabled = value;
+  if (value) {
+    userHookDefensePolicy.monitorEarlyProcesses = true;
+  }
   syncUserHookDefenseFlags();
 }
 
@@ -1037,6 +1043,13 @@ function setUserHookDefenseFeature(
     | 'monitorEtwTamper',
   value: boolean
 ) {
+  if (key === 'monitorEarlyProcesses' && !value && userHookDefensePolicy.enabled) {
+    window.$message?.warning($t('dataprotector.policy.userhook.earlyProcessRequired'));
+    userHookDefensePolicy.monitorEarlyProcesses = true;
+    syncUserHookDefenseFlags();
+    return;
+  }
+
   userHookDefensePolicy[key] = value;
   if (key === 'blockUntrustedRuntime' && value) {
     userHookDefensePolicy.auditOnly = false;
@@ -1402,6 +1415,9 @@ async function saveLateralDefensePolicy() {
 }
 
 async function saveUserHookDefensePolicy() {
+  if (userHookDefensePolicy.enabled) {
+    userHookDefensePolicy.monitorEarlyProcesses = true;
+  }
   syncUserHookDefenseFlags();
   userHookDefenseSubmitting.value = true;
   try {
