@@ -524,6 +524,10 @@ function normalizeActionToken(action?: string) {
 
 function auditActionLabel(record: Api.DataProtector.AuditRecord) {
   const action = record.Action || '';
+  if (action === 'userhook.health.runtime-injection-queued' && record.Status === '0x00000000') {
+    return textByLocale('运行时已加载', 'Runtime loaded');
+  }
+
   const token = normalizeActionToken(action);
   const labels = localizedActionLabels();
   if (labels[token]) return labels[token];
@@ -642,6 +646,13 @@ function localizedActionLabels(): Record<string, string> {
 function auditRecordSummary(record: Api.DataProtector.AuditRecord) {
   if (isUserHookCoverageRecord(record)) {
     const source = resolveSourceInfo(record);
+    if ((record.Action || '') === 'userhook.health.runtime-injection-queued' && record.Status === '0x00000000') {
+      return textByLocale(
+        `用户态防护运行时已在进程中加载，进程：${source.primary || '-'}`,
+        `The user-mode protection runtime is loaded in the process. Process: ${source.primary || '-'}`
+      );
+    }
+
     if ((record.Action || '').includes('runtime-missing')) {
       return textByLocale(
         `进程未加载用户态防护运行时，表示该进程当前只有覆盖状态异常，不等同于已经确认攻击。进程：${source.primary || '-'}`,

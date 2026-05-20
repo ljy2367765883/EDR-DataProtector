@@ -817,9 +817,34 @@ DpRuntimeWriteEvent(
     _In_opt_z_ LPCWSTR Target,
     _In_ DWORD Status,
     _In_ BOOL Blocked
-    )
+)
 {
     DpRuntimeWriteBehaviorEvent(Action, L"behavior", NULL, Target, Status, Blocked, 0, 0, 0, NULL);
+}
+
+static VOID
+DpRuntimeDebugTrace(
+    _In_z_ LPCWSTR Action,
+    _In_opt_z_ LPCWSTR Target,
+    _In_ DWORD Status
+    )
+{
+    WCHAR message[1024];
+
+    if (Action == NULL) {
+        return;
+    }
+
+    if (SUCCEEDED(StringCchPrintfW(message,
+                                   ARRAYSIZE(message),
+                                   L"DataProtector[UserHookRuntime] pid=%lu action=%s status=0x%08X process=%s target=%s\r\n",
+                                   gCurrentProcessId,
+                                   Action,
+                                   Status,
+                                   gCurrentProcessPath,
+                                   Target == NULL ? L"" : Target))) {
+        OutputDebugStringW(message);
+    }
 }
 
 static VOID
@@ -851,6 +876,13 @@ DpRuntimeWriteBehaviorEvent(
 
     if (Action == NULL) {
         return;
+    }
+
+    if (wcscmp(Action, L"userhook.runtime.loaded") == 0 ||
+        wcscmp(Action, L"userhook.runtime.minhook-init-failed") == 0 ||
+        wcscmp(Action, L"userhook.runtime.enable-hooks-failed") == 0 ||
+        wcsstr(Action, L".blocked.") != NULL) {
+        DpRuntimeDebugTrace(Action, Target, Status);
     }
 
     if (FAILED(StringCchCopyW(directory, ARRAYSIZE(directory), L"C:\\ProgramData\\DataProtector"))) {

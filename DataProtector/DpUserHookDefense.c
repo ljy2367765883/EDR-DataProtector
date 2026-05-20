@@ -30,6 +30,13 @@ SeLocateProcessImageName(
     _Outptr_ PUNICODE_STRING *pImageFileName
     );
 
+extern
+BOOLEAN
+KeAlertThread(
+    _Inout_ PRKTHREAD Thread,
+    _In_ KPROCESSOR_MODE AlertMode
+    );
+
 #if DP_ENABLE_USER_HOOK_DEFENSE_TRACE
 #define DP_USER_HOOK_TRACE(_format, ...) \
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "DataProtector[UserHook] " _format, __VA_ARGS__)
@@ -214,6 +221,7 @@ typedef struct _DP_USER_HOOK_TARGET_ENTRY {
     ULONG State;
     ULONG AttemptCount;
     ULONG SensitiveImageMask;
+    WCHAR ProcessImage[DP_USER_HOOK_DEFENSE_PROCESS_CHARS];
 } DP_USER_HOOK_TARGET_ENTRY, *PDP_USER_HOOK_TARGET_ENTRY;
 
 typedef struct _DP_USER_HOOK_APC_CONTEXT {
@@ -892,12 +900,14 @@ DpUserHookShouldInjectProcess(
 static
 VOID
 DpUserHookTrackTargetProcess(
-    _In_ HANDLE ProcessId
+    _In_ HANDLE ProcessId,
+    _In_opt_ PCUNICODE_STRING ProcessImage
     )
 {
     KIRQL oldIrql;
     ULONG index;
     ULONG emptyIndex = MAXULONG;
+    ULONG imageBytes = 0;
 
     if (ProcessId == NULL) {
         return;
@@ -909,6 +919,12 @@ DpUserHookTrackTargetProcess(
         if (gDpUserHookTargets[index].ProcessId == ProcessId) {
             gDpUserHookTargets[index].State = DpUserHookTargetPending;
             gDpUserHookTargets[index].AttemptCount = 0;
+            if (ProcessImage != NULL && ProcessImage->Buffer != NULL && ProcessImage->Length != 0) {
+                imageBytes = min(ProcessImage->Length,
+                                 (ULONG)(sizeof(gDpUserHookTargets[index].ProcessImage) - sizeof(WCHAR)));
+                RtlCopyMemory(gDpUserHookTargets[index].ProcessImage, ProcessImage->Buffer, imageBytes);
+                gDpUserHookTargets[index].ProcessImage[imageBytes / sizeof(WCHAR)] = L'\0';
+            }
             KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
             return;
         }
@@ -919,14 +935,28 @@ DpUserHookTrackTargetProcess(
     }
 
     if (emptyIndex != MAXULONG) {
+        RtlZeroMemory(&gDpUserHookTargets[emptyIndex], sizeof(gDpUserHookTargets[emptyIndex]));
         gDpUserHookTargets[emptyIndex].ProcessId = ProcessId;
         gDpUserHookTargets[emptyIndex].State = DpUserHookTargetPending;
         gDpUserHookTargets[emptyIndex].AttemptCount = 0;
+        if (ProcessImage != NULL && ProcessImage->Buffer != NULL && ProcessImage->Length != 0) {
+            imageBytes = min(ProcessImage->Length,
+                             (ULONG)(sizeof(gDpUserHookTargets[emptyIndex].ProcessImage) - sizeof(WCHAR)));
+            RtlCopyMemory(gDpUserHookTargets[emptyIndex].ProcessImage, ProcessImage->Buffer, imageBytes);
+            gDpUserHookTargets[emptyIndex].ProcessImage[imageBytes / sizeof(WCHAR)] = L'\0';
+        }
     } else {
         ULONG replaceIndex = (ULONG)((ULONG_PTR)ProcessId % RTL_NUMBER_OF(gDpUserHookTargets));
+        RtlZeroMemory(&gDpUserHookTargets[replaceIndex], sizeof(gDpUserHookTargets[replaceIndex]));
         gDpUserHookTargets[replaceIndex].ProcessId = ProcessId;
         gDpUserHookTargets[replaceIndex].State = DpUserHookTargetPending;
         gDpUserHookTargets[replaceIndex].AttemptCount = 0;
+        if (ProcessImage != NULL && ProcessImage->Buffer != NULL && ProcessImage->Length != 0) {
+            imageBytes = min(ProcessImage->Length,
+                             (ULONG)(sizeof(gDpUserHookTargets[replaceIndex].ProcessImage) - sizeof(WCHAR)));
+            RtlCopyMemory(gDpUserHookTargets[replaceIndex].ProcessImage, ProcessImage->Buffer, imageBytes);
+            gDpUserHookTargets[replaceIndex].ProcessImage[imageBytes / sizeof(WCHAR)] = L'\0';
+        }
     }
 
     KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
@@ -976,6 +1006,60 @@ DpUserHookIsTrackedTargetProcess(
     for (index = 0; index < RTL_NUMBER_OF(gDpUserHookTargets); index++) {
         if (gDpUserHookTargets[index].ProcessId == ProcessId) {
             found = TRUE;
+            break;
+        }
+    }
+
+    KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
+    return found;
+}
+
+static
+BOOLEAN
+DpUserHookCopyTrackedProcessImage(
+    _In_ HANDLE ProcessId,
+    _Out_writes_(ImageChars) PWCHAR Image,
+    _In_ ULONG ImageChars,
+    _Out_ PUNICODE_STRING ImageString
+    )
+{
+    KIRQL oldIrql;
+    ULONG index;
+    ULONG chars;
+    BOOLEAN found = FALSE;
+
+    if (ImageString != NULL) {
+        ImageString->Buffer = Image;
+        ImageString->Length = 0;
+        ImageString->MaximumLength = (USHORT)(ImageChars * sizeof(WCHAR));
+    }
+
+    if (Image != NULL && ImageChars != 0) {
+        Image[0] = L'\0';
+    }
+
+    if (ProcessId == NULL || Image == NULL || ImageChars == 0 || ImageString == NULL) {
+        return FALSE;
+    }
+
+    KeAcquireSpinLock(&gDpUserHookTargetLock, &oldIrql);
+
+    for (index = 0; index < RTL_NUMBER_OF(gDpUserHookTargets); index++) {
+        if (gDpUserHookTargets[index].ProcessId == ProcessId &&
+            gDpUserHookTargets[index].ProcessImage[0] != L'\0') {
+
+            chars = 0;
+            while (chars + 1 < ImageChars &&
+                   gDpUserHookTargets[index].ProcessImage[chars] != L'\0') {
+                chars++;
+            }
+
+            RtlCopyMemory(Image,
+                          gDpUserHookTargets[index].ProcessImage,
+                          chars * sizeof(WCHAR));
+            Image[chars] = L'\0';
+            ImageString->Length = (USHORT)(chars * sizeof(WCHAR));
+            found = chars != 0;
             break;
         }
     }
@@ -1830,20 +1914,24 @@ DpUserHookApcKernelRoutine(
     )
 {
     PDP_USER_HOOK_APC_CONTEXT context;
+    UNICODE_STRING runtimePath;
+    UNICODE_STRING processImage;
 
     UNREFERENCED_PARAMETER(NormalContext);
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
     context = CONTAINING_RECORD(Apc, DP_USER_HOOK_APC_CONTEXT, Apc);
+    RtlInitUnicodeString(&runtimePath, context->RuntimePath);
+    RtlInitUnicodeString(&processImage, context->ProcessImage);
     if (NormalRoutine == NULL || *NormalRoutine == NULL) {
         DpUserHookMarkTargetInjectionComplete(context->ProcessId, FALSE);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              context->ProcessId,
                              context->ParentProcessId,
                              (ULONG)STATUS_CANCELLED,
-                             NULL,
-                             NULL,
+                             runtimePath.Length == 0 ? NULL : &runtimePath,
+                             processImage.Length == 0 ? NULL : &processImage,
                              DpUserHookReadPolicyFlags());
         DpUserHookFreeApcContext(context, TRUE);
         return;
@@ -1854,8 +1942,8 @@ DpUserHookApcKernelRoutine(
                          context->ProcessId,
                          context->ParentProcessId,
                          STATUS_SUCCESS,
-                         NULL,
-                         NULL,
+                         &runtimePath,
+                         processImage.Length == 0 ? NULL : &processImage,
                          DpUserHookReadPolicyFlags());
 
     DpUserHookFreeApcContext(context, FALSE);
@@ -1868,15 +1956,19 @@ DpUserHookApcRundownRoutine(
     )
 {
     PDP_USER_HOOK_APC_CONTEXT context;
+    UNICODE_STRING runtimePath;
+    UNICODE_STRING processImage;
 
     context = CONTAINING_RECORD(Apc, DP_USER_HOOK_APC_CONTEXT, Apc);
+    RtlInitUnicodeString(&runtimePath, context->RuntimePath);
+    RtlInitUnicodeString(&processImage, context->ProcessImage);
     DpUserHookMarkTargetInjectionComplete(context->ProcessId, FALSE);
     DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                          context->ProcessId,
                          context->ParentProcessId,
                          (ULONG)STATUS_CANCELLED,
-                         NULL,
-                         NULL,
+                         runtimePath.Length == 0 ? NULL : &runtimePath,
+                         processImage.Length == 0 ? NULL : &processImage,
                          DpUserHookReadPolicyFlags());
 
     DpUserHookFreeApcContext(context, TRUE);
@@ -2010,6 +2102,16 @@ DpUserHookQueueRuntimeApc(
         return STATUS_UNSUCCESSFUL;
     }
 
+    if (KeAlertThread((PRKTHREAD)Thread, UserMode)) {
+        DP_USER_HOOK_TRACE("apc queued and user-alerted pid=%Iu runtime=%wZ\n",
+                           (ULONG_PTR)ProcessId,
+                           RuntimeDllPath);
+    } else {
+        DP_USER_HOOK_TRACE("apc queued; target thread already alert-pending pid=%Iu runtime=%wZ\n",
+                           (ULONG_PTR)ProcessId,
+                           RuntimeDllPath);
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -2026,6 +2128,8 @@ DpUserHookTryQueueRuntimeInjection(
     WCHAR runtimePathBuffer[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
     ULONG runtimePathBytes;
     UNICODE_STRING runtimePath;
+    WCHAR processImageBuffer[DP_USER_HOOK_DEFENSE_PROCESS_CHARS];
+    UNICODE_STRING processImage;
     PETHREAD currentThread;
     PETHREAD targetThread = NULL;
     PEPROCESS threadProcess;
@@ -2060,7 +2164,7 @@ DpUserHookTryQueueRuntimeInjection(
                                                 ImageInfo->ImageSize,
                                                 &loadLibraryW);
     if (!NT_SUCCESS(status)) {
-        DpUserHookTrackTargetProcess(ProcessId);
+        DpUserHookTrackTargetProcess(ProcessId, NULL);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              ProcessId,
                              NULL,
@@ -2074,7 +2178,7 @@ DpUserHookTryQueueRuntimeInjection(
     currentThread = PsGetCurrentThread();
     threadProcess = PsGetThreadProcess(currentThread);
     if (threadProcess == NULL || PsGetProcessId(threadProcess) != ProcessId) {
-        DpUserHookTrackTargetProcess(ProcessId);
+        DpUserHookTrackTargetProcess(ProcessId, NULL);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              ProcessId,
                              NULL,
@@ -2094,23 +2198,27 @@ DpUserHookTryQueueRuntimeInjection(
     runtimePath.Buffer = runtimePathBuffer;
     runtimePath.Length = (USHORT)runtimePathBytes;
     runtimePath.MaximumLength = sizeof(runtimePathBuffer);
+    DpUserHookCopyTrackedProcessImage(ProcessId,
+                                      processImageBuffer,
+                                      RTL_NUMBER_OF(processImageBuffer),
+                                      &processImage);
 
     status = DpUserHookQueueRuntimeApc(targetThread,
                                        ProcessId,
                                        NULL,
                                        loadLibraryW,
                                        &runtimePath,
-                                       NULL);
+                                       processImage.Length == 0 ? NULL : &processImage);
     ObDereferenceObject(targetThread);
 
     if (!NT_SUCCESS(status)) {
-        DpUserHookTrackTargetProcess(ProcessId);
+        DpUserHookTrackTargetProcess(ProcessId, processImage.Length == 0 ? NULL : &processImage);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              ProcessId,
                              NULL,
                              (ULONG)status,
                              &runtimePath,
-                             NULL,
+                             processImage.Length == 0 ? NULL : &processImage,
                              DpUserHookReadPolicyFlags());
         return;
     }
@@ -2120,7 +2228,7 @@ DpUserHookTryQueueRuntimeInjection(
                          NULL,
                          (ULONG)STATUS_PENDING,
                          &runtimePath,
-                         NULL,
+                         processImage.Length == 0 ? NULL : &processImage,
                          DpUserHookReadPolicyFlags());
 }
 
@@ -2282,7 +2390,7 @@ DpUserHookDefenseObserveProcessCreate(
     }
 
     parentProcessId = CreateInfo->ParentProcessId;
-    DpUserHookTrackTargetProcess(ProcessId);
+    DpUserHookTrackTargetProcess(ProcessId, CreateInfo->ImageFileName);
 
     RtlInitUnicodeString(&runtimeTarget, L"DataProtectorUserHookRuntime.dll");
 
