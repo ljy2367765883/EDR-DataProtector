@@ -427,6 +427,12 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/audit/attack-flow")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", store.QueryAuditAttackFlow(ParseAuditQuery(context.Request)));
+                    return;
+                }
+
                 if (method == "DELETE" && path == "/api/audit/events")
                 {
                     AuditLog.AuditDeleteOptions request =

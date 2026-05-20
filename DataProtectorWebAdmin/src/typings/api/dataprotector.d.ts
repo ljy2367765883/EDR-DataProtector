@@ -557,6 +557,96 @@ declare namespace Api {
       total: number;
     }
 
+    interface AuditAttackFlowResponse {
+      generatedUtc: string;
+      fromUtc: string;
+      toUtc: string;
+      eventTotal: number;
+      incidentTotal: number;
+      criticalTotal: number;
+      hostTotal: number;
+      processTotal: number;
+      remoteTotal: number;
+      summary: string;
+      stages: AuditAttackFlowStage[];
+      incidents: AuditAttackFlowIncident[];
+      processes: AuditAttackFlowProcess[];
+      entities: AuditAttackFlowEntity[];
+      events: AuditAttackFlowEvent[];
+    }
+
+    interface AuditAttackFlowStage {
+      key: string;
+      label: string;
+      active: boolean;
+      count: number;
+      severity: string;
+      firstSeenUtc: string;
+      lastSeenUtc: string;
+      detail: string;
+    }
+
+    interface AuditAttackFlowIncident {
+      key: string;
+      host: string;
+      rootProcess: string;
+      rootPid: string;
+      firstSeenUtc: string;
+      lastSeenUtc: string;
+      severity: string;
+      score: number;
+      eventCount: number;
+      stages: string[];
+      actions: string[];
+      remotes: string[];
+      objects: string[];
+    }
+
+    interface AuditAttackFlowProcess {
+      key: string;
+      host: string;
+      pid: string;
+      parentPid: string;
+      name: string;
+      path: string;
+      user: string;
+      severity: string;
+      eventCount: number;
+    }
+
+    interface AuditAttackFlowEntity {
+      key: string;
+      type: string;
+      label: string;
+      severity: string;
+      count: number;
+    }
+
+    interface AuditAttackFlowEvent {
+      id: string;
+      timeUtc: string;
+      host: string;
+      user: string;
+      stage: string;
+      category: string;
+      action: string;
+      title: string;
+      detail: string;
+      severity: string;
+      disposition: string;
+      sourceProcess: string;
+      sourcePid: string;
+      sourceUser: string;
+      targetProcess: string;
+      targetPid: string;
+      objectType: string;
+      objectName: string;
+      objectFormat: string;
+      policyName: string;
+      remoteIdentity: string;
+      rawMessage: string;
+    }
+
     interface AuditDeleteRequest {
       TimestampUtc?: string;
       Action?: string;

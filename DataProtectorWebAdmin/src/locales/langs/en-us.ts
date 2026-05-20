@@ -584,6 +584,34 @@ const local: App.I18n.Schema = {
         target: 'Target',
         status: 'Status',
         message: 'Message'
+      },
+      attackFlow: {
+        title: 'Attack Flow Reconstruction',
+        empty: 'No correlated attack flow in the current audit scope.',
+        activeStages: '{count} stages',
+        events: '{count} evidence events',
+        incidents: 'Correlated Incidents',
+        processes: 'Process Profile',
+        timeline: 'Evidence Timeline',
+        entities: 'Key Entities',
+        stages: {
+          delivery: 'Delivery / Landing',
+          execution: 'Execution',
+          behavior: 'Risk Behavior',
+          credential: 'Credential Access',
+          lateral: 'Lateral Movement',
+          network: 'Network / C2',
+          persistence: 'Persistence',
+          impact: 'Impact / Data'
+        },
+        columns: {
+          root: 'Root Process',
+          stages: 'Stages',
+          remotes: 'Remotes',
+          events: 'Events',
+          score: 'Score',
+          process: 'Process'
+        }
       }
     },
     remote: {

@@ -580,6 +580,34 @@
         target: '目标',
         status: '状态',
         message: '消息'
+      },
+      attackFlow: {
+        title: '攻击流程还原',
+        empty: '当前筛选范围内暂无可关联的攻击流程。',
+        activeStages: '{count} 个阶段',
+        events: '{count} 条证据',
+        incidents: '关联事件簇',
+        processes: '进程画像',
+        timeline: '证据时间线',
+        entities: '关键实体',
+        stages: {
+          delivery: '落地 / 投递',
+          execution: '执行',
+          behavior: '危险行为',
+          credential: '凭据访问',
+          lateral: '横向移动',
+          network: '外联 / C2',
+          persistence: '持久化',
+          impact: '影响 / 数据'
+        },
+        columns: {
+          root: '根进程',
+          stages: '阶段',
+          remotes: '远端',
+          events: '事件',
+          score: '分数',
+          process: '进程'
+        }
       }
     },
     remote: {

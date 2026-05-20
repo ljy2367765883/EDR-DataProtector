@@ -367,6 +367,14 @@ export function fetchAuditEvents(params: number | Api.DataProtector.AuditQuery =
   });
 }
 
+export function fetchAuditAttackFlow(params: Api.DataProtector.AuditQuery = {}) {
+  return request<Api.DataProtector.AuditAttackFlowResponse>({
+    url: '/audit/attack-flow',
+    method: 'get',
+    params
+  });
+}
+
 export function fetchRemoveAuditEvent(data: Api.DataProtector.AuditDeleteRequest) {
   return request<Api.DataProtector.OperationResult>({
     url: '/audit/events',

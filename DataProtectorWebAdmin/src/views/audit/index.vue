@@ -2,7 +2,7 @@
 import { computed, h, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NTag, type DataTableColumns, type PaginationProps } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
-import { fetchAuditEvents, fetchClearAuditEvents, fetchDevices, fetchRemoveAuditEvent } from '@/service/api';
+import { fetchAuditAttackFlow, fetchAuditEvents, fetchClearAuditEvents, fetchDevices, fetchRemoveAuditEvent } from '@/service/api';
 import { $t } from '@/locales';
 import { useAppStore } from '@/store/modules/app';
 
@@ -39,6 +39,7 @@ interface HostSummary {
 const loading = ref(false);
 const appStore = useAppStore();
 const auditResponse = ref<Api.DataProtector.AuditQueryResponse | null>(null);
+const attackFlow = ref<Api.DataProtector.AuditAttackFlowResponse | null>(null);
 const devices = ref<Api.DataProtector.Device[]>([]);
 const activeCategory = ref<AuditCategory>('all');
 const timeRange = ref<[number, number] | null>(null);
@@ -109,6 +110,12 @@ const totalCount = computed(() => auditResponse.value?.total ?? 0);
 const criticalCount = computed(() => auditResponse.value?.criticalTotal ?? 0);
 const warningCount = computed(() => auditResponse.value?.warningTotal ?? 0);
 const blockedCount = computed(() => auditResponse.value?.blockedTotal ?? 0);
+const attackFlowEvents = computed(() => attackFlow.value?.events ?? []);
+const attackFlowStages = computed(() => attackFlow.value?.stages ?? []);
+const attackFlowIncidents = computed(() => attackFlow.value?.incidents ?? []);
+const attackFlowProcesses = computed(() => attackFlow.value?.processes ?? []);
+const attackFlowEntities = computed(() => attackFlow.value?.entities ?? []);
+const activeAttackStageCount = computed(() => attackFlowStages.value.filter(item => item.active).length);
 
 const categorySummaries = computed<AuditSummary[]>(() =>
   categoryOptions.value.filter(item => item.value !== 'all').map(item => {
@@ -241,6 +248,71 @@ const hostColumns = computed<DataTableColumns<HostSummary>>(() => [
     sorter: (a, b) => a.blocked - b.blocked,
     render(row) {
       return h(NTag, { type: row.blocked ? 'error' : 'default', bordered: false }, { default: () => row.blocked });
+    }
+  }
+]);
+
+const attackIncidentColumns = computed<DataTableColumns<Api.DataProtector.AuditAttackFlowIncident>>(() => [
+  {
+    title: $t('dataprotector.audit.attackFlow.columns.root'),
+    key: 'rootProcess',
+    minWidth: 260,
+    render(row) {
+      return h('div', { class: 'audit-cell-stack' }, [
+        h('div', { class: 'audit-cell-strong' }, row.rootProcess || row.host || '-'),
+        h('div', { class: 'audit-cell-muted' }, [row.host, row.rootPid ? `PID ${row.rootPid}` : ''].filter(Boolean).join(' / ') || '-')
+      ]);
+    }
+  },
+  {
+    title: $t('dataprotector.audit.attackFlow.columns.stages'),
+    key: 'stages',
+    minWidth: 220,
+    render(row) {
+      return h('div', { class: 'attack-tag-list' }, row.stages.map(stage => h(NTag, { size: 'small', bordered: false }, { default: () => stageLabel(stage) })));
+    }
+  },
+  {
+    title: $t('dataprotector.audit.attackFlow.columns.remotes'),
+    key: 'remotes',
+    minWidth: 220,
+    render(row) {
+      return row.remotes?.length ? row.remotes.slice(0, 3).join(' / ') : '-';
+    }
+  },
+  { title: $t('dataprotector.audit.attackFlow.columns.events'), key: 'eventCount', width: 90 },
+  { title: $t('dataprotector.audit.attackFlow.columns.score'), key: 'score', width: 90 },
+  {
+    title: $t('dataprotector.audit.severity'),
+    key: 'severity',
+    width: 110,
+    render(row) {
+      return h(NTag, { type: attackSeverityTagType(row.severity), bordered: false }, { default: () => attackSeverityLabel(row.severity) });
+    }
+  }
+]);
+
+const attackProcessColumns = computed<DataTableColumns<Api.DataProtector.AuditAttackFlowProcess>>(() => [
+  {
+    title: $t('dataprotector.audit.attackFlow.columns.process'),
+    key: 'path',
+    minWidth: 280,
+    render(row) {
+      return h('div', { class: 'audit-cell-stack' }, [
+        h('div', { class: 'audit-cell-strong' }, row.name || row.path || '-'),
+        h('div', { class: 'audit-cell-muted' }, row.path || '-')
+      ]);
+    }
+  },
+  { title: 'PID', key: 'pid', width: 90 },
+  { title: $t('dataprotector.audit.columns.host'), key: 'host', minWidth: 140, ellipsis: { tooltip: true } },
+  { title: $t('dataprotector.audit.attackFlow.columns.events'), key: 'eventCount', width: 90 },
+  {
+    title: $t('dataprotector.audit.severity'),
+    key: 'severity',
+    width: 110,
+    render(row) {
+      return h(NTag, { type: attackSeverityTagType(row.severity), bordered: false }, { default: () => attackSeverityLabel(row.severity) });
     }
   }
 ]);
@@ -587,6 +659,54 @@ function dispositionTagType(disposition: Exclude<AuditDisposition, 'all'>) {
   return 'success';
 }
 
+function stageLabel(stage: string) {
+  const labels: Record<string, string> = {
+    delivery: $t('dataprotector.audit.attackFlow.stages.delivery'),
+    execution: $t('dataprotector.audit.attackFlow.stages.execution'),
+    behavior: $t('dataprotector.audit.attackFlow.stages.behavior'),
+    credential: $t('dataprotector.audit.attackFlow.stages.credential'),
+    lateral: $t('dataprotector.audit.attackFlow.stages.lateral'),
+    network: $t('dataprotector.audit.attackFlow.stages.network'),
+    persistence: $t('dataprotector.audit.attackFlow.stages.persistence'),
+    impact: $t('dataprotector.audit.attackFlow.stages.impact')
+  };
+
+  return labels[stage] || stage || '-';
+}
+
+function stageIcon(stage: string) {
+  const icons: Record<string, string> = {
+    delivery: 'mdi:download-network-outline',
+    execution: 'mdi:play-circle-outline',
+    behavior: 'mdi:vector-polyline',
+    credential: 'mdi:key-chain',
+    lateral: 'mdi:lan-disconnect',
+    network: 'mdi:access-point-network',
+    persistence: 'mdi:shield-key-outline',
+    impact: 'mdi:database-alert-outline'
+  };
+
+  return icons[stage] || 'mdi:timeline-clock-outline';
+}
+
+function attackSeverityTagType(value?: string) {
+  if (value === 'critical' || value === 'high') return 'error';
+  if (value === 'warning' || value === 'medium') return 'warning';
+  if (value === 'info') return 'info';
+  return 'default';
+}
+
+function attackSeverityLabel(value?: string) {
+  if (value === 'critical' || value === 'high') return $t('dataprotector.audit.critical');
+  if (value === 'warning' || value === 'medium') return $t('dataprotector.audit.warning');
+  if (value === 'info') return $t('dataprotector.audit.info');
+  return $t('dataprotector.audit.operational');
+}
+
+function formatAttackTime(value?: string) {
+  return value ? new Date(value).toLocaleString() : '-';
+}
+
 function updateCharts() {
   updateTrendChart(opts => {
     const critical = $t('dataprotector.audit.critical');
@@ -653,7 +773,8 @@ async function refresh(resetPage = false) {
 
   loading.value = true;
   try {
-    const [auditResult, deviceResult] = await Promise.all([fetchAuditEvents(buildQuery()), fetchDevices()]);
+    const query = buildQuery();
+    const [auditResult, flowResult, deviceResult] = await Promise.all([fetchAuditEvents(query), fetchAuditAttackFlow(query), fetchDevices()]);
     if (!auditResult.error) {
       auditResponse.value = auditResult.data;
       suppressPaginationRefresh = true;
@@ -662,6 +783,7 @@ async function refresh(resetPage = false) {
       pagination.pageSize = auditResult.data.pageSize;
       suppressPaginationRefresh = false;
     }
+    if (!flowResult.error) attackFlow.value = flowResult.data;
     if (!deviceResult.error) devices.value = deviceResult.data;
   } finally {
     loading.value = false;
@@ -872,6 +994,106 @@ onMounted(refresh);
       </NGrid>
     </NCard>
 
+    <NCard :bordered="false" class="card-wrapper">
+      <template #header>
+        <div class="flex flex-wrap items-center justify-between gap-12px">
+          <div>
+            <div class="text-16px font-700">{{ $t('dataprotector.audit.attackFlow.title') }}</div>
+            <div class="m-t-4px text-12px text-gray-500">{{ attackFlow?.summary || $t('dataprotector.audit.attackFlow.empty') }}</div>
+          </div>
+          <NSpace>
+            <NTag type="error" :bordered="false">{{ $t('dataprotector.audit.attackFlow.activeStages', { count: activeAttackStageCount }) }}</NTag>
+            <NTag type="info" :bordered="false">{{ $t('dataprotector.audit.attackFlow.events', { count: attackFlow?.eventTotal || 0 }) }}</NTag>
+          </NSpace>
+        </div>
+      </template>
+
+      <NSpace vertical :size="16">
+        <div class="attack-stage-rail">
+          <div
+            v-for="stage in attackFlowStages"
+            :key="stage.key"
+            class="attack-stage"
+            :class="{ active: stage.active, critical: stage.severity === 'critical' || stage.severity === 'high' }"
+          >
+            <div class="stage-icon">
+              <SvgIcon :icon="stageIcon(stage.key)" />
+            </div>
+            <div class="stage-body">
+              <div class="stage-title">{{ stageLabel(stage.key) }}</div>
+              <div class="stage-detail">{{ stage.detail }}</div>
+            </div>
+            <NTag size="small" :type="attackSeverityTagType(stage.severity)" :bordered="false">{{ stage.count }}</NTag>
+          </div>
+        </div>
+
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 l:13">
+            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.incidents') }}</div>
+            <NDataTable
+              :columns="attackIncidentColumns"
+              :data="attackFlowIncidents"
+              :pagination="{ pageSize: 5 }"
+              :bordered="false"
+              :scroll-x="980"
+            />
+          </NGi>
+          <NGi span="24 l:11">
+            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.processes') }}</div>
+            <NDataTable
+              :columns="attackProcessColumns"
+              :data="attackFlowProcesses"
+              :pagination="{ pageSize: 5 }"
+              :bordered="false"
+              :scroll-x="820"
+            />
+          </NGi>
+        </NGrid>
+
+        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+          <NGi span="24 l:15">
+            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.timeline') }}</div>
+            <div class="attack-timeline">
+              <div
+                v-for="event in attackFlowEvents.slice(0, 80)"
+                :key="event.id"
+                class="attack-event"
+                :class="`severity-${event.severity}`"
+              >
+                <div class="event-dot">
+                  <SvgIcon :icon="stageIcon(event.stage)" />
+                </div>
+                <div class="event-card">
+                  <div class="event-title-row">
+                    <span>{{ event.title }}</span>
+                    <small>{{ formatAttackTime(event.timeUtc) }}</small>
+                  </div>
+                  <div class="event-detail">{{ event.detail || event.rawMessage || '-' }}</div>
+                  <div class="event-meta">
+                    {{ event.host || '-' }} · {{ event.sourceProcess || '-' }} · PID {{ event.sourcePid || '-' }} · {{ stageLabel(event.stage) }}
+                  </div>
+                </div>
+              </div>
+              <NEmpty v-if="!attackFlowEvents.length" :description="$t('dataprotector.audit.attackFlow.empty')" />
+            </div>
+          </NGi>
+          <NGi span="24 l:9">
+            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.entities') }}</div>
+            <div class="attack-entity-list">
+              <div v-for="entity in attackFlowEntities" :key="entity.key" class="attack-entity">
+                <div>
+                  <div class="entity-label">{{ entity.label }}</div>
+                  <div class="entity-type">{{ entity.type }}</div>
+                </div>
+                <NTag size="small" :type="attackSeverityTagType(entity.severity)" :bordered="false">{{ entity.count }}</NTag>
+              </div>
+              <NEmpty v-if="!attackFlowEntities.length" :description="$t('dataprotector.audit.attackFlow.empty')" />
+            </div>
+          </NGi>
+        </NGrid>
+      </NSpace>
+    </NCard>
+
     <NCard :title="$t('dataprotector.audit.auditEvents')" :bordered="false" class="card-wrapper">
       <NSpace vertical :size="12">
         <NTabs :value="activeCategory" type="line" animated @update:value="setActiveCategory">
@@ -919,5 +1141,158 @@ onMounted(refresh);
 .audit-cell-muted {
   color: var(--n-text-color-3);
   font-size: 12px;
+}
+
+.attack-stage-rail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.attack-stage {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(15, 23, 42, 0.03);
+  opacity: 0.72;
+}
+
+.attack-stage.active {
+  border-color: rgba(32, 128, 240, 0.4);
+  background: rgba(32, 128, 240, 0.08);
+  opacity: 1;
+}
+
+.attack-stage.critical {
+  border-color: rgba(208, 48, 80, 0.45);
+  background: rgba(208, 48, 80, 0.08);
+}
+
+.stage-icon,
+.event-dot {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: #fff;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+}
+
+.stage-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.stage-title,
+.story-panel-title,
+.entity-label {
+  font-weight: 700;
+}
+
+.stage-detail,
+.entity-type,
+.event-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--n-text-color-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.story-panel-title {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.attack-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attack-timeline {
+  position: relative;
+  display: flex;
+  max-height: 520px;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.attack-event {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.event-card {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.event-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 700;
+}
+
+.event-title-row small {
+  flex: 0 0 auto;
+  color: var(--n-text-color-3);
+  font-weight: 400;
+}
+
+.event-detail {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--n-text-color-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attack-event.severity-critical .event-dot,
+.attack-event.severity-high .event-dot {
+  background: linear-gradient(135deg, #dc2626, #9333ea);
+}
+
+.attack-event.severity-warning .event-dot,
+.attack-event.severity-medium .event-dot {
+  background: linear-gradient(135deg, #f59e0b, #dc2626);
+}
+
+.attack-entity-list {
+  display: flex;
+  max-height: 520px;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.attack-entity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.48);
 }
 </style>

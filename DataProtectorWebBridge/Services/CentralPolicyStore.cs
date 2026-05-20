@@ -762,6 +762,27 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public AuditAttackFlowResponse QueryAuditAttackFlow(AuditLog.AuditQueryOptions options)
+        {
+            AuditLog.AuditQueryOptions query = options ?? new AuditLog.AuditQueryOptions();
+            AuditLog.AuditRecord[] auditRecords;
+            NetworkConnectionObservation[] networkRecords;
+
+            lock (syncRoot)
+            {
+                auditRecords = state.Audit
+                    .Select(CloneAudit)
+                    .Where(record => AuditLog.Matches(record, query))
+                    .ToArray();
+                networkRecords = state.NetworkConnections
+                    .Select(CloneNetworkObservation)
+                    .Where(item => IsNetworkObservationInAuditScope(item, query))
+                    .ToArray();
+            }
+
+            return BuildAuditAttackFlow(auditRecords, networkRecords, query);
+        }
+
         public PolicyBridgeService.OperationResult ClearAudit(string actor)
         {
             lock (syncRoot)
@@ -1636,6 +1657,625 @@ namespace DataProtectorWebBridge.Services
             };
             AuditLog.EnrichRecord(record);
             state.Audit.Add(record);
+        }
+
+        private static AuditAttackFlowResponse BuildAuditAttackFlow(
+            AuditLog.AuditRecord[] auditRecords,
+            NetworkConnectionObservation[] networkRecords,
+            AuditLog.AuditQueryOptions query)
+        {
+            List<AuditAttackFlowEvent> events = new List<AuditAttackFlowEvent>();
+            Dictionary<string, AuditAttackFlowProcess> processes = new Dictionary<string, AuditAttackFlowProcess>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, AuditAttackFlowEntity> entityMap = new Dictionary<string, AuditAttackFlowEntity>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, AttackIncidentAccumulator> incidentMap = new Dictionary<string, AttackIncidentAccumulator>(StringComparer.OrdinalIgnoreCase);
+            DateTime firstUtc = DateTime.MaxValue;
+            DateTime lastUtc = DateTime.MinValue;
+
+            foreach (AuditLog.AuditRecord record in (auditRecords ?? new AuditLog.AuditRecord[0]))
+            {
+                if (record == null)
+                {
+                    continue;
+                }
+
+                AuditLog.EnrichRecord(record);
+                AuditAttackFlowEvent flowEvent = BuildAttackFlowEvent(record);
+                if (flowEvent == null)
+                {
+                    continue;
+                }
+
+                events.Add(flowEvent);
+                TrackFlowTime(flowEvent.timeUtc, ref firstUtc, ref lastUtc);
+                AddProcessNode(processes, flowEvent.host, flowEvent.sourcePid, flowEvent.sourceProcess, string.Empty, flowEvent.sourceUser, flowEvent.severity);
+                AddProcessNode(processes, flowEvent.host, flowEvent.targetPid, flowEvent.targetProcess, flowEvent.sourcePid, string.Empty, flowEvent.severity);
+                AddEntity(entityMap, "host", flowEvent.host, flowEvent.host, flowEvent.severity);
+                AddEntity(entityMap, "process", ProcessEntityKey(flowEvent.host, flowEvent.sourcePid, flowEvent.sourceProcess), FirstNonEmpty(flowEvent.sourceProcess, flowEvent.sourcePid), flowEvent.severity);
+                AddEntity(entityMap, flowEvent.objectType, FirstNonEmpty(flowEvent.objectName, flowEvent.targetProcess, flowEvent.targetPid, flowEvent.action), FirstNonEmpty(flowEvent.objectName, flowEvent.targetProcess, flowEvent.action), flowEvent.severity);
+                AddToIncident(incidentMap, flowEvent);
+            }
+
+            foreach (NetworkConnectionObservation item in (networkRecords ?? new NetworkConnectionObservation[0]))
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                AuditAttackFlowEvent flowEvent = BuildNetworkAttackFlowEvent(item);
+                events.Add(flowEvent);
+                TrackFlowTime(flowEvent.timeUtc, ref firstUtc, ref lastUtc);
+                AddProcessNode(processes, flowEvent.host, flowEvent.sourcePid, flowEvent.sourceProcess, string.Empty, flowEvent.sourceUser, flowEvent.severity);
+                AddEntity(entityMap, "host", flowEvent.host, flowEvent.host, flowEvent.severity);
+                AddEntity(entityMap, "process", ProcessEntityKey(flowEvent.host, flowEvent.sourcePid, flowEvent.sourceProcess), FirstNonEmpty(flowEvent.sourceProcess, flowEvent.sourcePid), flowEvent.severity);
+                AddEntity(entityMap, "remote", flowEvent.remoteIdentity, flowEvent.remoteIdentity, flowEvent.severity);
+                AddToIncident(incidentMap, flowEvent);
+            }
+
+            AuditAttackFlowEvent[] orderedEvents = events
+                .OrderBy(item => ParseUtcOrMin(item.timeUtc))
+                .Take(500)
+                .ToArray();
+            AuditAttackFlowStage[] stages = BuildAttackFlowStages(orderedEvents);
+            AuditAttackFlowIncident[] incidents = incidentMap.Values
+                .Select(item => item.ToIncident())
+                .OrderByDescending(item => item.score)
+                .ThenByDescending(item => item.lastSeenUtc, StringComparer.OrdinalIgnoreCase)
+                .Take(24)
+                .ToArray();
+
+            return new AuditAttackFlowResponse
+            {
+                generatedUtc = DateTime.UtcNow.ToString("o"),
+                fromUtc = firstUtc == DateTime.MaxValue ? string.Empty : firstUtc.ToString("o"),
+                toUtc = lastUtc == DateTime.MinValue ? string.Empty : lastUtc.ToString("o"),
+                eventTotal = orderedEvents.Length,
+                incidentTotal = incidents.Length,
+                criticalTotal = orderedEvents.Count(item => string.Equals(item.severity, "critical", StringComparison.OrdinalIgnoreCase)),
+                hostTotal = orderedEvents.Select(item => item.host).Where(item => !string.IsNullOrWhiteSpace(item)).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                processTotal = processes.Count,
+                remoteTotal = orderedEvents.Select(item => item.remoteIdentity).Where(item => !string.IsNullOrWhiteSpace(item)).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                summary = BuildAttackFlowSummary(stages, incidents, orderedEvents),
+                stages = stages,
+                incidents = incidents,
+                processes = processes.Values
+                    .OrderBy(item => item.host, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(item => item.pid, StringComparer.OrdinalIgnoreCase)
+                    .Take(200)
+                    .ToArray(),
+                entities = entityMap.Values
+                    .OrderByDescending(item => SeverityScore(item.severity))
+                    .ThenByDescending(item => item.count)
+                    .Take(80)
+                    .ToArray(),
+                events = orderedEvents
+            };
+        }
+
+        private static AuditAttackFlowEvent BuildAttackFlowEvent(AuditLog.AuditRecord record)
+        {
+            string action = record.Action ?? string.Empty;
+            string stage = ClassifyAttackStage(record);
+            string severity = AuditLog.ResolveSeverity(record);
+            string disposition = AuditLog.ResolveDisposition(record);
+            string sourceProcess = FirstNonEmpty(record.SourceProcess, record.Extension);
+            string targetProcess = FirstNonEmpty(record.TargetProcess, LooksLikeProcessPath(record.Target) ? record.Target : string.Empty);
+            string objectType = FirstNonEmpty(record.ObjectType, InferAttackObjectType(action));
+            string objectName = FirstNonEmpty(record.ObjectName, record.Target, targetProcess, action);
+
+            return new AuditAttackFlowEvent
+            {
+                id = BuildStableId(record.TimestampUtc, action, record.Target, record.Message),
+                timeUtc = record.TimestampUtc ?? string.Empty,
+                host = FirstNonEmpty(record.SourceHost, record.Host, record.Actor),
+                user = FirstNonEmpty(record.SourceUser, record.Actor),
+                stage = stage,
+                category = AuditLog.ClassifyCategory(record),
+                action = action,
+                title = BuildAttackEventTitle(record, stage),
+                detail = BuildAttackEventDetail(record),
+                severity = severity,
+                disposition = disposition,
+                sourceProcess = sourceProcess,
+                sourcePid = record.SourcePid ?? string.Empty,
+                sourceUser = FirstNonEmpty(record.SourceUser, record.Actor),
+                targetProcess = targetProcess,
+                targetPid = record.TargetPid ?? string.Empty,
+                objectType = objectType,
+                objectName = objectName,
+                objectFormat = record.ObjectFormat ?? string.Empty,
+                policyName = record.PolicyName ?? string.Empty,
+                remoteIdentity = IsRemoteStage(stage) ? FirstNonEmpty(record.TargetHost, record.Target, record.ObjectName) : string.Empty,
+                rawMessage = record.Message ?? string.Empty
+            };
+        }
+
+        private static AuditAttackFlowEvent BuildNetworkAttackFlowEvent(NetworkConnectionObservation item)
+        {
+            string remote = FirstNonEmpty(item.remoteIdentity, item.domain, item.remoteEndpoint, item.remoteAddress);
+            string protocol = FirstNonEmpty(item.protocolName, item.isHttp3 ? "HTTP/3" : item.isQuic ? "QUIC" : string.Empty);
+            string detail = JoinCompact(" / ", protocol, item.direction, item.remoteEndpoint, item.signer, item.signatureStatus);
+
+            return new AuditAttackFlowEvent
+            {
+                id = BuildStableId(item.lastSeenUtc, "network.connection.observed", remote, item.processPath),
+                timeUtc = item.lastSeenUtc ?? string.Empty,
+                host = item.host ?? string.Empty,
+                user = item.user ?? string.Empty,
+                stage = "network",
+                category = "network",
+                action = item.blocked ? "network.connection.blocked" : "network.connection.observed",
+                title = item.blocked ? "Network connection blocked" : "Network connection observed",
+                detail = detail,
+                severity = item.blocked || string.Equals(item.signatureStatus, "unsigned", StringComparison.OrdinalIgnoreCase) ? "warning" : "info",
+                disposition = item.blocked ? "blocked" : "observed",
+                sourceProcess = item.processPath ?? string.Empty,
+                sourcePid = item.processId == 0 ? string.Empty : item.processId.ToString(CultureInfo.InvariantCulture),
+                sourceUser = item.user ?? string.Empty,
+                targetProcess = string.Empty,
+                targetPid = string.Empty,
+                objectType = item.isHttp3 ? "http3-connection" : item.isQuic ? "quic-connection" : "network-connection",
+                objectName = remote,
+                objectFormat = detail,
+                policyName = "network-awareness",
+                remoteIdentity = remote,
+                rawMessage = detail
+            };
+        }
+
+        private static string ClassifyAttackStage(AuditLog.AuditRecord record)
+        {
+            string action = record == null ? string.Empty : record.Action ?? string.Empty;
+            string objectType = record == null ? string.Empty : record.ObjectType ?? string.Empty;
+            string message = record == null ? string.Empty : record.Message ?? string.Empty;
+
+            if (action.StartsWith("sandbox.sample", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
+                objectType.IndexOf("file", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "delivery";
+            }
+
+            if (action.StartsWith("userhook.observed.process-create", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.observed.suspended-process-create", StringComparison.OrdinalIgnoreCase))
+            {
+                return "execution";
+            }
+
+            if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "behavior";
+            }
+
+            if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase) ||
+                objectType.IndexOf("credential", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "credential";
+            }
+
+            if (action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "lateral";
+            }
+
+            if (action.StartsWith("network.", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("network.smtp", StringComparison.OrdinalIgnoreCase))
+            {
+                return "network";
+            }
+
+            if (action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase))
+            {
+                return "impact";
+            }
+
+            if (message.IndexOf("registry", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("scheduled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("service", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "persistence";
+            }
+
+            return "behavior";
+        }
+
+        private static AuditAttackFlowStage[] BuildAttackFlowStages(AuditAttackFlowEvent[] events)
+        {
+            string[] order = new[] { "delivery", "execution", "behavior", "credential", "lateral", "network", "persistence", "impact" };
+            return order.Select(stage =>
+            {
+                AuditAttackFlowEvent[] matched = (events ?? new AuditAttackFlowEvent[0])
+                    .Where(item => string.Equals(item.stage, stage, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                string severity = matched.Length == 0 ? "info" : matched.Select(item => item.severity).OrderByDescending(SeverityScore).First();
+                return new AuditAttackFlowStage
+                {
+                    key = stage,
+                    label = AttackStageLabel(stage),
+                    count = matched.Length,
+                    active = matched.Length > 0,
+                    severity = severity,
+                    firstSeenUtc = matched.Length == 0 ? string.Empty : matched.Min(item => item.timeUtc),
+                    lastSeenUtc = matched.Length == 0 ? string.Empty : matched.Max(item => item.timeUtc),
+                    detail = BuildStageDetail(stage, matched)
+                };
+            }).ToArray();
+        }
+
+        private static string BuildStageDetail(string stage, AuditAttackFlowEvent[] events)
+        {
+            if (events == null || events.Length == 0)
+            {
+                return "No telemetry observed for this stage.";
+            }
+
+            string sample = FirstNonEmpty(events[0].sourceProcess, events[0].objectName, events[0].action);
+            return events.Length.ToString(CultureInfo.InvariantCulture) + " event(s), first evidence: " + sample;
+        }
+
+        private static string BuildAttackFlowSummary(AuditAttackFlowStage[] stages, AuditAttackFlowIncident[] incidents, AuditAttackFlowEvent[] events)
+        {
+            int activeStages = (stages ?? new AuditAttackFlowStage[0]).Count(item => item.active);
+            int critical = (events ?? new AuditAttackFlowEvent[0]).Count(item => string.Equals(item.severity, "critical", StringComparison.OrdinalIgnoreCase));
+            if (incidents != null && incidents.Length > 0)
+            {
+                return "Detected " + incidents.Length.ToString(CultureInfo.InvariantCulture) +
+                       " correlated attack flow(s) across " + activeStages.ToString(CultureInfo.InvariantCulture) +
+                       " stage(s), with " + critical.ToString(CultureInfo.InvariantCulture) + " critical event(s).";
+            }
+
+            return "No high-confidence attack chain was reconstructed from the selected audit scope.";
+        }
+
+        private static void AddToIncident(Dictionary<string, AttackIncidentAccumulator> incidents, AuditAttackFlowEvent item)
+        {
+            if (item == null || incidents == null)
+            {
+                return;
+            }
+
+            string key = IncidentKey(item);
+            AttackIncidentAccumulator incident;
+            if (!incidents.TryGetValue(key, out incident))
+            {
+                incident = new AttackIncidentAccumulator
+                {
+                    key = key,
+                    host = item.host ?? string.Empty,
+                    rootProcess = FirstNonEmpty(item.sourceProcess, item.targetProcess),
+                    rootPid = FirstNonEmpty(item.sourcePid, item.targetPid),
+                    firstSeenUtc = item.timeUtc ?? string.Empty,
+                    lastSeenUtc = item.timeUtc ?? string.Empty,
+                    severity = item.severity ?? "info"
+                };
+                incidents[key] = incident;
+            }
+
+            incident.eventCount++;
+            incident.firstSeenUtc = EarlierUtc(incident.firstSeenUtc, item.timeUtc);
+            incident.lastSeenUtc = LaterUtc(incident.lastSeenUtc, item.timeUtc);
+            incident.severity = MaxSeverity(incident.severity, item.severity);
+            incident.stages.Add(item.stage ?? string.Empty);
+            incident.actions.Add(item.action ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(item.remoteIdentity))
+            {
+                incident.remotes.Add(item.remoteIdentity);
+            }
+
+            if (!string.IsNullOrWhiteSpace(item.objectName))
+            {
+                incident.objects.Add(item.objectName);
+            }
+
+            incident.score += 10 + SeverityScore(item.severity) * 15 + (string.Equals(item.disposition, "blocked", StringComparison.OrdinalIgnoreCase) ? 20 : 0);
+        }
+
+        private static string IncidentKey(AuditAttackFlowEvent item)
+        {
+            return string.Join("|", new[]
+            {
+                item.host ?? string.Empty,
+                FirstNonEmpty(item.sourceProcess, item.targetProcess),
+                FirstNonEmpty(item.sourcePid, item.targetPid)
+            });
+        }
+
+        private static void AddProcessNode(Dictionary<string, AuditAttackFlowProcess> processes, string host, string pid, string path, string parentPid, string user, string severity)
+        {
+            if (processes == null || string.IsNullOrWhiteSpace(path) && string.IsNullOrWhiteSpace(pid))
+            {
+                return;
+            }
+
+            string key = ProcessEntityKey(host, pid, path);
+            AuditAttackFlowProcess node;
+            if (!processes.TryGetValue(key, out node))
+            {
+                node = new AuditAttackFlowProcess
+                {
+                    key = key,
+                    host = host ?? string.Empty,
+                    pid = pid ?? string.Empty,
+                    parentPid = parentPid ?? string.Empty,
+                    name = SafeFileName(path),
+                    path = path ?? string.Empty,
+                    user = user ?? string.Empty,
+                    severity = severity ?? "info",
+                    eventCount = 0
+                };
+                processes[key] = node;
+            }
+
+            node.eventCount++;
+            node.severity = MaxSeverity(node.severity, severity);
+            node.path = PreferNonEmpty(path, node.path);
+            node.user = PreferNonEmpty(user, node.user);
+            node.parentPid = PreferNonEmpty(parentPid, node.parentPid);
+            node.name = PreferNonEmpty(SafeFileName(node.path), node.name);
+        }
+
+        private static void AddEntity(Dictionary<string, AuditAttackFlowEntity> entities, string type, string key, string label, string severity)
+        {
+            if (entities == null || string.IsNullOrWhiteSpace(key))
+            {
+                return;
+            }
+
+            string normalizedType = string.IsNullOrWhiteSpace(type) ? "object" : type;
+            string entityKey = normalizedType + "|" + key;
+            AuditAttackFlowEntity entity;
+            if (!entities.TryGetValue(entityKey, out entity))
+            {
+                entity = new AuditAttackFlowEntity
+                {
+                    key = entityKey,
+                    type = normalizedType,
+                    label = string.IsNullOrWhiteSpace(label) ? key : label,
+                    severity = severity ?? "info",
+                    count = 0
+                };
+                entities[entityKey] = entity;
+            }
+
+            entity.count++;
+            entity.severity = MaxSeverity(entity.severity, severity);
+        }
+
+        private static string BuildAttackEventTitle(AuditLog.AuditRecord record, string stage)
+        {
+            if (!string.IsNullOrWhiteSpace(record.ObjectName))
+            {
+                return AttackStageLabel(stage) + ": " + record.ObjectName;
+            }
+
+            if (!string.IsNullOrWhiteSpace(record.Target))
+            {
+                return AttackStageLabel(stage) + ": " + record.Target;
+            }
+
+            return AttackStageLabel(stage) + ": " + (record.Action ?? "event");
+        }
+
+        private static string BuildAttackEventDetail(AuditLog.AuditRecord record)
+        {
+            return JoinCompact(" / ",
+                AuditLog.ResolveSourceDisplay(record),
+                AuditLog.ResolveTargetDisplay(record),
+                record.EventDetails,
+                record.Message);
+        }
+
+        private static string AttackStageLabel(string stage)
+        {
+            if (string.Equals(stage, "delivery", StringComparison.OrdinalIgnoreCase)) return "Delivery / Landing";
+            if (string.Equals(stage, "execution", StringComparison.OrdinalIgnoreCase)) return "Execution";
+            if (string.Equals(stage, "behavior", StringComparison.OrdinalIgnoreCase)) return "Behavior";
+            if (string.Equals(stage, "credential", StringComparison.OrdinalIgnoreCase)) return "Credential Access";
+            if (string.Equals(stage, "lateral", StringComparison.OrdinalIgnoreCase)) return "Lateral Movement";
+            if (string.Equals(stage, "network", StringComparison.OrdinalIgnoreCase)) return "Network / C2";
+            if (string.Equals(stage, "persistence", StringComparison.OrdinalIgnoreCase)) return "Persistence";
+            if (string.Equals(stage, "impact", StringComparison.OrdinalIgnoreCase)) return "Impact / Data";
+            return "Telemetry";
+        }
+
+        private static string InferAttackObjectType(string action)
+        {
+            if (string.IsNullOrWhiteSpace(action)) return "object";
+            if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase)) return "file";
+            if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase)) return "credential";
+            if (action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase)) return "remote-admin";
+            if (action.StartsWith("network.", StringComparison.OrdinalIgnoreCase)) return "remote";
+            if (action.StartsWith("dlp.", StringComparison.OrdinalIgnoreCase)) return "sensitive-data";
+            if (action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase)) return "process-behavior";
+            return "object";
+        }
+
+        private static bool IsNetworkObservationInAuditScope(NetworkConnectionObservation item, AuditLog.AuditQueryOptions query)
+        {
+            if (item == null)
+            {
+                return false;
+            }
+
+            if (query == null)
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(query.Category) &&
+                !string.Equals(query.Category, "all", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(query.Category, "network", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(query.Host) &&
+                !string.Equals(query.Host, "all", StringComparison.OrdinalIgnoreCase) &&
+                (item.host ?? string.Empty).IndexOf(query.Host, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            DateTime timestamp = ParseUtcOrMin(item.lastSeenUtc);
+            DateTime fromUtc;
+            DateTime toUtc;
+            if (TryParseAuditUtc(query.FromUtc, out fromUtc) && timestamp < fromUtc)
+            {
+                return false;
+            }
+
+            if (TryParseAuditUtc(query.ToUtc, out toUtc) && timestamp > toUtc)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(query.Search))
+            {
+                string haystack = JoinCompact("\n",
+                    item.host,
+                    item.user,
+                    item.processPath,
+                    item.remoteIdentity,
+                    item.remoteAddress,
+                    item.remoteEndpoint,
+                    item.domain,
+                    item.protocolName,
+                    item.signatureStatus,
+                    item.signer);
+                if (haystack.IndexOf(query.Search, StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryParseAuditUtc(string value, out DateTime timestampUtc)
+        {
+            if (DateTime.TryParse(value, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out timestampUtc))
+            {
+                timestampUtc = timestampUtc.ToUniversalTime();
+                return true;
+            }
+
+            return false;
+        }
+
+        private static void TrackFlowTime(string value, ref DateTime firstUtc, ref DateTime lastUtc)
+        {
+            DateTime parsed = ParseUtcOrMin(value);
+            if (parsed == DateTime.MinValue)
+            {
+                return;
+            }
+
+            if (parsed < firstUtc) firstUtc = parsed;
+            if (parsed > lastUtc) lastUtc = parsed;
+        }
+
+        private static string EarlierUtc(string left, string right)
+        {
+            DateTime leftUtc = ParseUtcOrMax(left);
+            DateTime rightUtc = ParseUtcOrMax(right);
+            return leftUtc <= rightUtc ? (left ?? string.Empty) : (right ?? string.Empty);
+        }
+
+        private static string LaterUtc(string left, string right)
+        {
+            DateTime leftUtc = ParseUtcOrMin(left);
+            DateTime rightUtc = ParseUtcOrMin(right);
+            return leftUtc >= rightUtc ? (left ?? string.Empty) : (right ?? string.Empty);
+        }
+
+        private static string MaxSeverity(string left, string right)
+        {
+            return SeverityScore(right) > SeverityScore(left) ? (right ?? "info") : (left ?? "info");
+        }
+
+        private static int SeverityScore(string severity)
+        {
+            if (string.Equals(severity, "critical", StringComparison.OrdinalIgnoreCase)) return 4;
+            if (string.Equals(severity, "high", StringComparison.OrdinalIgnoreCase)) return 3;
+            if (string.Equals(severity, "warning", StringComparison.OrdinalIgnoreCase)) return 2;
+            if (string.Equals(severity, "medium", StringComparison.OrdinalIgnoreCase)) return 2;
+            if (string.Equals(severity, "info", StringComparison.OrdinalIgnoreCase)) return 1;
+            return 0;
+        }
+
+        private static string ProcessEntityKey(string host, string pid, string path)
+        {
+            return string.Join("|", new[] { host ?? string.Empty, pid ?? string.Empty, path ?? string.Empty });
+        }
+
+        private static string SafeFileName(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                return Path.GetFileName(path.Trim().Trim('"'));
+            }
+            catch
+            {
+                return path;
+            }
+        }
+
+        private static bool LooksLikeProcessPath(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   (value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                    value.IndexOf("\\", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static bool IsRemoteStage(string stage)
+        {
+            return string.Equals(stage, "network", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(stage, "lateral", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildStableId(params string[] values)
+        {
+            unchecked
+            {
+                uint hash = 2166136261u;
+                string text = string.Join("|", values ?? new string[0]);
+                foreach (char ch in text)
+                {
+                    hash ^= ch;
+                    hash *= 16777619u;
+                }
+
+                return hash.ToString("x8", CultureInfo.InvariantCulture);
+            }
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            if (values == null)
+            {
+                return string.Empty;
+            }
+
+            foreach (string value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string JoinCompact(string separator, params string[] values)
+        {
+            return string.Join(separator, (values ?? new string[0]).Where(value => !string.IsNullOrWhiteSpace(value)).ToArray());
         }
 
         private void EnsureHashProtectPolicy()
@@ -4713,6 +5353,147 @@ namespace DataProtectorWebBridge.Services
             public NetworkTrendBucket[] trendBuckets { get; set; }
             public NetworkDistributionItem[] eventDistribution { get; set; }
             public NetworkInsightItem[] items { get; set; }
+        }
+
+        public sealed class AuditAttackFlowResponse
+        {
+            public string generatedUtc { get; set; }
+            public string fromUtc { get; set; }
+            public string toUtc { get; set; }
+            public int eventTotal { get; set; }
+            public int incidentTotal { get; set; }
+            public int criticalTotal { get; set; }
+            public int hostTotal { get; set; }
+            public int processTotal { get; set; }
+            public int remoteTotal { get; set; }
+            public string summary { get; set; }
+            public AuditAttackFlowStage[] stages { get; set; }
+            public AuditAttackFlowIncident[] incidents { get; set; }
+            public AuditAttackFlowProcess[] processes { get; set; }
+            public AuditAttackFlowEntity[] entities { get; set; }
+            public AuditAttackFlowEvent[] events { get; set; }
+        }
+
+        public sealed class AuditAttackFlowStage
+        {
+            public string key { get; set; }
+            public string label { get; set; }
+            public bool active { get; set; }
+            public int count { get; set; }
+            public string severity { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public string detail { get; set; }
+        }
+
+        public sealed class AuditAttackFlowIncident
+        {
+            public string key { get; set; }
+            public string host { get; set; }
+            public string rootProcess { get; set; }
+            public string rootPid { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public string severity { get; set; }
+            public int score { get; set; }
+            public int eventCount { get; set; }
+            public string[] stages { get; set; }
+            public string[] actions { get; set; }
+            public string[] remotes { get; set; }
+            public string[] objects { get; set; }
+        }
+
+        public sealed class AuditAttackFlowProcess
+        {
+            public string key { get; set; }
+            public string host { get; set; }
+            public string pid { get; set; }
+            public string parentPid { get; set; }
+            public string name { get; set; }
+            public string path { get; set; }
+            public string user { get; set; }
+            public string severity { get; set; }
+            public int eventCount { get; set; }
+        }
+
+        public sealed class AuditAttackFlowEntity
+        {
+            public string key { get; set; }
+            public string type { get; set; }
+            public string label { get; set; }
+            public string severity { get; set; }
+            public int count { get; set; }
+        }
+
+        public sealed class AuditAttackFlowEvent
+        {
+            public string id { get; set; }
+            public string timeUtc { get; set; }
+            public string host { get; set; }
+            public string user { get; set; }
+            public string stage { get; set; }
+            public string category { get; set; }
+            public string action { get; set; }
+            public string title { get; set; }
+            public string detail { get; set; }
+            public string severity { get; set; }
+            public string disposition { get; set; }
+            public string sourceProcess { get; set; }
+            public string sourcePid { get; set; }
+            public string sourceUser { get; set; }
+            public string targetProcess { get; set; }
+            public string targetPid { get; set; }
+            public string objectType { get; set; }
+            public string objectName { get; set; }
+            public string objectFormat { get; set; }
+            public string policyName { get; set; }
+            public string remoteIdentity { get; set; }
+            public string rawMessage { get; set; }
+        }
+
+        private sealed class AttackIncidentAccumulator
+        {
+            public string key { get; set; }
+            public string host { get; set; }
+            public string rootProcess { get; set; }
+            public string rootPid { get; set; }
+            public string firstSeenUtc { get; set; }
+            public string lastSeenUtc { get; set; }
+            public string severity { get; set; }
+            public int score { get; set; }
+            public int eventCount { get; set; }
+            public HashSet<string> stages { get; private set; }
+            public HashSet<string> actions { get; private set; }
+            public HashSet<string> remotes { get; private set; }
+            public HashSet<string> objects { get; private set; }
+
+            public AttackIncidentAccumulator()
+            {
+                stages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                actions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                remotes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                objects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            public AuditAttackFlowIncident ToIncident()
+            {
+                return new AuditAttackFlowIncident
+                {
+                    key = key ?? string.Empty,
+                    host = host ?? string.Empty,
+                    rootProcess = rootProcess ?? string.Empty,
+                    rootPid = rootPid ?? string.Empty,
+                    firstSeenUtc = firstSeenUtc ?? string.Empty,
+                    lastSeenUtc = lastSeenUtc ?? string.Empty,
+                    severity = severity ?? "info",
+                    score = score,
+                    eventCount = eventCount,
+                    stages = stages.Where(item => !string.IsNullOrWhiteSpace(item)).OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray(),
+                    actions = actions.Where(item => !string.IsNullOrWhiteSpace(item)).OrderBy(item => item, StringComparer.OrdinalIgnoreCase).Take(12).ToArray(),
+                    remotes = remotes.Where(item => !string.IsNullOrWhiteSpace(item)).OrderBy(item => item, StringComparer.OrdinalIgnoreCase).Take(12).ToArray(),
+                    objects = objects.Where(item => !string.IsNullOrWhiteSpace(item)).OrderBy(item => item, StringComparer.OrdinalIgnoreCase).Take(12).ToArray()
+                };
+            }
         }
 
         public sealed class NetworkTrendBucket
