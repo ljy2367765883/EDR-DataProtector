@@ -588,6 +588,13 @@
         eventOverview: '事件概览',
         policy: '策略',
         remote: '远端',
+        navigation: '导航',
+        timelineCaption: '按时间还原该事件周边的关键证据，重复行为会自动合并。',
+        selectedEvidence: '选中证据',
+        processTab: '进程',
+        objectTab: '对象',
+        policyTab: '策略',
+        evidenceInfo: '证据信息',
         singleEventHint: '当前事件暂无更多关联证据，已按单事件展示。'
       },
       attackFlow: {

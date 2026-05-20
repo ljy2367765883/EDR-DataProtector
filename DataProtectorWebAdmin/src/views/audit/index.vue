@@ -57,6 +57,19 @@ interface AuditTimelineItem {
   count?: number;
 }
 
+interface AuditGraphPoint {
+  id: string;
+  x: number;
+  y: number;
+  severity: string;
+}
+
+interface AuditGraph {
+  flow: FlowGraphData;
+  miniPoints: AuditGraphPoint[];
+  height: number;
+}
+
 type FlowGraphData = Parameters<LogicFlow['render']>[0];
 
 const loading = ref(false);
@@ -70,6 +83,7 @@ const selectedAuditRecord = ref<Api.DataProtector.AuditRecord | null>(null);
 const auditDetailVisible = ref(false);
 const auditDetailLoading = ref(false);
 const attackDetailFlowRef = ref<HTMLElement | null>(null);
+const selectedDetailEventId = ref('');
 let attackDetailFlow: LogicFlow | null = null;
 
 const filters = reactive({
@@ -140,7 +154,6 @@ const warningCount = computed(() => auditResponse.value?.warningTotal ?? 0);
 const blockedCount = computed(() => auditResponse.value?.blockedTotal ?? 0);
 const attackFlowEvents = computed(() => attackFlow.value?.events ?? []);
 const attackFlowStages = computed(() => attackFlow.value?.stages ?? []);
-const activeAttackStageCount = computed(() => attackFlowStages.value.filter(item => item.active).length);
 const detailTimelineEvents = computed<AuditTimelineItem[]>(() => {
   const items = compactTimelineEvents(attackFlowEvents.value.map(normalizeAttackFlowEvent));
   if (items.length) return items.slice(0, 18);
@@ -148,6 +161,10 @@ const detailTimelineEvents = computed<AuditTimelineItem[]>(() => {
   return selectedAuditRecord.value ? [normalizeAuditRecordEvent(selectedAuditRecord.value)] : [];
 });
 const attackStoryEvents = computed(() => detailTimelineEvents.value);
+const auditDetailGraph = computed(() => buildAuditDetailGraph());
+const selectedDetailEvent = computed(
+  () => attackStoryEvents.value.find(item => item.id === selectedDetailEventId.value) || attackStoryEvents.value[0] || null
+);
 
 const categorySummaries = computed<AuditSummary[]>(() =>
   categoryOptions.value.filter(item => item.value !== 'all').map(item => {
@@ -600,6 +617,7 @@ async function openAuditDetail(record: Api.DataProtector.AuditRecord) {
   attackDetailFlow?.destroy();
   attackDetailFlow = null;
   selectedAuditRecord.value = record;
+  selectedDetailEventId.value = '';
   auditDetailVisible.value = true;
   attackFlow.value = null;
   auditDetailLoading.value = true;
@@ -608,6 +626,7 @@ async function openAuditDetail(record: Api.DataProtector.AuditRecord) {
     if (!error) attackFlow.value = data;
   } finally {
     auditDetailLoading.value = false;
+    if (!selectedDetailEventId.value && attackStoryEvents.value[0]) selectedDetailEventId.value = attackStoryEvents.value[0].id;
     renderAttackFlows();
   }
 }
@@ -833,89 +852,260 @@ function formatTimelineTime(value?: string) {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function flowTextStyle() {
+function graphSeverityColor(severity?: string) {
+  const colors: Record<string, string> = {
+    critical: '#ef4444',
+    high: '#f97316',
+    warning: '#f59e0b',
+    medium: '#f59e0b',
+    info: '#64748b',
+    operational: '#94a3b8'
+  };
+  return colors[severity || 'info'] || colors.info;
+}
+
+function graphNodeFill(severity?: string, active = true) {
+  if (!active) return '#e5e7eb';
+  return graphSeverityColor(severity);
+}
+
+function graphTextStyle(textWidth = 120, lineHeight = 14, color = '#334155', fontSize = 11) {
   return {
-    fontSize: 12,
-    textWidth: 132,
+    color,
+    fontSize,
+    textWidth,
     overflowMode: 'ellipsis' as const,
-    lineHeight: 16
+    lineHeight
   };
 }
 
 function buildStoryFlowData(): FlowGraphData {
-  const events = attackStoryEvents.value.slice(0, 12);
+  return auditDetailGraph.value.flow;
+}
+
+function buildAuditDetailGraph(): AuditGraph {
+  const events = attackStoryEvents.value.slice(0, 24);
+  const nodes: NonNullable<FlowGraphData['nodes']> = [];
+  const edges: NonNullable<FlowGraphData['edges']> = [];
+  const miniPoints: AuditGraphPoint[] = [];
+  const mainX = 168;
+  const topY = 62;
+  const rowGap = 76;
 
   if (!events.length) {
-    return {
-      nodes: [
-        {
-          id: 'story-empty',
-          type: 'rect',
-          x: 120,
-          y: 90,
-          text: {
-            x: 120,
-            y: 90,
-            value: $t('dataprotector.audit.attackFlow.empty'),
-            ...flowTextStyle()
-          },
-          properties: {
-            width: 180,
-            height: 56
-          }
-        }
-      ],
-      edges: []
-    };
-  }
-
-  const nodes = events.map((event, index) => {
-    const x = 90 + index * 132;
-    const y = 78;
-    const title = `${String(index + 1).padStart(2, '0')}`;
-    const meta = event.count && event.count > 1 ? `x${event.count}` : formatTimelineTime(event.timeUtc);
-
-    return {
-      id: `story-${event.id || index}`,
-      type: 'circle',
-      x,
-      y,
+    const emptyId = 'audit-detail-empty';
+    nodes.push({
+      id: emptyId,
+      type: 'rect',
+      x: mainX,
+      y: topY,
       text: {
-        x,
-        y: y + 2,
-        value: `${title}\n${meta}`,
-        ...flowTextStyle(),
-        textWidth: 88,
-        lineHeight: 15
+        x: mainX,
+        y: topY,
+        value: '-',
+        ...graphTextStyle(28, 14, '#64748b', 12)
       },
       properties: {
-        r: 34
+        width: 52,
+        height: 52,
+        radius: 6,
+        style: { fill: '#ffffff', stroke: '#cbd5e1', strokeWidth: 1 }
       }
-    };
+    });
+    miniPoints.push({ id: emptyId, x: 50, y: 50, severity: 'info' });
+    return { flow: { nodes, edges }, miniPoints, height: 360 };
+  }
+
+  const startId = 'audit-detail-start';
+  nodes.push({
+    id: startId,
+    type: 'rect',
+    x: mainX,
+    y: topY,
+    text: {
+      x: mainX,
+      y: topY,
+      value: 'START',
+      ...graphTextStyle(58, 14, '#334155', 11)
+    },
+    properties: {
+      width: 74,
+      height: 34,
+      radius: 4,
+      style: { fill: '#ffffff', stroke: '#94a3b8', strokeWidth: 1.4 },
+      textStyle: { fontWeight: 700 }
+    }
   });
 
-  const edges = events.slice(1).map((event, index) => ({
-    id: `story-edge-${index}`,
-    type: 'polyline',
-    sourceNodeId: `story-${events[index].id || index}`,
-    targetNodeId: `story-${event.id || index + 1}`
-  }));
+  let previousId = startId;
+  events.forEach((event, index) => {
+    const y = topY + (index + 1) * rowGap;
+    const nodeId = `audit-event-${event.id || index}`;
+    const active = event.severity !== 'info' && event.severity !== 'operational';
 
-  return { nodes, edges };
+    nodes.push({
+      id: `audit-event-time-${index}`,
+      type: 'text',
+      x: mainX - 72,
+      y,
+      text: {
+        x: mainX - 72,
+        y,
+        value: formatTimelineTime(event.timeUtc),
+        ...graphTextStyle(62, 12, '#94a3b8', 10)
+      },
+      properties: {
+        textStyle: { textAnchor: 'end' }
+      }
+    });
+
+    nodes.push({
+      id: nodeId,
+      type: 'circle',
+      x: mainX,
+      y,
+      text: {
+        x: mainX,
+        y,
+        value: String(index + 1),
+        ...graphTextStyle(24, 13, '#ffffff', 10)
+      },
+      properties: {
+        r: active ? 15 : 12,
+        style: {
+          fill: graphNodeFill(event.severity, true),
+          stroke: '#ffffff',
+          strokeWidth: 2.5,
+          filter: active ? 'drop-shadow(0 5px 14px rgba(15, 23, 42, 0.22))' : undefined
+        },
+        textStyle: {
+          fontWeight: 800
+        }
+      }
+    });
+
+    edges.push(createGraphEdge(`audit-event-edge-${index}`, previousId, nodeId, active ? '#94a3b8' : '#cbd5e1', false));
+    previousId = nodeId;
+  });
+
+  const graphHeight = Math.max(360, topY + (events.length + 1) * rowGap + 54);
+  nodes.unshift({
+    id: 'audit-detail-axis',
+    type: 'rect',
+    x: mainX,
+    y: graphHeight / 2,
+    text: '',
+    properties: {
+      width: 2,
+      height: graphHeight - 96,
+      style: { fill: '#dbe4ee', stroke: '#dbe4ee', strokeWidth: 0 }
+    }
+  });
+
+  events.forEach((event, index) => {
+    const y = topY + (index + 1) * rowGap;
+    miniPoints.push({
+      id: event.id,
+      x: 50,
+      y: Math.min(94, Math.max(8, (y / graphHeight) * 100)),
+      severity: event.severity
+    });
+  });
+
+  return { flow: { nodes, edges }, miniPoints, height: graphHeight };
+}
+
+function createGraphEdge(id: string, sourceNodeId: string, targetNodeId: string, stroke: string, subtle: boolean) {
+  return {
+    id,
+    type: 'polyline',
+    sourceNodeId,
+    targetNodeId,
+    properties: {
+      style: {
+        stroke,
+        strokeWidth: subtle ? 1 : 1.4,
+        strokeDasharray: subtle ? '4 4' : undefined
+      }
+    }
+  };
 }
 
 function createLogicFlow(container: HTMLElement) {
   const lf = new LogicFlow({
     container,
-    grid: false,
-    isSilentMode: true,
-    stopScrollGraph: true,
-    stopZoomGraph: true,
+    grid: {
+      size: 24,
+      visible: true,
+      type: 'mesh',
+      config: {
+        color: '#eef2f7',
+        thickness: 1
+      }
+    },
+    isSilentMode: false,
+    stopScrollGraph: false,
+    stopZoomGraph: false,
     stopMoveGraph: false,
     adjustEdge: false,
+    textEdit: false,
+    nodeTextEdit: false,
+    edgeTextEdit: false,
+    allowRotate: false,
+    allowResize: false,
+    hoverOutline: false,
+    nodeSelectedOutline: true,
+    edgeSelectedOutline: false,
+    outline: false,
     history: false,
     keyboard: { enabled: false },
-    edgeType: 'polyline'
+    edgeType: 'polyline',
+    style: {
+      rect: { radius: 4 },
+      circle: { stroke: '#ffffff', strokeWidth: 2 },
+      nodeText: {
+        color: '#334155',
+        fontSize: 11,
+        lineHeight: 14,
+        overflowMode: 'ellipsis'
+      },
+      text: {
+        color: '#94a3b8',
+        fontSize: 10,
+        lineHeight: 12,
+        overflowMode: 'ellipsis'
+      },
+      polyline: {
+        stroke: '#93c5fd',
+        strokeWidth: 1.4,
+        fill: 'none'
+      },
+      arrow: {
+        offset: 4,
+        verticalLength: 2,
+        endArrowType: 'none'
+      },
+      outline: {
+        stroke: '#2563eb',
+        strokeWidth: 1.5,
+        strokeDasharray: '3 3'
+      }
+    }
+  });
+  lf.updateEditConfig({
+    adjustNodePosition: false,
+    textEdit: false,
+    nodeTextEdit: false,
+    edgeTextEdit: false,
+    nodeTextDraggable: false,
+    edgeTextDraggable: false,
+    hideAnchors: true
+  });
+  lf.on('node:click', ({ data }) => {
+    const id = String(data?.id || '').replace(/^audit-event-/, '');
+    if (id && attackStoryEvents.value.some(item => item.id === id)) {
+      selectedDetailEventId.value = id;
+    }
   });
 
   return lf;
@@ -925,7 +1115,7 @@ function renderLogicFlow(lf: LogicFlow, data: FlowGraphData) {
   lf.render(data);
   nextTick(() => {
     window.setTimeout(() => {
-      lf.fitView(24, 24);
+      lf.resetZoom();
       lf.translateCenter();
     }, 0);
   });
@@ -936,8 +1126,13 @@ function renderAttackFlows() {
     if (attackDetailFlowRef.value) {
       attackDetailFlow ??= createLogicFlow(attackDetailFlowRef.value);
       renderLogicFlow(attackDetailFlow, buildStoryFlowData());
+      if (!selectedDetailEventId.value && attackStoryEvents.value[0]) selectedDetailEventId.value = attackStoryEvents.value[0].id;
     }
   });
+}
+
+function zoomAuditDetailFlow(zoomIn: boolean) {
+  attackDetailFlow?.zoom(zoomIn);
 }
 
 function updateCharts() {
@@ -1255,105 +1450,182 @@ onBeforeUnmount(() => {
       </NSpace>
     </NCard>
 
-    <NModal v-model:show="auditDetailVisible" preset="card" class="audit-detail-modal" :title="$t('dataprotector.audit.detail.title')">
+    <NModal
+      v-model:show="auditDetailVisible"
+      preset="card"
+      class="audit-detail-modal"
+      :title="$t('dataprotector.audit.detail.title')"
+      :auto-focus="false"
+    >
       <template v-if="selectedAuditRecord">
-        <NSpace vertical :size="16">
-          <div class="detail-header">
-            <div class="detail-title">
-              <div class="detail-eyebrow">{{ $t('dataprotector.audit.detail.eventOverview') }}</div>
-              <h3>{{ selectedAuditRecord.Action || '-' }}</h3>
-              <p>{{ selectedAuditRecord.Message || selectedAuditRecord.EventDetails || '-' }}</p>
+        <NSpin :show="auditDetailLoading">
+          <div class="detail-investigation-panel">
+            <div class="attack-flow-header">
+              <div>
+                <div class="eyebrow">{{ $t('dataprotector.audit.detail.eventOverview') }}</div>
+                <h3>{{ selectedAuditRecord.Action || '-' }}</h3>
+                <p>{{ attackFlow?.summary || selectedAuditRecord.Message || selectedAuditRecord.EventDetails || '-' }}</p>
+              </div>
+              <NSpace>
+                <NTag :type="severityTagType(resolveSeverity(selectedAuditRecord))" :bordered="false">
+                  {{ severityLabel(resolveSeverity(selectedAuditRecord)) }}
+                </NTag>
+                <NTag :type="dispositionTagType(resolveDisposition(selectedAuditRecord))" :bordered="false">
+                  {{ dispositionLabel(resolveDisposition(selectedAuditRecord)) }}
+                </NTag>
+              </NSpace>
             </div>
-            <NSpace>
-              <NTag :type="severityTagType(resolveSeverity(selectedAuditRecord))" :bordered="false">
-                {{ severityLabel(resolveSeverity(selectedAuditRecord)) }}
-              </NTag>
-              <NTag :type="dispositionTagType(resolveDisposition(selectedAuditRecord))" :bordered="false">
-                {{ dispositionLabel(resolveDisposition(selectedAuditRecord)) }}
-              </NTag>
-            </NSpace>
-          </div>
 
-          <NDescriptions :column="2" bordered size="small">
-            <NDescriptionsItem :label="$t('dataprotector.audit.columns.time')">
-              {{ formatAttackTime(selectedAuditRecord.TimestampUtc) }}
-            </NDescriptionsItem>
-            <NDescriptionsItem :label="$t('dataprotector.audit.columns.host')">
-              {{ resolveHost(selectedAuditRecord) || '-' }}
-            </NDescriptionsItem>
-            <NDescriptionsItem :label="$t('dataprotector.audit.columns.source')">
-              {{ resolveSourceInfo(selectedAuditRecord).primary || '-' }}
-            </NDescriptionsItem>
-            <NDescriptionsItem :label="$t('dataprotector.audit.columns.object')">
-              {{ resolveTargetInfo(selectedAuditRecord).primary || '-' }}
-            </NDescriptionsItem>
-            <NDescriptionsItem :label="$t('dataprotector.audit.columns.status')">
-              {{ selectedAuditRecord.Status || '-' }}
-            </NDescriptionsItem>
-            <NDescriptionsItem :label="$t('dataprotector.audit.detail.policy')">
-              {{ selectedAuditRecord.PolicyName || '-' }}
-            </NDescriptionsItem>
-          </NDescriptions>
+            <div class="story-stage-summary">
+              <NTag
+                v-for="stage in attackFlowStages"
+                :key="stage.key"
+                size="small"
+                :type="stage.active ? attackSeverityTagType(stage.severity) : 'default'"
+                :bordered="false"
+              >
+                {{ stageLabel(stage.key) }} {{ stage.count || 0 }}
+              </NTag>
+              <NTag v-if="!attackFlowStages.length" size="small" :bordered="false">
+                {{ stageLabel(inferTimelineStage(selectedAuditRecord)) }} 1
+              </NTag>
+            </div>
 
-          <NSpin :show="auditDetailLoading">
-            <div class="detail-flow-card">
-              <div class="detail-section-head">
-                <div>
-                  <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.timeline') }}</div>
-                  <div class="flow-story-caption">
-                    {{ attackFlow?.summary || $t('dataprotector.audit.detail.singleEventHint') }}
+            <div class="attack-investigation-layout">
+              <div class="attack-graph-shell">
+                <div
+                  ref="attackDetailFlowRef"
+                  class="logic-flow-panel attack-graph-canvas"
+                  :style="{ height: `${auditDetailGraph.height}px` }"
+                ></div>
+                <div class="attack-graph-tools">
+                  <NButton quaternary circle size="small" @click="renderAttackFlows">
+                    <template #icon><SvgIcon icon="mdi:fit-to-page-outline" /></template>
+                  </NButton>
+                  <NButton quaternary circle size="small" @click="zoomAuditDetailFlow(true)">
+                    <template #icon><SvgIcon icon="mdi:magnify-plus-outline" /></template>
+                  </NButton>
+                  <NButton quaternary circle size="small" @click="zoomAuditDetailFlow(false)">
+                    <template #icon><SvgIcon icon="mdi:magnify-minus-outline" /></template>
+                  </NButton>
+                </div>
+                <div class="attack-mini-map">
+                  <div class="mini-map-title">{{ $t('dataprotector.audit.detail.navigation') }}</div>
+                  <div class="mini-map-body">
+                    <button
+                      v-for="point in auditDetailGraph.miniPoints"
+                      :key="point.id"
+                      type="button"
+                      class="mini-map-point"
+                      :class="{ active: selectedDetailEventId === point.id }"
+                      :style="{ left: `${point.x}%`, top: `${point.y}%`, background: graphSeverityColor(point.severity) }"
+                      @click="selectedDetailEventId = point.id"
+                    />
                   </div>
                 </div>
-                <NSpace>
-                  <NTag type="error" :bordered="false">{{ $t('dataprotector.audit.attackFlow.activeStages', { count: activeAttackStageCount }) }}</NTag>
-                  <NTag type="info" :bordered="false">{{ $t('dataprotector.audit.attackFlow.events', { count: attackStoryEvents.length }) }}</NTag>
-                </NSpace>
               </div>
-              <div ref="attackDetailFlowRef" class="logic-flow-panel logic-flow-detail"></div>
-              <div class="event-timeline">
-                <div v-for="(event, index) in attackStoryEvents" :key="event.id || index" class="event-timeline-row">
-                  <div class="event-index">{{ String(index + 1).padStart(2, '0') }}</div>
-                  <div class="event-line"></div>
-                  <div class="event-card">
-                    <div class="event-card-head">
-                      <div>
-                        <div class="event-stage">{{ stageLabel(event.stage) }} · {{ formatAttackTime(event.timeUtc) }}</div>
-                        <div class="event-title">{{ event.title || event.action || '-' }}</div>
-                      </div>
-                      <NSpace>
-                        <NTag v-if="event.count && event.count > 1" size="small" :bordered="false">
-                          x{{ event.count }}
-                        </NTag>
+
+              <div class="attack-event-timeline">
+                <div class="timeline-list-header">
+                  <div>
+                    <strong>{{ $t('dataprotector.audit.attackFlow.timeline') }}</strong>
+                    <span>{{ $t('dataprotector.audit.detail.timelineCaption') }}</span>
+                  </div>
+                  <NTag :bordered="false">{{ $t('dataprotector.audit.attackFlow.events', { count: attackStoryEvents.length }) }}</NTag>
+                </div>
+                <div v-if="attackStoryEvents.length" class="timeline-event-list">
+                  <button
+                    v-for="(event, index) in attackStoryEvents"
+                    :key="event.id || index"
+                    type="button"
+                    class="timeline-event-card"
+                    :class="{ active: selectedDetailEventId === event.id }"
+                    @click="selectedDetailEventId = event.id"
+                  >
+                    <span class="event-step" :style="{ background: graphSeverityColor(event.severity) }">
+                      {{ index + 1 }}
+                    </span>
+                    <span class="event-content">
+                      <span class="event-card-top">
+                        <span class="event-time">{{ formatAttackTime(event.timeUtc) }}</span>
                         <NTag size="small" :type="attackSeverityTagType(event.severity)" :bordered="false">
                           {{ attackSeverityLabel(event.severity) }}
                         </NTag>
-                      </NSpace>
+                        <NTag v-if="event.count && event.count > 1" size="small" :bordered="false">
+                          x{{ event.count }}
+                        </NTag>
+                      </span>
+                      <strong>{{ event.title || event.action || '-' }}</strong>
+                      <small>{{ stageLabel(event.stage) }}</small>
+                      <span class="event-target">{{ event.detail || event.raw || event.target || '-' }}</span>
+                      <span class="event-meta">
+                        <span>{{ $t('dataprotector.audit.columns.source') }} {{ event.source || '-' }}</span>
+                        <span>{{ $t('dataprotector.audit.columns.object') }} {{ event.target || event.object || '-' }}</span>
+                      </span>
+                    </span>
+                  </button>
+                </div>
+                <NEmpty v-else :description="$t('dataprotector.audit.attackFlow.empty')" />
+              </div>
+
+              <aside class="attack-detail-panel">
+                <template v-if="selectedDetailEvent">
+                  <div class="detail-back">
+                    <SvgIcon icon="mdi:chevron-left" />
+                    <span>{{ $t('dataprotector.audit.detail.selectedEvidence') }}</span>
+                  </div>
+                  <div class="detail-title-row">
+                    <h4>{{ selectedDetailEvent.title || selectedDetailEvent.action || '-' }}</h4>
+                    <NTag :type="attackSeverityTagType(selectedDetailEvent.severity)" :bordered="false">
+                      {{ attackSeverityLabel(selectedDetailEvent.severity) }}
+                    </NTag>
+                  </div>
+                  <div class="detail-subtitle">
+                    {{ stageLabel(selectedDetailEvent.stage) }} / {{ timelineDispositionLabel(selectedDetailEvent.disposition) }}
+                  </div>
+                  <p class="detail-description">{{ selectedDetailEvent.detail || selectedDetailEvent.raw || '-' }}</p>
+                  <div class="detail-tabs">
+                    <span class="active">{{ $t('dataprotector.audit.detail.processTab') }}</span>
+                    <span>{{ $t('dataprotector.audit.detail.objectTab') }}</span>
+                    <span>{{ $t('dataprotector.audit.detail.policyTab') }}</span>
+                  </div>
+                  <div class="detail-fields">
+                    <div>
+                      <span>{{ $t('dataprotector.audit.columns.time') }}</span>
+                      <strong>{{ formatAttackTime(selectedDetailEvent.timeUtc) }}</strong>
                     </div>
-                    <div class="event-detail">{{ event.detail || event.raw || '-' }}</div>
-                    <div class="event-meta-grid">
-                      <div>
-                        <span>{{ $t('dataprotector.audit.columns.source') }}</span>
-                        <strong>{{ event.source || '-' }}</strong>
-                      </div>
-                      <div>
-                        <span>{{ $t('dataprotector.audit.columns.object') }}</span>
-                        <strong>{{ event.target || event.object || '-' }}</strong>
-                      </div>
-                      <div>
-                        <span>{{ $t('dataprotector.audit.detail.remote') }}</span>
-                        <strong>{{ event.remote || '-' }}</strong>
-                      </div>
-                      <div>
-                        <span>{{ $t('dataprotector.audit.disposition') }}</span>
-                        <strong>{{ timelineDispositionLabel(event.disposition) }}</strong>
-                      </div>
+                    <div>
+                      <span>{{ $t('dataprotector.audit.columns.action') }}</span>
+                      <strong>{{ selectedDetailEvent.action || '-' }}</strong>
+                    </div>
+                    <div>
+                      <span>{{ $t('dataprotector.audit.columns.source') }}</span>
+                      <strong>{{ selectedDetailEvent.source || '-' }}</strong>
+                    </div>
+                    <div>
+                      <span>{{ $t('dataprotector.audit.columns.object') }}</span>
+                      <strong>{{ selectedDetailEvent.target || selectedDetailEvent.object || '-' }}</strong>
+                    </div>
+                    <div>
+                      <span>{{ $t('dataprotector.audit.detail.remote') }}</span>
+                      <strong>{{ selectedDetailEvent.remote || '-' }}</strong>
+                    </div>
+                    <div>
+                      <span>{{ $t('dataprotector.audit.disposition') }}</span>
+                      <strong>{{ timelineDispositionLabel(selectedDetailEvent.disposition) }}</strong>
                     </div>
                   </div>
-                </div>
-              </div>
+                  <div class="attack-tactics">
+                    <div>{{ $t('dataprotector.audit.detail.evidenceInfo') }}</div>
+                    <NTag size="small" :bordered="false">{{ stageLabel(selectedDetailEvent.stage) }}</NTag>
+                    <NTag size="small" :bordered="false">{{ selectedDetailEvent.category || classifyAudit(selectedAuditRecord) }}</NTag>
+                  </div>
+                </template>
+                <NEmpty v-else :description="$t('dataprotector.audit.detail.singleEventHint')" />
+              </aside>
             </div>
-          </NSpin>
-        </NSpace>
+          </div>
+        </NSpin>
       </template>
     </NModal>
   </NSpace>
@@ -1392,201 +1664,427 @@ onBeforeUnmount(() => {
 }
 
 .audit-detail-modal {
-  width: min(1120px, calc(100vw - 48px));
+  width: min(1560px, calc(100vw - 48px));
 }
 
-.detail-header {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding: 16px;
-  background: #ffffff;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+.audit-detail-modal :deep(.n-card__content) {
+  padding: 0;
+}
+
+.detail-investigation-panel {
+  overflow: hidden;
+  background: #f4f6f8;
+  border: 1px solid rgb(226 232 240);
   border-radius: 8px;
 }
 
-.detail-title {
-  min-width: 0;
-}
-
-.detail-title h3 {
-  margin: 4px 0 0;
-  color: #111827;
-  font-size: 18px;
-  font-weight: 800;
-  line-height: 1.35;
-}
-
-.detail-title p {
-  margin: 6px 0 0;
-  color: var(--n-text-color-3);
-  font-size: 13px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-.detail-eyebrow {
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.detail-flow-card {
-  padding: 14px;
-  background: #ffffff;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 8px;
-}
-
-.detail-section-head {
+.attack-flow-header {
   display: flex;
   gap: 12px;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 12px;
+  padding: 14px 16px 10px;
+  background: rgb(255 255 255 / 82%);
+  border-bottom: 1px solid rgb(226 232 240);
 }
 
-.story-panel-title {
+.attack-flow-header h3 {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  color: #111827;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.attack-flow-header p {
+  max-width: 880px;
+  margin: 4px 0 0;
+  color: var(--n-text-color-3);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.eyebrow {
+  color: #64748b;
+  font-size: 12px;
   font-weight: 700;
-}
-
-.story-panel-title {
-  margin-bottom: 10px;
-  font-size: 14px;
 }
 
 .logic-flow-panel {
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 8px;
-  background: #fff;
+  background: #f4f6f8;
 }
 
-.logic-flow-detail {
-  height: 170px;
-  margin-bottom: 16px;
+.story-stage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 12px 16px;
+  background: #ffffff;
+  border-bottom: 1px solid rgb(226 232 240);
 }
 
-.flow-story-caption {
-  margin-top: 8px;
-  color: var(--n-text-color-3);
-  font-size: 12px;
+.attack-investigation-layout {
+  display: grid;
+  grid-template-columns: 330px minmax(420px, 1fr) 360px;
+  min-height: 620px;
 }
 
-.event-timeline {
+.attack-graph-shell {
+  position: relative;
+  min-width: 0;
+  max-height: 760px;
+  min-height: 520px;
+  overflow: auto;
+  background:
+    linear-gradient(90deg, rgb(226 232 240 / 22%) 1px, transparent 1px),
+    linear-gradient(rgb(226 232 240 / 22%) 1px, transparent 1px),
+    #f8fafc;
+  background-size: 36px 36px;
+  border-right: 1px solid rgb(226 232 240);
+}
+
+.attack-graph-canvas {
+  width: 100%;
+  min-height: 520px;
+  border: 0;
+  border-radius: 0;
+}
+
+.attack-graph-tools {
+  position: absolute;
+  top: 12px;
+  left: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
-.event-timeline-row {
+.attack-graph-tools :deep(.n-button) {
+  background: rgb(255 255 255 / 92%);
+  border: 1px solid rgb(226 232 240);
+  box-shadow: 0 5px 14px rgb(15 23 42 / 10%);
+}
+
+.attack-mini-map {
+  position: absolute;
+  bottom: 14px;
+  left: 14px;
+  width: 148px;
+  padding: 8px;
+  background: rgb(255 255 255 / 92%);
+  border: 1px solid rgb(203 213 225);
+  border-radius: 4px;
+  box-shadow: 0 10px 28px rgb(15 23 42 / 12%);
+}
+
+.mini-map-title {
+  margin-bottom: 6px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.mini-map-body {
   position: relative;
-  display: grid;
-  grid-template-columns: 42px 18px minmax(0, 1fr);
-  gap: 10px;
+  height: 104px;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgb(226 232 240 / 72%) 1px, transparent 1px),
+    linear-gradient(rgb(226 232 240 / 72%) 1px, transparent 1px),
+    #f8fafc;
+  background-size: 18px 18px;
+  border: 1px solid rgb(226 232 240);
 }
 
-.event-index {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  color: #334155;
-  font-size: 12px;
-  font-weight: 800;
-  background: #f8fafc;
-  border: 1px solid rgba(148, 163, 184, 0.32);
+.mini-map-point {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  cursor: pointer;
+  border: 1px solid #ffffff;
   border-radius: 999px;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 18%);
+  transform: translate(-50%, -50%);
 }
 
-.event-line {
-  width: 1px;
-  height: 100%;
-  margin: 0 auto;
-  background: #e2e8f0;
+.mini-map-point.active {
+  width: 13px;
+  height: 13px;
+  outline: 2px solid rgb(96 165 250 / 48%);
 }
 
-.event-card {
+.attack-event-timeline {
   min-width: 0;
-  padding: 12px;
-  background: #f8fafc;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 8px;
+  max-height: 760px;
+  min-height: 520px;
+  overflow: auto;
+  background: #ffffff;
+  border-right: 1px solid rgb(226 232 240);
 }
 
-.event-card-head {
+.timeline-list-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   gap: 12px;
   align-items: flex-start;
   justify-content: space-between;
+  padding: 16px 18px 12px;
+  background: rgb(255 255 255 / 94%);
+  border-bottom: 1px solid rgb(226 232 240);
+  backdrop-filter: blur(12px);
 }
 
-.event-stage {
+.timeline-list-header strong {
+  display: block;
+  color: #111827;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.timeline-list-header span {
+  display: block;
+  margin-top: 3px;
   color: #64748b;
   font-size: 12px;
-  font-weight: 700;
+  line-height: 1.45;
 }
 
-.event-title {
-  margin-top: 3px;
-  color: #111827;
-  font-size: 14px;
-  font-weight: 800;
-  overflow-wrap: anywhere;
-}
-
-.event-detail {
-  margin-top: 8px;
-  color: #475569;
-  font-size: 12px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-.event-meta-grid {
+.timeline-event-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
+  gap: 10px;
+  padding: 14px 16px 18px;
 }
 
-.event-meta-grid div {
-  min-width: 0;
-  padding: 8px 10px;
-  background: #ffffff;
-  border: 1px solid rgba(226, 232, 240, 0.9);
+.timeline-event-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: #f8fafc;
+  border: 1px solid rgb(226 232 240);
   border-radius: 8px;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
-.event-meta-grid span {
-  display: block;
+.timeline-event-card:hover,
+.timeline-event-card.active {
+  background: #ffffff;
+  border-color: #93c5fd;
+  box-shadow: 0 10px 26px rgb(15 23 42 / 10%);
+}
+
+.event-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 5px 14px rgb(15 23 42 / 16%);
+}
+
+.event-content {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.event-card-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.event-time {
   color: #64748b;
   font-size: 11px;
+  font-weight: 700;
 }
 
-.event-meta-grid strong {
-  display: block;
-  margin-top: 2px;
-  color: #0f172a;
+.event-content strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #172033;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.event-content small {
+  color: #2563eb;
   font-size: 12px;
   font-weight: 700;
-  overflow-wrap: anywhere;
 }
 
-@media (max-width: 720px) {
+.event-target {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.attack-detail-panel {
+  min-width: 0;
+  max-height: 760px;
+  min-height: 520px;
+  padding: 18px 22px;
+  overflow: auto;
+  background: #ffffff;
+}
+
+.detail-back {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 20px;
+  color: #60a5fa;
+  font-size: 12px;
+}
+
+.detail-title-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.detail-title-row h4 {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #1f2937;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.detail-subtitle {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.detail-description {
+  margin: 20px 0 18px;
+  overflow-wrap: anywhere;
+  color: #374151;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.detail-tabs {
+  display: flex;
+  gap: 28px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid rgb(226 232 240);
+}
+
+.detail-tabs span {
+  padding-bottom: 9px;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.detail-tabs span.active {
+  color: #2563eb;
+  border-bottom: 2px solid #60a5fa;
+}
+
+.detail-fields {
+  display: grid;
+  gap: 11px;
+}
+
+.detail-fields div {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.detail-fields span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.detail-fields strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attack-tactics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid rgb(226 232 240);
+}
+
+.attack-tactics div {
+  flex: 0 0 100%;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+@media (max-width: 1100px) {
   .audit-detail-modal {
     width: calc(100vw - 24px);
   }
 
-  .detail-header,
-  .detail-section-head,
-  .event-card-head {
+  .attack-flow-header {
     flex-direction: column;
   }
 
-  .event-meta-grid {
+  .attack-investigation-layout {
     grid-template-columns: 1fr;
+  }
+
+  .attack-graph-shell,
+  .attack-event-timeline,
+  .attack-detail-panel {
+    max-height: none;
+    min-height: 360px;
+    border-right: 0;
+  }
+
+  .attack-detail-panel {
+    border-top: 1px solid rgb(226 232 240);
   }
 }
 </style>

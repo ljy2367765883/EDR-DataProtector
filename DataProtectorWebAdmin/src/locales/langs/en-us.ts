@@ -592,6 +592,13 @@ const local: App.I18n.Schema = {
         eventOverview: 'Event overview',
         policy: 'Policy',
         remote: 'Remote',
+        navigation: 'Navigation',
+        timelineCaption: 'Reconstructs key evidence around this event in chronological order and folds repeated behavior.',
+        selectedEvidence: 'Selected evidence',
+        processTab: 'Process',
+        objectTab: 'Object',
+        policyTab: 'Policy',
+        evidenceInfo: 'Evidence info',
         singleEventHint: 'No additional correlated evidence is available for this event, so it is shown as a single-event timeline.'
       },
       attackFlow: {
