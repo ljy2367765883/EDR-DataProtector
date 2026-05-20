@@ -850,6 +850,22 @@ const local: App.I18n.Schema = {
         services: 'Services/Drivers',
         tasks: 'Tasks'
       },
+      summary: {
+        verdict: 'Verdict',
+        ready: 'Report ready',
+        openReport: 'Open full report',
+        noSelection: 'Select a sandbox sample.',
+        noReport: 'The selected sample has no report yet.',
+        queued: 'The sample is queued and has not started isolated execution.',
+        running: 'The sandbox is executing the sample; the report refreshes automatically when ready.',
+        failed: 'Sandbox analysis failed. Check the error and server-side logs.',
+        invalid: 'The report JSON cannot be parsed; it may be from an old build or an incomplete write.',
+        completedNoReport: 'The sample is completed but the record has no report payload. Re-run analysis or check whether the server run directory was removed.',
+        timedOut: 'Sample execution timed out; telemetry and isolation summary were retained.',
+        nonZeroExit: 'Sample execution finished with exit code {exitCode}; telemetry was still retained.',
+        signals: 'This analysis observed {count} signal(s). Highest risk: {severity}.',
+        clean: 'Execution completed and no high-risk behavior was observed. Continue judging with source and signature context.'
+      },
       attackFlow: {
         eyebrow: 'Attack Flow',
         title: 'Threat Storyline',

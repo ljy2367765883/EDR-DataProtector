@@ -240,6 +240,30 @@ const rawReport = computed(() => parseJson<SandboxReport | null>(selectedSample.
 const report = computed(() => sanitizeSandboxReport(rawReport.value));
 const attackStory = computed(() => buildAttackStory(report.value));
 const activeAttackFlowStageCount = computed(() => attackStory.value.stages.filter(item => item.active).length);
+const reportParseFailed = computed(() => Boolean(selectedSample.value?.reportJson && !rawReport.value));
+const reportSignalCounts = computed(() => ({
+  behaviors: report.value?.behaviors?.length || 0,
+  processes: report.value?.processes?.length || 0,
+  network: report.value?.network?.length || 0,
+  artifacts: report.value?.fileArtifacts?.length || 0,
+  runtime: report.value?.runtimeEvents?.length || 0,
+  kernel: report.value?.kernelEvents?.length || 0,
+  services: report.value?.services?.length || 0,
+  tasks: report.value?.scheduledTasks?.length || 0
+}));
+const reportSignalTotal = computed(
+  () =>
+    reportSignalCounts.value.behaviors +
+    reportSignalCounts.value.network +
+    reportSignalCounts.value.artifacts +
+    reportSignalCounts.value.runtime +
+    reportSignalCounts.value.kernel +
+    reportSignalCounts.value.services +
+    reportSignalCounts.value.tasks
+);
+const reportRiskSeverity = computed(() => calculateReportRiskSeverity(report.value, selectedSample.value));
+const reportSummaryText = computed(() => buildReportSummaryText(report.value, selectedSample.value));
+const reportTopFindings = computed(() => attackStory.value.events.slice(0, 3));
 const stats = computed(() => ({
   total: response.value?.total ?? 0,
   queued: response.value?.queuedTotal ?? 0,
@@ -334,7 +358,7 @@ const sampleColumns = computed<DataTableColumns<Api.DataProtector.SandboxSample>
           <NButton size="small" type="primary" secondary disabled={row.status === 'running'} onClick={() => analyze(row)}>
             {$t('dataprotector.sandbox.analyze')}
           </NButton>
-          <NButton size="small" secondary onClick={() => selectSample(row)}>
+          <NButton size="small" secondary onClick={() => openReport(row)}>
             {$t('dataprotector.sandbox.report')}
           </NButton>
           <NButton size="small" secondary disabled={row.status === 'running' || !row.reportJson} onClick={() => removeLogs(row)}>
@@ -565,6 +589,17 @@ async function analyze(row = selectedSample.value) {
 
 function selectSample(row: Api.DataProtector.SandboxSample) {
   selectedSampleId.value = row.sampleId;
+}
+
+function openReport(row: Api.DataProtector.SandboxSample) {
+  selectSample(row);
+  scrollToReport();
+}
+
+function scrollToReport() {
+  window.requestAnimationFrame(() => {
+    document.getElementById('sandbox-report-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 }
 
 function removeSample(row: Api.DataProtector.SandboxSample) {
@@ -827,6 +862,66 @@ function buildAttackFlowStages(value: SandboxReport | null): AttackFlowStage[] {
     createAttackFlowStage('persistence', persistenceCount > 0, persistenceCount, 'critical', 'mdi:shield-key-outline'),
     createAttackFlowStage('artifact', artifactCount > 0, artifactCount, 'high', 'mdi:file-cog-outline')
   ];
+}
+
+function calculateReportRiskSeverity(value: SandboxReport | null, sample: Api.DataProtector.SandboxSample | null) {
+  if (reportParseFailed.value) return 'high';
+  if (sample?.status === 'failed' || value?.error || value?.errors?.length) return 'high';
+  if (!value) return sample?.status === 'running' ? 'medium' : 'info';
+
+  let severity = 'info';
+  for (const behavior of value.behaviors || []) {
+    severity = maxSeverity(severity, behavior?.severity);
+  }
+  if ((value.runtimeEvents || []).some(item => item?.blocked)) {
+    severity = maxSeverity(severity, 'high');
+  } else if ((value.runtimeEvents || []).length) {
+    severity = maxSeverity(severity, 'medium');
+  }
+  if ((value.kernelEvents || []).length) {
+    severity = maxSeverity(severity, 'high');
+  }
+  if ((value.network || []).length || (value.fileArtifacts || []).length) {
+    severity = maxSeverity(severity, 'medium');
+  }
+  if (value.execution?.timedOut || (typeof value.execution?.exitCode === 'number' && value.execution.exitCode !== 0)) {
+    severity = maxSeverity(severity, 'medium');
+  }
+
+  return severity;
+}
+
+function buildReportSummaryText(value: SandboxReport | null, sample: Api.DataProtector.SandboxSample | null) {
+  if (!sample) return $t('dataprotector.sandbox.summary.noSelection');
+  if (reportParseFailed.value) return $t('dataprotector.sandbox.summary.invalid');
+  if (sample.status === 'running') return $t('dataprotector.sandbox.summary.running');
+  if (sample.status === 'queued') return $t('dataprotector.sandbox.summary.queued');
+  if (!value) {
+    if (sample.status === 'failed') {
+      return sample.error || $t('dataprotector.sandbox.summary.failed');
+    }
+    if (sample.status === 'completed') {
+      return $t('dataprotector.sandbox.summary.completedNoReport');
+    }
+    return $t('dataprotector.sandbox.summary.noReport');
+  }
+
+  if (value.execution?.timedOut) {
+    return $t('dataprotector.sandbox.summary.timedOut');
+  }
+
+  if (typeof value.execution?.exitCode === 'number' && value.execution.exitCode !== 0) {
+    return $t('dataprotector.sandbox.summary.nonZeroExit', { exitCode: value.execution.exitCode });
+  }
+
+  if (reportSignalTotal.value > 0) {
+    return $t('dataprotector.sandbox.summary.signals', {
+      count: reportSignalTotal.value,
+      severity: severityLabel(reportRiskSeverity.value)
+    });
+  }
+
+  return $t('dataprotector.sandbox.summary.clean');
 }
 
 function buildAttackProcessGraph(value: SandboxReport | null): AttackStoryProcessNode[] {
@@ -1190,6 +1285,54 @@ onBeforeUnmount(stopPolling);
               </div>
             </div>
 
+            <div class="selected-report-brief" :class="`severity-${reportRiskSeverity}`">
+              <div class="brief-main">
+                <div class="brief-icon">
+                  <SvgIcon icon="mdi:shield-search" />
+                </div>
+                <div class="brief-copy">
+                  <div class="brief-title">
+                    {{ report ? $t('dataprotector.sandbox.summary.ready') : statusLabel(selectedSample.status) }}
+                  </div>
+                  <div class="brief-text">{{ reportSummaryText }}</div>
+                </div>
+                <NTag :type="severityTagType(reportRiskSeverity)" :bordered="false">
+                  {{ severityLabel(reportRiskSeverity) }}
+                </NTag>
+              </div>
+              <div class="brief-metrics">
+                <div>
+                  <span>{{ $t('dataprotector.sandbox.reportMetrics.behaviors') }}</span>
+                  <strong>{{ reportSignalCounts.behaviors }}</strong>
+                </div>
+                <div>
+                  <span>{{ $t('dataprotector.sandbox.reportMetrics.kernel') }}</span>
+                  <strong>{{ reportSignalCounts.kernel }}</strong>
+                </div>
+                <div>
+                  <span>{{ $t('dataprotector.sandbox.reportMetrics.runtime') }}</span>
+                  <strong>{{ reportSignalCounts.runtime }}</strong>
+                </div>
+                <div>
+                  <span>{{ $t('dataprotector.sandbox.reportMetrics.network') }}</span>
+                  <strong>{{ reportSignalCounts.network }}</strong>
+                </div>
+              </div>
+              <div v-if="reportTopFindings.length" class="brief-findings">
+                <div v-for="finding in reportTopFindings" :key="finding.id" class="brief-finding">
+                  <SvgIcon :icon="finding.icon" />
+                  <span>{{ finding.title }}</span>
+                </div>
+              </div>
+              <NAlert v-if="reportParseFailed" type="error" :bordered="false" class="m-t-10px">
+                {{ $t('dataprotector.sandbox.summary.invalid') }}
+              </NAlert>
+              <NButton v-if="report" class="m-t-10px" secondary block @click="scrollToReport">
+                <template #icon><SvgIcon icon="mdi:file-chart-outline" /></template>
+                {{ $t('dataprotector.sandbox.summary.openReport') }}
+              </NButton>
+            </div>
+
             <NForm label-placement="top" class="analysis-form">
               <NFormItem :label="$t('dataprotector.sandbox.arguments')">
                 <NInput v-model:value="analysisForm.arguments" clearable :placeholder="$t('dataprotector.sandbox.argumentsPlaceholder')" />
@@ -1231,7 +1374,7 @@ onBeforeUnmount(stopPolling);
       </NGi>
     </NGrid>
 
-    <NCard :bordered="false" class="work-panel">
+    <NCard id="sandbox-report-panel" :bordered="false" class="work-panel">
       <template #header>
         <div class="panel-title">
           <span>{{ $t('dataprotector.sandbox.report') }}</span>
@@ -1248,6 +1391,24 @@ onBeforeUnmount(stopPolling);
         </div>
       </template>
       <template v-if="selectedSample && report">
+        <div class="verdict-panel" :class="`severity-${reportRiskSeverity}`">
+          <div class="verdict-copy">
+            <div class="eyebrow">{{ $t('dataprotector.sandbox.summary.verdict') }}</div>
+            <h3>{{ severityLabel(reportRiskSeverity) }}</h3>
+            <p>{{ reportSummaryText }}</p>
+          </div>
+          <div class="verdict-meta">
+            <div>
+              <span>{{ $t('dataprotector.sandbox.exitCode') }}</span>
+              <strong>{{ report.execution?.exitCode ?? '-' }}</strong>
+            </div>
+            <div>
+              <span>{{ $t('dataprotector.sandbox.duration') }}</span>
+              <strong>{{ report.execution?.timeoutSeconds || selectedSample.timeoutSeconds || '-' }}s</strong>
+            </div>
+          </div>
+        </div>
+
         <div class="report-summary">
           <div class="report-metric">
             <span>{{ $t('dataprotector.sandbox.reportMetrics.behaviors') }}</span>
@@ -1430,6 +1591,18 @@ onBeforeUnmount(stopPolling);
           </NCollapseItem>
         </NCollapse>
       </template>
+      <template v-else-if="selectedSample">
+        <NAlert v-if="reportParseFailed" type="error" :bordered="false">
+          {{ $t('dataprotector.sandbox.summary.invalid') }}
+        </NAlert>
+        <NAlert v-else-if="selectedSample.status === 'completed'" type="warning" :bordered="false">
+          {{ $t('dataprotector.sandbox.summary.completedNoReport') }}
+        </NAlert>
+        <NAlert v-else-if="selectedSample.status === 'failed'" type="error" :bordered="false">
+          {{ selectedSample.error || $t('dataprotector.sandbox.summary.failed') }}
+        </NAlert>
+        <NEmpty v-else :description="$t('dataprotector.sandbox.noReport')" />
+      </template>
       <NEmpty v-else :description="$t('dataprotector.sandbox.noReport')" />
     </NCard>
   </div>
@@ -1538,6 +1711,153 @@ onBeforeUnmount(stopPolling);
 .checks {
   display: grid;
   gap: 8px;
+}
+
+.selected-report-brief,
+.verdict-panel {
+  margin-top: 14px;
+  padding: 14px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgb(35 24 63 / 94%), rgb(15 23 42 / 96%)),
+    radial-gradient(circle at 12% 0%, rgb(139 92 246 / 24%), transparent 34%);
+  border: 1px solid rgb(167 139 250 / 28%);
+  border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%);
+}
+
+.brief-main,
+.verdict-panel {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.brief-icon {
+  display: grid;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  color: #ffffff;
+  font-size: 22px;
+  background: rgb(124 58 237 / 32%);
+  border: 1px solid rgb(196 181 253 / 30%);
+  border-radius: 8px;
+}
+
+.brief-copy,
+.verdict-copy {
+  min-width: 0;
+}
+
+.brief-title,
+.verdict-copy h3 {
+  color: #ffffff;
+  font-weight: 850;
+}
+
+.brief-title {
+  font-size: 15px;
+}
+
+.brief-text,
+.verdict-copy p {
+  margin: 4px 0 0;
+  color: rgb(203 213 225);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.brief-metrics,
+.verdict-meta {
+  display: grid;
+  gap: 8px;
+}
+
+.brief-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.brief-metrics div,
+.verdict-meta div {
+  min-width: 0;
+  padding: 9px 10px;
+  background: rgb(15 23 42 / 42%);
+  border: 1px solid rgb(148 163 184 / 16%);
+  border-radius: 8px;
+}
+
+.brief-metrics span,
+.verdict-meta span {
+  display: block;
+  overflow: hidden;
+  color: rgb(148 163 184);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brief-metrics strong,
+.verdict-meta strong {
+  display: block;
+  margin-top: 2px;
+  color: #ffffff;
+  font-size: 18px;
+}
+
+.brief-findings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.brief-finding {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  color: rgb(226 232 240);
+  font-size: 12px;
+  background: rgb(15 23 42 / 44%);
+  border: 1px solid rgb(148 163 184 / 16%);
+  border-radius: 8px;
+}
+
+.brief-finding span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-report-brief.severity-critical,
+.selected-report-brief.severity-high,
+.verdict-panel.severity-critical,
+.verdict-panel.severity-high {
+  border-color: rgb(251 113 133 / 34%);
+}
+
+.selected-report-brief.severity-medium,
+.verdict-panel.severity-medium {
+  border-color: rgb(251 191 36 / 34%);
+}
+
+.verdict-panel {
+  margin: 0 0 14px;
+}
+
+.verdict-copy h3 {
+  margin: 3px 0 0;
+  font-size: 24px;
+}
+
+.verdict-meta {
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  min-width: 260px;
 }
 
 .report-summary {
@@ -1894,15 +2214,32 @@ onBeforeUnmount(stopPolling);
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .brief-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .story-stage-rail,
   .attack-story-grid,
-  .story-entity-row {
+  .story-entity-row,
+  .verdict-panel {
     grid-template-columns: 1fr;
+  }
+
+  .brief-main,
+  .verdict-panel {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .verdict-meta {
+    width: 100%;
+    min-width: 0;
   }
 }
 
 @media (max-width: 560px) {
-  .report-summary {
+  .report-summary,
+  .brief-metrics {
     grid-template-columns: 1fr;
   }
 }

@@ -827,6 +827,20 @@ namespace DataProtectorWebBridge.Services
                     rows = rows.Where(item => SandboxSampleHaystack(item).IndexOf(normalized.search, StringComparison.OrdinalIgnoreCase) >= 0);
                 }
 
+                bool restoredReports = false;
+                foreach (SandboxSampleState item in rows)
+                {
+                    if (TryRestoreSandboxReport(item))
+                    {
+                        restoredReports = true;
+                    }
+                }
+
+                if (restoredReports)
+                {
+                    Save();
+                }
+
                 SandboxSampleDto[] all = rows
                     .OrderByDescending(item => item.submittedUtc, StringComparer.OrdinalIgnoreCase)
                     .Select(ToSandboxSampleDto)
@@ -2818,6 +2832,117 @@ namespace DataProtectorWebBridge.Services
             }
 
             return hadReport;
+        }
+
+        private bool TryRestoreSandboxReport(SandboxSampleState sample)
+        {
+            if (sample == null ||
+                !string.IsNullOrWhiteSpace(sample.reportJson) ||
+                !string.Equals(sample.status, "completed", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string reportPath = TryFindSandboxReportPath(sample);
+            if (string.IsNullOrWhiteSpace(reportPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                FileInfo reportFile = new FileInfo(reportPath);
+                if (!reportFile.Exists || reportFile.Length <= 0 || reportFile.Length > 4 * 1024 * 1024)
+                {
+                    return false;
+                }
+
+                string reportJson = File.ReadAllText(reportPath, Encoding.UTF8);
+                if (string.IsNullOrWhiteSpace(reportJson) ||
+                    reportJson.IndexOf("\"dataprotector.sandbox.report", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return false;
+                }
+
+                sample.reportJson = Truncate(reportJson, 4 * 1024 * 1024);
+                sample.error = string.Empty;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private string TryFindSandboxReportPath(SandboxSampleState sample)
+        {
+            string root = GetSandboxRunDirectory();
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+            {
+                return string.Empty;
+            }
+
+            List<string> candidates = new List<string>();
+            if (!string.IsNullOrWhiteSpace(sample.startedUtc) && DateTime.TryParse(sample.startedUtc, out DateTime startedUtc))
+            {
+                foreach (DirectoryInfo directory in new DirectoryInfo(root).EnumerateDirectories().OrderByDescending(item => item.LastWriteTimeUtc).Take(50))
+                {
+                    if (Math.Abs((directory.LastWriteTimeUtc - startedUtc.ToUniversalTime()).TotalHours) <= 12)
+                    {
+                        candidates.Add(Path.Combine(directory.FullName, "report", "report.json"));
+                    }
+                }
+            }
+            else
+            {
+                candidates.AddRange(new DirectoryInfo(root)
+                    .EnumerateDirectories()
+                    .OrderByDescending(item => item.LastWriteTimeUtc)
+                    .Take(50)
+                    .Select(item => Path.Combine(item.FullName, "report", "report.json")));
+            }
+
+            string expectedSha256 = NormalizeSha256(sample.sha256);
+            string expectedName = sample.fileName ?? string.Empty;
+            foreach (string candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (IsSandboxReportForSample(candidate, expectedSha256, expectedName))
+                {
+                    return candidate;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private bool IsSandboxReportForSample(string reportPath, string expectedSha256, string expectedName)
+        {
+            if (string.IsNullOrWhiteSpace(reportPath) || !File.Exists(reportPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                string reportJson = File.ReadAllText(reportPath, Encoding.UTF8);
+                if (string.IsNullOrWhiteSpace(reportJson))
+                {
+                    return false;
+                }
+
+                if (!string.IsNullOrWhiteSpace(expectedSha256) &&
+                    reportJson.IndexOf(expectedSha256, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                return !string.IsNullOrWhiteSpace(expectedName) &&
+                       reportJson.IndexOf(expectedName, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void AddSandboxReportDirectoryCandidates(HashSet<string> paths, string reportJson)

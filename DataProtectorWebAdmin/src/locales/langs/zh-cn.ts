@@ -846,6 +846,22 @@
         services: '服务/驱动',
         tasks: '计划任务'
       },
+      summary: {
+        verdict: '分析结论',
+        ready: '报告已生成',
+        openReport: '查看完整报告',
+        noSelection: '请选择一个沙箱样本。',
+        noReport: '当前样本还没有生成报告。',
+        queued: '样本已进入队列，尚未开始隔离执行。',
+        running: '沙箱正在隔离执行样本，报告生成后会自动刷新。',
+        failed: '沙箱分析失败，请查看错误信息和服务器日志。',
+        invalid: '报告 JSON 无法解析，可能是旧版本报告或写入不完整。',
+        completedNoReport: '样本状态为已完成，但当前记录没有报告内容；可重新分析，或检查服务器沙箱运行目录是否被清理。',
+        timedOut: '样本执行超时，已保留沙箱遥测和隔离环境摘要。',
+        nonZeroExit: '样本执行结束，退出码为 {exitCode}；仍保留本次行为遥测。',
+        signals: '本次分析命中 {count} 条可观测信号，最高风险等级为 {severity}。',
+        clean: '样本已执行完成，未观察到高危行为；建议结合样本来源和签名继续判定。'
+      },
       attackFlow: {
         eyebrow: 'Attack Flow',
         title: '威胁故事线',
