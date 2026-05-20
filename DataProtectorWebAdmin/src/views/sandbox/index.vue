@@ -1,5 +1,7 @@
 <script setup lang="tsx">
-import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import LogicFlow from '@logicflow/core';
+import '@logicflow/core/dist/index.css';
 import type { DataTableColumns, PaginationProps, UploadCustomRequestOptions } from 'naive-ui';
 import { NButton, NTag, useMessage } from 'naive-ui';
 import {
@@ -10,6 +12,7 @@ import {
   fetchSubmitSandboxSample
 } from '@/service/api';
 import { $t } from '@/locales';
+import { useAppStore } from '@/store/modules/app';
 
 defineOptions({
   name: 'Sandbox'
@@ -189,13 +192,22 @@ type AttackStory = {
   entities: AttackStoryEntity[];
 };
 
+type FlowGraphData = Parameters<LogicFlow['render']>[0];
+
 const message = useMessage();
+const appStore = useAppStore();
 const loading = ref(false);
 const uploading = ref(false);
 const analyzing = ref(false);
 const response = ref<Api.DataProtector.SandboxSampleQueryResponse | null>(null);
 const selectedSampleId = ref('');
 const pollTimer = ref<number | null>(null);
+const sandboxStageFlowRef = ref<HTMLElement | null>(null);
+const sandboxProcessFlowRef = ref<HTMLElement | null>(null);
+const sandboxTimelineFlowRef = ref<HTMLElement | null>(null);
+let sandboxStageFlow: LogicFlow | null = null;
+let sandboxProcessFlow: LogicFlow | null = null;
+let sandboxTimelineFlow: LogicFlow | null = null;
 
 const query = reactive<Api.DataProtector.SandboxSampleQuery>({
   page: 1,
@@ -1100,6 +1112,238 @@ function eventIcon(value?: string) {
   return 'mdi:radar';
 }
 
+function compactFlowText(value?: string, fallback = '-') {
+  const text = (value || fallback).replace(/\s+/g, ' ').trim();
+  if (text.length <= 30) return text;
+  return `${text.slice(0, 27)}...`;
+}
+
+function flowTextStyle(textWidth = 132, lineHeight = 16) {
+  return {
+    fontSize: 12,
+    textWidth,
+    overflowMode: 'ellipsis' as const,
+    lineHeight
+  };
+}
+
+function buildSandboxStageFlowData(): FlowGraphData {
+  const stages = attackStory.value.stages.length
+    ? attackStory.value.stages
+    : [
+        {
+          key: 'empty',
+          label: $t('dataprotector.sandbox.attackFlow.empty'),
+          detail: '',
+          active: false,
+          severity: 'info',
+          count: 0,
+          icon: ''
+        }
+      ];
+
+  const nodes = stages.map((stage, index) => {
+    const x = 94 + index * 184;
+    const y = 74;
+
+    return {
+      id: `sandbox-stage-${stage.key || index}`,
+      type: 'rect',
+      x,
+      y,
+      text: {
+        x,
+        y,
+        value: `${stage.label}\n${stage.count || 0}`,
+        ...flowTextStyle()
+      },
+      properties: {
+        width: 146,
+        height: 62
+      }
+    };
+  });
+
+  const edges = stages.slice(1).map((stage, index) => ({
+    id: `sandbox-stage-edge-${index}`,
+    type: 'polyline',
+    sourceNodeId: `sandbox-stage-${stages[index].key || index}`,
+    targetNodeId: `sandbox-stage-${stage.key || index + 1}`
+  }));
+
+  return { nodes, edges };
+}
+
+function buildSandboxProcessFlowData(): FlowGraphData {
+  const processes = attackStory.value.processes;
+
+  if (!processes.length) {
+    return {
+      nodes: [
+        {
+          id: 'sandbox-process-empty',
+          type: 'rect',
+          x: 130,
+          y: 86,
+          text: {
+            x: 130,
+            y: 86,
+            value: $t('dataprotector.sandbox.attackFlow.empty'),
+            ...flowTextStyle(150)
+          },
+          properties: {
+            width: 190,
+            height: 56
+          }
+        }
+      ],
+      edges: []
+    };
+  }
+
+  const nodes = processes.map((process, index) => {
+    const depth = Math.min(process.depth || 0, 3);
+    const x = 120 + depth * 190;
+    const y = 72 + index * 98;
+
+    return {
+      id: `sandbox-process-${process.pid || index}-${process.order}`,
+      type: 'rect',
+      x,
+      y,
+      text: {
+        x,
+        y,
+        value: `${compactFlowText(process.name)}\nPID ${process.pid || '-'} / PPID ${process.parentPid || '-'}`,
+        ...flowTextStyle(150, 15)
+      },
+      properties: {
+        width: 176,
+        height: 68
+      }
+    };
+  });
+
+  const idByPid = new Map(processes.map((process, index) => [process.pid, `sandbox-process-${process.pid || index}-${process.order}`]));
+  const edges = processes
+    .filter(process => process.parentPid && idByPid.has(process.parentPid))
+    .map((process, index) => ({
+      id: `sandbox-process-edge-${index}`,
+      type: 'polyline',
+      sourceNodeId: idByPid.get(process.parentPid)!,
+      targetNodeId: idByPid.get(process.pid)!
+    }));
+
+  return { nodes, edges };
+}
+
+function buildSandboxTimelineFlowData(): FlowGraphData {
+  const events = attackStory.value.events;
+
+  if (!events.length) {
+    return {
+      nodes: [
+        {
+          id: 'sandbox-timeline-empty',
+          type: 'rect',
+          x: 130,
+          y: 86,
+          text: {
+            x: 130,
+            y: 86,
+            value: $t('dataprotector.sandbox.attackFlow.empty'),
+            ...flowTextStyle(150)
+          },
+          properties: {
+            width: 190,
+            height: 56
+          }
+        }
+      ],
+      edges: []
+    };
+  }
+
+  const nodes = events.map((event, index) => {
+    const row = Math.floor(index / 5);
+    const column = index % 5;
+    const x = 112 + column * 184;
+    const y = 82 + row * 112;
+
+    return {
+      id: `sandbox-event-${event.id || index}`,
+      type: 'rect',
+      x,
+      y,
+      text: {
+        x,
+        y,
+        value: `${compactFlowText(event.title)}\n${formatTime(event.time)}\nPID ${event.pid || '-'}`,
+        ...flowTextStyle(142, 15)
+      },
+      properties: {
+        width: 160,
+        height: 76
+      }
+    };
+  });
+
+  const edges = events.slice(1).map((event, index) => ({
+    id: `sandbox-event-edge-${index}`,
+    type: 'polyline',
+    sourceNodeId: `sandbox-event-${events[index].id || index}`,
+    targetNodeId: `sandbox-event-${event.id || index + 1}`
+  }));
+
+  return { nodes, edges };
+}
+
+function createLogicFlow(container: HTMLElement) {
+  const lf = new LogicFlow({
+    container,
+    grid: false,
+    isSilentMode: true,
+    stopScrollGraph: true,
+    stopZoomGraph: true,
+    stopMoveGraph: false,
+    adjustEdge: false,
+    history: false,
+    keyboard: { enabled: false },
+    edgeType: 'polyline'
+  });
+
+  return lf;
+}
+
+function renderLogicFlow(lf: LogicFlow, data: FlowGraphData) {
+  lf.render(data);
+  nextTick(() => {
+    window.setTimeout(() => {
+      lf.fitView(24, 24);
+      lf.translateCenter();
+    }, 0);
+  });
+}
+
+function renderSandboxFlows() {
+  nextTick(() => {
+    if (sandboxStageFlowRef.value) {
+      sandboxStageFlow ??= createLogicFlow(sandboxStageFlowRef.value);
+      renderLogicFlow(sandboxStageFlow, buildSandboxStageFlowData());
+    }
+
+    if (sandboxProcessFlowRef.value) {
+      sandboxProcessFlow ??= createLogicFlow(sandboxProcessFlowRef.value);
+      renderLogicFlow(sandboxProcessFlow, buildSandboxProcessFlowData());
+    }
+
+    if (sandboxTimelineFlowRef.value) {
+      sandboxTimelineFlow ??= createLogicFlow(sandboxTimelineFlowRef.value);
+      renderLogicFlow(sandboxTimelineFlow, buildSandboxTimelineFlowData());
+    }
+  });
+}
+
 function statusTagType(status: string) {
   if (status === 'completed') return 'success';
   if (status === 'running') return 'info';
@@ -1155,12 +1399,23 @@ function formatBytes(value: number) {
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+watch([attackStory, () => appStore.locale], renderSandboxFlows, { deep: true });
+
 onMounted(async () => {
+  renderSandboxFlows();
   await refresh(false);
   if (samples.value.some(item => item.status === 'running')) startPolling();
 });
 
-onBeforeUnmount(stopPolling);
+onBeforeUnmount(() => {
+  stopPolling();
+  sandboxStageFlow?.destroy();
+  sandboxProcessFlow?.destroy();
+  sandboxTimelineFlow?.destroy();
+  sandboxStageFlow = null;
+  sandboxProcessFlow = null;
+  sandboxTimelineFlow = null;
+});
 </script>
 
 <template>
@@ -1455,63 +1710,30 @@ onBeforeUnmount(stopPolling);
             </NTag>
           </div>
 
-          <div class="story-stage-rail">
-            <div
+          <div class="story-panel-title">{{ $t('dataprotector.sandbox.attackFlow.stagesTitle') }}</div>
+          <div ref="sandboxStageFlowRef" class="logic-flow-panel logic-flow-stage"></div>
+
+          <div class="story-stage-summary">
+            <NTag
               v-for="stage in attackStory.stages"
               :key="stage.key"
-              class="story-stage"
-              :class="[{ active: stage.active }, `severity-${stage.severity}`]"
+              size="small"
+              :type="stage.active ? severityTagType(stage.severity) : 'default'"
+              :bordered="false"
             >
-              <SvgIcon :icon="stage.icon" />
-              <span>{{ stage.label }}</span>
-            </div>
+              {{ stage.label }} {{ stage.count || 0 }}
+            </NTag>
           </div>
 
           <div class="attack-story-grid">
             <div class="story-process-panel">
               <div class="story-panel-title">{{ $t('dataprotector.sandbox.attackFlow.processGraph') }}</div>
-              <div class="process-graph">
-                <div
-                  v-for="node in attackStory.processes"
-                  :key="`${node.pid}-${node.order}`"
-                  class="process-node"
-                  :class="[`severity-${node.risk}`, { child: node.depth > 0 }]"
-                  :style="{ marginLeft: `${node.depth * 22}px` }"
-                >
-                  <div class="process-dot" />
-                  <div class="process-copy">
-                    <div class="process-name">{{ node.name }}</div>
-                    <div class="process-meta">PID {{ node.pid }} · PPID {{ node.parentPid || '-' }}</div>
-                    <div class="process-path">{{ node.path }}</div>
-                  </div>
-                </div>
-                <NEmpty v-if="!attackStory.processes.length" :description="$t('dataprotector.sandbox.attackFlow.empty')" />
-              </div>
+              <div ref="sandboxProcessFlowRef" class="logic-flow-panel logic-flow-process"></div>
             </div>
 
             <div class="story-timeline-panel">
               <div class="story-panel-title">{{ $t('dataprotector.sandbox.attackFlow.timeline') }}</div>
-              <div class="story-timeline">
-                <div
-                  v-for="event in attackStory.events"
-                  :key="event.id"
-                  class="timeline-event"
-                  :class="`severity-${event.severity}`"
-                >
-                  <div class="timeline-marker">
-                    <SvgIcon :icon="event.icon" />
-                  </div>
-                  <div class="timeline-card">
-                    <div class="timeline-topline">
-                      <span>{{ event.title }}</span>
-                      <small>{{ formatTime(event.time) }}</small>
-                    </div>
-                    <div class="timeline-detail">{{ event.detail }}</div>
-                    <div class="timeline-meta">PID {{ event.pid || '-' }} · {{ severityLabel(event.severity) }}</div>
-                  </div>
-                </div>
-                <NEmpty v-if="!attackStory.events.length" :description="$t('dataprotector.sandbox.attackFlow.empty')" />
-              </div>
+              <div ref="sandboxTimelineFlowRef" class="logic-flow-panel logic-flow-timeline"></div>
             </div>
           </div>
 
@@ -1887,31 +2109,14 @@ onBeforeUnmount(stopPolling);
 }
 
 .attack-flow-panel {
-  position: relative;
   padding: 16px;
-  overflow: hidden;
-  background:
-    linear-gradient(135deg, rgb(37 24 66 / 95%), rgb(11 18 32 / 97%)),
-    radial-gradient(circle at 20% 18%, rgb(125 92 255 / 22%), transparent 34%);
-  border: 1px solid rgb(167 139 250 / 26%);
+  background: rgb(249 250 251);
+  border: 1px solid rgb(229 231 235);
   border-radius: 8px;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%), 0 18px 42px rgb(30 21 54 / 18%);
   margin-bottom: 14px;
 }
 
-.attack-flow-panel::before {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  content: '';
-  background: linear-gradient(110deg, transparent 0%, rgb(255 255 255 / 8%) 46%, transparent 62%);
-  opacity: 0.7;
-  transform: translateX(-120%);
-  animation: flow-sheen 6s ease-in-out infinite;
-}
-
 .attack-flow-header {
-  position: relative;
   display: flex;
   gap: 12px;
   align-items: flex-start;
@@ -1921,44 +2126,38 @@ onBeforeUnmount(stopPolling);
 
 .attack-flow-header h3 {
   margin: 3px 0 0;
-  color: #ffffff;
   font-size: 17px;
   font-weight: 800;
 }
 
-.story-stage-rail {
-  position: relative;
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+.logic-flow-panel {
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid rgb(229 231 235);
+  border-radius: 8px;
+}
+
+.logic-flow-stage {
+  height: 180px;
+  margin-bottom: 10px;
+}
+
+.logic-flow-process {
+  height: 420px;
+}
+
+.logic-flow-timeline {
+  height: 420px;
+}
+
+.story-stage-summary {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 14px;
 }
 
-.story-stage {
-  display: flex;
-  min-width: 0;
-  gap: 7px;
-  align-items: center;
-  justify-content: center;
-  min-height: 38px;
-  padding: 8px;
-  color: rgb(203 213 225);
-  font-size: 12px;
-  font-weight: 800;
-  background: rgb(15 23 42 / 48%);
-  border: 1px solid rgb(148 163 184 / 18%);
-  border-radius: 8px;
-}
-
-.story-stage.active {
-  color: #ffffff;
-  background: linear-gradient(135deg, rgb(124 58 237 / 42%), rgb(8 145 178 / 24%));
-  border-color: rgb(103 232 249 / 44%);
-  animation: flow-node-pulse 2.8s ease-in-out infinite;
-}
-
 .attack-story-grid {
-  position: relative;
   display: grid;
   grid-template-columns: minmax(280px, 0.85fr) minmax(360px, 1.15fr);
   gap: 12px;
@@ -1968,189 +2167,15 @@ onBeforeUnmount(stopPolling);
 .story-timeline-panel {
   min-width: 0;
   padding: 14px;
-  background: rgb(2 6 23 / 42%);
-  border: 1px solid rgb(148 163 184 / 16%);
+  background: #ffffff;
+  border: 1px solid rgb(229 231 235);
   border-radius: 8px;
 }
 
 .story-panel-title {
   margin-bottom: 12px;
-  color: rgb(226 232 240);
   font-size: 13px;
   font-weight: 800;
-}
-
-.process-graph {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.process-graph::before {
-  position: absolute;
-  top: 18px;
-  bottom: 18px;
-  left: 9px;
-  width: 1px;
-  content: '';
-  background: linear-gradient(180deg, rgb(103 232 249 / 12%), rgb(103 232 249 / 56%), rgb(167 139 250 / 12%));
-}
-
-.process-node {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 10px 11px;
-  color: rgb(226 232 240);
-  background: rgb(15 23 42 / 58%);
-  border: 1px solid rgb(148 163 184 / 18%);
-  border-radius: 8px;
-}
-
-.process-node.child::before {
-  position: absolute;
-  top: 19px;
-  left: -21px;
-  width: 20px;
-  height: 1px;
-  content: '';
-  background: rgb(103 232 249 / 35%);
-}
-
-.process-dot {
-  flex: 0 0 10px;
-  width: 10px;
-  height: 10px;
-  margin-top: 5px;
-  background: rgb(103 232 249);
-  border-radius: 50%;
-  box-shadow: 0 0 16px rgb(34 211 238 / 60%);
-}
-
-.process-copy {
-  min-width: 0;
-}
-
-.process-name {
-  overflow: hidden;
-  color: #ffffff;
-  font-size: 13px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.process-meta,
-.process-path,
-.timeline-meta {
-  overflow: hidden;
-  color: rgb(148 163 184);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.process-path {
-  margin-top: 3px;
-}
-
-.story-timeline {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.story-timeline::before {
-  position: absolute;
-  top: 12px;
-  bottom: 12px;
-  left: 16px;
-  width: 2px;
-  content: '';
-  background: linear-gradient(180deg, rgb(34 211 238 / 12%), rgb(34 211 238 / 58%), rgb(168 85 247 / 12%));
-}
-
-.timeline-event {
-  position: relative;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 10px;
-}
-
-.timeline-marker {
-  z-index: 1;
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  color: #ffffff;
-  font-size: 18px;
-  background: rgb(30 41 59);
-  border: 1px solid rgb(103 232 249 / 42%);
-  border-radius: 8px;
-  box-shadow: 0 0 20px rgb(14 165 233 / 18%);
-}
-
-.severity-critical .process-dot,
-.severity-critical .timeline-marker,
-.severity-high .process-dot,
-.severity-high .timeline-marker {
-  background: rgb(244 63 94);
-  border-color: rgb(251 113 133 / 52%);
-  box-shadow: 0 0 20px rgb(244 63 94 / 34%);
-}
-
-.severity-medium .process-dot,
-.severity-medium .timeline-marker {
-  background: rgb(245 158 11);
-  border-color: rgb(251 191 36 / 46%);
-  box-shadow: 0 0 18px rgb(245 158 11 / 28%);
-}
-
-.timeline-card {
-  min-width: 0;
-  padding: 10px 12px;
-  background: rgb(15 23 42 / 62%);
-  border: 1px solid rgb(148 163 184 / 18%);
-  border-radius: 8px;
-}
-
-.timeline-topline {
-  display: flex;
-  min-width: 0;
-  gap: 10px;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.timeline-topline span {
-  overflow: hidden;
-  color: #ffffff;
-  font-size: 13px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.timeline-topline small {
-  flex: 0 0 auto;
-  color: rgb(148 163 184);
-  font-size: 11px;
-}
-
-.timeline-detail {
-  display: -webkit-box;
-  margin-top: 5px;
-  overflow: hidden;
-  color: rgb(203 213 225);
-  font-size: 12px;
-  line-height: 1.45;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
 }
 
 .story-entity-row {
@@ -2166,9 +2191,8 @@ onBeforeUnmount(stopPolling);
   gap: 8px;
   align-items: center;
   padding: 10px 12px;
-  color: rgb(203 213 225);
-  background: rgb(15 23 42 / 46%);
-  border: 1px solid rgb(148 163 184 / 16%);
+  background: #ffffff;
+  border: 1px solid rgb(229 231 235);
   border-radius: 8px;
 }
 
@@ -2182,7 +2206,6 @@ onBeforeUnmount(stopPolling);
 
 .story-entity strong {
   margin-left: auto;
-  color: #ffffff;
   font-size: 18px;
 }
 
@@ -2218,7 +2241,6 @@ onBeforeUnmount(stopPolling);
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .story-stage-rail,
   .attack-story-grid,
   .story-entity-row,
   .verdict-panel {
@@ -2241,27 +2263,6 @@ onBeforeUnmount(stopPolling);
   .report-summary,
   .brief-metrics {
     grid-template-columns: 1fr;
-  }
-}
-
-@keyframes flow-sheen {
-  0%,
-  42% {
-    transform: translateX(-120%);
-  }
-  72%,
-  100% {
-    transform: translateX(120%);
-  }
-}
-
-@keyframes flow-node-pulse {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-2px);
   }
 }
 

@@ -903,6 +903,7 @@ const local: App.I18n.Schema = {
         eyebrow: 'Attack Flow',
         title: 'Threat Storyline',
         active: '{count} stage(s) hit',
+        stagesTitle: 'Stage Chain',
         processGraph: 'Process Graph',
         timeline: 'Behavior Timeline',
         empty: 'No sample behavior',

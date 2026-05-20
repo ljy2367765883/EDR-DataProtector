@@ -899,6 +899,7 @@
         eyebrow: 'Attack Flow',
         title: '威胁故事线',
         active: '{count} 个阶段命中',
+        stagesTitle: '阶段链路',
         processGraph: '进程关系',
         timeline: '行为时间线',
         empty: '暂无样本行为',
