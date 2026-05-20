@@ -2212,7 +2212,7 @@ namespace DataProtectorWebBridge.Services
                     "critical",
                     "malicious",
                     "Defense Evasion",
-                    "T1093 Process Hollowing",
+                    "T1055.012 Process Hollowing",
                     "挂起创建、卸载映像、写入内存、改线程上下文、恢复线程组成典型空洞化行为。"),
                 NewBehaviorRule(
                     "dp.behavior.apc-injection",
@@ -2303,7 +2303,7 @@ namespace DataProtectorWebBridge.Services
                     "warning",
                     "suspicious",
                     "Persistence",
-                    "T1060 Registry Run Keys / Startup Folder",
+                    "T1547.001 Registry Run Keys / Startup Folder",
                     "Run/RunOnce、启动目录、计划任务或服务创建相关行为。"),
                 NewBehaviorRule(
                     "dp.behavior.script-network",
