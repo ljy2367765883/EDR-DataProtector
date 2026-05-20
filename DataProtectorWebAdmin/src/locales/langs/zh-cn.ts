@@ -559,6 +559,7 @@
       total: '总量',
       userhook: '进程威胁感知',
       criticalCount: '{count} 个严重',
+      viewDetail: '查看详情',
       clearTitle: '清空审计日志',
       clearContent: '这会移除当前中央审计历史，并保留一条清空操作记录。',
       clearSuccess: '审计日志已清空。',
@@ -574,12 +575,20 @@
         time: '时间',
         type: '类型',
         events: '事件数',
+        host: '主机',
         source: '来源',
         object: '对象',
         action: '操作',
         target: '目标',
         status: '状态',
         message: '消息'
+      },
+      detail: {
+        title: '审计详情',
+        eventOverview: '事件概览',
+        policy: '策略',
+        remote: '远端',
+        singleEventHint: '当前事件暂无更多关联证据，已按单事件展示。'
       },
       attackFlow: {
         title: '攻击流程还原',

@@ -38,6 +38,25 @@ interface HostSummary {
   blocked: number;
 }
 
+interface AuditTimelineItem {
+  id: string;
+  timeUtc: string;
+  lastTimeUtc?: string;
+  stage: string;
+  category: string;
+  action: string;
+  title: string;
+  detail: string;
+  severity: string;
+  disposition: string;
+  source: string;
+  target: string;
+  object: string;
+  remote: string;
+  raw: string;
+  count?: number;
+}
+
 type FlowGraphData = Parameters<LogicFlow['render']>[0];
 
 const loading = ref(false);
@@ -47,10 +66,11 @@ const attackFlow = ref<Api.DataProtector.AuditAttackFlowResponse | null>(null);
 const devices = ref<Api.DataProtector.Device[]>([]);
 const activeCategory = ref<AuditCategory>('all');
 const timeRange = ref<[number, number] | null>(null);
-const attackStageFlowRef = ref<HTMLElement | null>(null);
-const attackStoryFlowRef = ref<HTMLElement | null>(null);
-let attackStageFlow: LogicFlow | null = null;
-let attackStoryFlow: LogicFlow | null = null;
+const selectedAuditRecord = ref<Api.DataProtector.AuditRecord | null>(null);
+const auditDetailVisible = ref(false);
+const auditDetailLoading = ref(false);
+const attackDetailFlowRef = ref<HTMLElement | null>(null);
+let attackDetailFlow: LogicFlow | null = null;
 
 const filters = reactive({
   host: 'all',
@@ -120,11 +140,14 @@ const warningCount = computed(() => auditResponse.value?.warningTotal ?? 0);
 const blockedCount = computed(() => auditResponse.value?.blockedTotal ?? 0);
 const attackFlowEvents = computed(() => attackFlow.value?.events ?? []);
 const attackFlowStages = computed(() => attackFlow.value?.stages ?? []);
-const attackFlowIncidents = computed(() => attackFlow.value?.incidents ?? []);
-const attackFlowProcesses = computed(() => attackFlow.value?.processes ?? []);
-const attackFlowEntities = computed(() => attackFlow.value?.entities ?? []);
 const activeAttackStageCount = computed(() => attackFlowStages.value.filter(item => item.active).length);
-const attackStoryEvents = computed(() => attackFlowEvents.value.slice(0, 40));
+const detailTimelineEvents = computed<AuditTimelineItem[]>(() => {
+  const items = compactTimelineEvents(attackFlowEvents.value.map(normalizeAttackFlowEvent));
+  if (items.length) return items.slice(0, 18);
+
+  return selectedAuditRecord.value ? [normalizeAuditRecordEvent(selectedAuditRecord.value)] : [];
+});
+const attackStoryEvents = computed(() => detailTimelineEvents.value);
 
 const categorySummaries = computed<AuditSummary[]>(() =>
   categoryOptions.value.filter(item => item.value !== 'all').map(item => {
@@ -261,71 +284,6 @@ const hostColumns = computed<DataTableColumns<HostSummary>>(() => [
   }
 ]);
 
-const attackIncidentColumns = computed<DataTableColumns<Api.DataProtector.AuditAttackFlowIncident>>(() => [
-  {
-    title: $t('dataprotector.audit.attackFlow.columns.root'),
-    key: 'rootProcess',
-    minWidth: 260,
-    render(row) {
-      return h('div', { class: 'audit-cell-stack' }, [
-        h('div', { class: 'audit-cell-strong' }, row.rootProcess || row.host || '-'),
-        h('div', { class: 'audit-cell-muted' }, [row.host, row.rootPid ? `PID ${row.rootPid}` : ''].filter(Boolean).join(' / ') || '-')
-      ]);
-    }
-  },
-  {
-    title: $t('dataprotector.audit.attackFlow.columns.stages'),
-    key: 'stages',
-    minWidth: 220,
-    render(row) {
-      return h('div', { class: 'attack-tag-list' }, row.stages.map(stage => h(NTag, { size: 'small', bordered: false }, { default: () => stageLabel(stage) })));
-    }
-  },
-  {
-    title: $t('dataprotector.audit.attackFlow.columns.remotes'),
-    key: 'remotes',
-    minWidth: 220,
-    render(row) {
-      return row.remotes?.length ? row.remotes.slice(0, 3).join(' / ') : '-';
-    }
-  },
-  { title: $t('dataprotector.audit.attackFlow.columns.events'), key: 'eventCount', width: 90 },
-  { title: $t('dataprotector.audit.attackFlow.columns.score'), key: 'score', width: 90 },
-  {
-    title: $t('dataprotector.audit.severity'),
-    key: 'severity',
-    width: 110,
-    render(row) {
-      return h(NTag, { type: attackSeverityTagType(row.severity), bordered: false }, { default: () => attackSeverityLabel(row.severity) });
-    }
-  }
-]);
-
-const attackProcessColumns = computed<DataTableColumns<Api.DataProtector.AuditAttackFlowProcess>>(() => [
-  {
-    title: $t('dataprotector.audit.attackFlow.columns.process'),
-    key: 'path',
-    minWidth: 280,
-    render(row) {
-      return h('div', { class: 'audit-cell-stack' }, [
-        h('div', { class: 'audit-cell-strong' }, row.name || row.path || '-'),
-        h('div', { class: 'audit-cell-muted' }, row.path || '-')
-      ]);
-    }
-  },
-  { title: 'PID', key: 'pid', width: 90 },
-  { title: $t('dataprotector.audit.columns.host'), key: 'host', minWidth: 140, ellipsis: { tooltip: true } },
-  { title: $t('dataprotector.audit.attackFlow.columns.events'), key: 'eventCount', width: 90 },
-  {
-    title: $t('dataprotector.audit.severity'),
-    key: 'severity',
-    width: 110,
-    render(row) {
-      return h(NTag, { type: attackSeverityTagType(row.severity), bordered: false }, { default: () => attackSeverityLabel(row.severity) });
-    }
-  }
-]);
-
 const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => [
   {
     title: $t('dataprotector.audit.columns.time'),
@@ -417,14 +375,21 @@ const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => 
   {
     title: $t('dataprotector.common.action'),
     key: 'actions',
-    width: 110,
+    width: 190,
     fixed: 'right',
     render(row) {
-      return h(
-        NButton,
-        { size: 'small', type: 'error', secondary: true, onClick: () => removeAuditEvent(row) },
-        { default: () => $t('dataprotector.common.delete') }
-      );
+      return h('div', { class: 'audit-row-actions' }, [
+        h(
+          NButton,
+          { size: 'small', type: 'primary', secondary: true, onClick: () => openAuditDetail(row) },
+          { default: () => $t('dataprotector.audit.viewDetail') }
+        ),
+        h(
+          NButton,
+          { size: 'small', type: 'error', secondary: true, onClick: () => removeAuditEvent(row) },
+          { default: () => $t('dataprotector.common.delete') }
+        )
+      ]);
     }
   }
 ]);
@@ -491,6 +456,160 @@ function resolveTargetInfo(record: Api.DataProtector.AuditRecord) {
   const primary = [objectType, objectName].filter(Boolean).join(' / ') || '-';
   const secondary = [objectFormat, targetPid ? `PID ${targetPid}` : '', windowTitle].filter(Boolean).join(' / ');
   return { primary, secondary };
+}
+
+function normalizeAttackFlowEvent(event: Api.DataProtector.AuditAttackFlowEvent): AuditTimelineItem {
+  return {
+    id: event.id || `${event.timeUtc}-${event.action}-${event.objectName}`,
+    timeUtc: event.timeUtc || '',
+    stage: event.stage || '',
+    category: event.category || '',
+    action: event.action || '',
+    title: conciseEventTitle(firstText(event.title, event.action, event.objectName, event.remoteIdentity), event.stage),
+    detail: conciseEventDetail(firstText(event.detail, event.rawMessage)),
+    severity: event.severity || 'info',
+    disposition: event.disposition || 'observed',
+    source: firstText(event.sourceProcess, event.sourcePid, event.sourceUser, event.host),
+    target: firstText(event.targetProcess, event.targetPid, event.objectName, event.remoteIdentity),
+    object: [event.objectType, event.objectName, event.objectFormat].filter(Boolean).join(' / '),
+    remote: event.remoteIdentity || '',
+    raw: event.rawMessage || ''
+  };
+}
+
+function normalizeAuditRecordEvent(record: Api.DataProtector.AuditRecord): AuditTimelineItem {
+  const source = resolveSourceInfo(record);
+  const target = resolveTargetInfo(record);
+  const category = classifyAudit(record);
+  const stage = inferTimelineStage(record);
+  return {
+    id: `${record.TimestampUtc}-${record.Action}-${record.Target}`,
+    timeUtc: record.TimestampUtc || '',
+    stage,
+    category,
+    action: record.Action || '',
+    title: conciseEventTitle(firstText(target.primary, record.Action), stage),
+    detail: conciseEventDetail(firstText(record.EventDetails, record.Message, target.secondary)),
+    severity: resolveSeverity(record),
+    disposition: resolveDisposition(record),
+    source: [source.primary, source.secondary].filter(item => item && item !== '-').join(' / '),
+    target: [target.primary, target.secondary].filter(item => item && item !== '-').join(' / '),
+    object: firstText(record.ObjectName, record.Target),
+    remote: firstText(record.TargetHost, record.Target),
+    raw: record.Message || ''
+  };
+}
+
+function compactTimelineEvents(items: AuditTimelineItem[]) {
+  const compacted: AuditTimelineItem[] = [];
+  const buckets = new Map<string, AuditTimelineItem>();
+
+  for (const item of items) {
+    const key = [
+      item.stage,
+      item.action,
+      item.source.toLowerCase(),
+      item.target.toLowerCase(),
+      item.object.toLowerCase(),
+      item.remote.toLowerCase()
+    ].join('|');
+    const existing = buckets.get(key);
+    if (!existing) {
+      const clone = { ...item, count: 1, lastTimeUtc: item.timeUtc };
+      buckets.set(key, clone);
+      compacted.push(clone);
+      continue;
+    }
+
+    existing.count = (existing.count || 1) + 1;
+    existing.lastTimeUtc = item.timeUtc || existing.lastTimeUtc;
+    existing.severity = maxTimelineSeverity(existing.severity, item.severity);
+  }
+
+  return compacted.sort((a, b) => new Date(a.timeUtc || 0).getTime() - new Date(b.timeUtc || 0).getTime());
+}
+
+function conciseEventTitle(value: string, stage: string) {
+  const text = (value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return stageLabel(stage);
+  const withoutStage = text.replace(/^(Delivery \/ Landing|Execution|Behavior|Credential Access|Lateral Movement|Network \/ C2|Persistence|Impact \/ Data|Risk Behavior):\s*/i, '');
+  return withoutStage.length > 120 ? `${withoutStage.slice(0, 117)}...` : withoutStage;
+}
+
+function conciseEventDetail(value: string) {
+  const text = (value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const parts = text
+    .split(/\s+\/\s+|;\s*/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  const unique = Array.from(new Set(parts));
+  const compact = unique.slice(0, 5).join(' / ');
+  return compact.length > 260 ? `${compact.slice(0, 257)}...` : compact;
+}
+
+function maxTimelineSeverity(left?: string, right?: string) {
+  return timelineSeverityRank(right) > timelineSeverityRank(left) ? right || left || 'info' : left || right || 'info';
+}
+
+function timelineSeverityRank(value?: string) {
+  if (value === 'critical' || value === 'high') return 4;
+  if (value === 'warning' || value === 'medium') return 3;
+  if (value === 'info' || value === 'low') return 2;
+  return 1;
+}
+
+function inferTimelineStage(record: Api.DataProtector.AuditRecord) {
+  const action = record.Action || '';
+  const objectType = record.ObjectType || '';
+  const message = record.Message || '';
+  if (action.startsWith('webshell.') || objectType.includes('file')) return 'delivery';
+  if (action.includes('process-create')) return 'execution';
+  if (action.startsWith('hashdump.') || objectType.includes('credential')) return 'credential';
+  if (action.startsWith('lateral.')) return 'lateral';
+  if (action.startsWith('network.')) return 'network';
+  if (action.startsWith('dlp.')) return 'impact';
+  if (/registry|scheduled|service/i.test(message)) return 'persistence';
+  return 'behavior';
+}
+
+function buildDetailQuery(record: Api.DataProtector.AuditRecord): Api.DataProtector.AuditQuery {
+  const parsedCenter = record.TimestampUtc ? new Date(record.TimestampUtc).getTime() : Number.NaN;
+  const center = Number.isFinite(parsedCenter) ? parsedCenter : Date.now();
+  const from = new Date(center - 15 * 60 * 1000).toISOString();
+  const to = new Date(center + 15 * 60 * 1000).toISOString();
+  const source = resolveSourceInfo(record);
+  const target = resolveTargetInfo(record);
+  const search = firstText(record.SourcePid, record.SourceProcess, record.TargetPid, record.TargetProcess, source.primary, target.primary, record.Action);
+
+  return {
+    page: 1,
+    pageSize: 80,
+    limit: 80,
+    category: 'all',
+    host: resolveHost(record) || 'all',
+    severity: 'all',
+    disposition: 'all',
+    fromUtc: from,
+    toUtc: to,
+    search
+  };
+}
+
+async function openAuditDetail(record: Api.DataProtector.AuditRecord) {
+  attackDetailFlow?.destroy();
+  attackDetailFlow = null;
+  selectedAuditRecord.value = record;
+  auditDetailVisible.value = true;
+  attackFlow.value = null;
+  auditDetailLoading.value = true;
+  try {
+    const { error, data } = await fetchAuditAttackFlow(buildDetailQuery(record));
+    if (!error) attackFlow.value = data;
+  } finally {
+    auditDetailLoading.value = false;
+    renderAttackFlows();
+  }
 }
 
 function parseMessageFields(message?: string) {
@@ -654,6 +773,14 @@ function dispositionLabel(disposition: Exclude<AuditDisposition, 'all'>) {
   return labels[disposition];
 }
 
+function timelineDispositionLabel(value?: string) {
+  if (value === 'blocked' || value === 'observed' || value === 'completed' || value === 'failed') {
+    return dispositionLabel(value);
+  }
+
+  return value || '-';
+}
+
 function severityTagType(severity: Exclude<AuditSeverity, 'all'>) {
   if (severity === 'critical') return 'error';
   if (severity === 'warning') return 'warning';
@@ -701,10 +828,9 @@ function formatAttackTime(value?: string) {
   return value ? new Date(value).toLocaleString() : '-';
 }
 
-function compactFlowText(value?: string, fallback = '-') {
-  const text = (value || fallback).replace(/\s+/g, ' ').trim();
-  if (text.length <= 28) return text;
-  return `${text.slice(0, 25)}...`;
+function formatTimelineTime(value?: string) {
+  if (!value) return '-';
+  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function flowTextStyle() {
@@ -716,51 +842,8 @@ function flowTextStyle() {
   };
 }
 
-function buildStageFlowData(): FlowGraphData {
-  const stages = attackFlowStages.value.length
-    ? attackFlowStages.value
-    : [
-        {
-          key: 'empty',
-          label: $t('dataprotector.audit.attackFlow.empty'),
-          active: false,
-          count: 0,
-          severity: 'info',
-          firstSeenUtc: '',
-          lastSeenUtc: '',
-          detail: ''
-        }
-      ];
-
-  const nodes = stages.map((stage, index) => ({
-    id: `stage-${stage.key || index}`,
-    type: 'rect',
-    x: 96 + index * 190,
-    y: 76,
-    text: {
-      x: 96 + index * 190,
-      y: 76,
-      value: `${stageLabel(stage.key)}\n${stage.count || 0} ${$t('dataprotector.audit.attackFlow.columns.events')}`,
-      ...flowTextStyle()
-    },
-    properties: {
-      width: 150,
-      height: 64
-    }
-  }));
-
-  const edges = stages.slice(1).map((stage, index) => ({
-    id: `stage-edge-${index}`,
-    type: 'polyline',
-    sourceNodeId: `stage-${stages[index].key || index}`,
-    targetNodeId: `stage-${stage.key || index + 1}`
-  }));
-
-  return { nodes, edges };
-}
-
 function buildStoryFlowData(): FlowGraphData {
-  const events = attackStoryEvents.value;
+  const events = attackStoryEvents.value.slice(0, 12);
 
   if (!events.length) {
     return {
@@ -787,29 +870,26 @@ function buildStoryFlowData(): FlowGraphData {
   }
 
   const nodes = events.map((event, index) => {
-    const row = Math.floor(index / 8);
-    const column = index % 8;
-    const x = 116 + column * 184;
-    const y = 86 + row * 116;
-    const title = compactFlowText(event.title || event.action || stageLabel(event.stage));
-    const meta = compactFlowText(event.sourceProcess || event.host || event.remoteIdentity || event.objectName || '-', '');
+    const x = 90 + index * 132;
+    const y = 78;
+    const title = `${String(index + 1).padStart(2, '0')}`;
+    const meta = event.count && event.count > 1 ? `x${event.count}` : formatTimelineTime(event.timeUtc);
 
     return {
       id: `story-${event.id || index}`,
-      type: 'rect',
+      type: 'circle',
       x,
       y,
       text: {
         x,
-        y,
-        value: `${title}\n${formatAttackTime(event.timeUtc)}${meta ? `\n${meta}` : ''}`,
+        y: y + 2,
+        value: `${title}\n${meta}`,
         ...flowTextStyle(),
-        textWidth: 142,
+        textWidth: 88,
         lineHeight: 15
       },
       properties: {
-        width: 158,
-        height: 76
+        r: 34
       }
     };
   });
@@ -853,14 +933,9 @@ function renderLogicFlow(lf: LogicFlow, data: FlowGraphData) {
 
 function renderAttackFlows() {
   nextTick(() => {
-    if (attackStageFlowRef.value) {
-      attackStageFlow ??= createLogicFlow(attackStageFlowRef.value);
-      renderLogicFlow(attackStageFlow, buildStageFlowData());
-    }
-
-    if (attackStoryFlowRef.value) {
-      attackStoryFlow ??= createLogicFlow(attackStoryFlowRef.value);
-      renderLogicFlow(attackStoryFlow, buildStoryFlowData());
+    if (attackDetailFlowRef.value) {
+      attackDetailFlow ??= createLogicFlow(attackDetailFlowRef.value);
+      renderLogicFlow(attackDetailFlow, buildStoryFlowData());
     }
   });
 }
@@ -932,7 +1007,7 @@ async function refresh(resetPage = false) {
   loading.value = true;
   try {
     const query = buildQuery();
-    const [auditResult, flowResult, deviceResult] = await Promise.all([fetchAuditEvents(query), fetchAuditAttackFlow(query), fetchDevices()]);
+    const [auditResult, deviceResult] = await Promise.all([fetchAuditEvents(query), fetchDevices()]);
     if (!auditResult.error) {
       auditResponse.value = auditResult.data;
       suppressPaginationRefresh = true;
@@ -941,7 +1016,6 @@ async function refresh(resetPage = false) {
       pagination.pageSize = auditResult.data.pageSize;
       suppressPaginationRefresh = false;
     }
-    if (!flowResult.error) attackFlow.value = flowResult.data;
     if (!deviceResult.error) devices.value = deviceResult.data;
   } finally {
     loading.value = false;
@@ -1010,18 +1084,15 @@ async function removeAuditEvent(record: Api.DataProtector.AuditRecord) {
 }
 
 watch([auditResponse, () => appStore.locale], updateCharts, { deep: true });
-watch([attackFlow, () => appStore.locale], renderAttackFlows, { deep: true });
+watch([attackFlow, selectedAuditRecord, () => appStore.locale], renderAttackFlows, { deep: true });
 
 onMounted(() => {
-  renderAttackFlows();
   refresh();
 });
 
 onBeforeUnmount(() => {
-  attackStageFlow?.destroy();
-  attackStoryFlow?.destroy();
-  attackStageFlow = null;
-  attackStoryFlow = null;
+  attackDetailFlow?.destroy();
+  attackDetailFlow = null;
 });
 </script>
 
@@ -1163,74 +1234,6 @@ onBeforeUnmount(() => {
       </NGrid>
     </NCard>
 
-    <NCard :bordered="false" class="card-wrapper">
-      <template #header>
-        <div class="flex flex-wrap items-center justify-between gap-12px">
-          <div>
-            <div class="text-16px font-700">{{ $t('dataprotector.audit.attackFlow.title') }}</div>
-            <div class="m-t-4px text-12px text-gray-500">{{ attackFlow?.summary || $t('dataprotector.audit.attackFlow.empty') }}</div>
-          </div>
-          <NSpace>
-            <NTag type="error" :bordered="false">{{ $t('dataprotector.audit.attackFlow.activeStages', { count: activeAttackStageCount }) }}</NTag>
-            <NTag type="info" :bordered="false">{{ $t('dataprotector.audit.attackFlow.events', { count: attackFlow?.eventTotal || 0 }) }}</NTag>
-          </NSpace>
-        </div>
-      </template>
-
-      <NSpace vertical :size="16">
-        <div>
-          <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.stagesTitle') }}</div>
-          <div ref="attackStageFlowRef" class="logic-flow-panel logic-flow-stage"></div>
-        </div>
-
-        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-          <NGi span="24 l:13">
-            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.incidents') }}</div>
-            <NDataTable
-              :columns="attackIncidentColumns"
-              :data="attackFlowIncidents"
-              :pagination="{ pageSize: 5 }"
-              :bordered="false"
-              :scroll-x="980"
-            />
-          </NGi>
-          <NGi span="24 l:11">
-            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.processes') }}</div>
-            <NDataTable
-              :columns="attackProcessColumns"
-              :data="attackFlowProcesses"
-              :pagination="{ pageSize: 5 }"
-              :bordered="false"
-              :scroll-x="820"
-            />
-          </NGi>
-        </NGrid>
-
-        <NGrid :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
-          <NGi span="24 l:15">
-            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.timeline') }}</div>
-            <div ref="attackStoryFlowRef" class="logic-flow-panel logic-flow-story"></div>
-            <div v-if="attackStoryEvents.length" class="flow-story-caption">
-              {{ $t('dataprotector.audit.attackFlow.storyCaption', { count: attackStoryEvents.length }) }}
-            </div>
-          </NGi>
-          <NGi span="24 l:9">
-            <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.entities') }}</div>
-            <div class="attack-entity-list">
-              <div v-for="entity in attackFlowEntities" :key="entity.key" class="attack-entity">
-                <div>
-                  <div class="entity-label">{{ entity.label }}</div>
-                  <div class="entity-type">{{ entity.type }}</div>
-                </div>
-                <NTag size="small" :type="attackSeverityTagType(entity.severity)" :bordered="false">{{ entity.count }}</NTag>
-              </div>
-              <NEmpty v-if="!attackFlowEntities.length" :description="$t('dataprotector.audit.attackFlow.empty')" />
-            </div>
-          </NGi>
-        </NGrid>
-      </NSpace>
-    </NCard>
-
     <NCard :title="$t('dataprotector.audit.auditEvents')" :bordered="false" class="card-wrapper">
       <NSpace vertical :size="12">
         <NTabs :value="activeCategory" type="line" animated @update:value="setActiveCategory">
@@ -1246,11 +1249,113 @@ onBeforeUnmount(() => {
           :data="events"
           :loading="loading"
           :pagination="pagination"
-          :scroll-x="1840"
+          :scroll-x="1920"
           remote
         />
       </NSpace>
     </NCard>
+
+    <NModal v-model:show="auditDetailVisible" preset="card" class="audit-detail-modal" :title="$t('dataprotector.audit.detail.title')">
+      <template v-if="selectedAuditRecord">
+        <NSpace vertical :size="16">
+          <div class="detail-header">
+            <div class="detail-title">
+              <div class="detail-eyebrow">{{ $t('dataprotector.audit.detail.eventOverview') }}</div>
+              <h3>{{ selectedAuditRecord.Action || '-' }}</h3>
+              <p>{{ selectedAuditRecord.Message || selectedAuditRecord.EventDetails || '-' }}</p>
+            </div>
+            <NSpace>
+              <NTag :type="severityTagType(resolveSeverity(selectedAuditRecord))" :bordered="false">
+                {{ severityLabel(resolveSeverity(selectedAuditRecord)) }}
+              </NTag>
+              <NTag :type="dispositionTagType(resolveDisposition(selectedAuditRecord))" :bordered="false">
+                {{ dispositionLabel(resolveDisposition(selectedAuditRecord)) }}
+              </NTag>
+            </NSpace>
+          </div>
+
+          <NDescriptions :column="2" bordered size="small">
+            <NDescriptionsItem :label="$t('dataprotector.audit.columns.time')">
+              {{ formatAttackTime(selectedAuditRecord.TimestampUtc) }}
+            </NDescriptionsItem>
+            <NDescriptionsItem :label="$t('dataprotector.audit.columns.host')">
+              {{ resolveHost(selectedAuditRecord) || '-' }}
+            </NDescriptionsItem>
+            <NDescriptionsItem :label="$t('dataprotector.audit.columns.source')">
+              {{ resolveSourceInfo(selectedAuditRecord).primary || '-' }}
+            </NDescriptionsItem>
+            <NDescriptionsItem :label="$t('dataprotector.audit.columns.object')">
+              {{ resolveTargetInfo(selectedAuditRecord).primary || '-' }}
+            </NDescriptionsItem>
+            <NDescriptionsItem :label="$t('dataprotector.audit.columns.status')">
+              {{ selectedAuditRecord.Status || '-' }}
+            </NDescriptionsItem>
+            <NDescriptionsItem :label="$t('dataprotector.audit.detail.policy')">
+              {{ selectedAuditRecord.PolicyName || '-' }}
+            </NDescriptionsItem>
+          </NDescriptions>
+
+          <NSpin :show="auditDetailLoading">
+            <div class="detail-flow-card">
+              <div class="detail-section-head">
+                <div>
+                  <div class="story-panel-title">{{ $t('dataprotector.audit.attackFlow.timeline') }}</div>
+                  <div class="flow-story-caption">
+                    {{ attackFlow?.summary || $t('dataprotector.audit.detail.singleEventHint') }}
+                  </div>
+                </div>
+                <NSpace>
+                  <NTag type="error" :bordered="false">{{ $t('dataprotector.audit.attackFlow.activeStages', { count: activeAttackStageCount }) }}</NTag>
+                  <NTag type="info" :bordered="false">{{ $t('dataprotector.audit.attackFlow.events', { count: attackStoryEvents.length }) }}</NTag>
+                </NSpace>
+              </div>
+              <div ref="attackDetailFlowRef" class="logic-flow-panel logic-flow-detail"></div>
+              <div class="event-timeline">
+                <div v-for="(event, index) in attackStoryEvents" :key="event.id || index" class="event-timeline-row">
+                  <div class="event-index">{{ String(index + 1).padStart(2, '0') }}</div>
+                  <div class="event-line"></div>
+                  <div class="event-card">
+                    <div class="event-card-head">
+                      <div>
+                        <div class="event-stage">{{ stageLabel(event.stage) }} · {{ formatAttackTime(event.timeUtc) }}</div>
+                        <div class="event-title">{{ event.title || event.action || '-' }}</div>
+                      </div>
+                      <NSpace>
+                        <NTag v-if="event.count && event.count > 1" size="small" :bordered="false">
+                          x{{ event.count }}
+                        </NTag>
+                        <NTag size="small" :type="attackSeverityTagType(event.severity)" :bordered="false">
+                          {{ attackSeverityLabel(event.severity) }}
+                        </NTag>
+                      </NSpace>
+                    </div>
+                    <div class="event-detail">{{ event.detail || event.raw || '-' }}</div>
+                    <div class="event-meta-grid">
+                      <div>
+                        <span>{{ $t('dataprotector.audit.columns.source') }}</span>
+                        <strong>{{ event.source || '-' }}</strong>
+                      </div>
+                      <div>
+                        <span>{{ $t('dataprotector.audit.columns.object') }}</span>
+                        <strong>{{ event.target || event.object || '-' }}</strong>
+                      </div>
+                      <div>
+                        <span>{{ $t('dataprotector.audit.detail.remote') }}</span>
+                        <strong>{{ event.remote || '-' }}</strong>
+                      </div>
+                      <div>
+                        <span>{{ $t('dataprotector.audit.disposition') }}</span>
+                        <strong>{{ timelineDispositionLabel(event.disposition) }}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </NSpin>
+        </NSpace>
+      </template>
+    </NModal>
   </NSpace>
 </template>
 
@@ -1280,18 +1385,70 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.story-panel-title,
-.entity-label {
+.audit-row-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.audit-detail-modal {
+  width: min(1120px, calc(100vw - 48px));
+}
+
+.detail-header {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+}
+
+.detail-title {
+  min-width: 0;
+}
+
+.detail-title h3 {
+  margin: 4px 0 0;
+  color: #111827;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.detail-title p {
+  margin: 6px 0 0;
+  color: var(--n-text-color-3);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.detail-eyebrow {
+  color: #64748b;
+  font-size: 12px;
   font-weight: 700;
 }
 
-.entity-type {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--n-text-color-3);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.detail-flow-card {
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+}
+
+.detail-section-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.story-panel-title {
+  font-weight: 700;
 }
 
 .story-panel-title {
@@ -1306,12 +1463,9 @@ onBeforeUnmount(() => {
   background: #fff;
 }
 
-.logic-flow-stage {
-  height: 180px;
-}
-
-.logic-flow-story {
-  height: 520px;
+.logic-flow-detail {
+  height: 170px;
+  margin-bottom: 16px;
 }
 
 .flow-story-caption {
@@ -1320,30 +1474,119 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.attack-tag-list {
+.event-timeline {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.attack-entity-list {
-  display: flex;
-  max-height: 520px;
   flex-direction: column;
-  gap: 8px;
-  overflow: auto;
-  padding-right: 4px;
+  gap: 12px;
 }
 
-.attack-entity {
-  display: flex;
+.event-timeline-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px 18px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.event-index {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 999px;
+}
+
+.event-line {
+  width: 1px;
+  height: 100%;
+  margin: 0 auto;
+  background: #e2e8f0;
+}
+
+.event-card {
   min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.24);
   border-radius: 8px;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.48);
+}
+
+.event-card-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.event-stage {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.event-title {
+  margin-top: 3px;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.event-detail {
+  margin-top: 8px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.event-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.event-meta-grid div {
+  min-width: 0;
+  padding: 8px 10px;
+  background: #ffffff;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 8px;
+}
+
+.event-meta-grid span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.event-meta-grid strong {
+  display: block;
+  margin-top: 2px;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .audit-detail-modal {
+    width: calc(100vw - 24px);
+  }
+
+  .detail-header,
+  .detail-section-head,
+  .event-card-head {
+    flex-direction: column;
+  }
+
+  .event-meta-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

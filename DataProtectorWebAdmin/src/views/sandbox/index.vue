@@ -2728,12 +2728,10 @@ onBeforeUnmount(() => {
   margin-top: 14px;
   padding: 14px;
   overflow: hidden;
-  background:
-    linear-gradient(135deg, rgb(35 24 63 / 94%), rgb(15 23 42 / 96%)),
-    radial-gradient(circle at 12% 0%, rgb(139 92 246 / 24%), transparent 34%);
-  border: 1px solid rgb(167 139 250 / 28%);
+  background: #ffffff;
+  border: 1px solid rgb(226 232 240);
   border-radius: 8px;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%);
+  box-shadow: 0 8px 22px rgb(15 23 42 / 5%);
 }
 
 .brief-main,
@@ -2750,10 +2748,10 @@ onBeforeUnmount(() => {
   width: 40px;
   height: 40px;
   place-items: center;
-  color: #ffffff;
+  color: #4f46e5;
   font-size: 22px;
-  background: rgb(124 58 237 / 32%);
-  border: 1px solid rgb(196 181 253 / 30%);
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
   border-radius: 8px;
 }
 
@@ -2764,7 +2762,7 @@ onBeforeUnmount(() => {
 
 .brief-title,
 .verdict-copy h3 {
-  color: #ffffff;
+  color: #111827;
   font-weight: 850;
 }
 
@@ -2775,7 +2773,7 @@ onBeforeUnmount(() => {
 .brief-text,
 .verdict-copy p {
   margin: 4px 0 0;
-  color: rgb(203 213 225);
+  color: #64748b;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -2795,8 +2793,8 @@ onBeforeUnmount(() => {
 .verdict-meta div {
   min-width: 0;
   padding: 9px 10px;
-  background: rgb(15 23 42 / 42%);
-  border: 1px solid rgb(148 163 184 / 16%);
+  background: #f8fafc;
+  border: 1px solid rgb(226 232 240);
   border-radius: 8px;
 }
 
@@ -2804,7 +2802,7 @@ onBeforeUnmount(() => {
 .verdict-meta span {
   display: block;
   overflow: hidden;
-  color: rgb(148 163 184);
+  color: #64748b;
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2814,7 +2812,7 @@ onBeforeUnmount(() => {
 .verdict-meta strong {
   display: block;
   margin-top: 2px;
-  color: #ffffff;
+  color: #111827;
   font-size: 18px;
 }
 
@@ -2831,10 +2829,10 @@ onBeforeUnmount(() => {
   gap: 6px;
   align-items: center;
   padding: 6px 8px;
-  color: rgb(226 232 240);
+  color: #475569;
   font-size: 12px;
-  background: rgb(15 23 42 / 44%);
-  border: 1px solid rgb(148 163 184 / 16%);
+  background: #f8fafc;
+  border: 1px solid rgb(226 232 240);
   border-radius: 8px;
 }
 
@@ -2848,12 +2846,12 @@ onBeforeUnmount(() => {
 .selected-report-brief.severity-high,
 .verdict-panel.severity-critical,
 .verdict-panel.severity-high {
-  border-color: rgb(251 113 133 / 34%);
+  border-left: 3px solid #ef4444;
 }
 
 .selected-report-brief.severity-medium,
 .verdict-panel.severity-medium {
-  border-color: rgb(251 191 36 / 34%);
+  border-left: 3px solid #f59e0b;
 }
 
 .verdict-panel {

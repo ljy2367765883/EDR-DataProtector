@@ -563,6 +563,7 @@ const local: App.I18n.Schema = {
       total: 'Total',
       userhook: 'Process Threat Insight',
       criticalCount: '{count} critical',
+      viewDetail: 'Details',
       clearTitle: 'Clear audit log',
       clearContent: 'This removes the current central audit history. A clear operation record will be kept.',
       clearSuccess: 'Audit log cleared.',
@@ -578,12 +579,20 @@ const local: App.I18n.Schema = {
         time: 'Time',
         type: 'Type',
         events: 'Events',
+        host: 'Host',
         source: 'Source',
         object: 'Object',
         action: 'Action',
         target: 'Target',
         status: 'Status',
         message: 'Message'
+      },
+      detail: {
+        title: 'Audit Details',
+        eventOverview: 'Event overview',
+        policy: 'Policy',
+        remote: 'Remote',
+        singleEventHint: 'No additional correlated evidence is available for this event, so it is shown as a single-event timeline.'
       },
       attackFlow: {
         title: 'Attack Flow Reconstruction',
