@@ -2429,7 +2429,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.telemetry-impairment",
                     "遥测削弱与 ETW Patch",
-                    new[] { "userhook.runtime.etw-prepatched-detected", "userhook.runtime.etw-return-patch-detected", "userhook.runtime.etw-jump-patch-detected", "userhook.observed.etw-provider-unregister" },
+                    new[] { "userhook.runtime.etw-prepatched-detected", "userhook.runtime.etw-return-patch-detected", "userhook.runtime.etw-jump-patch-detected" },
                     null,
                     120,
                     1,
@@ -2579,7 +2579,7 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(ruleId, "dp.behavior.process-hollowing", StringComparison.OrdinalIgnoreCase)) return "Correlates suspended process creation, image unmap, remote write, thread context changes and resume behavior.";
             if (string.Equals(ruleId, "dp.behavior.apc-injection", StringComparison.OrdinalIgnoreCase)) return "Correlates QueueUserAPC with remote memory allocation or cross-process memory writes.";
             if (string.Equals(ruleId, "dp.behavior.hook-bypass", StringComparison.OrdinalIgnoreCase)) return "Correlates hook tamper, private syscall stubs and direct NT API behavior.";
-            if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase)) return "Detects ETW patching or provider unregister behavior that weakens telemetry.";
+            if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase)) return "Detects verified ETW patching or telemetry entry-point tamper signals.";
             if (string.Equals(ruleId, "dp.behavior.manual-map", StringComparison.OrdinalIgnoreCase)) return "Correlates manual mapped PE evidence, RWX memory and private executable memory.";
             if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase)) return "Correlates LOLBin execution with suspicious command-line or network behavior.";
             if (string.Equals(ruleId, "dp.behavior.office-script-exec", StringComparison.OrdinalIgnoreCase)) return "Detects Office spawning script interpreters or proxy execution tools with risky arguments.";
@@ -2673,7 +2673,7 @@ namespace DataProtectorWebBridge.Services
 
             if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase))
             {
-                return new[] { "MITRE ATT&CK T1562.002", "Microsoft ETW EventRegister/EventWrite", "Sysmon telemetry model" };
+                return new[] { "MITRE ATT&CK T1562.002", "Microsoft ETW EventWrite/EtwEventWrite", "Sysmon telemetry model" };
             }
 
             if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase))
@@ -2709,8 +2709,8 @@ namespace DataProtectorWebBridge.Services
                 ruleId = ruleId,
                 name = string.IsNullOrWhiteSpace(name) ? ruleId : name,
                 enabled = rule == null || rule.enabled,
-                actions = NormalizeRuleList(rule == null ? null : rule.actions),
-                anyActions = NormalizeRuleList(rule == null ? null : rule.anyActions),
+                actions = NormalizeBehaviorRuleActions(ruleId, rule == null ? null : rule.actions),
+                anyActions = NormalizeBehaviorRuleActions(ruleId, rule == null ? null : rule.anyActions),
                 processNames = NormalizeRuleList(rule == null ? null : rule.processNames),
                 parentProcessNames = NormalizeRuleList(rule == null ? null : rule.parentProcessNames),
                 targetContains = NormalizeRuleList(rule == null ? null : rule.targetContains),
@@ -2725,6 +2725,20 @@ namespace DataProtectorWebBridge.Services
                 description = NormalizeRuleText(rule == null ? string.Empty : rule.description, 1024),
                 references = NormalizeRuleList(rule == null ? null : rule.references)
             };
+        }
+
+        private static string[] NormalizeBehaviorRuleActions(string ruleId, string[] values)
+        {
+            string[] actions = NormalizeRuleList(values);
+            if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase))
+            {
+                actions = actions
+                    .Where(action => !string.Equals(action, "userhook.observed.etw-provider-unregister", StringComparison.OrdinalIgnoreCase))
+                    .Where(action => !string.Equals(action, "userhook.observed.etw-provider-register", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+            }
+
+            return actions;
         }
 
         private static string[] NormalizeRuleList(string[] values)
@@ -4137,6 +4151,12 @@ namespace DataProtectorWebBridge.Services
                     return evaluation;
                 }
 
+                if (RuleRequiresEtwPatchEvidence(rule) && !candidates.Any(IsVerifiedEtwTamperAtom))
+                {
+                    evaluation.Reason = "no verified ETW patch evidence";
+                    return evaluation;
+                }
+
                 if (!ordered)
                 {
                     evaluation.Reason = "events are not in a plausible order";
@@ -4207,6 +4227,20 @@ namespace DataProtectorWebBridge.Services
                        id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        id.IndexOf("office-script", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        id.IndexOf("persistence", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool RuleRequiresEtwPatchEvidence(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("telemetry-impairment", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool IsVerifiedEtwTamperAtom(UserHookBehaviorAtom atom)
+            {
+                string action = atom == null ? string.Empty : (atom.Action ?? string.Empty);
+                return action.IndexOf("etw-prepatched-detected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       action.IndexOf("etw-return-patch-detected", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       action.IndexOf("etw-jump-patch-detected", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
             private static bool HasPlausibleOrder(List<UserHookBehaviorAtom> candidates)
