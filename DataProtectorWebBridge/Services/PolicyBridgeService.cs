@@ -121,6 +121,9 @@ namespace DataProtectorWebBridge.Services
         private const int MaxQueryAttempts = 4;
 
         private readonly AuditLog auditLog;
+        private readonly object userHookCorrelatorLock = new object();
+        private UserHookBehaviorCorrelator userHookCorrelator;
+        private string userHookCorrelatorSignature;
 
         public PolicyBridgeService(AuditLog auditLog)
         {
@@ -1319,7 +1322,7 @@ namespace DataProtectorWebBridge.Services
         {
             UserHookDefenseEventDto[] events = QueryUserHookDefenseEvents();
             List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
-            UserHookBehaviorCorrelator correlator = new UserHookBehaviorCorrelator(policy);
+            UserHookBehaviorCorrelator correlator = GetUserHookBehaviorCorrelator(policy);
 
             foreach (UserHookDefenseEventDto item in events)
             {
@@ -1349,18 +1352,102 @@ namespace DataProtectorWebBridge.Services
                     EventDetails = message
                 };
 
-                records.Add(record);
-                TryAppendAudit(record);
-                records.AddRange(correlator.Observe(record));
+                AddUserHookBehaviorMatches(records, correlator.Observe(record));
+                if (ShouldUploadAtomicUserHookRecord(record))
+                {
+                    records.Add(record);
+                    TryAppendAudit(record);
+                }
             }
 
             foreach (AuditLog.AuditRecord record in DrainUserHookRuntimeAuditRecords(policy))
             {
-                records.Add(record);
-                records.AddRange(correlator.Observe(record));
+                AddUserHookBehaviorMatches(records, correlator.Observe(record));
+                if (ShouldUploadAtomicUserHookRecord(record))
+                {
+                    records.Add(record);
+                    TryAppendAudit(record);
+                }
             }
 
             return records.ToArray();
+        }
+
+        private UserHookBehaviorCorrelator GetUserHookBehaviorCorrelator(UserHookDefensePolicyDto policy)
+        {
+            UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
+            string signature = BuildUserHookBehaviorPolicySignature(normalized);
+            lock (userHookCorrelatorLock)
+            {
+                if (userHookCorrelator == null ||
+                    !string.Equals(userHookCorrelatorSignature, signature, StringComparison.Ordinal))
+                {
+                    userHookCorrelator = new UserHookBehaviorCorrelator(normalized);
+                    userHookCorrelatorSignature = signature;
+                }
+
+                return userHookCorrelator;
+            }
+        }
+
+        private static string BuildUserHookBehaviorPolicySignature(UserHookDefensePolicyDto policy)
+        {
+            JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+            return serializer.Serialize(NormalizeUserHookBehaviorRules(policy == null ? null : policy.behaviorRules));
+        }
+
+        private void AddUserHookBehaviorMatches(List<AuditLog.AuditRecord> records, AuditLog.AuditRecord[] matches)
+        {
+            if (matches == null || matches.Length == 0)
+            {
+                return;
+            }
+
+            foreach (AuditLog.AuditRecord match in matches)
+            {
+                if (match == null)
+                {
+                    continue;
+                }
+
+                records.Add(match);
+                TryAppendAudit(match);
+            }
+        }
+
+        private static bool ShouldUploadAtomicUserHookRecord(AuditLog.AuditRecord record)
+        {
+            if (record == null)
+            {
+                return false;
+            }
+
+            string action = record.Action ?? string.Empty;
+            string disposition = record.Disposition ?? string.Empty;
+            string status = record.Status ?? string.Empty;
+
+            if (action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (action.StartsWith("userhook.runtime.drain.failed", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.parse.failed", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.policy-signer-untrusted", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("userhook.runtime.policy-signer-excluded", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (action.StartsWith("userhook.blocked.", StringComparison.OrdinalIgnoreCase) ||
+                action.IndexOf(".blocked.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                string.Equals(disposition, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(status, "0xC0000022", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         private static string BuildUserHookAuditMessage(UserHookDefenseEventDto item)
@@ -1454,7 +1541,6 @@ namespace DataProtectorWebBridge.Services
                     };
 
                     records.Add(record);
-                    TryAppendAudit(record);
                 }
                 catch
                 {
@@ -1471,7 +1557,6 @@ namespace DataProtectorWebBridge.Services
                         Message = line
                     };
                     records.Add(record);
-                    TryAppendAudit(record);
                 }
             }
 
@@ -1532,13 +1617,18 @@ namespace DataProtectorWebBridge.Services
             string category = runtimeEvent == null ? string.Empty : (runtimeEvent.category ?? string.Empty);
 
             if (blocked ||
-                action.IndexOf(".blocked.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.IndexOf(".blocked.", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "critical";
+            }
+
+            if (
                 action.IndexOf("unhook", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 action.IndexOf("syscall-bypass", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 action.IndexOf("manual-map", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 category.IndexOf("injection", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "critical";
+                return "warning";
             }
 
             if (action.IndexOf("memory-private-executable", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -2447,7 +2537,7 @@ namespace DataProtectorWebBridge.Services
             return new UserHookBehaviorRule
             {
                 ruleId = ruleId,
-                name = name,
+                name = FriendlyDefaultBehaviorRuleName(ruleId, name),
                 enabled = true,
                 actions = actions ?? new string[0],
                 anyActions = anyActions ?? new string[0],
@@ -2462,9 +2552,41 @@ namespace DataProtectorWebBridge.Services
                 disposition = disposition,
                 tactic = tactic,
                 technique = technique,
-                description = description,
+                description = FriendlyDefaultBehaviorRuleDescription(ruleId, description),
                 references = DefaultRuleReferences(ruleId)
             };
+        }
+
+        private static string FriendlyDefaultBehaviorRuleName(string ruleId, string fallback)
+        {
+            if (string.Equals(ruleId, "dp.behavior.injection-chain", StringComparison.OrdinalIgnoreCase)) return "Cross-process injection chain";
+            if (string.Equals(ruleId, "dp.behavior.process-hollowing", StringComparison.OrdinalIgnoreCase)) return "Process hollowing chain";
+            if (string.Equals(ruleId, "dp.behavior.apc-injection", StringComparison.OrdinalIgnoreCase)) return "APC injection chain";
+            if (string.Equals(ruleId, "dp.behavior.hook-bypass", StringComparison.OrdinalIgnoreCase)) return "Hook bypass and direct syscall behavior";
+            if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase)) return "Telemetry impairment and ETW tamper";
+            if (string.Equals(ruleId, "dp.behavior.manual-map", StringComparison.OrdinalIgnoreCase)) return "Manual map or executable memory chain";
+            if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase)) return "LOLBin download or execution chain";
+            if (string.Equals(ruleId, "dp.behavior.office-script-exec", StringComparison.OrdinalIgnoreCase)) return "Office child script execution";
+            if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase)) return "System recovery inhibition";
+            if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase)) return "Autostart persistence chain";
+            if (string.Equals(ruleId, "dp.behavior.script-network", StringComparison.OrdinalIgnoreCase)) return "Script interpreter network chain";
+            return string.IsNullOrWhiteSpace(fallback) ? ruleId : fallback;
+        }
+
+        private static string FriendlyDefaultBehaviorRuleDescription(string ruleId, string fallback)
+        {
+            if (string.Equals(ruleId, "dp.behavior.injection-chain", StringComparison.OrdinalIgnoreCase)) return "Correlates cross-process access, executable memory, memory write and remote execution before alerting.";
+            if (string.Equals(ruleId, "dp.behavior.process-hollowing", StringComparison.OrdinalIgnoreCase)) return "Correlates suspended process creation, image unmap, remote write, thread context changes and resume behavior.";
+            if (string.Equals(ruleId, "dp.behavior.apc-injection", StringComparison.OrdinalIgnoreCase)) return "Correlates QueueUserAPC with remote memory allocation or cross-process memory writes.";
+            if (string.Equals(ruleId, "dp.behavior.hook-bypass", StringComparison.OrdinalIgnoreCase)) return "Correlates hook tamper, private syscall stubs and direct NT API behavior.";
+            if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase)) return "Detects ETW patching or provider unregister behavior that weakens telemetry.";
+            if (string.Equals(ruleId, "dp.behavior.manual-map", StringComparison.OrdinalIgnoreCase)) return "Correlates manual mapped PE evidence, RWX memory and private executable memory.";
+            if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase)) return "Correlates LOLBin execution with suspicious command-line or network behavior.";
+            if (string.Equals(ruleId, "dp.behavior.office-script-exec", StringComparison.OrdinalIgnoreCase)) return "Detects Office spawning script interpreters or proxy execution tools with risky arguments.";
+            if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase)) return "Detects VSS, backup or boot recovery destruction command execution.";
+            if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase)) return "Correlates Run, RunOnce, startup folder, task or service persistence behavior.";
+            if (string.Equals(ruleId, "dp.behavior.script-network", StringComparison.OrdinalIgnoreCase)) return "Correlates script interpreter execution with outbound network behavior.";
+            return fallback ?? string.Empty;
         }
 
         private static string[] DefaultRuleProcessNames(string ruleId)
@@ -3757,8 +3879,10 @@ namespace DataProtectorWebBridge.Services
                 DateTime windowStart;
                 List<UserHookBehaviorAtom> candidates;
                 HashSet<string> matchedActions;
+                BehaviorMatchEvaluation evaluation;
                 int score;
                 string dedupKey;
+                string message;
 
                 record = null;
                 if (rule == null || !rule.enabled || !AtomMatchesRule(rule, atom))
@@ -3769,8 +3893,9 @@ namespace DataProtectorWebBridge.Services
                 windowStart = atom.TimestampUtc.AddSeconds(-Clamp(rule.windowSeconds, 5, 3600));
                 candidates = atoms
                     .Where(item => item.TimestampUtc >= windowStart)
-                    .Where(item => string.Equals(item.ProcessKey, atom.ProcessKey, StringComparison.OrdinalIgnoreCase))
+                    .Where(item => IsRelatedBehaviorScope(rule, atom, item))
                     .Where(item => AtomMatchesRule(rule, item))
+                    .OrderBy(item => item.TimestampUtc)
                     .ToList();
 
                 matchedActions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3779,46 +3904,48 @@ namespace DataProtectorWebBridge.Services
                     matchedActions.Add(item.Action);
                 }
 
-                score = matchedActions.Count * Clamp(rule.weight, 1, 100);
-                if (matchedActions.Count < Clamp(rule.threshold, 1, 64))
+                evaluation = EvaluateBehaviorChain(rule, atom, candidates, matchedActions);
+                score = evaluation.Score;
+                if (!evaluation.Alert)
                 {
                     return false;
                 }
 
-                dedupKey = rule.ruleId + "|" + atom.ProcessKey + "|" + (long)(atom.TimestampUtc.Subtract(DateTime.MinValue).TotalSeconds / Clamp(rule.windowSeconds, 5, 3600));
+                dedupKey = rule.ruleId + "|" + evaluation.ScopeKey + "|" + (long)(atom.TimestampUtc.Subtract(DateTime.MinValue).TotalSeconds / Clamp(rule.windowSeconds, 5, 3600));
                 if (!emitted.Add(dedupKey))
                 {
                     return false;
                 }
 
+                message = BuildRuleMatchMessage(rule, matchedActions, candidates, evaluation);
                 record = new AuditLog.AuditRecord
                 {
                     TimestampUtc = atom.TimestampUtc.ToString("o"),
                     Host = atom.Host,
                     Actor = "behavior-chain-engine",
                     Action = "behavior.chain." + rule.ruleId,
-                    Target = atom.Target,
-                    Extension = atom.ProcessImage,
+                    Target = evaluation.PrimaryTarget,
+                    Extension = evaluation.PrimaryProcess,
                     Succeeded = !string.Equals(rule.disposition, "malicious", StringComparison.OrdinalIgnoreCase),
                     Status = string.Equals(rule.severity, "critical", StringComparison.OrdinalIgnoreCase) ? "0xE0020001" : "0xE0020000",
-                    Message = BuildRuleMatchMessage(rule, matchedActions, candidates.Count, score),
+                    Message = message,
                     SourceHost = atom.Host,
-                    SourceProcess = atom.ProcessImage,
+                    SourceProcess = evaluation.PrimaryProcess,
                     SourcePid = atom.ProcessPid,
-                    TargetProcess = atom.Target,
-                    TargetPid = atom.TargetPid,
+                    TargetProcess = evaluation.PrimaryTarget,
+                    TargetPid = evaluation.PrimaryTargetPid,
                     ObjectType = "behavior-chain",
                     ObjectName = string.IsNullOrWhiteSpace(rule.name) ? rule.ruleId : rule.name,
-                    ObjectFormat = BuildRuleObjectFormat(rule, matchedActions, candidates.Count, score),
+                    ObjectFormat = BuildRuleObjectFormat(rule, matchedActions, candidates.Count, score, evaluation),
                     PolicyName = "process-threat-insight",
                     Disposition = NormalizeBehaviorDisposition(rule.disposition),
                     Severity = NormalizeBehaviorSeverity(rule.severity),
-                    EventDetails = BuildRuleMatchMessage(rule, matchedActions, candidates.Count, score)
+                    EventDetails = message
                 };
                 return true;
             }
 
-            private static string BuildRuleObjectFormat(UserHookBehaviorRule rule, HashSet<string> matchedActions, int eventCount, int score)
+            private static string BuildRuleObjectFormat(UserHookBehaviorRule rule, HashSet<string> matchedActions, int eventCount, int score, BehaviorMatchEvaluation evaluation)
             {
                 List<string> parts = new List<string>();
                 if (!string.IsNullOrWhiteSpace(rule.ruleId))
@@ -3838,6 +3965,17 @@ namespace DataProtectorWebBridge.Services
 
                 parts.Add("score=" + score.ToString(CultureInfo.InvariantCulture));
                 parts.Add("events=" + eventCount.ToString(CultureInfo.InvariantCulture));
+                parts.Add("classes=" + string.Join(",", evaluation.EvidenceClasses.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()));
+                if (!string.IsNullOrWhiteSpace(evaluation.ScopeKey))
+                {
+                    parts.Add("scope=" + evaluation.ScopeKey);
+                }
+
+                if (!string.IsNullOrWhiteSpace(evaluation.Reason))
+                {
+                    parts.Add("reason=" + evaluation.Reason);
+                }
+
                 parts.Add("actions=" + string.Join(",", matchedActions.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()));
                 return string.Join(";", parts.ToArray());
             }
@@ -3885,13 +4023,20 @@ namespace DataProtectorWebBridge.Services
                 return "observed";
             }
 
-            private static string BuildRuleMatchMessage(UserHookBehaviorRule rule, HashSet<string> matchedActions, int eventCount, int score)
+            private static string BuildRuleMatchMessage(UserHookBehaviorRule rule, HashSet<string> matchedActions, List<UserHookBehaviorAtom> candidates, BehaviorMatchEvaluation evaluation)
             {
                 string message = "Behavior chain matched: " + rule.name + ".";
-                message += " Severity=" + rule.severity + "; disposition=" + rule.disposition + "; score=" + score.ToString(CultureInfo.InvariantCulture) + "; events=" + eventCount.ToString(CultureInfo.InvariantCulture) + ".";
+                message += " Severity=" + rule.severity + "; disposition=" + rule.disposition + "; score=" + evaluation.Score.ToString(CultureInfo.InvariantCulture) + "; events=" + candidates.Count.ToString(CultureInfo.InvariantCulture) + ".";
                 if (!string.IsNullOrWhiteSpace(rule.technique))
                 {
                     message += " Technique: " + rule.technique + ".";
+                }
+
+                message += " EvidenceClasses: " + string.Join(",", evaluation.EvidenceClasses.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()) + ".";
+                message += " Source: " + evaluation.PrimaryProcess + "; Target: " + evaluation.PrimaryTarget + ".";
+                if (!string.IsNullOrWhiteSpace(evaluation.Reason))
+                {
+                    message += " Reason: " + evaluation.Reason + ".";
                 }
 
                 message += " Actions: " + string.Join(",", matchedActions.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()) + ".";
@@ -3901,6 +4046,203 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 return message;
+            }
+
+            private static BehaviorMatchEvaluation EvaluateBehaviorChain(UserHookBehaviorRule rule, UserHookBehaviorAtom atom, List<UserHookBehaviorAtom> candidates, HashSet<string> matchedActions)
+            {
+                BehaviorMatchEvaluation evaluation = new BehaviorMatchEvaluation();
+                int requiredActions = Clamp(rule.threshold, 1, 64);
+                int baseWeight = Clamp(rule.weight, 1, 100);
+                bool hasRequiredAction = rule.actions == null || rule.actions.Length == 0 || matchedActions.Any(action => MatchesAction(rule.actions, action));
+                bool hasAnyAction = rule.anyActions == null || rule.anyActions.Length == 0 || matchedActions.Any(action => MatchesAction(rule.anyActions, action));
+                bool isSingleHighConfidenceRule = IsHighConfidenceSingleEventRule(rule);
+                bool ordered = HasPlausibleOrder(candidates);
+
+                evaluation.PrimaryProcess = FirstNonEmpty(atom.ProcessImage, candidates.Select(item => item.ProcessImage).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item)), "-");
+                evaluation.PrimaryTarget = FirstNonEmpty(atom.Target, candidates.Select(item => item.Target).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item)), "-");
+                evaluation.PrimaryTargetPid = FirstNonEmpty(atom.TargetPid, candidates.Select(item => item.TargetPid).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item)), string.Empty);
+                evaluation.ScopeKey = BuildScopeKey(rule, atom);
+
+                foreach (UserHookBehaviorAtom item in candidates)
+                {
+                    evaluation.EvidenceClasses.Add(item.EvidenceClass);
+                    evaluation.Score += Math.Max(5, baseWeight / 3);
+                    evaluation.Score += item.RiskScore;
+                    if (item.Blocked)
+                    {
+                        evaluation.Score += 30;
+                    }
+
+                    if (item.IsCrossProcess)
+                    {
+                        evaluation.Score += 12;
+                    }
+
+                    if (item.IsSuspiciousProcess)
+                    {
+                        evaluation.Score += 12;
+                    }
+
+                    if (item.HasSuspiciousCommand)
+                    {
+                        evaluation.Score += 16;
+                    }
+
+                    if (item.IsUserWritableProcess)
+                    {
+                        evaluation.Score += 8;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(item.TargetPid) &&
+                        !string.Equals(item.TargetPid, item.ProcessPid, StringComparison.OrdinalIgnoreCase))
+                    {
+                        evaluation.Score += 8;
+                    }
+                }
+
+                evaluation.Score += matchedActions.Count * 8;
+                evaluation.Score += Math.Max(0, evaluation.EvidenceClasses.Count - 1) * 12;
+                if (hasRequiredAction) evaluation.Score += 12;
+                if (hasAnyAction) evaluation.Score += 8;
+                if (ordered) evaluation.Score += 12;
+
+                if (!hasRequiredAction || !hasAnyAction)
+                {
+                    evaluation.Reason = "missing required behavior atom";
+                    return evaluation;
+                }
+
+                if (matchedActions.Count < requiredActions && !isSingleHighConfidenceRule)
+                {
+                    evaluation.Reason = "not enough distinct actions";
+                    return evaluation;
+                }
+
+                if (evaluation.EvidenceClasses.Count < 2 && !isSingleHighConfidenceRule)
+                {
+                    evaluation.Reason = "not enough behavior classes";
+                    return evaluation;
+                }
+
+                if (RuleRequiresCrossProcess(rule) && !candidates.Any(item => item.IsCrossProcess))
+                {
+                    evaluation.Reason = "no cross-process relationship";
+                    return evaluation;
+                }
+
+                if (RuleRequiresSuspiciousContext(rule) &&
+                    !candidates.Any(item => item.IsSuspiciousProcess || item.HasSuspiciousCommand || item.IsUserWritableProcess || item.Blocked))
+                {
+                    evaluation.Reason = "no suspicious process, command, writable path or response context";
+                    return evaluation;
+                }
+
+                if (!ordered)
+                {
+                    evaluation.Reason = "events are not in a plausible order";
+                    return evaluation;
+                }
+
+                int alertThreshold = isSingleHighConfidenceRule ? 70 : Math.Max(70, requiredActions * Math.Max(20, baseWeight / 2));
+                evaluation.Alert = evaluation.Score >= alertThreshold;
+                evaluation.Reason = evaluation.Alert ? "multi-signal behavior chain" : "score below threshold";
+                return evaluation;
+            }
+
+            private static bool IsRelatedBehaviorScope(UserHookBehaviorRule rule, UserHookBehaviorAtom anchor, UserHookBehaviorAtom candidate)
+            {
+                if (!string.Equals(anchor.Host, candidate.Host, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                if (RuleRequiresCrossProcess(rule))
+                {
+                    string anchorTarget = FirstNonEmpty(anchor.TargetPid, anchor.Target);
+                    string candidateTarget = FirstNonEmpty(candidate.TargetPid, candidate.Target);
+                    return string.Equals(anchor.ProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase) &&
+                           (string.IsNullOrWhiteSpace(anchorTarget) ||
+                            string.IsNullOrWhiteSpace(candidateTarget) ||
+                            string.Equals(anchorTarget, candidateTarget, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (string.Equals(anchor.ProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                return !string.IsNullOrWhiteSpace(anchor.ParentProcessKey) &&
+                       string.Equals(anchor.ParentProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase);
+            }
+
+            private static string BuildScopeKey(UserHookBehaviorRule rule, UserHookBehaviorAtom atom)
+            {
+                if (RuleRequiresCrossProcess(rule))
+                {
+                    return atom.ProcessKey + "->" + FirstNonEmpty(atom.TargetPid, atom.Target, "unknown-target");
+                }
+
+                return atom.ProcessKey;
+            }
+
+            private static bool IsHighConfidenceSingleEventRule(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("telemetry-impairment", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("recovery-inhibit", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool RuleRequiresCrossProcess(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("injection", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("hollow", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("apc", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool RuleRequiresSuspiciousContext(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("lolbin", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("office-script", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("persistence", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool HasPlausibleOrder(List<UserHookBehaviorAtom> candidates)
+            {
+                if (candidates == null || candidates.Count < 2)
+                {
+                    return true;
+                }
+
+                int processIndex = candidates.FindIndex(item => item.EvidenceClass == "process");
+                int memoryIndex = candidates.FindIndex(item => item.EvidenceClass == "memory");
+                int writeIndex = candidates.FindIndex(item => item.EvidenceClass == "write");
+                int executeIndex = candidates.FindIndex(item => item.EvidenceClass == "execute");
+                int apcIndex = candidates.FindIndex(item => item.EvidenceClass == "apc");
+
+                if (writeIndex >= 0 && executeIndex >= 0 && writeIndex > executeIndex)
+                {
+                    return false;
+                }
+
+                if (memoryIndex >= 0 && executeIndex >= 0 && memoryIndex > executeIndex)
+                {
+                    return false;
+                }
+
+                if (processIndex >= 0 && executeIndex >= 0 && processIndex > executeIndex)
+                {
+                    return false;
+                }
+
+                if (writeIndex >= 0 && apcIndex >= 0 && writeIndex > apcIndex)
+                {
+                    return false;
+                }
+
+                return true;
             }
 
             private static bool AtomMatchesRule(UserHookBehaviorRule rule, UserHookBehaviorAtom atom)
@@ -3942,7 +4284,69 @@ namespace DataProtectorWebBridge.Services
                     return false;
                 }
 
-                return actions.Any(item => string.Equals(item, action, StringComparison.OrdinalIgnoreCase));
+                return actions.Any(item => ActionEquivalent(item, action));
+            }
+
+            private static bool ActionEquivalent(string expected, string actual)
+            {
+                string left = NormalizeActionAtom(expected);
+                string right = NormalizeActionAtom(actual);
+                return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+            }
+
+            private static string NormalizeActionAtom(string action)
+            {
+                string value = (action ?? string.Empty).Trim().ToLowerInvariant();
+                if (value.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase))
+                {
+                    value = value.Substring("userhook.".Length);
+                }
+
+                if (value.StartsWith("observed.", StringComparison.OrdinalIgnoreCase))
+                {
+                    value = value.Substring("observed.".Length);
+                }
+
+                if (value.StartsWith("blocked.", StringComparison.OrdinalIgnoreCase))
+                {
+                    value = value.Substring("blocked.".Length);
+                }
+
+                value = value.Replace("nt-", string.Empty);
+                value = value.Replace("behavior-", string.Empty);
+                value = value.Replace("-ex", string.Empty);
+
+                if (value == "create-remote-thread" || value == "remote-thread-create" || value == "createthread")
+                {
+                    return "remote-thread";
+                }
+
+                if (value == "write-process-memory" || value == "write-virtual-memory")
+                {
+                    return "write-memory";
+                }
+
+                if (value == "remote-executable-memory" || value == "allocate-executable-memory" || value == "protect-executable-memory")
+                {
+                    return "executable-memory";
+                }
+
+                if (value == "queue-user-apc")
+                {
+                    return "queue-apc";
+                }
+
+                if (value == "process-access")
+                {
+                    return "process-access";
+                }
+
+                if (value == "thread-access")
+                {
+                    return "thread-access";
+                }
+
+                return value;
             }
 
             private static bool MatchesOptionalList(string[] values, string source)
@@ -4015,16 +4419,203 @@ namespace DataProtectorWebBridge.Services
                     Host = record.Host ?? Environment.MachineName,
                     Action = record.Action ?? string.Empty,
                     Target = record.Target ?? string.Empty,
-                    ProcessImage = record.Extension ?? string.Empty,
-                    CommandLine = ExtractMessageField(record.Message, "Command: "),
+                    ProcessImage = FirstNonEmpty(record.SourceProcess, record.Extension),
+                    CommandLine = FirstNonEmpty(ExtractMessageField(record.Message, "Command: "), record.Message),
                     ParentImage = ExtractMessageField(record.Message, "Parent: "),
                     ProcessPid = FirstNonEmpty(record.SourcePid, ExtractPid(record.Message)),
-                    TargetPid = record.TargetPid ?? string.Empty
+                    TargetPid = record.TargetPid ?? string.Empty,
+                    Status = record.Status ?? string.Empty,
+                    Blocked = string.Equals(record.Disposition, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                              (record.Action ?? string.Empty).IndexOf(".blocked.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              string.Equals(record.Status, "0xC0000022", StringComparison.OrdinalIgnoreCase)
                 };
                 atom.ProcessKey = string.IsNullOrWhiteSpace(atom.ProcessImage)
                     ? atom.Host + "|" + ExtractPid(record.Message)
                     : atom.Host + "|" + atom.ProcessImage;
+                atom.ParentProcessKey = string.IsNullOrWhiteSpace(atom.ParentImage) ? string.Empty : atom.Host + "|" + atom.ParentImage;
+                atom.EvidenceClass = ClassifyEvidenceClass(atom);
+                atom.IsCrossProcess = IsCrossProcessAtom(atom);
+                atom.IsSuspiciousProcess = IsSuspiciousProcess(atom.ProcessImage) || IsSuspiciousProcess(atom.Target) || IsSuspiciousProcess(atom.CommandLine);
+                atom.HasSuspiciousCommand = HasSuspiciousCommand(atom.CommandLine) || HasSuspiciousCommand(atom.Target);
+                atom.IsUserWritableProcess = IsUserWritablePath(atom.ProcessImage) || IsUserWritablePath(atom.Target) || IsUserWritablePath(atom.CommandLine);
+                atom.RiskScore = ComputeAtomRisk(atom);
                 return true;
+            }
+
+            private static string ClassifyEvidenceClass(UserHookBehaviorAtom atom)
+            {
+                string action = atom == null ? string.Empty : (atom.Action ?? string.Empty);
+                string api = (atom == null ? string.Empty : (atom.Target ?? string.Empty)) + " " + (atom == null ? string.Empty : (atom.CommandLine ?? string.Empty));
+
+                if (action.IndexOf("write-process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "write";
+                }
+
+                if (action.IndexOf("remote-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("allocate-executable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("protect-executable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("memory-rwx", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("memory-private-executable", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "memory";
+                }
+
+                if (action.IndexOf("remote-thread", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-create-thread-ex", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "execute";
+                }
+
+                if (action.IndexOf("queue-user-apc", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "apc";
+                }
+
+                if (action.IndexOf("set-thread-context", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("resume-thread", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-unmap-view", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "thread";
+                }
+
+                if (action.IndexOf("process-create", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    api.IndexOf("CreateProcess", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "process";
+                }
+
+                if (action.IndexOf("network-connect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("network-wsaconnect", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "network";
+                }
+
+                if (action.IndexOf("registry-set-value", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "registry";
+                }
+
+                if (action.IndexOf("load-library", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("manual-map", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "module";
+                }
+
+                if (action.IndexOf("etw", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("unhook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("hook-overwrite", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("syscall", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "evasion";
+                }
+
+                return "behavior";
+            }
+
+            private static bool IsCrossProcessAtom(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return false;
+                }
+
+                if (string.IsNullOrWhiteSpace(atom.TargetPid))
+                {
+                    return atom.Action.IndexOf("remote", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                           atom.Action.IndexOf("process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                           atom.Action.IndexOf("thread", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+
+                return !string.Equals(atom.TargetPid, atom.ProcessPid, StringComparison.OrdinalIgnoreCase);
+            }
+
+            private static bool IsSuspiciousProcess(string value)
+            {
+                string name = ExtractFileName(value);
+                string[] names =
+                {
+                    "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe",
+                    "regsvr32.exe", "certutil.exe", "bitsadmin.exe", "wmic.exe", "msiexec.exe", "installutil.exe",
+                    "regasm.exe", "regsvcs.exe", "vssadmin.exe", "wbadmin.exe", "bcdedit.exe", "reagentc.exe",
+                    "schtasks.exe", "sc.exe", "psexec.exe", "procdump.exe"
+                };
+
+                return names.Any(item => string.Equals(item, name, StringComparison.OrdinalIgnoreCase));
+            }
+
+            private static bool HasSuspiciousCommand(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "-enc", "-encodedcommand", "frombase64string", "downloadstring", "invoke-expression", " iex ",
+                    "http://", "https://", "urlcache", "scrobj.dll", "javascript:", "vbscript:", "delete shadows",
+                    "shadowcopy delete", "resize shadowstorage", "wbadmin delete", "recoveryenabled no",
+                    "bootstatuspolicy ignoreallfailures", "currentversion\\run", "\\runonce", "schtasks", "/create",
+                    "sc create", "new-service", "virtualallocex", "writeprocessmemory", "createremotethread"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool IsUserWritablePath(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string text = value.Trim().Trim('"');
+                string lower = text.ToLowerInvariant();
+                return lower.IndexOf("\\users\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       lower.IndexOf("\\appdata\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       lower.IndexOf("\\temp\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       lower.IndexOf("\\programdata\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       lower.IndexOf("\\downloads\\", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static int ComputeAtomRisk(UserHookBehaviorAtom atom)
+            {
+                int score = 0;
+                if (atom == null)
+                {
+                    return score;
+                }
+
+                switch (atom.EvidenceClass)
+                {
+                    case "write":
+                    case "memory":
+                    case "execute":
+                    case "evasion":
+                        score += 25;
+                        break;
+                    case "thread":
+                    case "module":
+                        score += 18;
+                        break;
+                    case "process":
+                    case "network":
+                    case "registry":
+                        score += 12;
+                        break;
+                    default:
+                        score += 5;
+                        break;
+                }
+
+                if (atom.Blocked) score += 25;
+                if (atom.IsCrossProcess) score += 12;
+                if (atom.IsSuspiciousProcess) score += 10;
+                if (atom.HasSuspiciousCommand) score += 14;
+                if (atom.IsUserWritableProcess) score += 8;
+                return score;
             }
 
             private static string ExtractMessageField(string message, string prefix)
@@ -4079,8 +4670,39 @@ namespace DataProtectorWebBridge.Services
             public string CommandLine { get; set; }
             public string ParentImage { get; set; }
             public string ProcessKey { get; set; }
+            public string ParentProcessKey { get; set; }
             public string ProcessPid { get; set; }
             public string TargetPid { get; set; }
+            public string Status { get; set; }
+            public string EvidenceClass { get; set; }
+            public bool Blocked { get; set; }
+            public bool IsCrossProcess { get; set; }
+            public bool IsSuspiciousProcess { get; set; }
+            public bool HasSuspiciousCommand { get; set; }
+            public bool IsUserWritableProcess { get; set; }
+            public int RiskScore { get; set; }
+        }
+
+        private sealed class BehaviorMatchEvaluation
+        {
+            public bool Alert { get; set; }
+            public int Score { get; set; }
+            public string Reason { get; set; }
+            public string ScopeKey { get; set; }
+            public string PrimaryProcess { get; set; }
+            public string PrimaryTarget { get; set; }
+            public string PrimaryTargetPid { get; set; }
+            public HashSet<string> EvidenceClasses { get; private set; }
+
+            public BehaviorMatchEvaluation()
+            {
+                EvidenceClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                Reason = string.Empty;
+                ScopeKey = string.Empty;
+                PrimaryProcess = string.Empty;
+                PrimaryTarget = string.Empty;
+                PrimaryTargetPid = string.Empty;
+            }
         }
 
         public class HashProtectPolicyRequest

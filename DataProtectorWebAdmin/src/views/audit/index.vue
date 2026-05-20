@@ -720,12 +720,6 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
     action.startsWith('lateral.blocked') ||
     action.startsWith('userhook.blocked') ||
     action.startsWith('behavior.chain.') ||
-    action.startsWith('userhook.runtime.unhook-detected') ||
-    action.startsWith('userhook.runtime.hook-overwrite-detected') ||
-    action.startsWith('userhook.runtime.syscall-bypass-risk') ||
-    action.startsWith('userhook.runtime.memory-manual-map') ||
-    action.startsWith('userhook.runtime.memory-rwx') ||
-    action.startsWith('userhook.runtime.memory-private-syscall-stub') ||
     action.startsWith('dlp.clipboard.blocked') ||
     action.startsWith('dlp.screenshot.blocked') ||
     action.includes('.blocked') ||
@@ -735,6 +729,17 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
   }
 
   if (action.startsWith('webshell.warning') || action.startsWith('security.audit.drain.failed') || action.includes('.failed') || /failed/i.test(message)) {
+    return 'warning';
+  }
+
+  if (
+    action.startsWith('userhook.runtime.unhook-detected') ||
+    action.startsWith('userhook.runtime.hook-overwrite-detected') ||
+    action.startsWith('userhook.runtime.syscall-bypass-risk') ||
+    action.startsWith('userhook.runtime.memory-manual-map') ||
+    action.startsWith('userhook.runtime.memory-rwx') ||
+    action.startsWith('userhook.runtime.memory-private-syscall-stub')
+  ) {
     return 'warning';
   }
 
