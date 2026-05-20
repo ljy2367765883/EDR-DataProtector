@@ -365,9 +365,10 @@ namespace DataProtectorWebBridge.Services
                 EnsureState();
                 if (request != null && request.all)
                 {
-                    if (state.Samples.Any(item => string.Equals(item.status, "running", StringComparison.OrdinalIgnoreCase)))
+                    StaticAnalysisSampleState active = state.Samples.FirstOrDefault(item => IsActiveRunningSample(item));
+                    if (active != null)
                     {
-                        throw new PolicyBridgeService.BridgeException(1, "Static analysis history cannot be cleared while analysis is running.");
+                        throw new PolicyBridgeService.BridgeException(1, "Static analysis history cannot be cleared while analysis is running. Active sample: " + active.fileName);
                     }
 
                     foreach (StaticAnalysisSampleState item in state.Samples.ToArray())
@@ -384,7 +385,7 @@ namespace DataProtectorWebBridge.Services
                 StaticAnalysisSampleState sample = state.Samples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase));
                 if (sample != null)
                 {
-                    if (string.Equals(sample.status, "running", StringComparison.OrdinalIgnoreCase))
+                    if (IsActiveRunningSample(sample))
                     {
                         throw new PolicyBridgeService.BridgeException(1, "Static analysis sample cannot be removed while analysis is running.");
                     }
@@ -1622,6 +1623,28 @@ namespace DataProtectorWebBridge.Services
                 lastProgressUtc = now;
                 progress("ghidra", "Ghidra 正在分析", 45, "[" + stream + "] " + trimmed);
             }
+        }
+
+        private static bool IsActiveRunningSample(StaticAnalysisSampleState sample)
+        {
+            if (sample == null || !string.Equals(sample.status, "running", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            DateTime lastProgress;
+            if (DateTime.TryParse(sample.lastProgressUtc, null, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out lastProgress))
+            {
+                return (DateTime.UtcNow - lastProgress).TotalMinutes < 30;
+            }
+
+            DateTime started;
+            if (DateTime.TryParse(sample.startedUtc, null, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out started))
+            {
+                return (DateTime.UtcNow - started).TotalMinutes < 30;
+            }
+
+            return true;
         }
 
         private static IEnumerable<Dictionary<string, object>> EnumerateDictionaries(object value)
