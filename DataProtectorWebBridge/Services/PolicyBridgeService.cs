@@ -3717,7 +3717,9 @@ namespace DataProtectorWebBridge.Services
                     return false;
                 }
 
-                if (!MatchesOptionalList(rule.processNames, atom.ProcessImage))
+                if (!MatchesOptionalList(rule.processNames, atom.ProcessImage) &&
+                    !MatchesOptionalList(rule.processNames, atom.Target) &&
+                    !MatchesOptionalList(rule.processNames, atom.CommandLine))
                 {
                     return false;
                 }
