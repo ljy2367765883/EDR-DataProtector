@@ -153,11 +153,18 @@ namespace DataProtectorWebBridge.Services
             }
 
             string localPolicyRefreshReason = string.Empty;
-            bool shouldApplyPolicy = response.policyVersion != appliedPolicyVersion ||
+            long previousAppliedPolicyVersion = appliedPolicyVersion;
+            bool serverPolicyVersionChanged = response.policyVersion != appliedPolicyVersion;
+            bool shouldApplyPolicy = serverPolicyVersionChanged ||
                                      ShouldRefreshLocalUserHookPolicy(response, rawStatus, out localPolicyRefreshReason);
             if (shouldApplyPolicy)
             {
-                if (response.policyVersion == appliedPolicyVersion && !string.IsNullOrWhiteSpace(localPolicyRefreshReason))
+                string applyReason = serverPolicyVersionChanged
+                    ? "central policy version changed from " + appliedPolicyVersion + " to " + response.policyVersion
+                    : localPolicyRefreshReason;
+                Console.WriteLine(DateTime.Now.ToString("s") + " Central policy apply required: " + applyReason);
+
+                if (!serverPolicyVersionChanged && !string.IsNullOrWhiteSpace(localPolicyRefreshReason))
                 {
                     Console.WriteLine(DateTime.Now.ToString("s") + " Local process threat insight policy refresh required: " + localPolicyRefreshReason);
                 }
@@ -173,6 +180,22 @@ namespace DataProtectorWebBridge.Services
                     response.usbCryptPolicy ?? PolicyBridgeService.DefaultUsbCryptPolicy(),
                     response.dlpProtectionPolicy ?? PolicyBridgeService.DefaultDlpProtectionPolicy(),
                     response.policyVersion);
+
+                if (appliedPolicyVersion != response.policyVersion || !string.Equals(lastApplyStatus, "0x00000000", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.Error.WriteLine(
+                        DateTime.Now.ToString("s") +
+                        " Central policy apply incomplete. serverVersion=" +
+                        response.policyVersion +
+                        "; previousLocalVersion=" +
+                        previousAppliedPolicyVersion +
+                        "; currentLocalVersion=" +
+                        appliedPolicyVersion +
+                        "; status=" +
+                        lastApplyStatus +
+                        "; message=" +
+                        lastApplyMessage);
+                }
             }
 
             pendingTaskResults.Clear();
@@ -193,6 +216,17 @@ namespace DataProtectorWebBridge.Services
             }
 
             PolicyBridgeService.UserHookDefensePolicyDto desired = NormalizeAgentUserHookPolicy(response.userHookDefensePolicy);
+            string desiredSummary = PolicyBridgeService.UserHookDefensePolicySummary(desired);
+            string currentSummary = PolicyBridgeService.UserHookDefensePolicySummary(currentUserHookDefensePolicy);
+            if (!string.Equals(desiredSummary, currentSummary, StringComparison.Ordinal))
+            {
+                reason = "central process threat insight policy content differs from local applied cache. desired=" +
+                         desiredSummary +
+                         "; local=" +
+                         currentSummary;
+                return true;
+            }
+
             try
             {
                 PolicyBridgeService.UserHookDefensePolicyDto actual = policyService.QueryKernelUserHookDefensePolicy();

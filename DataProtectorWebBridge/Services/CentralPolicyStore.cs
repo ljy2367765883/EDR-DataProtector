@@ -638,26 +638,13 @@ namespace DataProtectorWebBridge.Services
         public PolicyBridgeService.OperationResult UpdateUserHookDefensePolicy(PolicyBridgeService.UserHookDefensePolicyRequest request)
         {
             PolicyBridgeService.UserHookDefensePolicyDto normalized = PolicyBridgeService.NormalizeUserHookDefensePolicy(request);
+            long policyVersion;
             lock (syncRoot)
             {
                 EnsureUserHookDefensePolicy();
-                if (PolicyBridgeService.ToUserHookDefenseFlags(state.UserHookDefensePolicy) != PolicyBridgeService.ToUserHookDefenseFlags(normalized) ||
-                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessNames, normalized.excludedProcessNames) ||
-                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessDirectories, normalized.excludedProcessDirectories) ||
-                    !StringArrayEquals(state.UserHookDefensePolicy.excludedProcessPaths, normalized.excludedProcessPaths) ||
-                    !StringArrayEquals(state.UserHookDefensePolicy.trustedSignerSubjects, normalized.trustedSignerSubjects) ||
-                    state.UserHookDefensePolicy.monitorRuntimeApiBehavior != normalized.monitorRuntimeApiBehavior ||
-                    state.UserHookDefensePolicy.scanExecutableMemory != normalized.scanExecutableMemory ||
-                    state.UserHookDefensePolicy.monitorEtwTamper != normalized.monitorEtwTamper ||
-                    !SameBehaviorRules(state.UserHookDefensePolicy.behaviorRules, normalized.behaviorRules))
-                {
-                    state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
-                    state.PolicyVersion++;
-                }
-                else
-                {
-                    state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
-                }
+                state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);
+                state.PolicyVersion++;
+                policyVersion = state.PolicyVersion;
 
                 AppendAudit(
                     normalized.actor,
@@ -670,7 +657,7 @@ namespace DataProtectorWebBridge.Services
                 Save();
             }
 
-            return Success("Process threat insight policy stored on central server.");
+            return Success("Process threat insight policy stored on central server. Policy version " + policyVersion + ".");
         }
 
         private static bool StringArrayEquals(string[] left, string[] right)
