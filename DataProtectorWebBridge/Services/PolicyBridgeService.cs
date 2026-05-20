@@ -2442,10 +2442,10 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.manual-map",
                     "内存驻留载荷",
-                    new[] { "userhook.runtime.memory-manual-map", "userhook.runtime.memory-rwx", "userhook.runtime.memory-private-executable" },
+                    new[] { "userhook.runtime.memory-manual-map", "userhook.runtime.memory-private-executable", "userhook.runtime.memory-private-syscall-stub" },
                     null,
                     180,
-                    1,
+                    2,
                     80,
                     "critical",
                     "suspicious",
@@ -2628,7 +2628,7 @@ namespace DataProtectorWebBridge.Services
         {
             if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase))
             {
-                return new[] { "\\run", "\\runonce", "currentversion\\run", "startup", "schtasks", "create service", "new-service", "sc.exe create" };
+                return new[] { "\\run", "\\runonce", "currentversion\\run", "startup", "create service", "new-service", "sc.exe create" };
             }
 
             return new string[0];
@@ -2648,12 +2648,12 @@ namespace DataProtectorWebBridge.Services
 
             if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase))
             {
-                return new[] { "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete", "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "disable", "reagentc /disable" };
+                return new[] { "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete", "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "reagentc /disable" };
             }
 
             if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase))
             {
-                return new[] { "schtasks", "/create", "sc create", "new-service", "currentversion\\run", "runonce", "startup" };
+                return new[] { "schtasks /create", "schtasks.exe /create", " /create ", "sc create", "new-service", "currentversion\\run", "runonce", "startup" };
             }
 
             return new string[0];
@@ -3904,11 +3904,17 @@ namespace DataProtectorWebBridge.Services
                     return false;
                 }
 
+                if (IsBenignBehaviorAtom(atom))
+                {
+                    return false;
+                }
+
                 windowStart = atom.TimestampUtc.AddSeconds(-Clamp(rule.windowSeconds, 5, 3600));
                 candidates = atoms
                     .Where(item => item.TimestampUtc >= windowStart)
                     .Where(item => IsRelatedBehaviorScope(rule, atom, item))
                     .Where(item => AtomMatchesRule(rule, item))
+                    .Where(item => !IsBenignBehaviorAtom(item))
                     .OrderBy(item => item.TimestampUtc)
                     .ToList();
 
@@ -4157,6 +4163,18 @@ namespace DataProtectorWebBridge.Services
                     return evaluation;
                 }
 
+                if (RuleRequiresExplicitMaliciousIntent(rule) && !candidates.Any(HasExplicitMaliciousIntent))
+                {
+                    evaluation.Reason = "no explicit malicious intent";
+                    return evaluation;
+                }
+
+                if (RuleRequiresExecutableMemoryContext(rule) && !candidates.Any(HasStrongExecutableMemoryEvidence))
+                {
+                    evaluation.Reason = "no strong executable memory evidence";
+                    return evaluation;
+                }
+
                 if (!ordered)
                 {
                     evaluation.Reason = "events are not in a plausible order";
@@ -4235,12 +4253,58 @@ namespace DataProtectorWebBridge.Services
                 return id.IndexOf("telemetry-impairment", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
+            private static bool RuleRequiresExplicitMaliciousIntent(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("persistence", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("recovery-inhibit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("lolbin", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool RuleRequiresExecutableMemoryContext(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("manual-map", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("hook-bypass", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
             private static bool IsVerifiedEtwTamperAtom(UserHookBehaviorAtom atom)
             {
                 string action = atom == null ? string.Empty : (atom.Action ?? string.Empty);
                 return action.IndexOf("etw-prepatched-detected", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        action.IndexOf("etw-return-patch-detected", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        action.IndexOf("etw-jump-patch-detected", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool HasExplicitMaliciousIntent(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return false;
+                }
+
+                return atom.HasSuspiciousCommand ||
+                       atom.Blocked ||
+                       ContainsCredentialIntent(atom.CommandLine) ||
+                       ContainsCredentialIntent(atom.Target) ||
+                       ContainsPersistenceIntent(atom.CommandLine) ||
+                       ContainsPersistenceIntent(atom.Target) ||
+                       ContainsRecoveryInhibitIntent(atom.CommandLine) ||
+                       ContainsRecoveryInhibitIntent(atom.Target) ||
+                       HasPublicNetworkIntent(atom.CommandLine) ||
+                       HasPublicNetworkIntent(atom.Target);
+            }
+
+            private static bool HasStrongExecutableMemoryEvidence(UserHookBehaviorAtom atom)
+            {
+                string action = atom == null ? string.Empty : (atom.Action ?? string.Empty);
+                return action.IndexOf("memory-manual-map", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       action.IndexOf("memory-private-executable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       action.IndexOf("memory-private-syscall-stub", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       action.IndexOf("syscall-bypass", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       action.IndexOf("unhook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       action.IndexOf("hook-overwrite", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
             private static bool HasPlausibleOrder(List<UserHookBehaviorAtom> candidates)
@@ -4472,6 +4536,7 @@ namespace DataProtectorWebBridge.Services
                 atom.IsSuspiciousProcess = IsSuspiciousProcess(atom.ProcessImage) || IsSuspiciousProcess(atom.Target) || IsSuspiciousProcess(atom.CommandLine);
                 atom.HasSuspiciousCommand = HasSuspiciousCommand(atom.CommandLine) || HasSuspiciousCommand(atom.Target);
                 atom.IsUserWritableProcess = IsUserWritablePath(atom.ProcessImage) || IsUserWritablePath(atom.Target) || IsUserWritablePath(atom.CommandLine);
+                atom.IsBenignSystemActivity = IsBenignSystemActivity(atom);
                 atom.RiskScore = ComputeAtomRisk(atom);
                 return true;
             }
@@ -4579,6 +4644,120 @@ namespace DataProtectorWebBridge.Services
                 return names.Any(item => string.Equals(item, name, StringComparison.OrdinalIgnoreCase));
             }
 
+            private static bool IsBenignBehaviorAtom(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return true;
+                }
+
+                if (atom.IsBenignSystemActivity)
+                {
+                    return true;
+                }
+
+                if ((atom.Action ?? string.Empty).IndexOf("create-hook-failed", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                if ((atom.Action ?? string.Empty).IndexOf("memory-rwx", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    !HasStrongExecutableMemoryEvidence(atom) &&
+                    !atom.HasSuspiciousCommand)
+                {
+                    return true;
+                }
+
+                return false;
+            }
+
+            private static bool IsBenignSystemActivity(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return false;
+                }
+
+                string processName = ExtractFileName(atom.ProcessImage).ToLowerInvariant();
+                string targetName = ExtractFileName(atom.Target).ToLowerInvariant();
+                string text = ((atom.Target ?? string.Empty) + " " + (atom.CommandLine ?? string.Empty)).ToLowerInvariant();
+
+                if (IsInternalTelemetryProcess(processName) || IsInternalTelemetryProcess(targetName) || IsInternalTelemetryText(text))
+                {
+                    return true;
+                }
+
+                if (IsBenignSystemProcess(processName) && IsQueryOnlyProcessAccess(atom) && !ContainsCredentialIntent(text))
+                {
+                    return true;
+                }
+
+                if (processName == "schtasks.exe" && targetName == "conhost.exe")
+                {
+                    return true;
+                }
+
+                if (processName == "conhost.exe" && (targetName == "cmd.exe" || targetName == "powershell.exe" || targetName == "schtasks.exe"))
+                {
+                    return true;
+                }
+
+                return false;
+            }
+
+            private static bool IsQueryOnlyProcessAccess(UserHookBehaviorAtom atom)
+            {
+                string action = atom == null ? string.Empty : (atom.Action ?? string.Empty);
+                if (action.IndexOf("process-access", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    action.IndexOf("thread-access", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return false;
+                }
+
+                int access = ExtractHexInt(atom.Target, "access=");
+                return access == 0x00001410 ||
+                       access == 0x00001400 ||
+                       access == 0x00001000 ||
+                       access == 0x00000410 ||
+                       access == 0x00001402;
+            }
+
+            private static bool IsBenignSystemProcess(string name)
+            {
+                string[] names =
+                {
+                    "wmiprvse.exe", "wmiadap.exe", "wmiapsrv.exe", "svchost.exe", "explorer.exe", "conhost.exe",
+                    "taskhostw.exe", "dllhost.exe", "runtimebroker.exe", "searchhost.exe", "sihost.exe", "ctfmon.exe",
+                    "fontdrvhost.exe", "dwm.exe", "spoolsv.exe", "wudfhost.exe", "smartscreen.exe"
+                };
+
+                return names.Any(item => string.Equals(item, name, StringComparison.OrdinalIgnoreCase));
+            }
+
+            private static bool IsInternalTelemetryProcess(string name)
+            {
+                return name.IndexOf("dataprotectorsandbox", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       name.IndexOf("dataprotectorwebbridge", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       name.IndexOf("dataprotectoragentclient", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       name.IndexOf("dataprotectorwebadmin", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool IsInternalTelemetryText(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string text = value.ToLowerInvariant();
+                return text.Contains("dataprotectorsandbox") ||
+                       text.Contains("dataprotectoruserhookruntime") ||
+                       text.Contains("dataprotectorpolicyapi") ||
+                       text.Contains("runtime-injection-queued") ||
+                       text.Contains("runtime-injection-skipped") ||
+                       text.Contains("hook-surface-image-load");
+            }
+
             private static bool HasSuspiciousCommand(string value)
             {
                 if (string.IsNullOrWhiteSpace(value))
@@ -4595,7 +4774,74 @@ namespace DataProtectorWebBridge.Services
                     "sc create", "new-service", "virtualallocex", "writeprocessmemory", "createremotethread"
                 };
 
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                       ContainsCredentialIntent(value) ||
+                       ContainsPersistenceIntent(value) ||
+                       ContainsRecoveryInhibitIntent(value);
+            }
+
+            private static bool ContainsCredentialIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "sekurlsa", "lsadump", "privilege::debug", "token::", "vault::", "kerberos::",
+                    "hklm\\sam", "hklm\\system", "hklm\\security", "reg save hklm\\sam", "reg save hklm\\system",
+                    "ntds.dit", "lsass", "comsvcs.dll", "minidump", "procdump"
+                };
+
                 return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool ContainsPersistenceIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "currentversion\\run", "\\runonce", "startup", "schtasks /create", "schtasks.exe /create",
+                    " /create ", "sc create", "new-service", "create service", "start= auto", "autostart"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool ContainsRecoveryInhibitIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete",
+                    "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "reagentc /disable"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool HasPublicNetworkIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string text = value.ToLowerInvariant();
+                return (text.Contains("http://") || text.Contains("https://")) &&
+                       !text.Contains("localhost") &&
+                       !text.Contains("127.0.0.1") &&
+                       !text.Contains("192.168.") &&
+                       !text.Contains("10.");
             }
 
             private static bool IsUserWritablePath(string value)
@@ -4683,6 +4929,36 @@ namespace DataProtectorWebBridge.Services
                 return string.IsNullOrWhiteSpace(value) ? "unknown" : value;
             }
 
+            private static int ExtractHexInt(string text, string prefix)
+            {
+                if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(prefix))
+                {
+                    return 0;
+                }
+
+                int index = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                {
+                    return 0;
+                }
+
+                index += prefix.Length;
+                int end = text.IndexOf(' ', index);
+                if (end < 0)
+                {
+                    end = text.Length;
+                }
+
+                string value = text.Substring(index, end - index).Trim();
+                if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                {
+                    value = value.Substring(2);
+                }
+
+                int parsed;
+                return int.TryParse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out parsed) ? parsed : 0;
+            }
+
             private void TrimAtoms(DateTime now)
             {
                 DateTime cutoff = now.AddHours(-1);
@@ -4714,6 +4990,7 @@ namespace DataProtectorWebBridge.Services
             public bool IsSuspiciousProcess { get; set; }
             public bool HasSuspiciousCommand { get; set; }
             public bool IsUserWritableProcess { get; set; }
+            public bool IsBenignSystemActivity { get; set; }
             public int RiskScore { get; set; }
         }
 

@@ -811,22 +811,35 @@ namespace DataProtectorSandboxTelemetry
                 return;
             }
 
-            string type = "kernel-process-telemetry";
-            string severity = "medium";
-            if (record.operation == 8)
+            if (IsKernelEvidenceNoise(record))
             {
-                type = "kernel-early-injection-queued";
-                severity = "info";
+                return;
             }
-            else if (record.operation == 9 || record.operation == 5)
+
+            string type = string.Empty;
+            string severity = string.Empty;
+            if (record.operation == 9 || record.operation == 5)
             {
                 type = "kernel-runtime-injection-risk";
-                severity = "high";
+                severity = "medium";
             }
-            else if (record.operation == 11 || record.operation == 12 || record.operation == 15)
+            else if (record.operation == 11 || record.operation == 12)
             {
-                type = "kernel-injection-primitive";
-                severity = "high";
+                if (IsCredentialKernelAccess(record))
+                {
+                    type = "credential-process-access";
+                    severity = "high";
+                }
+                else if (HasCrossProcessInjectionAccess(record))
+                {
+                    type = "cross-process-injection-evidence";
+                    severity = "medium";
+                }
+            }
+            else if (record.operation == 15)
+            {
+                type = "cross-process-execution";
+                severity = IsKnownBenignKernelRelationship(record) ? "medium" : "high";
             }
             else if (record.operation == 13 || record.operation == 14)
             {
@@ -834,7 +847,10 @@ namespace DataProtectorSandboxTelemetry
                 severity = "critical";
             }
 
-            AddBehavior(behaviors, type, severity, record.description, record.pid);
+            if (!string.IsNullOrWhiteSpace(type))
+            {
+                AddBehavior(behaviors, type, severity, record.description, record.pid);
+            }
         }
 
         private static List<RuntimeEventRecord> ReadRuntimeEvents(string path, List<BehaviorRecord> behaviors, List<string> errors)
@@ -893,6 +909,11 @@ namespace DataProtectorSandboxTelemetry
 
             string severity = "medium";
             string type = "api-hook-event";
+            if (record.action.IndexOf("create-hook-failed", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return;
+            }
+
             if (record.action.Contains("blocked"))
             {
                 severity = "high";
@@ -908,10 +929,16 @@ namespace DataProtectorSandboxTelemetry
                 severity = "high";
                 type = "syscall-bypass-risk";
             }
-            else if (record.action.Contains("memory"))
+            else if (record.action.Contains("manual-map") ||
+                     record.action.Contains("memory-private-executable") ||
+                     record.action.Contains("memory-private-syscall-stub"))
             {
                 severity = "high";
                 type = "executable-memory";
+            }
+            else if (record.action.Contains("memory-rwx"))
+            {
+                return;
             }
             else if (record.action.Contains("network"))
             {
@@ -1139,6 +1166,13 @@ namespace DataProtectorSandboxTelemetry
 
         private static void AddRuleDetections(List<ProcessRecord> processes, List<NetworkRecord> network, List<RuntimeEventRecord> runtimeEvents, List<KernelSensorEventRecord> kernelEvents, List<ServiceRecord> services, List<TaskRecord> tasks, List<BehaviorRecord> behaviors)
         {
+            HashSet<int> sampleTreePids = new HashSet<int>(processes.Where(item => !IsBenignSystemProcessName(item.name)).Select(item => item.pid));
+            bool hasMaliciousCommand = processes.Any(IsHighRiskProcessCommand);
+            bool hasScriptOrLolbinIntent = processes.Any(IsSuspiciousScriptOrLolbinProcess);
+            bool hasCredentialAccess = kernelEvents.Any(item => sampleTreePids.Contains(item.pid) && IsCredentialKernelAccess(item) && !IsKernelEvidenceNoise(item)) ||
+                                       processes.Any(HasCredentialCommandIntent);
+            bool hasInjectionChain = HasSampleInjectionChain(kernelEvents, runtimeEvents, sampleTreePids);
+
             foreach (ProcessRecord process in processes)
             {
                 AnalyzeProcess(process, behaviors);
@@ -1146,27 +1180,46 @@ namespace DataProtectorSandboxTelemetry
 
             foreach (NetworkRecord connection in network)
             {
-                AddBehavior(behaviors, "network-connection", "medium", "Remote connection: " + connection.remoteAddress + ":" + connection.remotePort.ToString(CultureInfo.InvariantCulture), connection.pid);
+                if (sampleTreePids.Contains(connection.pid) && (hasScriptOrLolbinIntent || IsPublicRemoteAddress(connection.remoteAddress)))
+                {
+                    AddBehavior(behaviors, "network-connection", "medium", "Remote connection: " + connection.remoteAddress + ":" + connection.remotePort.ToString(CultureInfo.InvariantCulture), connection.pid);
+                }
             }
 
-            if (runtimeEvents.Any(item => item.action != null && item.action.Contains("unhook")))
+            if (runtimeEvents.Any(item => item.action != null &&
+                                          (item.action.Contains("unhook") || item.action.Contains("hook-overwrite"))))
             {
                 AddBehavior(behaviors, "anti-hook-evasion", "critical", "Runtime hook tampering was observed.", 0);
             }
 
-            if (kernelEvents.Any(item => item.operation == 13 || item.operation == 14))
+            if (kernelEvents.Any(item => (item.operation == 13 || item.operation == 14) && !IsKernelEvidenceNoise(item)))
             {
                 AddBehavior(behaviors, "native-module-reload-evasion", "critical", "Kernel sensor observed suspicious reload or abnormal path for a sensitive module.", 0);
             }
 
-            if (services.Any(item => item.serviceType.IndexOf("Kernel", StringComparison.OrdinalIgnoreCase) >= 0))
+            if (services.Any(item => item.serviceType.IndexOf("Kernel", StringComparison.OrdinalIgnoreCase) >= 0 && IsSuspiciousPersistenceCommand(item.pathName)))
             {
                 AddBehavior(behaviors, "kernel-driver-activity", "critical", "Kernel driver service activity was observed.", 0);
             }
 
-            if (tasks.Count > 0)
+            if (tasks.Any(item => IsSuspiciousPersistenceCommand(item.command)))
             {
                 AddBehavior(behaviors, "persistence", "high", "Scheduled task persistence activity was observed.", 0);
+            }
+
+            if (hasCredentialAccess)
+            {
+                AddBehavior(behaviors, "credential-access", "critical", "Credential material or credential process access was observed.", 0);
+            }
+
+            if (hasInjectionChain)
+            {
+                AddBehavior(behaviors, "process-injection-chain", "critical", "Cross-process injection sequence was observed in the sample process tree.", 0);
+            }
+
+            if (hasMaliciousCommand)
+            {
+                AddBehavior(behaviors, "malicious-command-line", "critical", "Sample process tree executed a high-risk command line.", 0);
             }
         }
 
@@ -1174,17 +1227,17 @@ namespace DataProtectorSandboxTelemetry
         {
             string name = (process.name ?? string.Empty).ToLowerInvariant();
             string cmd = (process.commandLine ?? string.Empty).ToLowerInvariant();
-            if (IsOneOf(name, "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe"))
+            if (IsSuspiciousScriptOrLolbinProcess(process))
             {
                 AddBehavior(behaviors, "script-or-lolbin-execution", "medium", "Interpreter or loader launched: " + process.name, process.pid);
             }
 
-            if (IsOneOf(name, "schtasks.exe", "sc.exe", "reg.exe", "vssadmin.exe", "wbadmin.exe", "bcdedit.exe", "wevtutil.exe", "netsh.exe", "wmic.exe", "bitsadmin.exe", "certutil.exe", "driverquery.exe", "fltmc.exe"))
+            if (IsAdministrativeToolWithRiskyIntent(name, cmd))
             {
                 AddBehavior(behaviors, "system-abuse-tool", "high", "Administrative tool launched: " + process.name, process.pid);
             }
 
-            if (cmd.Contains("shadowcopy") || cmd.Contains("hklm\\sam") || cmd.Contains("hklm\\system") || cmd.Contains("encodedcommand") || cmd.Contains("downloadstring") || cmd.Contains("sekurlsa") || cmd.Contains("lsass"))
+            if (IsHighRiskProcessCommand(process))
             {
                 AddBehavior(behaviors, "high-risk-command-line", "critical", Truncate(process.commandLine, 512), process.pid);
             }
@@ -1228,6 +1281,7 @@ namespace DataProtectorSandboxTelemetry
             behaviors.RemoveAll(item =>
                 item == null ||
                 internalPids.Contains(item.pid) ||
+                IsBenignBehaviorNoise(item) ||
                 IsInternalTelemetryText(item.type) ||
                 IsInternalTelemetryText(item.detail));
             network.RemoveAll(item => item == null || internalPids.Contains(item.pid));
@@ -1251,6 +1305,20 @@ namespace DataProtectorSandboxTelemetry
                 IsInternalTelemetryText(item.pathName));
             tasks.RemoveAll(item => item == null || IsInternalTelemetryText(item.command));
             processes.RemoveAll(item => item == null || internalPids.Contains(item.pid) || IsInternalProcess(item));
+        }
+
+        private static bool IsBenignBehaviorNoise(BehaviorRecord behavior)
+        {
+            if (behavior == null)
+            {
+                return true;
+            }
+
+            string type = behavior.type ?? string.Empty;
+            string detail = behavior.detail ?? string.Empty;
+            return type.Equals("kernel-process-telemetry", StringComparison.OrdinalIgnoreCase) ||
+                   type.Equals("kernel-early-injection-queued", StringComparison.OrdinalIgnoreCase) ||
+                   IsKnownBenignKernelText(detail);
         }
 
         private static bool IsInternalProcess(ProcessRecord process)
@@ -1284,6 +1352,301 @@ namespace DataProtectorSandboxTelemetry
                    text.Contains("userhook.observed") ||
                    text.Contains("sandbox-kernel-sensor") ||
                    text.Contains("kernel-early-injection-policy");
+        }
+
+        private static bool IsKernelEvidenceNoise(KernelSensorEventRecord record)
+        {
+            if (record == null)
+            {
+                return true;
+            }
+
+            return IsKnownBenignKernelRelationship(record) ||
+                   (IsQueryOnlyProcessAccess(record) && !IsCredentialKernelAccess(record)) ||
+                   IsKnownBenignKernelText(record.description);
+        }
+
+        private static bool IsKnownBenignKernelRelationship(KernelSensorEventRecord record)
+        {
+            string source = ExtractKernelField(record == null ? string.Empty : record.description, "source=");
+            string target = ExtractKernelField(record == null ? string.Empty : record.description, "target=");
+            string sourceName = NormalizeProcessName(source);
+            string targetName = NormalizeProcessName(target);
+
+            if (IsInternalTelemetryText(source) || IsInternalTelemetryText(target))
+            {
+                return true;
+            }
+
+            if (IsOneOf(sourceName, "wmiprvse.exe", "wmiadap.exe", "wmiapsrv.exe", "svchost.exe", "explorer.exe", "conhost.exe", "taskhostw.exe", "dllhost.exe"))
+            {
+                return true;
+            }
+
+            if (sourceName == "schtasks.exe" && targetName == "conhost.exe")
+            {
+                return true;
+            }
+
+            if (sourceName == "conhost.exe" && (targetName == "cmd.exe" || targetName == "powershell.exe" || targetName == "schtasks.exe"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsKnownBenignKernelText(string value)
+        {
+            string text = (value ?? string.Empty).ToLowerInvariant();
+            return text.Contains("runtime-injection-skipped") ||
+                   text.Contains("runtime-injection-queued") ||
+                   text.Contains("hook-surface-image-load") ||
+                   text.Contains("\\device\\vmsmb\\") ||
+                   text.Contains("\\windows\\system32\\ntdll.dll") ||
+                   text.Contains("\\windows\\system32\\kernel32.dll") ||
+                   text.Contains("\\windows\\system32\\kernelbase.dll");
+        }
+
+        private static bool IsQueryOnlyProcessAccess(KernelSensorEventRecord record)
+        {
+            if (record == null || (record.operation != 11 && record.operation != 12))
+            {
+                return false;
+            }
+
+            int access = ParseHexField(record.description, "access=");
+            if (access == 0)
+            {
+                return false;
+            }
+
+            return (access & unchecked((int)0xFFE00000)) == 0 &&
+                   (access & unchecked((int)0x001FA3ED)) == 0 &&
+                   (access & unchecked((int)0x0000002A)) == 0 &&
+                   (access == 0x00001410 || access == 0x00001400 || access == 0x00001000 || access == 0x00000410);
+        }
+
+        private static bool HasCrossProcessInjectionAccess(KernelSensorEventRecord record)
+        {
+            if (record == null || (record.operation != 11 && record.operation != 12))
+            {
+                return false;
+            }
+
+            int access = ParseHexField(record.description, "access=");
+            return (access & 0x00000002) != 0 ||
+                   (access & 0x00000008) != 0 ||
+                   (access & 0x00000020) != 0 ||
+                   (access & 0x00000040) != 0 ||
+                   (access & 0x00000200) != 0 ||
+                   (access & 0x00000400) != 0 ||
+                   access == 0x001FFFFF ||
+                   access == 0x001F3FFF ||
+                   access == 0x001F0FFF;
+        }
+
+        private static bool IsCredentialKernelAccess(KernelSensorEventRecord record)
+        {
+            if (record == null || (record.operation != 11 && record.operation != 12))
+            {
+                return false;
+            }
+
+            string text = (record.description ?? string.Empty).ToLowerInvariant();
+            return text.Contains("target=lsass.exe") ||
+                   text.Contains("target=sam") ||
+                   text.Contains("target=security") ||
+                   text.Contains("target=system");
+        }
+
+        private static bool HasSampleInjectionChain(List<KernelSensorEventRecord> kernelEvents, List<RuntimeEventRecord> runtimeEvents, HashSet<int> sampleTreePids)
+        {
+            if (kernelEvents == null || sampleTreePids == null || sampleTreePids.Count == 0)
+            {
+                return false;
+            }
+
+            bool processAccess = kernelEvents.Any(item => sampleTreePids.Contains(item.pid) && HasCrossProcessInjectionAccess(item));
+            bool remoteThread = kernelEvents.Any(item => sampleTreePids.Contains(item.pid) && item.operation == 15 && !IsKernelEvidenceNoise(item));
+            bool memoryWrite = runtimeEvents != null && runtimeEvents.Any(item => sampleTreePids.Contains(item.pid) &&
+                ((item.action ?? string.Empty).IndexOf("write-process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 (item.action ?? string.Empty).IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0));
+            bool executableMemory = runtimeEvents != null && runtimeEvents.Any(item => sampleTreePids.Contains(item.pid) &&
+                ((item.action ?? string.Empty).IndexOf("remote-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 (item.action ?? string.Empty).IndexOf("nt-allocate-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 (item.action ?? string.Empty).IndexOf("nt-protect-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0));
+
+            return remoteThread && (processAccess || memoryWrite || executableMemory);
+        }
+
+        private static bool IsSuspiciousScriptOrLolbinProcess(ProcessRecord process)
+        {
+            if (process == null)
+            {
+                return false;
+            }
+
+            string name = NormalizeProcessName(process.name);
+            string cmd = (process.commandLine ?? string.Empty).ToLowerInvariant();
+            if (!IsOneOf(name, "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe", "msiexec.exe", "certutil.exe", "bitsadmin.exe"))
+            {
+                return false;
+            }
+
+            return ContainsAny(cmd,
+                "-enc", "-encodedcommand", "downloadstring", "frombase64string", "invoke-expression", " iex ",
+                "http://", "https://", "javascript:", "vbscript:", "scrobj.dll", "urlcache", "/i:", "shellcode",
+                "bypass", "hidden", "regsvr32", "rundll32", "mshta");
+        }
+
+        private static bool IsAdministrativeToolWithRiskyIntent(string name, string cmd)
+        {
+            name = NormalizeProcessName(name);
+            cmd = (cmd ?? string.Empty).ToLowerInvariant();
+            if (!IsOneOf(name, "schtasks.exe", "sc.exe", "reg.exe", "vssadmin.exe", "wbadmin.exe", "bcdedit.exe", "wevtutil.exe", "wmic.exe", "bitsadmin.exe", "certutil.exe"))
+            {
+                return false;
+            }
+
+            return IsSuspiciousPersistenceCommand(cmd) ||
+                   HasCredentialCommandIntent(cmd) ||
+                   ContainsAny(cmd, "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete", "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "cl ", "clear-log", "/create", "process call create", "urlcache", "download");
+        }
+
+        private static bool IsHighRiskProcessCommand(ProcessRecord process)
+        {
+            if (process == null)
+            {
+                return false;
+            }
+
+            string cmd = (process.commandLine ?? string.Empty).ToLowerInvariant();
+            return HasCredentialCommandIntent(process) ||
+                   ContainsAny(cmd, "shadowcopy delete", "delete shadows", "resize shadowstorage", "wbadmin delete", "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "encodedcommand", "downloadstring", "frombase64string", "sekurlsa", "privilege::debug", "lsadump::", "token::", "procdump", "comsvcs.dll", "minidump");
+        }
+
+        private static bool HasCredentialCommandIntent(ProcessRecord process)
+        {
+            return process != null && HasCredentialCommandIntent(process.commandLine);
+        }
+
+        private static bool HasCredentialCommandIntent(string commandLine)
+        {
+            string cmd = (commandLine ?? string.Empty).ToLowerInvariant();
+            return ContainsAny(cmd,
+                "sekurlsa", "lsadump", "privilege::debug", "token::", "vault::", "kerberos::",
+                "hklm\\sam", "hklm\\system", "hklm\\security", "reg save hklm\\sam", "reg save hklm\\system",
+                "ntds.dit", "lsass", "comsvcs.dll", "minidump", "procdump");
+        }
+
+        private static bool IsSuspiciousPersistenceCommand(string commandLine)
+        {
+            string cmd = (commandLine ?? string.Empty).ToLowerInvariant();
+            return ContainsAny(cmd,
+                "currentversion\\run", "\\runonce", "startup", "schtasks /create", "schtasks.exe /create",
+                " /create ", "sc create", "new-service", "create service", "start= auto", "autostart",
+                "powershell", "wscript", "cscript", "mshta", "rundll32", "regsvr32", "appdata", "\\temp\\", "\\users\\public\\");
+        }
+
+        private static bool IsBenignSystemProcessName(string name)
+        {
+            name = NormalizeProcessName(name);
+            return IsOneOf(name,
+                "wmiprvse.exe", "wmiadap.exe", "wmiapsrv.exe", "svchost.exe", "explorer.exe", "conhost.exe",
+                "taskhostw.exe", "dllhost.exe", "runtimebroker.exe", "searchhost.exe", "sihost.exe", "ctfmon.exe",
+                "fontdrvhost.exe", "dwm.exe", "spoolsv.exe", "wudfhost.exe", "smartscreen.exe");
+        }
+
+        private static bool IsPublicRemoteAddress(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            string text = value.Trim().ToLowerInvariant();
+            return !(text == "127.0.0.1" ||
+                     text == "::1" ||
+                     text.StartsWith("10.", StringComparison.Ordinal) ||
+                     text.StartsWith("192.168.", StringComparison.Ordinal) ||
+                     text.StartsWith("172.16.", StringComparison.Ordinal) ||
+                     text.StartsWith("172.17.", StringComparison.Ordinal) ||
+                     text.StartsWith("172.18.", StringComparison.Ordinal) ||
+                     text.StartsWith("172.19.", StringComparison.Ordinal) ||
+                     text.StartsWith("172.2", StringComparison.Ordinal) ||
+                     text.StartsWith("172.30.", StringComparison.Ordinal) ||
+                     text.StartsWith("172.31.", StringComparison.Ordinal) ||
+                     text.StartsWith("fe80:", StringComparison.Ordinal));
+        }
+
+        private static bool ContainsAny(string value, params string[] tokens)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static string ExtractKernelField(string text, string prefix)
+        {
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(prefix))
+            {
+                return string.Empty;
+            }
+
+            int index = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return string.Empty;
+            }
+
+            index += prefix.Length;
+            int end = text.IndexOf(' ', index);
+            if (end < 0)
+            {
+                end = text.Length;
+            }
+
+            return text.Substring(index, end - index).Trim();
+        }
+
+        private static int ParseHexField(string text, string prefix)
+        {
+            string value = ExtractKernelField(text, prefix);
+            if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                value = value.Substring(2);
+            }
+
+            int parsed;
+            return int.TryParse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out parsed) ? parsed : 0;
+        }
+
+        private static string NormalizeProcessName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            string name = value.Trim().Trim('"').ToLowerInvariant();
+            try
+            {
+                name = Path.GetFileName(name);
+            }
+            catch
+            {
+            }
+
+            if (!name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && name.IndexOf('.') < 0)
+            {
+                name += ".exe";
+            }
+
+            return name;
         }
 
         private static SignatureRecord GetSignature(string path)
