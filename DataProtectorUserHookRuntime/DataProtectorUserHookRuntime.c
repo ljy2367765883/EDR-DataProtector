@@ -6,6 +6,7 @@
 #include <wincrypt.h>
 #include <wintrust.h>
 #include <softpub.h>
+#include <evntprov.h>
 #include <stdio.h>
 #include <string.h>
 #include <strsafe.h>
@@ -16,7 +17,7 @@
 #define DP_RUNTIME_MAX_TEXT 1024
 #define DP_RUNTIME_MAX_POLICY_TEXT 32768
 #define DP_RUNTIME_STATUS_BLOCKED 0xC0000022u
-#define DP_RUNTIME_MAX_HOOKS 32
+#define DP_RUNTIME_MAX_HOOKS 48
 #define DP_RUNTIME_HOOK_PROBE_BYTES 32
 #define DP_RUNTIME_INTEGRITY_INTERVAL_MS 1500
 #define DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS 30000
@@ -51,6 +52,7 @@ typedef struct _DP_RUNTIME_HOOK_ENTRY {
     BOOL Created;
     BOOL Enabled;
     BOOL IsNtdllSyscall;
+    BOOL IsEtwSurface;
     BOOL HookBytesCaptured;
     BOOL TamperActive;
     BOOL SyscallRiskActive;
@@ -97,6 +99,13 @@ typedef NTSTATUS (NTAPI *PFN_NtWriteVirtualMemory)(HANDLE, PVOID, PVOID, SIZE_T,
 typedef NTSTATUS (NTAPI *PFN_NtAllocateVirtualMemory)(HANDLE, PVOID *, ULONG_PTR, PSIZE_T, ULONG, ULONG);
 typedef NTSTATUS (NTAPI *PFN_NtProtectVirtualMemory)(HANDLE, PVOID *, PSIZE_T, ULONG, PULONG);
 typedef NTSTATUS (NTAPI *PFN_NtUnmapViewOfSection)(HANDLE, PVOID);
+typedef ULONG (WINAPI *PFN_EventRegister)(LPCGUID, PENABLECALLBACK, PVOID, PREGHANDLE);
+typedef ULONG (WINAPI *PFN_EventUnregister)(REGHANDLE);
+typedef ULONG (WINAPI *PFN_EventWrite)(REGHANDLE, PCEVENT_DESCRIPTOR, ULONG, PEVENT_DATA_DESCRIPTOR);
+typedef ULONG (WINAPI *PFN_EventWriteTransfer)(REGHANDLE, PCEVENT_DESCRIPTOR, LPCGUID, LPCGUID, ULONG, PEVENT_DATA_DESCRIPTOR);
+typedef ULONG (WINAPI *PFN_EventWriteString)(REGHANDLE, UCHAR, ULONGLONG, PCWSTR);
+typedef NTSTATUS (NTAPI *PFN_EtwEventWrite)(REGHANDLE, PCEVENT_DESCRIPTOR, ULONG, PEVENT_DATA_DESCRIPTOR);
+typedef NTSTATUS (NTAPI *PFN_EtwEventWriteTransfer)(REGHANDLE, PCEVENT_DESCRIPTOR, LPCGUID, LPCGUID, ULONG, PEVENT_DATA_DESCRIPTOR);
 
 static PFN_CreateRemoteThread gRealCreateRemoteThread;
 static PFN_CreateRemoteThreadEx gRealCreateRemoteThreadEx;
@@ -119,6 +128,13 @@ static PFN_NtWriteVirtualMemory gRealNtWriteVirtualMemory;
 static PFN_NtAllocateVirtualMemory gRealNtAllocateVirtualMemory;
 static PFN_NtProtectVirtualMemory gRealNtProtectVirtualMemory;
 static PFN_NtUnmapViewOfSection gRealNtUnmapViewOfSection;
+static PFN_EventRegister gRealEventRegister;
+static PFN_EventUnregister gRealEventUnregister;
+static PFN_EventWrite gRealEventWrite;
+static PFN_EventWriteTransfer gRealEventWriteTransfer;
+static PFN_EventWriteString gRealEventWriteString;
+static PFN_EtwEventWrite gRealEtwEventWrite;
+static PFN_EtwEventWriteTransfer gRealEtwEventWriteTransfer;
 
 static INIT_ONCE gInitializeOnce = INIT_ONCE_STATIC_INIT;
 static SRWLOCK gEventLock = SRWLOCK_INIT;
@@ -128,6 +144,7 @@ static BOOL gAuditOnly = TRUE;
 static BOOL gEnabled = TRUE;
 static BOOL gMonitorRuntimeApiBehavior = TRUE;
 static BOOL gScanExecutableMemory = TRUE;
+static BOOL gMonitorEtwTamper = TRUE;
 static BOOL gMinHookInitialized;
 static BOOL gHooksEnabled;
 static HANDLE gInitThread;
@@ -138,6 +155,7 @@ static DP_RUNTIME_HOOK_ENTRY gHookEntries[DP_RUNTIME_MAX_HOOKS];
 static DWORD gHookEntryCount;
 static DP_RUNTIME_MEMORY_REPORT_ENTRY gMemoryReportCache[DP_RUNTIME_MEMORY_REPORT_CACHE_SIZE];
 static DWORD gLastMemoryScanTick;
+static volatile LONG gEtwUnregisterReports;
 
 static VOID
 DpRuntimeWriteEvent(
@@ -732,6 +750,7 @@ DpRuntimeShouldExitByPolicy(VOID)
     gAuditOnly = DpRuntimeJsonBool(policy, L"auditOnly", TRUE);
     gMonitorRuntimeApiBehavior = DpRuntimeJsonBool(policy, L"monitorRuntimeApiBehavior", TRUE);
     gScanExecutableMemory = DpRuntimeJsonBool(policy, L"scanExecutableMemory", TRUE);
+    gMonitorEtwTamper = DpRuntimeJsonBool(policy, L"monitorEtwTamper", TRUE);
 
     if (!gEnabled) {
         return TRUE;
@@ -1005,6 +1024,68 @@ DpRuntimeIsLikelySyscallStub(
         if (Bytes[i] == 0x0F && Bytes[i + 1] == 0x05) {
             return TRUE;
         }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeIsLikelyEtwReturnPatch(
+    _In_reads_(Length) const BYTE *Bytes,
+    _In_ SIZE_T Length
+    )
+{
+    if (Bytes == NULL || Length == 0) {
+        return FALSE;
+    }
+
+    if (Bytes[0] == 0xC3 || Bytes[0] == 0xC2) {
+        return TRUE;
+    }
+
+    if (Length >= 3 && Bytes[0] == 0x33 && Bytes[1] == 0xC0 && Bytes[2] == 0xC3) {
+        return TRUE;
+    }
+
+    if (Length >= 6 &&
+        Bytes[0] == 0xB8 &&
+        Bytes[1] == 0x00 &&
+        Bytes[2] == 0x00 &&
+        Bytes[3] == 0x00 &&
+        Bytes[4] == 0x00 &&
+        Bytes[5] == 0xC3) {
+        return TRUE;
+    }
+
+    if (Length >= 8 &&
+        Bytes[0] == 0x48 &&
+        Bytes[1] == 0x31 &&
+        Bytes[2] == 0xC0 &&
+        Bytes[3] == 0xC3) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeIsLikelyJumpPatch(
+    _In_reads_(Length) const BYTE *Bytes,
+    _In_ SIZE_T Length
+    )
+{
+    if (Bytes == NULL || Length == 0) {
+        return FALSE;
+    }
+
+    if (Bytes[0] == 0xE9 || Bytes[0] == 0xEB) {
+        return TRUE;
+    }
+
+    if (Length >= 6 &&
+        Bytes[0] == 0xFF &&
+        Bytes[1] == 0x25) {
+        return TRUE;
     }
 
     return FALSE;
@@ -1457,7 +1538,11 @@ DpRuntimeCheckHookIntegrity(VOID)
         entry->TamperActive = TRUE;
         entry->LastReportTick = shouldReport ? nowTick : entry->LastReportTick;
         if (shouldReport) {
-            if (matchesOriginal) {
+            if (entry->IsEtwSurface && DpRuntimeIsLikelyEtwReturnPatch(currentBytes, entry->ProbeLength)) {
+                DpRuntimeWriteEvent(L"userhook.runtime.etw-return-patch-detected", entry->DisplayName, ERROR_SUCCESS, FALSE);
+            } else if (entry->IsEtwSurface && DpRuntimeIsLikelyJumpPatch(currentBytes, entry->ProbeLength)) {
+                DpRuntimeWriteEvent(L"userhook.runtime.etw-jump-patch-detected", entry->DisplayName, ERROR_INVALID_DATA, FALSE);
+            } else if (matchesOriginal) {
                 DpRuntimeWriteEvent(L"userhook.runtime.unhook-detected", entry->DisplayName, ERROR_SUCCESS, FALSE);
             } else {
                 DpRuntimeWriteEvent(L"userhook.runtime.hook-overwrite-detected", entry->DisplayName, ERROR_INVALID_DATA, FALSE);
@@ -1977,6 +2062,89 @@ DpHookNtUnmapViewOfSection(
     return gRealNtUnmapViewOfSection(processHandle, baseAddress);
 }
 
+static ULONG WINAPI
+DpHookEventRegister(
+    LPCGUID providerId,
+    PENABLECALLBACK enableCallback,
+    PVOID callbackContext,
+    PREGHANDLE regHandle
+    )
+{
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.etw-provider-register", L"telemetry", L"EventRegister", L"EventRegister", ERROR_SUCCESS, FALSE, 0, 0, 0, NULL);
+    return gRealEventRegister(providerId, enableCallback, callbackContext, regHandle);
+}
+
+static ULONG WINAPI
+DpHookEventUnregister(
+    REGHANDLE regHandle
+    )
+{
+    if (InterlockedIncrement(&gEtwUnregisterReports) <= 4) {
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.etw-provider-unregister", L"telemetry", L"EventUnregister", L"EventUnregister", ERROR_SUCCESS, FALSE, 0, 0, 0, NULL);
+    }
+
+    return gRealEventUnregister(regHandle);
+}
+
+static ULONG WINAPI
+DpHookEventWrite(
+    REGHANDLE regHandle,
+    PCEVENT_DESCRIPTOR eventDescriptor,
+    ULONG userDataCount,
+    PEVENT_DATA_DESCRIPTOR userData
+    )
+{
+    return gRealEventWrite(regHandle, eventDescriptor, userDataCount, userData);
+}
+
+static ULONG WINAPI
+DpHookEventWriteTransfer(
+    REGHANDLE regHandle,
+    PCEVENT_DESCRIPTOR eventDescriptor,
+    LPCGUID activityId,
+    LPCGUID relatedActivityId,
+    ULONG userDataCount,
+    PEVENT_DATA_DESCRIPTOR userData
+    )
+{
+    return gRealEventWriteTransfer(regHandle, eventDescriptor, activityId, relatedActivityId, userDataCount, userData);
+}
+
+static ULONG WINAPI
+DpHookEventWriteString(
+    REGHANDLE regHandle,
+    UCHAR level,
+    ULONGLONG keyword,
+    PCWSTR string
+    )
+{
+    return gRealEventWriteString(regHandle, level, keyword, string);
+}
+
+static NTSTATUS NTAPI
+DpHookEtwEventWrite(
+    REGHANDLE regHandle,
+    PCEVENT_DESCRIPTOR eventDescriptor,
+    ULONG userDataCount,
+    PEVENT_DATA_DESCRIPTOR userData
+    )
+{
+    return gRealEtwEventWrite(regHandle, eventDescriptor, userDataCount, userData);
+}
+
+static NTSTATUS NTAPI
+DpHookEtwEventWriteTransfer(
+    REGHANDLE regHandle,
+    PCEVENT_DESCRIPTOR eventDescriptor,
+    LPCGUID activityId,
+    LPCGUID relatedActivityId,
+    ULONG userDataCount,
+    PEVENT_DATA_DESCRIPTOR userData
+    )
+{
+    return gRealEtwEventWriteTransfer(regHandle, eventDescriptor, activityId, relatedActivityId, userDataCount, userData);
+}
+
 static BOOL
 DpRuntimeHookApi(
     _In_z_ LPCWSTR ModuleName,
@@ -2015,6 +2183,10 @@ DpRuntimeHookApi(
     entry->ProbeLength = DP_RUNTIME_HOOK_PROBE_BYTES;
     isNtdllSyscall = (_wcsicmp(ModuleName, L"ntdll.dll") == 0 && _strnicmp(ApiName, "Nt", 2) == 0);
     entry->IsNtdllSyscall = isNtdllSyscall;
+    entry->IsEtwSurface = (_wcsicmp(ModuleName, L"advapi32.dll") == 0 &&
+                           (_strnicmp(ApiName, "Event", 5) == 0 || _strnicmp(ApiName, "Etw", 3) == 0)) ||
+                          (_wcsicmp(ModuleName, L"ntdll.dll") == 0 &&
+                           _strnicmp(ApiName, "Etw", 3) == 0);
     (VOID)StringCchCopyW(entry->ModuleName, ARRAYSIZE(entry->ModuleName), ModuleName);
     (VOID)StringCchCopyA(entry->ApiName, ARRAYSIZE(entry->ApiName), ApiName);
     (VOID)StringCchPrintfW(entry->DisplayName, ARRAYSIZE(entry->DisplayName), L"%s!%S", ModuleName, ApiName);
@@ -2022,6 +2194,10 @@ DpRuntimeHookApi(
     if (!DpRuntimeReadCodeBytes(entry->Target, entry->OriginalBytes, entry->ProbeLength)) {
         DpRuntimeWriteEvent(L"userhook.runtime.hook-baseline-failed", entry->DisplayName, GetLastError(), TRUE);
         return FALSE;
+    }
+
+    if (entry->IsEtwSurface && DpRuntimeIsLikelyEtwReturnPatch(entry->OriginalBytes, entry->ProbeLength)) {
+        DpRuntimeWriteEvent(L"userhook.runtime.etw-prepatched-detected", entry->DisplayName, ERROR_INVALID_DATA, FALSE);
     }
 
     if (MH_CreateHook((LPVOID)target, Detour, Original) != MH_OK) {
@@ -2080,6 +2256,18 @@ DpRuntimeInitializeOnce(
         DpRuntimeHookApi(L"ntdll.dll", "NtAllocateVirtualMemory", DpHookNtAllocateVirtualMemory, (LPVOID *)&gRealNtAllocateVirtualMemory);
         DpRuntimeHookApi(L"ntdll.dll", "NtProtectVirtualMemory", DpHookNtProtectVirtualMemory, (LPVOID *)&gRealNtProtectVirtualMemory);
         DpRuntimeHookApi(L"ntdll.dll", "NtUnmapViewOfSection", DpHookNtUnmapViewOfSection, (LPVOID *)&gRealNtUnmapViewOfSection);
+
+        if (gMonitorEtwTamper) {
+            DpRuntimeHookApi(L"advapi32.dll", "EventRegister", DpHookEventRegister, (LPVOID *)&gRealEventRegister);
+            DpRuntimeHookApi(L"advapi32.dll", "EventUnregister", DpHookEventUnregister, (LPVOID *)&gRealEventUnregister);
+            DpRuntimeHookApi(L"advapi32.dll", "EventWrite", DpHookEventWrite, (LPVOID *)&gRealEventWrite);
+            DpRuntimeHookApi(L"advapi32.dll", "EventWriteTransfer", DpHookEventWriteTransfer, (LPVOID *)&gRealEventWriteTransfer);
+            DpRuntimeHookApi(L"advapi32.dll", "EventWriteString", DpHookEventWriteString, (LPVOID *)&gRealEventWriteString);
+            DpRuntimeHookApi(L"ntdll.dll", "EtwEventWrite", DpHookEtwEventWrite, (LPVOID *)&gRealEtwEventWrite);
+            DpRuntimeHookApi(L"ntdll.dll", "EtwEventWriteTransfer", DpHookEtwEventWriteTransfer, (LPVOID *)&gRealEtwEventWriteTransfer);
+        } else {
+            DpRuntimeWriteEvent(L"userhook.runtime.etw-tamper-monitor-disabled", L"policy", ERROR_SUCCESS, FALSE);
+        }
 
         if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
             DpRuntimeWriteEvent(L"userhook.runtime.enable-hooks-failed", L"MinHook", GetLastError(), FALSE);

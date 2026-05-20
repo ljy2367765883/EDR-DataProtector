@@ -102,6 +102,7 @@ namespace DataProtectorWebBridge.Services
         private const uint UserHookDefenseFlagMonitorSystemProcesses = 0x00000040;
         private const uint UserHookDefenseFlagRuntimeApiBehavior = 0x00000080;
         private const uint UserHookDefenseFlagRuntimeMemoryScan = 0x00000100;
+        private const uint UserHookDefenseFlagEtwTamperMonitor = 0x00000200;
         private const uint UserHookDefenseAllowedFlags =
             UserHookDefenseFlagEnabled |
             UserHookDefenseFlagEarlyProcessInjection |
@@ -111,7 +112,8 @@ namespace DataProtectorWebBridge.Services
             UserHookDefenseFlagAuditOnly |
             UserHookDefenseFlagMonitorSystemProcesses |
             UserHookDefenseFlagRuntimeApiBehavior |
-            UserHookDefenseFlagRuntimeMemoryScan;
+            UserHookDefenseFlagRuntimeMemoryScan |
+            UserHookDefenseFlagEtwTamperMonitor;
         private const int MaxBehaviorChainRules = 64;
         private const int MaxBehaviorAtomsPerRule = 16;
         private const int MaxBehaviorRuleText = 256;
@@ -2003,6 +2005,7 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = (flags & UserHookDefenseFlagMonitorSystemProcesses) != 0,
                 monitorRuntimeApiBehavior = (flags & UserHookDefenseFlagRuntimeApiBehavior) != 0,
                 scanExecutableMemory = (flags & UserHookDefenseFlagRuntimeMemoryScan) != 0,
+                monitorEtwTamper = (flags & UserHookDefenseFlagEtwTamperMonitor) != 0,
                 excludedProcessNames = DefaultUserHookExcludedProcessNames(),
                 excludedProcessDirectories = DefaultUserHookExcludedProcessDirectories(),
                 excludedProcessPaths = DefaultUserHookExcludedProcessPaths(),
@@ -2023,6 +2026,7 @@ namespace DataProtectorWebBridge.Services
                        UserHookDefenseFlagRequireSignedRuntime |
                        UserHookDefenseFlagRuntimeApiBehavior |
                        UserHookDefenseFlagRuntimeMemoryScan |
+                       UserHookDefenseFlagEtwTamperMonitor |
                        UserHookDefenseFlagAuditOnly;
             }
 
@@ -2036,6 +2040,7 @@ namespace DataProtectorWebBridge.Services
             if (policy.monitorSystemProcesses) flags |= UserHookDefenseFlagMonitorSystemProcesses;
             if (policy.monitorRuntimeApiBehavior != false) flags |= UserHookDefenseFlagRuntimeApiBehavior;
             if (policy.scanExecutableMemory != false) flags |= UserHookDefenseFlagRuntimeMemoryScan;
+            if (policy.monitorEtwTamper != false) flags |= UserHookDefenseFlagEtwTamperMonitor;
             return flags & UserHookDefenseAllowedFlags;
         }
 
@@ -2048,6 +2053,7 @@ namespace DataProtectorWebBridge.Services
                 UserHookDefenseFlagRequireSignedRuntime |
                 UserHookDefenseFlagRuntimeApiBehavior |
                 UserHookDefenseFlagRuntimeMemoryScan |
+                UserHookDefenseFlagEtwTamperMonitor |
                 UserHookDefenseFlagAuditOnly);
         }
 
@@ -2065,6 +2071,7 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = source.monitorSystemProcesses,
                 monitorRuntimeApiBehavior = source.monitorRuntimeApiBehavior != false,
                 scanExecutableMemory = source.scanExecutableMemory != false,
+                monitorEtwTamper = source.monitorEtwTamper != false,
                 excludedProcessNames = NormalizeStringList(source.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
                 excludedProcessDirectories = NormalizeStringList(source.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
                 excludedProcessPaths = NormalizeStringList(source.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
@@ -2094,6 +2101,7 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = request.monitorSystemProcesses,
                 monitorRuntimeApiBehavior = request.monitorRuntimeApiBehavior != false,
                 scanExecutableMemory = request.scanExecutableMemory != false,
+                monitorEtwTamper = request.monitorEtwTamper != false,
                 excludedProcessNames = NormalizeStringList(request.excludedProcessNames, DefaultUserHookExcludedProcessNames()),
                 excludedProcessDirectories = NormalizeStringList(request.excludedProcessDirectories, DefaultUserHookExcludedProcessDirectories()),
                 excludedProcessPaths = NormalizeStringList(request.excludedProcessPaths, DefaultUserHookExcludedProcessPaths()),
@@ -2112,7 +2120,7 @@ namespace DataProtectorWebBridge.Services
             UserHookDefensePolicyDto normalized = CloneUserHookDefensePolicy(policy);
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};runtimeApi={7};memoryScan={8};rules={9};excludedNames={10};excludedDirs={11};excludedPaths={12};trustedSigners={13};flags=0x{14:X8}",
+                "enabled={0};earlyInject={1};imageLoad={2};signedRuntime={3};blockUntrusted={4};auditOnly={5};system={6};runtimeApi={7};memoryScan={8};etwTamper={9};rules={10};excludedNames={11};excludedDirs={12};excludedPaths={13};trustedSigners={14};flags=0x{15:X8}",
                 normalized.enabled,
                 normalized.monitorEarlyProcesses,
                 normalized.monitorImageLoads,
@@ -2122,6 +2130,7 @@ namespace DataProtectorWebBridge.Services
                 normalized.monitorSystemProcesses,
                 normalized.monitorRuntimeApiBehavior,
                 normalized.scanExecutableMemory,
+                normalized.monitorEtwTamper,
                 normalized.behaviorRules == null ? 0 : normalized.behaviorRules.Count(rule => rule != null && rule.enabled),
                 normalized.excludedProcessNames.Length,
                 normalized.excludedProcessDirectories.Length,
@@ -2240,6 +2249,19 @@ namespace DataProtectorWebBridge.Services
                     "Defense Evasion",
                     "T1562 Impair Defenses",
                     "检测到 hook 被还原/覆盖、私有 syscall stub 或直接系统调用迹象。"),
+                NewBehaviorRule(
+                    "dp.behavior.telemetry-impairment",
+                    "遥测削弱与 ETW Patch",
+                    new[] { "userhook.runtime.etw-prepatched-detected", "userhook.runtime.etw-return-patch-detected", "userhook.runtime.etw-jump-patch-detected", "userhook.observed.etw-provider-unregister" },
+                    null,
+                    120,
+                    1,
+                    95,
+                    "critical",
+                    "suspicious",
+                    "Defense Evasion",
+                    "T1562.002 Impair Defenses: Disable Windows Event Logging",
+                    "检测 ETW EventWrite/EtwEventWrite 等遥测入口被 ret/跳转补丁、预补丁或异常注销，防止恶意程序通过 patch ETW 逃避审计。"),
                 NewBehaviorRule(
                     "dp.behavior.manual-map",
                     "内存驻留载荷",
@@ -2438,6 +2460,11 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase))
             {
                 return new[] { "MITRE ATT&CK T1490", "Sigma/Elastic recovery inhibition rules" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1562.002", "Microsoft ETW EventRegister/EventWrite", "Sysmon telemetry model" };
             }
 
             if (string.Equals(ruleId, "dp.behavior.lolbin-download-exec", StringComparison.OrdinalIgnoreCase))
@@ -3927,6 +3954,7 @@ namespace DataProtectorWebBridge.Services
             public bool monitorSystemProcesses { get; set; }
             public bool? monitorRuntimeApiBehavior { get; set; }
             public bool? scanExecutableMemory { get; set; }
+            public bool? monitorEtwTamper { get; set; }
             public string[] excludedProcessNames { get; set; }
             public string[] excludedProcessDirectories { get; set; }
             public string[] excludedProcessPaths { get; set; }

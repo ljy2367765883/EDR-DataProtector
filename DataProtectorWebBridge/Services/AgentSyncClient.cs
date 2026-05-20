@@ -930,6 +930,7 @@ namespace DataProtectorWebBridge.Services
                 monitorSystemProcesses = userHookDefensePolicy.monitorSystemProcesses,
                 monitorRuntimeApiBehavior = userHookDefensePolicy.monitorRuntimeApiBehavior,
                 scanExecutableMemory = userHookDefensePolicy.scanExecutableMemory,
+                monitorEtwTamper = userHookDefensePolicy.monitorEtwTamper,
                 excludedProcessNames = userHookDefensePolicy.excludedProcessNames,
                 excludedProcessDirectories = userHookDefensePolicy.excludedProcessDirectories,
                 excludedProcessPaths = userHookDefensePolicy.excludedProcessPaths,

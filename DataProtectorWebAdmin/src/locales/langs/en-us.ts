@@ -1055,7 +1055,9 @@ const local: App.I18n.Schema = {
         runtimeApiBehaviorDesc: 'Monitors remote threads, cross-process memory writes, executable memory and global hook behavior inside controlled processes.',
         memoryScan: 'Memory anomaly scanning',
         memoryScanDesc: 'Periodically scans private executable pages, RWX pages, manual-mapped PE images and private syscall stubs.',
-        controls: 'Controls: {count}/8',
+        etwTamper: 'ETW telemetry integrity',
+        etwTamperDesc: 'Monitors EventWrite/EtwEventWrite telemetry entry points for ret patches, jump patches and suspicious provider unregister activity.',
+        controls: 'Controls: {count}/9',
         active: 'Active: {count}',
         excludedProcesses: 'Do-not-control process names',
         excludedProcessPlaceholder: 'One process per line, for example chrome.exe',
@@ -1088,7 +1090,9 @@ const local: App.I18n.Schema = {
           apiTitle: 'Dangerous API behavior chain',
           apiDetail: 'Monitors injection, cross-process writes, executable memory and global hook calls.',
           memoryTitle: 'Executable memory anomaly',
-          memoryDetail: 'Detects private executable, RWX, manual-mapped module and syscall-stub bypass indicators.'
+          memoryDetail: 'Detects private executable, RWX, manual-mapped module and syscall-stub bypass indicators.',
+          etwTitle: 'ETW telemetry integrity',
+          etwDetail: 'Uses ETW patching, pre-patching and suspicious unregister activity as defense-evasion signals.'
         }
       },
       dlp: {

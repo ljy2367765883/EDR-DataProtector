@@ -648,6 +648,7 @@ namespace DataProtectorWebBridge.Services
                     !StringArrayEquals(state.UserHookDefensePolicy.trustedSignerSubjects, normalized.trustedSignerSubjects) ||
                     state.UserHookDefensePolicy.monitorRuntimeApiBehavior != normalized.monitorRuntimeApiBehavior ||
                     state.UserHookDefensePolicy.scanExecutableMemory != normalized.scanExecutableMemory ||
+                    state.UserHookDefensePolicy.monitorEtwTamper != normalized.monitorEtwTamper ||
                     !SameBehaviorRules(state.UserHookDefensePolicy.behaviorRules, normalized.behaviorRules))
                 {
                     state.UserHookDefensePolicy = PolicyBridgeService.CloneUserHookDefensePolicy(normalized);

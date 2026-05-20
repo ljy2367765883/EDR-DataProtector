@@ -103,6 +103,7 @@ const userHookDefensePolicy = reactive<Api.DataProtector.UserHookDefensePolicy>(
   monitorSystemProcesses: false,
   monitorRuntimeApiBehavior: true,
   scanExecutableMemory: true,
+  monitorEtwTamper: true,
   excludedProcessNames: [],
   excludedProcessDirectories: [],
   excludedProcessPaths: [],
@@ -363,7 +364,8 @@ const userHookDefenseGroups = computed(() => {
     userHookDefensePolicy.auditOnly,
     userHookDefensePolicy.monitorSystemProcesses,
     userHookDefensePolicy.monitorRuntimeApiBehavior,
-    userHookDefensePolicy.scanExecutableMemory
+    userHookDefensePolicy.scanExecutableMemory,
+    userHookDefensePolicy.monitorEtwTamper
   ].filter(Boolean).length;
 
   return {
@@ -524,6 +526,13 @@ const userHookDefenseSurfaces = computed(() => [
     detail: $t('dataprotector.policy.userhook.surfacesList.memoryDetail'),
     enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.scanExecutableMemory,
     icon: 'mdi:memory'
+  },
+  {
+    key: 'etw-tamper',
+    title: $t('dataprotector.policy.userhook.surfacesList.etwTitle'),
+    detail: $t('dataprotector.policy.userhook.surfacesList.etwDetail'),
+    enabled: userHookDefensePolicy.enabled && userHookDefensePolicy.monitorEtwTamper,
+    icon: 'mdi:radar'
   }
 ]);
 
@@ -976,6 +985,7 @@ function applyUserHookDefensePolicy(policy?: Api.DataProtector.UserHookDefensePo
   userHookDefensePolicy.monitorSystemProcesses = Boolean(policy.monitorSystemProcesses);
   userHookDefensePolicy.monitorRuntimeApiBehavior = policy.monitorRuntimeApiBehavior !== false;
   userHookDefensePolicy.scanExecutableMemory = policy.scanExecutableMemory !== false;
+  userHookDefensePolicy.monitorEtwTamper = policy.monitorEtwTamper !== false;
   userHookDefensePolicy.excludedProcessNames = policy.excludedProcessNames || [];
   userHookDefensePolicy.excludedProcessDirectories = policy.excludedProcessDirectories || [];
   userHookDefensePolicy.excludedProcessPaths = policy.excludedProcessPaths || [];
@@ -1001,6 +1011,7 @@ function calculateUserHookDefenseFlags() {
   if (userHookDefensePolicy.monitorSystemProcesses) flags |= 0x00000040;
   if (userHookDefensePolicy.monitorRuntimeApiBehavior) flags |= 0x00000080;
   if (userHookDefensePolicy.scanExecutableMemory) flags |= 0x00000100;
+  if (userHookDefensePolicy.monitorEtwTamper) flags |= 0x00000200;
   return flags;
 }
 
@@ -1022,7 +1033,8 @@ function setUserHookDefenseFeature(
     | 'auditOnly'
     | 'monitorSystemProcesses'
     | 'monitorRuntimeApiBehavior'
-    | 'scanExecutableMemory',
+    | 'scanExecutableMemory'
+    | 'monitorEtwTamper',
   value: boolean
 ) {
   userHookDefensePolicy[key] = value;
@@ -1031,6 +1043,9 @@ function setUserHookDefenseFeature(
   }
   if (key === 'auditOnly' && value) {
     userHookDefensePolicy.blockUntrustedRuntime = false;
+  }
+  if (key === 'monitorRuntimeApiBehavior' && !value) {
+    userHookDefensePolicy.monitorEtwTamper = false;
   }
   syncUserHookDefenseFlags();
 }
@@ -1400,6 +1415,7 @@ async function saveUserHookDefensePolicy() {
       monitorSystemProcesses: userHookDefensePolicy.monitorSystemProcesses,
       monitorRuntimeApiBehavior: userHookDefensePolicy.monitorRuntimeApiBehavior,
       scanExecutableMemory: userHookDefensePolicy.scanExecutableMemory,
+      monitorEtwTamper: userHookDefensePolicy.monitorEtwTamper,
       excludedProcessNames: linesToList(userHookExcludedProcessesText.value),
       excludedProcessDirectories: linesToList(userHookExcludedDirectoriesText.value),
       excludedProcessPaths: linesToList(userHookExcludedPathsText.value),
@@ -2085,6 +2101,19 @@ onMounted(refresh);
                         />
                       </div>
                       <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.memoryScanDesc') }}</div>
+                    </div>
+                  </NGi>
+                  <NGi>
+                    <div class="rounded-8px border border-gray-200 p-14px dark:border-gray-700">
+                      <div class="flex items-center justify-between gap-10px">
+                        <div class="font-700">{{ $t('dataprotector.policy.userhook.etwTamper') }}</div>
+                        <NSwitch
+                          :value="userHookDefensePolicy.monitorEtwTamper"
+                          :disabled="!userHookDefensePolicy.enabled || !userHookDefensePolicy.monitorRuntimeApiBehavior"
+                          @update:value="value => setUserHookDefenseFeature('monitorEtwTamper', value)"
+                        />
+                      </div>
+                      <div class="m-t-6px text-12px text-gray-500">{{ $t('dataprotector.policy.userhook.etwTamperDesc') }}</div>
                     </div>
                   </NGi>
                 </NGrid>

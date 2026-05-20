@@ -1051,7 +1051,9 @@
         runtimeApiBehaviorDesc: '在已接管进程内监控远程线程、跨进程写内存、可执行内存和全局 Hook 等行为。',
         memoryScan: '内存异常扫描',
         memoryScanDesc: '周期扫描私有可执行页、RWX 页、手工映射 PE 和私有 syscall stub。',
-        controls: '控制项：{count}/8',
+        etwTamper: 'ETW 遥测防篡改',
+        etwTamperDesc: '监控 EventWrite/EtwEventWrite 等遥测入口被 ret、跳转补丁或异常注销，用作行为链辅助判定。',
+        controls: '控制项：{count}/9',
         active: '生效：{count}',
         excludedProcesses: '不接管进程名',
         excludedProcessPlaceholder: '每行一个进程，例如 chrome.exe',
@@ -1084,7 +1086,9 @@
           apiTitle: '危险 API 行为链',
           apiDetail: '监控注入、跨进程写入、可执行内存和全局 Hook 等高危调用。',
           memoryTitle: '可执行内存异常',
-          memoryDetail: '识别私有可执行、RWX、手工映射模块和 syscall stub 绕过迹象。'
+          memoryDetail: '识别私有可执行、RWX、手工映射模块和 syscall stub 绕过迹象。',
+          etwTitle: 'ETW 遥测完整性',
+          etwDetail: '将 ETW patch、预补丁和异常注销作为防御规避信号。'
         }
       },      dlp: {
         title: '截图和剪贴板防泄密',

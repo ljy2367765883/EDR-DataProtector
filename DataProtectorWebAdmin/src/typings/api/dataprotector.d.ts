@@ -213,6 +213,7 @@ declare namespace Api {
       monitorSystemProcesses: boolean;
       monitorRuntimeApiBehavior: boolean;
       scanExecutableMemory: boolean;
+      monitorEtwTamper: boolean;
       excludedProcessNames: string[];
       excludedProcessDirectories: string[];
       excludedProcessPaths: string[];
