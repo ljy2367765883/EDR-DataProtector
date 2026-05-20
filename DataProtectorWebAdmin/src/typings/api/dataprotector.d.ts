@@ -514,6 +514,11 @@ declare namespace Api {
       exitCode: number;
       error: string;
       reportJson: string;
+      stage: string;
+      stageText: string;
+      progress: number;
+      lastProgressUtc: string;
+      logText: string;
       score: number;
       verdict: StaticAnalysisVerdict;
       severity: StaticAnalysisSeverity;

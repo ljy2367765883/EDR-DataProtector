@@ -3,7 +3,7 @@ import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import LogicFlow from '@logicflow/core';
 import '@logicflow/core/dist/index.css';
 import type { DataTableColumns, PaginationProps, UploadCustomRequestOptions } from 'naive-ui';
-import { NButton, NTag, useMessage } from 'naive-ui';
+import { NButton, NProgress, NTag, useMessage } from 'naive-ui';
 import {
   fetchRemoveStaticAnalysisSample,
   fetchResetStaticAnalysisRules,
@@ -229,9 +229,23 @@ const sampleColumns = computed<DataTableColumns<Api.DataProtector.StaticAnalysis
   {
     title: '状态',
     key: 'status',
-    width: 120,
+    width: 190,
     render(row) {
-      return h(NTag, { type: statusTag(row.status), bordered: false }, { default: () => statusLabel(row.status) });
+      return h('div', { class: 'progress-cell' }, [
+        h('div', { class: 'progress-head' }, [
+          h(NTag, { type: statusTag(row.status), bordered: false }, { default: () => statusLabel(row.status) }),
+          h('span', `${normalizeProgress(row.progress)}%`)
+        ]),
+        h(NProgress, {
+          type: 'line',
+          percentage: normalizeProgress(row.progress),
+          showIndicator: false,
+          height: 6,
+          processing: row.status === 'running',
+          status: row.status === 'failed' ? 'error' : row.status === 'completed' ? 'success' : 'info'
+        }),
+        h('span', { class: 'stage-line' }, row.stageText || stageLabel(row.stage) || '-')
+      ]);
     }
   },
   {
@@ -766,6 +780,26 @@ function statusLabel(value?: string) {
   return ({ queued: '待分析', running: '分析中', completed: '已完成', failed: '失败' } as Record<string, string>)[value || ''] || '未知';
 }
 
+function stageLabel(value?: string) {
+  return (
+    {
+      queued: '等待分析',
+      preflight: '准备样本',
+      ghidra: 'Ghidra 分析',
+      scoring: '规则评分',
+      ai: 'AI 判定',
+      report: '生成报告',
+      completed: '分析完成',
+      failed: '分析失败'
+    } as Record<string, string>
+  )[value || ''] || value || '-';
+}
+
+function normalizeProgress(value?: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(Number(value))));
+}
+
 function verdictLabel(value?: string) {
   return ({ malicious: '恶意', suspicious: '可疑', observed: '观察', clean: '干净', failed: '失败', queued: '待分析' } as Record<string, string>)[value || ''] || '未知';
 }
@@ -904,12 +938,35 @@ onBeforeUnmount(() => {
               <NButton type="primary" :loading="analyzing" :disabled="selectedSample.status === 'running'" @click="analyze()">开始分析</NButton>
               <NButton :disabled="!selectedSample.reportJson" @click="scrollToReport">查看报告</NButton>
             </div>
+            <div class="analysis-progress m-t-16px">
+              <div class="progress-head">
+                <strong>{{ selectedSample.stageText || stageLabel(selectedSample.stage) }}</strong>
+                <span>{{ normalizeProgress(selectedSample.progress) }}%</span>
+              </div>
+              <NProgress
+                type="line"
+                :percentage="normalizeProgress(selectedSample.progress)"
+                :show-indicator="false"
+                :height="8"
+                :processing="selectedSample.status === 'running'"
+                :status="selectedSample.status === 'failed' ? 'error' : selectedSample.status === 'completed' ? 'success' : 'info'"
+              />
+              <span>最近更新：{{ formatTime(selectedSample.lastProgressUtc) }}</span>
+            </div>
             <NDescriptions class="m-t-16px" :column="1" bordered size="small">
               <NDescriptionsItem label="状态">{{ statusLabel(selectedSample.status) }}</NDescriptionsItem>
+              <NDescriptionsItem label="阶段">{{ selectedSample.stageText || stageLabel(selectedSample.stage) }}</NDescriptionsItem>
               <NDescriptionsItem label="架构">{{ selectedSample.architecture || '-' }}</NDescriptionsItem>
               <NDescriptionsItem label="签名">{{ selectedSample.signatureStatus }} {{ selectedSample.signer || '' }}</NDescriptionsItem>
               <NDescriptionsItem label="错误">{{ selectedSample.error || '-' }}</NDescriptionsItem>
             </NDescriptions>
+            <div class="analysis-log m-t-16px">
+              <div class="log-title">
+                <strong>分析日志</strong>
+                <span>{{ selectedSample.runId || '-' }}</span>
+              </div>
+              <pre>{{ selectedSample.logText || '暂无日志。' }}</pre>
+            </div>
           </template>
         </NCard>
       </NGi>
@@ -1177,6 +1234,57 @@ onBeforeUnmount(() => {
 .score-cell span {
   color: var(--n-text-color-3);
   font-size: 12px;
+}
+
+.progress-cell,
+.analysis-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.progress-head,
+.log-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.progress-head span,
+.stage-line,
+.analysis-progress span,
+.log-title span {
+  color: var(--n-text-color-3);
+  font-size: 12px;
+}
+
+.stage-line {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-log {
+  display: grid;
+  gap: 8px;
+}
+
+.analysis-log pre {
+  min-height: 160px;
+  max-height: 280px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: #334155;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  background: #f8fafc;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 8px;
 }
 
 .rule-editor-list {

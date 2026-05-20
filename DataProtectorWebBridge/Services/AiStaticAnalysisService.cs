@@ -223,6 +223,10 @@ namespace DataProtectorWebBridge.Services
                     existing.submitCount++;
                     existing.source = string.IsNullOrWhiteSpace(normalized.source) ? existing.source : normalized.source;
                     existing.notes = string.IsNullOrWhiteSpace(normalized.notes) ? existing.notes : normalized.notes;
+                    existing.stage = string.IsNullOrWhiteSpace(existing.stage) ? "queued" : existing.stage;
+                    existing.stageText = string.IsNullOrWhiteSpace(existing.stageText) ? "等待分析" : existing.stageText;
+                    existing.lastProgressUtc = DateTime.UtcNow.ToString("o");
+                    existing.logText = AppendAnalysisLog(existing.logText, "样本再次提交，等待静态分析。");
                     Save();
                     return ToSampleDto(existing);
                 }
@@ -246,6 +250,11 @@ namespace DataProtectorWebBridge.Services
                     lastSubmittedUtc = DateTime.UtcNow.ToString("o"),
                     submitCount = 1,
                     status = "queued",
+                    stage = "queued",
+                    stageText = "等待分析",
+                    progress = 0,
+                    lastProgressUtc = DateTime.UtcNow.ToString("o"),
+                    logText = AppendAnalysisLog(string.Empty, "样本已提交，等待静态分析。"),
                     storagePath = storagePath,
                     architecture = ReadArchitecture(storagePath),
                     signer = TryReadSignerSubject(storagePath),
@@ -296,7 +305,12 @@ namespace DataProtectorWebBridge.Services
                 if (string.IsNullOrWhiteSpace(sample.storagePath) || !File.Exists(sample.storagePath))
                 {
                     sample.status = "failed";
+                    sample.stage = "failed";
+                    sample.stageText = "样本文件缺失";
+                    sample.progress = 100;
+                    sample.lastProgressUtc = DateTime.UtcNow.ToString("o");
                     sample.error = "Static analysis sample file is missing from server storage.";
+                    sample.logText = AppendAnalysisLog(sample.logText, sample.error);
                     sample.completedUtc = DateTime.UtcNow.ToString("o");
                     Save();
                     return ToSampleDto(sample);
@@ -312,6 +326,11 @@ namespace DataProtectorWebBridge.Services
                 sample.verdict = "queued";
                 sample.severity = "info";
                 sample.runId = "sa-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 12);
+                sample.stage = "queued";
+                sample.stageText = "分析任务已创建";
+                sample.progress = 2;
+                sample.lastProgressUtc = DateTime.UtcNow.ToString("o");
+                sample.logText = AppendAnalysisLog(string.Empty, "分析任务已创建。runId=" + sample.runId);
                 config = CloneConfiguration(state.Configuration);
                 if (request != null)
                 {
@@ -413,10 +432,13 @@ namespace DataProtectorWebBridge.Services
                     sample = CloneSample(state.Samples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase)));
                 }
 
-                result = ExecuteAnalysis(sample, runId, config, rules);
+                UpdateAnalysisProgress(sampleId, "preflight", "准备样本与运行目录", 8, "开始静态分析。样本=" + (sample == null ? sampleId : sample.fileName));
+                result = ExecuteAnalysis(sample, runId, config, rules, (stage, stageText, progress, detail) =>
+                    UpdateAnalysisProgress(sampleId, stage, stageText, progress, detail));
             }
             catch (Exception ex)
             {
+                UpdateAnalysisProgress(sampleId, "failed", "分析异常", 100, ex.Message);
                 result = new StaticAnalysisExecutionResult
                 {
                     exitCode = 1,
@@ -444,6 +466,11 @@ namespace DataProtectorWebBridge.Services
                 sample.error = result.error ?? string.Empty;
                 sample.reportJson = Truncate(result.reportJson, 5 * 1024 * 1024);
                 sample.status = result.exitCode == 0 ? "completed" : "failed";
+                sample.stage = result.exitCode == 0 ? "completed" : "failed";
+                sample.stageText = result.exitCode == 0 ? "分析完成" : "分析失败";
+                sample.progress = 100;
+                sample.lastProgressUtc = DateTime.UtcNow.ToString("o");
+                sample.logText = AppendAnalysisLog(sample.logText, result.exitCode == 0 ? "静态分析完成。" : "静态分析失败：" + sample.error);
                 sample.score = result.score;
                 sample.verdict = string.IsNullOrWhiteSpace(result.verdict) ? (result.exitCode == 0 ? "observed" : "failed") : result.verdict;
                 sample.severity = string.IsNullOrWhiteSpace(result.severity) ? (result.exitCode == 0 ? "info" : "warning") : result.severity;
@@ -451,7 +478,34 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
-        private StaticAnalysisExecutionResult ExecuteAnalysis(StaticAnalysisSampleState sample, string runId, StaticAnalysisConfiguration config, StaticAnalysisRuleDto[] rules)
+        private void UpdateAnalysisProgress(string sampleId, string stage, string stageText, int progress, string detail)
+        {
+            lock (syncRoot)
+            {
+                StaticAnalysisSampleState sample = state.Samples.FirstOrDefault(item => string.Equals(item.sampleId, sampleId, StringComparison.OrdinalIgnoreCase));
+                if (sample == null)
+                {
+                    return;
+                }
+
+                sample.stage = NormalizeDeviceText(stage);
+                sample.stageText = NormalizeDeviceText(stageText);
+                sample.progress = ClampInt(progress, 0, 100);
+                sample.lastProgressUtc = DateTime.UtcNow.ToString("o");
+                if (!string.IsNullOrWhiteSpace(detail))
+                {
+                    sample.logText = AppendAnalysisLog(sample.logText, detail);
+                }
+                Save();
+            }
+        }
+
+        private StaticAnalysisExecutionResult ExecuteAnalysis(
+            StaticAnalysisSampleState sample,
+            string runId,
+            StaticAnalysisConfiguration config,
+            StaticAnalysisRuleDto[] rules,
+            Action<string, string, int, string> progress)
         {
             if (sample == null)
             {
@@ -475,16 +529,20 @@ namespace DataProtectorWebBridge.Services
                 exitCode = 2;
                 engineStatus = "ghidra-not-configured";
                 engineMessage = "Ghidra headless analyzer was not found. Configure ghidraRoot to a built Ghidra source checkout or distribution containing support\\analyzeHeadless.bat.";
+                progress?.Invoke("failed", "Ghidra 未配置", 100, engineMessage);
                 ghidraReport = BuildFallbackReport(sample, engineMessage);
             }
             else
             {
-                ProcessResult process = RunGhidraHeadless(headless, sample.storagePath, runRoot, ghidraReportPath, config, ghidraStdoutPath, ghidraStderrPath);
+                progress?.Invoke("ghidra", "启动 Ghidra headless", 15, "Ghidra=" + headless);
+                ProcessResult process = RunGhidraHeadless(headless, sample.storagePath, runRoot, ghidraReportPath, config, ghidraStdoutPath, ghidraStderrPath, progress);
                 exitCode = process.exitCode;
                 engineStatus = process.exitCode == 0 && File.Exists(ghidraReportPath) ? "completed" : "failed";
                 engineMessage = process.exitCode == 0 ? "Ghidra source-derived analyzer completed." : Truncate(process.stderr + "\n" + process.stdout, 8000);
+                progress?.Invoke(engineStatus == "completed" ? "ghidra" : "failed", engineStatus == "completed" ? "Ghidra 分析完成" : "Ghidra 分析失败", engineStatus == "completed" ? 70 : 100, engineMessage);
                 if (File.Exists(ghidraReportPath))
                 {
+                    progress?.Invoke("ghidra", "读取 Ghidra JSON 报告", 74, ghidraReportPath);
                     ghidraReport = TryReadJsonDictionary(ghidraReportPath);
                 }
                 if (ghidraReport == null)
@@ -493,8 +551,11 @@ namespace DataProtectorWebBridge.Services
                 }
             }
 
+            progress?.Invoke("scoring", "执行静态规则评分", 80, "规则数=" + (rules == null ? 0 : rules.Length).ToString(CultureInfo.InvariantCulture));
             StaticAnalysisRuleScore ruleScore = EvaluateRules(ghidraReport, rules);
+            progress?.Invoke("ai", config.aiEnabled ? "调用 AI 判定" : "跳过 AI 判定", config.aiEnabled ? 88 : 94, config.aiEnabled ? NormalizeAiEndpoint(config.baseUrl) : "AI 未启用。");
             StaticAnalysisAiResult aiResult = RunAiAnalysis(config, sample, ghidraReport, ruleScore);
+            progress?.Invoke("report", "生成最终报告", 96, "规则分数=" + ruleScore.score.ToString(CultureInfo.InvariantCulture) + "，AI状态=" + aiResult.status);
             Dictionary<string, object> report = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
             {
                 { "schema", "dataprotector.static.report.v1" },
@@ -537,7 +598,8 @@ namespace DataProtectorWebBridge.Services
             string ghidraReportPath,
             StaticAnalysisConfiguration config,
             string stdoutPath,
-            string stderrPath)
+            string stderrPath,
+            Action<string, string, int, string> progress)
         {
             string scriptPath = Path.GetDirectoryName(ResolveAnalyzerScriptPath());
             string projectDir = Path.Combine(runRoot, "project");
@@ -574,9 +636,29 @@ namespace DataProtectorWebBridge.Services
                 process.StartInfo = startInfo;
                 StringBuilder stdout = new StringBuilder();
                 StringBuilder stderr = new StringBuilder();
-                process.OutputDataReceived += (sender, eventArgs) => { if (eventArgs.Data != null) stdout.AppendLine(eventArgs.Data); };
-                process.ErrorDataReceived += (sender, eventArgs) => { if (eventArgs.Data != null) stderr.AppendLine(eventArgs.Data); };
+                DateTime lastProgressUtc = DateTime.MinValue;
+                process.OutputDataReceived += (sender, eventArgs) =>
+                {
+                    if (eventArgs.Data == null)
+                    {
+                        return;
+                    }
+
+                    stdout.AppendLine(eventArgs.Data);
+                    MaybeForwardGhidraLine(progress, "stdout", eventArgs.Data, ref lastProgressUtc);
+                };
+                process.ErrorDataReceived += (sender, eventArgs) =>
+                {
+                    if (eventArgs.Data == null)
+                    {
+                        return;
+                    }
+
+                    stderr.AppendLine(eventArgs.Data);
+                    MaybeForwardGhidraLine(progress, "stderr", eventArgs.Data, ref lastProgressUtc);
+                };
                 process.Start();
+                progress?.Invoke("ghidra", "Ghidra 进程已启动", 20, "PID=" + process.Id.ToString(CultureInfo.InvariantCulture));
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
                 bool exited = process.WaitForExit(Math.Max(60, config.timeoutSeconds) * 1000);
@@ -584,6 +666,7 @@ namespace DataProtectorWebBridge.Services
                 {
                     TryKill(process);
                     string timeoutMessage = "Ghidra static analysis timed out after " + config.timeoutSeconds.ToString(CultureInfo.InvariantCulture) + " seconds.";
+                    progress?.Invoke("failed", "Ghidra 分析超时", 100, timeoutMessage);
                     File.WriteAllText(stdoutPath, stdout.ToString(), Encoding.UTF8);
                     File.WriteAllText(stderrPath, stderr + timeoutMessage, Encoding.UTF8);
                     return new ProcessResult { exitCode = 124, stdout = stdout.ToString(), stderr = stderr + timeoutMessage };
@@ -594,6 +677,7 @@ namespace DataProtectorWebBridge.Services
                 string errText = stderr.ToString();
                 File.WriteAllText(stdoutPath, outText, Encoding.UTF8);
                 File.WriteAllText(stderrPath, errText, Encoding.UTF8);
+                progress?.Invoke(process.ExitCode == 0 ? "ghidra" : "failed", "Ghidra 进程已退出", process.ExitCode == 0 ? 68 : 100, "exitCode=" + process.ExitCode.ToString(CultureInfo.InvariantCulture));
                 return new ProcessResult { exitCode = process.ExitCode, stdout = outText, stderr = errText };
             }
         }
@@ -1258,6 +1342,11 @@ namespace DataProtectorWebBridge.Services
                 exitCode = source.exitCode,
                 error = source.error,
                 reportJson = source.reportJson,
+                stage = source.stage,
+                stageText = source.stageText,
+                progress = source.progress,
+                lastProgressUtc = source.lastProgressUtc,
+                logText = source.logText,
                 score = source.score,
                 verdict = source.verdict,
                 severity = source.severity,
@@ -1297,6 +1386,11 @@ namespace DataProtectorWebBridge.Services
                 exitCode = source.exitCode,
                 error = source.error,
                 reportJson = source.reportJson,
+                stage = source.stage,
+                stageText = source.stageText,
+                progress = source.progress,
+                lastProgressUtc = source.lastProgressUtc,
+                logText = source.logText,
                 score = source.score,
                 verdict = source.verdict,
                 severity = source.severity,
@@ -1504,6 +1598,29 @@ namespace DataProtectorWebBridge.Services
                 {
                     startInfo.EnvironmentVariables["PATH"] = bin + ";" + startInfo.EnvironmentVariables["PATH"];
                 }
+            }
+        }
+
+        private static void MaybeForwardGhidraLine(Action<string, string, int, string> progress, string stream, string line, ref DateTime lastProgressUtc)
+        {
+            if (progress == null || string.IsNullOrWhiteSpace(line))
+            {
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            string trimmed = Truncate(line.Trim(), 700);
+            if (stream == "stderr" ||
+                trimmed.IndexOf("DataProtector", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                trimmed.IndexOf("Analyzing", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                trimmed.IndexOf("Importing", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                trimmed.IndexOf("Decompiler", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                trimmed.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                trimmed.IndexOf("WARN", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                (now - lastProgressUtc).TotalSeconds >= 3)
+            {
+                lastProgressUtc = now;
+                progress("ghidra", "Ghidra 正在分析", 45, "[" + stream + "] " + trimmed);
             }
         }
 
@@ -1802,6 +1919,25 @@ namespace DataProtectorWebBridge.Services
             return value.Substring(0, maxLength);
         }
 
+        private static string AppendAnalysisLog(string current, string message)
+        {
+            string text = NormalizeDeviceText(message);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return current ?? string.Empty;
+            }
+
+            string line = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "  " + text.Replace("\r", " ").Replace("\n", " ");
+            string merged = string.IsNullOrWhiteSpace(current) ? line : (current.TrimEnd() + Environment.NewLine + line);
+            const int maxLogLength = 24000;
+            if (merged.Length <= maxLogLength)
+            {
+                return merged;
+            }
+
+            return merged.Substring(merged.Length - maxLogLength);
+        }
+
         private static string JoinCompact(string separator, params string[] values)
         {
             return string.Join(separator, (values ?? new string[0]).Where(item => !string.IsNullOrWhiteSpace(item)));
@@ -1939,6 +2075,11 @@ namespace DataProtectorWebBridge.Services
             public int exitCode { get; set; }
             public string error { get; set; }
             public string reportJson { get; set; }
+            public string stage { get; set; }
+            public string stageText { get; set; }
+            public int progress { get; set; }
+            public string lastProgressUtc { get; set; }
+            public string logText { get; set; }
             public int score { get; set; }
             public string verdict { get; set; }
             public string severity { get; set; }
@@ -1956,6 +2097,11 @@ namespace DataProtectorWebBridge.Services
             public int exitCode { get; set; }
             public string error { get; set; }
             public string reportJson { get; set; }
+            public string stage { get; set; }
+            public string stageText { get; set; }
+            public int progress { get; set; }
+            public string lastProgressUtc { get; set; }
+            public string logText { get; set; }
             public int score { get; set; }
             public string verdict { get; set; }
             public string severity { get; set; }
@@ -2092,6 +2238,11 @@ namespace DataProtectorWebBridge.Services
             public int exitCode { get; set; }
             public string error { get; set; }
             public string reportJson { get; set; }
+            public string stage { get; set; }
+            public string stageText { get; set; }
+            public int progress { get; set; }
+            public string lastProgressUtc { get; set; }
+            public string logText { get; set; }
             public int score { get; set; }
             public string verdict { get; set; }
             public string severity { get; set; }
