@@ -140,5 +140,16 @@ export const generatedRoutes: GeneratedRoute[] = [
       icon: 'mdi:shield-search',
       order: 28
     }
+  },
+  {
+    name: 'static-analysis',
+    path: '/static-analysis',
+    component: 'layout.base$view.static-analysis',
+    meta: {
+      title: 'static-analysis',
+      i18nKey: 'route.static-analysis',
+      icon: 'mdi:brain',
+      order: 29
+    }
   }
 ];

@@ -326,6 +326,82 @@ export function fetchRemoveSandboxLogs(data: Api.DataProtector.SandboxLogDeleteR
   });
 }
 
+export function fetchStaticAnalysisConfig() {
+  return request<Api.DataProtector.StaticAnalysisConfiguration>({
+    url: '/static-analysis/config',
+    method: 'get'
+  });
+}
+
+export function fetchSaveStaticAnalysisConfig(data: Api.DataProtector.StaticAnalysisConfigurationRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/static-analysis/config',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchStaticAnalysisRules() {
+  return request<Api.DataProtector.StaticAnalysisRule[]>({
+    url: '/static-analysis/rules',
+    method: 'get'
+  });
+}
+
+export function fetchSaveStaticAnalysisRules(data: Api.DataProtector.StaticAnalysisRuleSaveRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/static-analysis/rules',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchResetStaticAnalysisRules() {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/static-analysis/rules/reset',
+    method: 'post'
+  });
+}
+
+export function fetchStaticAnalysisSource() {
+  return request<Api.DataProtector.StaticAnalysisSourceInfo>({
+    url: '/static-analysis/source',
+    method: 'get'
+  });
+}
+
+export function fetchStaticAnalysisSamples(params: Api.DataProtector.StaticAnalysisSampleQuery = {}) {
+  return request<Api.DataProtector.StaticAnalysisSampleQueryResponse>({
+    url: '/static-analysis/samples',
+    method: 'get',
+    params
+  });
+}
+
+export function fetchSubmitStaticAnalysisSample(data: Api.DataProtector.StaticAnalysisSampleUploadRequest) {
+  return request<Api.DataProtector.StaticAnalysisSample>({
+    url: '/static-analysis/samples',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchStartStaticAnalysis(data: Api.DataProtector.StaticAnalysisAnalyzeRequest) {
+  return request<Api.DataProtector.StaticAnalysisSample>({
+    url: '/static-analysis/analyze',
+    method: 'post',
+    data
+  });
+}
+
+export function fetchRemoveStaticAnalysisSample(data: Api.DataProtector.StaticAnalysisSampleDeleteRequest) {
+  return request<Api.DataProtector.OperationResult>({
+    url: '/static-analysis/samples',
+    method: 'delete',
+    data
+  });
+}
+
 export function fetchRemovableDevices() {
   return request<Api.DataProtector.RemovableDevice[]>({
     url: '/device/removable',

@@ -235,6 +235,7 @@ const local: App.I18n.Schema = {
     'network-awareness': 'Network Awareness',
     remote: 'Remote',
     sandbox: 'Sandbox',
+    'static-analysis': 'Smart Static Analysis',
     audit: 'Audit'
   },
   page: {

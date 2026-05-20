@@ -29,6 +29,7 @@ declare module "@elegant-router/types" {
     "policy": "/policy";
     "remote": "/remote";
     "sandbox": "/sandbox";
+    "static-analysis": "/static-analysis";
   };
 
   /**
@@ -72,6 +73,7 @@ declare module "@elegant-router/types" {
     | "policy"
     | "remote"
     | "sandbox"
+    | "static-analysis"
   >;
 
   /**
@@ -100,6 +102,7 @@ declare module "@elegant-router/types" {
     | "policy"
     | "remote"
     | "sandbox"
+    | "static-analysis"
   >;
 
   /**

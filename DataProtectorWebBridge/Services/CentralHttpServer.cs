@@ -9,6 +9,7 @@ namespace DataProtectorWebBridge.Services
     {
         private readonly HttpListener listener = new HttpListener();
         private readonly CentralPolicyStore store;
+        private readonly AiStaticAnalysisService staticAnalysisService;
         private readonly StaticWebContent staticWebContent;
         private bool disposed;
 
@@ -20,6 +21,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             this.store = store ?? throw new ArgumentNullException("store");
+            staticAnalysisService = new AiStaticAnalysisService(store.DirectoryPath);
             staticWebContent = new StaticWebContent(webRoot);
             listener.Prefixes.Add(prefix);
             Prefix = prefix;
@@ -413,6 +415,80 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/static-analysis/config")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", staticAnalysisService.QueryConfiguration());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/static-analysis/config")
+                {
+                    AiStaticAnalysisService.StaticAnalysisConfigurationRequest request =
+                        JsonResponse.Read<AiStaticAnalysisService.StaticAnalysisConfigurationRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = staticAnalysisService.SaveConfiguration(request, context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/static-analysis/rules")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", staticAnalysisService.QueryRules());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/static-analysis/rules")
+                {
+                    AiStaticAnalysisService.StaticAnalysisRuleSaveRequest request =
+                        JsonResponse.Read<AiStaticAnalysisService.StaticAnalysisRuleSaveRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = staticAnalysisService.SaveRules(request, context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/static-analysis/rules/reset")
+                {
+                    PolicyBridgeService.OperationResult result = staticAnalysisService.ResetRules(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/static-analysis/source")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", staticAnalysisService.QuerySourceInfo());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/static-analysis/samples")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", staticAnalysisService.QuerySamples(ParseStaticAnalysisSampleQuery(context.Request)));
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/static-analysis/samples")
+                {
+                    AiStaticAnalysisService.StaticAnalysisSampleUploadRequest request =
+                        JsonResponse.Read<AiStaticAnalysisService.StaticAnalysisSampleUploadRequest>(context.Request.InputStream);
+                    JsonResponse.Write(context.Response, "0000", "Static analysis sample submitted.", staticAnalysisService.SubmitSample(request, context.Request.UserHostAddress));
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/static-analysis/analyze")
+                {
+                    AiStaticAnalysisService.StaticAnalysisAnalyzeRequest request =
+                        JsonResponse.Read<AiStaticAnalysisService.StaticAnalysisAnalyzeRequest>(context.Request.InputStream);
+                    JsonResponse.Write(context.Response, "0000", "AI static analysis started.", staticAnalysisService.StartAnalysis(request, context.Request.UserHostAddress));
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/static-analysis/samples")
+                {
+                    AiStaticAnalysisService.StaticAnalysisSampleDeleteRequest request =
+                        JsonResponse.Read<AiStaticAnalysisService.StaticAnalysisSampleDeleteRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = staticAnalysisService.RemoveSample(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/usbcrypt/initialize")
                 {
                     CentralPolicyStore.UsbCryptInitializationTaskRequest request =
@@ -557,6 +633,18 @@ namespace DataProtectorWebBridge.Services
                 status = request.QueryString["status"],
                 source = request.QueryString["source"],
                 host = request.QueryString["host"],
+                search = request.QueryString["search"]
+            };
+        }
+
+        private static AiStaticAnalysisService.StaticAnalysisSampleQuery ParseStaticAnalysisSampleQuery(HttpListenerRequest request)
+        {
+            return new AiStaticAnalysisService.StaticAnalysisSampleQuery
+            {
+                page = ParsePage(request.QueryString["page"]),
+                pageSize = ParseOptionalLimit(request.QueryString["pageSize"]),
+                status = request.QueryString["status"],
+                verdict = request.QueryString["verdict"],
                 search = request.QueryString["search"]
             };
         }

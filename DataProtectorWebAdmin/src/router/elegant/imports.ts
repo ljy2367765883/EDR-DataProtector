@@ -27,4 +27,5 @@ export const views: Record<LastLevelRouteKey, RouteComponent | (() => Promise<Ro
   policy: () => import("@/views/policy/index.vue"),
   remote: () => import("@/views/remote/index.vue"),
   sandbox: () => import("@/views/sandbox/index.vue"),
+  "static-analysis": () => import("@/views/static-analysis/index.vue"),
 };

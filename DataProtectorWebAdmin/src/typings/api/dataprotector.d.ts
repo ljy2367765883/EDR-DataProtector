@@ -395,6 +395,145 @@ declare namespace Api {
       fileVersion: string;
     }
 
+    type StaticAnalysisStatus = 'queued' | 'running' | 'completed' | 'failed';
+    type StaticAnalysisVerdict = 'clean' | 'observed' | 'suspicious' | 'malicious' | 'failed' | 'queued';
+    type StaticAnalysisSeverity = 'critical' | 'warning' | 'info';
+    type StaticAnalysisRuleTarget = 'import' | 'string' | 'function' | 'pseudocode' | 'feature' | 'any';
+
+    interface StaticAnalysisConfiguration {
+      enabled: boolean;
+      aiEnabled: boolean;
+      ghidraRoot: string;
+      javaPath: string;
+      baseUrl: string;
+      maskedToken: string;
+      tokenConfigured: boolean;
+      model: string;
+      temperature: number;
+      maxFunctions: number;
+      maxDecompilerChars: number;
+      timeoutSeconds: number;
+      analyzerScript: string;
+      ghidraDetected: boolean;
+      updatedUtc: string;
+    }
+
+    interface StaticAnalysisConfigurationRequest {
+      enabled: boolean;
+      aiEnabled: boolean;
+      ghidraRoot: string;
+      javaPath: string;
+      baseUrl: string;
+      token?: string;
+      clearToken?: boolean;
+      model: string;
+      temperature: number;
+      maxFunctions: number;
+      maxDecompilerChars: number;
+      timeoutSeconds: number;
+      actor?: string;
+    }
+
+    interface StaticAnalysisRule {
+      ruleId: string;
+      name: string;
+      enabled: boolean;
+      target: StaticAnalysisRuleTarget;
+      pattern: string;
+      regex: boolean;
+      weight: number;
+      severity: StaticAnalysisSeverity;
+      verdict: Exclude<StaticAnalysisVerdict, 'failed' | 'queued'>;
+      description: string;
+    }
+
+    interface StaticAnalysisRuleSaveRequest {
+      rules: StaticAnalysisRule[];
+      actor?: string;
+    }
+
+    interface StaticAnalysisSampleQuery {
+      page?: number;
+      pageSize?: number;
+      status?: StaticAnalysisStatus | 'all';
+      verdict?: StaticAnalysisVerdict | 'all';
+      search?: string;
+    }
+
+    interface StaticAnalysisSampleQueryResponse {
+      page: number;
+      pageSize: number;
+      total: number;
+      queuedTotal: number;
+      runningTotal: number;
+      completedTotal: number;
+      failedTotal: number;
+      maliciousTotal: number;
+      suspiciousTotal: number;
+      items: StaticAnalysisSample[];
+    }
+
+    interface StaticAnalysisSampleUploadRequest {
+      fileName: string;
+      contentBase64: string;
+      sha256?: string;
+      source?: string;
+      notes?: string;
+      actor?: string;
+    }
+
+    interface StaticAnalysisAnalyzeRequest {
+      sampleId: string;
+      maxFunctions?: number;
+      maxDecompilerChars?: number;
+      aiEnabled?: boolean;
+      actor?: string;
+    }
+
+    interface StaticAnalysisSampleDeleteRequest {
+      sampleId?: string;
+      all?: boolean;
+      actor?: string;
+    }
+
+    interface StaticAnalysisSample {
+      sampleId: string;
+      sha256: string;
+      fileName: string;
+      sizeBytes: number;
+      source: string;
+      submitter: string;
+      notes: string;
+      submittedUtc: string;
+      lastSubmittedUtc: string;
+      submitCount: number;
+      status: StaticAnalysisStatus;
+      startedUtc: string;
+      completedUtc: string;
+      runId: string;
+      exitCode: number;
+      error: string;
+      reportJson: string;
+      score: number;
+      verdict: StaticAnalysisVerdict;
+      severity: StaticAnalysisSeverity;
+      architecture: string;
+      signer: string;
+      signatureStatus: string;
+      productName: string;
+      companyName: string;
+      fileDescription: string;
+      fileVersion: string;
+    }
+
+    interface StaticAnalysisSourceInfo {
+      upstream: string;
+      upstreamCommit: string;
+      license: string;
+      adapterScript: string;
+      extractedPaths: string[];
+    }
+
     type RemovableDeviceStatus = 'pending' | 'authorized' | 'blocked';
 
     interface RemovableVolume {

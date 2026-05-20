@@ -174,7 +174,8 @@ const routeMap: RouteMap = {
   "network-awareness": "/network-awareness",
   "policy": "/policy",
   "remote": "/remote",
-  "sandbox": "/sandbox"
+  "sandbox": "/sandbox",
+  "static-analysis": "/static-analysis"
 };
 
 /**

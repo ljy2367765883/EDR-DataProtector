@@ -231,6 +231,7 @@
     'network-awareness': '网络感知',
     remote: '远程',
     sandbox: '轻量沙箱',
+    'static-analysis': '智慧静态分析大师',
     audit: '审计'
   },
   page: {

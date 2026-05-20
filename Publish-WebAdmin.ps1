@@ -232,9 +232,11 @@ try {
     $agentDriverPublish = Join-Path $agentPublish "driver"
     $staticOutput = Join-Path $serverPublish "web"
     $serverUsbRuntimePublish = Join-Path $serverPublish "usbcrypt-runtime"
-    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish, $serverUsbRuntimePublish | Out-Null
+    $serverStaticAnalyzerPublish = Join-Path $serverPublish "static-analyzer"
+    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish, $serverUsbRuntimePublish, $serverStaticAnalyzerPublish | Out-Null
 
     Copy-Item -Path (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
+    Copy-Item -Path (Join-Path $root "DataProtectorStaticAnalyzer\*") -Destination $serverStaticAnalyzerPublish -Recurse -Force
 
     $bridgeFiles = @(
         "DataProtectorWebBridge.exe",
@@ -344,6 +346,13 @@ agent\driver\dataprotector.cat
 
 USB encryption runtime package:
 server\usbcrypt-runtime\DataProtectorUsbRuntime.zip
+
+Smart static analysis:
+- Web tab: 智慧静态分析大师
+- Analyzer assets: server\static-analyzer
+- Configure a built Ghidra source checkout or distribution root in the web UI.
+  The server locates support\analyzeHeadless.bat and runs the extracted
+  DataProtectorGhidraAnalyzer.java script after Ghidra auto-analysis.
 
 USB encryption workflow:
 1. The web console discovers removable devices reported by endpoint agents.
