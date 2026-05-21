@@ -212,6 +212,32 @@ namespace DataProtectorWebBridge.Services
                     PolicyBridgeService.DlpProtectionPolicyRequest request =
                         JsonResponse.Read<PolicyBridgeService.DlpProtectionPolicyRequest>(context.Request.InputStream);
                     PolicyBridgeService.OperationResult result = dlpProtectionService.SetPolicy(request);
+                    if (result.succeeded)
+                    {
+                        PolicyBridgeService.OperationResult clear = policyService.ClearFileHunterRules(
+                            string.IsNullOrWhiteSpace(request == null ? string.Empty : request.actor) ? context.Request.UserHostAddress : request.actor);
+                        if (!clear.succeeded)
+                        {
+                            result = clear;
+                        }
+                        else
+                        {
+                            PolicyBridgeService.DlpProtectionPolicyDto localPolicy = dlpProtectionService.QueryPolicy();
+                            foreach (string safeFolder in localPolicy.safeFolders ?? new string[0])
+                            {
+                                PolicyBridgeService.OperationResult add = policyService.AddFileHunterRule(new PolicyBridgeService.FileHunterRuleRequest
+                                {
+                                    directory = safeFolder,
+                                    actor = string.IsNullOrWhiteSpace(localPolicy.actor) ? "web-admin" : localPolicy.actor
+                                });
+                                if (!add.succeeded)
+                                {
+                                    result = add;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     auditLog.Append(
                         string.IsNullOrWhiteSpace(request == null ? string.Empty : request.actor) ? context.Request.UserHostAddress : request.actor,
                         "policy.dlp.update",

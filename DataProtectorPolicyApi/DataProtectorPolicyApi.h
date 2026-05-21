@@ -48,6 +48,7 @@ extern "C" {
 #define DP_POLICY_API_WEBSHELL_OPERATION_RENAME  3u
 
 #define DP_POLICY_API_WEBSHELL_SAMPLE_BYTES      100u
+#define DP_POLICY_API_FILE_HUNTER_READ_FLAG_PAGING_IO 0x00000001u
 #define DP_POLICY_API_DEVICE_ID_CHARS            260u
 
 #define DP_POLICY_API_HASH_OPERATION_LSASS_HANDLE     1u
@@ -179,6 +180,21 @@ typedef struct _DP_POLICY_API_WEBSHELL_EVENT {
     LPCWSTR Extension;
     BYTE Sample[DP_POLICY_API_WEBSHELL_SAMPLE_BYTES];
 } DP_POLICY_API_WEBSHELL_EVENT, *PDP_POLICY_API_WEBSHELL_EVENT;
+
+typedef struct _DP_POLICY_API_FILE_HUNTER_RULE {
+    LPCWSTR Directory;
+} DP_POLICY_API_FILE_HUNTER_RULE, *PDP_POLICY_API_FILE_HUNTER_RULE;
+
+typedef struct _DP_POLICY_API_FILE_HUNTER_EVENT {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONGLONG BytesRead;
+    ULONGLONG ByteOffset;
+    DWORD Status;
+    DWORD Flags;
+    LPCWSTR Path;
+    LPCWSTR ProcessImage;
+} DP_POLICY_API_FILE_HUNTER_EVENT, *PDP_POLICY_API_FILE_HUNTER_EVENT;
 
 typedef struct _DP_POLICY_API_HASH_PROTECT_EVENT {
     ULONGLONG Sequence;
@@ -421,6 +437,44 @@ DP_POLICY_API
 DWORD
 DpPolicyQueryWebShellEvents(
     _Out_writes_opt_(eventCapacity) DP_POLICY_API_WEBSHELL_EVENT *events,
+    _In_ DWORD eventCapacity,
+    _Out_opt_ DWORD *eventCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyAddFileHunterRule(
+    _In_z_ LPCWSTR directoryPath
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyRemoveFileHunterRule(
+    _In_z_ LPCWSTR directoryPath
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyClearFileHunterRules(void);
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryFileHunterRules(
+    _Out_writes_opt_(ruleCapacity) DP_POLICY_API_FILE_HUNTER_RULE *rules,
+    _In_ DWORD ruleCapacity,
+    _Out_opt_ DWORD *ruleCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryFileHunterEvents(
+    _Out_writes_opt_(eventCapacity) DP_POLICY_API_FILE_HUNTER_EVENT *events,
     _In_ DWORD eventCapacity,
     _Out_opt_ DWORD *eventCount,
     _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,

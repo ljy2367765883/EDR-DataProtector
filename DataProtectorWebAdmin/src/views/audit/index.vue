@@ -529,6 +529,7 @@ function auditActionLabel(record: Api.DataProtector.AuditRecord) {
   }
 
   const token = normalizeActionToken(action);
+  if (action === 'dlp.file.read') return textByLocale('安全文件夹读取', 'Safe-folder file read');
   const labels = localizedActionLabels();
   if (labels[token]) return labels[token];
   if (action.startsWith('behavior.chain.')) return firstText(record.ObjectName, record.PolicyName, textByLocale('行为链命中', 'Behavior chain matched'));
@@ -1019,6 +1020,7 @@ function inferObjectType(record: Api.DataProtector.AuditRecord, fields: Record<s
   const action = record.Action || '';
   const channel = fields.channel || '';
   if (action.startsWith('dlp.') || channel) {
+    if (action.includes('file.read')) return 'file';
     if (action.includes('screenshot') || channel.includes('image')) return 'screenshot';
     if (action.includes('clipboard') || channel.includes('clipboard')) return 'clipboard';
     return fields.object || channel || 'dlp';
@@ -1060,7 +1062,7 @@ function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSe
     return 'critical';
   }
 
-  if (action.startsWith('webshell.warning') || action.startsWith('security.audit.drain.failed') || action.includes('.failed') || /failed/i.test(message)) {
+  if (action.startsWith('dlp.file.read') || action.startsWith('webshell.warning') || action.startsWith('security.audit.drain.failed') || action.includes('.failed') || /failed/i.test(message)) {
     return 'warning';
   }
 

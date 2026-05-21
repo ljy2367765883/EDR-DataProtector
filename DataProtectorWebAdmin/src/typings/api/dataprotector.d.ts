@@ -276,6 +276,7 @@ declare namespace Api {
       blockPrintScreenHotkeys: boolean;
       trustedProcessNames: string[];
       trustedProcessDirectories: string[];
+      safeFolders: string[];
       actor?: string;
     }
 

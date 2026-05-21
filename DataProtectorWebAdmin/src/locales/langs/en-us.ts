@@ -1241,6 +1241,9 @@ const local: App.I18n.Schema = {
         trustedProcessPlaceholder: 'One process per line, e.g. SnippingTool.exe',
         trustedDirectories: 'Trusted process directories',
         trustedDirectoryPlaceholder: 'One directory per line, e.g. C:\\Program Files\\TrustedApp',
+        safeFolders: 'Safe folders: {count}',
+        safeFolderList: 'Safe folders',
+        safeFolderPlaceholder: 'One folder per line, e.g. C:\\Users\\Public\\Sensitive',
         activeControls: 'Active controls: {count}',
         trustedEntries: 'Trusted entries: {count}',
         save: 'Save DLP Policy',
@@ -1254,7 +1257,9 @@ const local: App.I18n.Schema = {
           clipboardTextTitle: 'Clipboard text',
           clipboardTextDetail: 'Controls plain text, Unicode text, HTML and RTF clipboard formats from untrusted processes.',
           clipboardFilesTitle: 'Clipboard file drop',
-          clipboardFilesDetail: 'Controls CF_HDROP file transfer data to reduce copy-out leakage paths.'
+          clipboardFilesDetail: 'Controls CF_HDROP file transfer data to reduce copy-out leakage paths.',
+          fileHunterTitle: 'File thief hunter',
+          fileHunterDetail: 'Reports successful reads of any file inside protected safe folders.'
         }
       },
       webshell: {

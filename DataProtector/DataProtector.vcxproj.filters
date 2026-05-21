@@ -39,6 +39,9 @@
     <ClCompile Include="DpDeviceControl.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DpFileHunter.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DpHashProtect.c">
       <Filter>Source Files</Filter>
     </ClCompile>

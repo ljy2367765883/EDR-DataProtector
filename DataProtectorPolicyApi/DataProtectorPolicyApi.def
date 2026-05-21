@@ -27,6 +27,11 @@ EXPORTS
     DpPolicyClearWebShellRules
     DpPolicyQueryWebShellRules
     DpPolicyQueryWebShellEvents
+    DpPolicyAddFileHunterRule
+    DpPolicyRemoveFileHunterRule
+    DpPolicyClearFileHunterRules
+    DpPolicyQueryFileHunterRules
+    DpPolicyQueryFileHunterEvents
     DpPolicyQueryHashProtectEvents
     DpPolicySetHashProtectPolicy
     DpPolicyQueryHashProtectPolicy

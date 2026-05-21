@@ -22,6 +22,8 @@
 #define DP_WEBSHELL_EVENT_PATH_CHARS 512u
 #define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32u
 #define DP_WEBSHELL_MAX_SAMPLE_BYTES 100u
+#define DP_FILE_HUNTER_PATH_CHARS 512u
+#define DP_FILE_HUNTER_PROCESS_CHARS 64u
 #define DP_DEVICE_MAX_ID_CHARS 260u
 #define DP_DEVICE_MAX_ID_BYTES (DP_DEVICE_MAX_ID_CHARS * sizeof(WCHAR))
 #define DP_HASH_PROTECT_TARGET_CHARS 512u
@@ -52,6 +54,7 @@
 #define DP_SMTP_EVENT_STRING_CHARS (DP_SMTP_MAX_ADDRESS_CHARS * 2u + 2u)
 #define DP_NETWORK_CONNECTION_EVENT_STRING_CHARS (DP_NETWORK_EVENT_PROCESS_PATH_CHARS + DP_NETWORK_EVENT_DOMAIN_CHARS + 2u)
 #define DP_WEBSHELL_EVENT_STRING_CHARS (DP_WEBSHELL_EVENT_PATH_CHARS + DP_WEBSHELL_EVENT_EXTENSION_CHARS + 2u)
+#define DP_FILE_HUNTER_EVENT_STRING_CHARS (DP_FILE_HUNTER_PATH_CHARS + DP_FILE_HUNTER_PROCESS_CHARS + 2u)
 #define DP_HASH_PROTECT_EVENT_STRING_CHARS (DP_HASH_PROTECT_TARGET_CHARS + DP_HASH_PROTECT_PROCESS_CHARS + 2u)
 #define DP_LATERAL_DEFENSE_EVENT_STRING_CHARS (DP_LATERAL_DEFENSE_TARGET_CHARS + DP_LATERAL_DEFENSE_PROCESS_CHARS + 2u)
 #define DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS (DP_USER_HOOK_DEFENSE_TARGET_CHARS + DP_USER_HOOK_DEFENSE_PROCESS_CHARS + 2u)
@@ -92,6 +95,11 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryUserHookDefenseEvents = 110,
     DpPolicyCommandSetUserHookDefensePolicy = 111,
     DpPolicyCommandQueryUserHookDefensePolicy = 112,
+    DpPolicyCommandAddFileHunterRule = 120,
+    DpPolicyCommandRemoveFileHunterRule = 121,
+    DpPolicyCommandClearFileHunterRules = 122,
+    DpPolicyCommandQueryFileHunterRules = 123,
+    DpPolicyCommandQueryFileHunterEvents = 124,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -288,6 +296,45 @@ typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
     CHAR Sample[DP_WEBSHELL_MAX_SAMPLE_BYTES];
 } DP_WEBSHELL_EVENT_QUERY_ENTRY, *PDP_WEBSHELL_EVENT_QUERY_ENTRY;
 
+typedef struct _DP_FILE_HUNTER_RULE_MESSAGE {
+    ULONG Version;
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[DP_FILE_HUNTER_PATH_CHARS];
+} DP_FILE_HUNTER_RULE_MESSAGE, *PDP_FILE_HUNTER_RULE_MESSAGE;
+
+typedef struct _DP_FILE_HUNTER_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_FILE_HUNTER_RULE_QUERY_HEADER, *PDP_FILE_HUNTER_RULE_QUERY_HEADER;
+
+typedef struct _DP_FILE_HUNTER_RULE_QUERY_ENTRY {
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[1];
+} DP_FILE_HUNTER_RULE_QUERY_ENTRY, *PDP_FILE_HUNTER_RULE_QUERY_ENTRY;
+
+typedef struct _DP_FILE_HUNTER_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_FILE_HUNTER_EVENT_QUERY_HEADER, *PDP_FILE_HUNTER_EVENT_QUERY_HEADER;
+
+typedef struct _DP_FILE_HUNTER_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONGLONG BytesRead;
+    ULONGLONG ByteOffset;
+    ULONG Status;
+    ULONG Flags;
+    ULONG PathLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    WCHAR Path[DP_FILE_HUNTER_PATH_CHARS];
+    WCHAR ProcessImage[DP_FILE_HUNTER_PROCESS_CHARS];
+} DP_FILE_HUNTER_EVENT_QUERY_ENTRY, *PDP_FILE_HUNTER_EVENT_QUERY_ENTRY;
+
 typedef struct _DP_HASH_PROTECT_EVENT_QUERY_HEADER {
     ULONG Version;
     ULONG EventCount;
@@ -384,6 +431,10 @@ typedef struct _DP_USER_HOOK_DEFENSE_POLICY_MESSAGE {
 #define DP_WEBSHELL_RULE_QUERY_VERSION 1u
 #define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
 #define DP_WEBSHELL_EVENT_QUERY_VERSION 1u
+#define DP_FILE_HUNTER_RULE_MESSAGE_VERSION 1u
+#define DP_FILE_HUNTER_RULE_QUERY_VERSION 1u
+#define DP_FILE_HUNTER_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_FILE_HUNTER_RULE_QUERY_ENTRY, Directory)
+#define DP_FILE_HUNTER_EVENT_QUERY_VERSION 1u
 #define DP_HASH_PROTECT_EVENT_QUERY_VERSION 1u
 #define DP_HASH_PROTECT_POLICY_VERSION 1u
 #define DP_HASH_PROTECT_ALLOWED_FLAGS \
@@ -2685,6 +2736,447 @@ DpPolicyQueryWebShellEvents(
     DpPolicyTrace(L"WebShellEvents success eventCount=%lu stringCharsRequired=%lu",
                   EventCount != NULL ? *EventCount : 0,
                   StringBufferCharsRequired != NULL ? *StringBufferCharsRequired : 0);
+    return DP_POLICY_API_SUCCESS;
+}
+
+static
+DWORD
+DpPolicyBuildFileHunterRuleMessage(
+    _In_z_ LPCWSTR DirectoryPath,
+    _Out_ DP_FILE_HUNTER_RULE_MESSAGE *Message
+    )
+{
+    DWORD result;
+    LPWSTR ntPath = NULL;
+    size_t length;
+
+    if (Message == NULL) {
+        DpPolicySetLastErrorMessage(L"File hunter rule message is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(Message, sizeof(*Message));
+
+    result = DpPolicyConvertDosPathToNtPathAlloc(DirectoryPath, &ntPath);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    length = wcslen(ntPath);
+    if (length == 0 ||
+        length >= ARRAYSIZE(Message->Directory)) {
+
+        HeapFree(GetProcessHeap(), 0, ntPath);
+        DpPolicySetLastErrorMessage(L"Safe folder path is empty or too long.");
+        return DP_POLICY_API_ERROR_RULE_TOO_LONG;
+    }
+
+    Message->Version = DP_FILE_HUNTER_RULE_MESSAGE_VERSION;
+    Message->DirectoryLengthBytes = (ULONG)(length * sizeof(WCHAR));
+    CopyMemory(Message->Directory, ntPath, Message->DirectoryLengthBytes);
+
+    HeapFree(GetProcessHeap(), 0, ntPath);
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyAddFileHunterRule(
+    _In_z_ LPCWSTR DirectoryPath
+    )
+{
+    DWORD result;
+    DP_FILE_HUNTER_RULE_MESSAGE message;
+
+    result = DpPolicyBuildFileHunterRuleMessage(DirectoryPath, &message);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandAddFileHunterRule,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyRemoveFileHunterRule(
+    _In_z_ LPCWSTR DirectoryPath
+    )
+{
+    DWORD result;
+    DP_FILE_HUNTER_RULE_MESSAGE message;
+
+    result = DpPolicyBuildFileHunterRuleMessage(DirectoryPath, &message);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandRemoveFileHunterRule,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyClearFileHunterRules(void)
+{
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandClearFileHunterRules,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryFileHunterRules(
+    _Out_writes_opt_(RuleCapacity) DP_POLICY_API_FILE_HUNTER_RULE *Rules,
+    _In_ DWORD RuleCapacity,
+    _Out_opt_ DWORD *RuleCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_FILE_HUNTER_RULE_QUERY_HEADER header;
+    DP_FILE_HUNTER_RULE_QUERY_HEADER sizingHeader;
+    PBYTE cursor;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedRuleCount = 0;
+    BOOL sizingOnly = RuleCapacity == 0 && StringBufferChars == 0;
+
+    if (RuleCount != NULL) {
+        *RuleCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((RuleCapacity != 0 && Rules == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryFileHunterRules,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_FILE_HUNTER_RULE_QUERY_HEADER) ||
+        sizingHeader.Version != DP_FILE_HUNTER_RULE_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_FILE_HUNTER_RULE_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid file hunter rule snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryFileHunterRules,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_FILE_HUNTER_RULE_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid file hunter rule snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_FILE_HUNTER_RULE_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_FILE_HUNTER_RULE_QUERY_VERSION) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported file hunter rule snapshot version.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedRuleCount = header->RuleCount;
+    if (RuleCount != NULL) {
+        *RuleCount = returnedRuleCount;
+    }
+
+    cursor = queryBuffer + sizeof(DP_FILE_HUNTER_RULE_QUERY_HEADER);
+
+    for (index = 0; index < returnedRuleCount; index++) {
+        PDP_FILE_HUNTER_RULE_QUERY_ENTRY entry;
+        DWORD directoryChars;
+        DWORD entryBytes;
+
+        if ((ULONG_PTR)(cursor - queryBuffer) + DP_FILE_HUNTER_RULE_QUERY_ENTRY_HEADER_SIZE > bytesReturned) {
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned a truncated file hunter rule snapshot.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        entry = (PDP_FILE_HUNTER_RULE_QUERY_ENTRY)cursor;
+        entryBytes = (DWORD)DP_FILE_HUNTER_RULE_QUERY_ENTRY_HEADER_SIZE + entry->DirectoryLengthBytes;
+        if ((ULONG_PTR)(cursor - queryBuffer) + entryBytes > bytesReturned ||
+            entry->DirectoryLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid file hunter rule entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        directoryChars = entry->DirectoryLengthBytes / sizeof(WCHAR);
+        requiredStringChars += directoryChars + 1;
+
+        if (index < RuleCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + directoryChars + 1 <= StringBufferChars) {
+
+            Rules[index].Directory = StringBuffer + copiedStringChars;
+            if (directoryChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry->Directory, entry->DirectoryLengthBytes);
+                copiedStringChars += directoryChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+
+        cursor += entryBytes;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (RuleCapacity < returnedRuleCount || StringBufferChars < requiredStringChars) {
+        if (sizingOnly) {
+            DpPolicySetLastErrorMessage(L"Success.");
+            return DP_POLICY_API_SUCCESS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryFileHunterEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_FILE_HUNTER_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_FILE_HUNTER_EVENT_QUERY_HEADER header;
+    DP_FILE_HUNTER_EVENT_QUERY_HEADER sizingHeader;
+    PDP_FILE_HUNTER_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryFileHunterEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_FILE_HUNTER_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_FILE_HUNTER_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_FILE_HUNTER_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid file hunter event snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount > MAXDWORD / DP_FILE_HUNTER_EVENT_STRING_CHARS) {
+                DpPolicySetLastErrorMessage(L"File hunter event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+
+            *StringBufferCharsRequired = sizingHeader.EventCount * DP_FILE_HUNTER_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        sizingHeader.EventCount > MAXDWORD / DP_FILE_HUNTER_EVENT_STRING_CHARS ||
+        StringBufferChars < sizingHeader.EventCount * DP_FILE_HUNTER_EVENT_STRING_CHARS) {
+
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL &&
+            sizingHeader.EventCount <= MAXDWORD / DP_FILE_HUNTER_EVENT_STRING_CHARS) {
+            *StringBufferCharsRequired = sizingHeader.EventCount * DP_FILE_HUNTER_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryFileHunterEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_FILE_HUNTER_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid file hunter event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_FILE_HUNTER_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_FILE_HUNTER_EVENT_QUERY_VERSION ||
+        header->EventCount > (MAXDWORD - sizeof(DP_FILE_HUNTER_EVENT_QUERY_HEADER)) / sizeof(DP_FILE_HUNTER_EVENT_QUERY_ENTRY) ||
+        bytesReturned < sizeof(DP_FILE_HUNTER_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_FILE_HUNTER_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported file hunter event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedEventCount = header->EventCount;
+    if (EventCount != NULL) {
+        *EventCount = returnedEventCount;
+    }
+
+    entry = (PDP_FILE_HUNTER_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_FILE_HUNTER_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < returnedEventCount; index++) {
+        DWORD pathChars;
+        DWORD processChars;
+
+        if (entry[index].PathLengthBytes > sizeof(entry[index].Path) ||
+            entry[index].ProcessImageLengthBytes > sizeof(entry[index].ProcessImage) ||
+            entry[index].PathLengthBytes % sizeof(WCHAR) != 0 ||
+            entry[index].ProcessImageLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid file hunter event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        pathChars = entry[index].PathLengthBytes / sizeof(WCHAR);
+        processChars = entry[index].ProcessImageLengthBytes / sizeof(WCHAR);
+        requiredStringChars += pathChars + 1 + processChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + pathChars + 1 + processChars + 1 <= StringBufferChars) {
+
+            Events[index].Sequence = entry[index].Sequence;
+            Events[index].ProcessId = entry[index].ProcessId;
+            Events[index].BytesRead = entry[index].BytesRead;
+            Events[index].ByteOffset = entry[index].ByteOffset;
+            Events[index].Status = entry[index].Status;
+            Events[index].Flags = entry[index].Flags;
+
+            Events[index].Path = StringBuffer + copiedStringChars;
+            if (pathChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].Path, entry[index].PathLengthBytes);
+                copiedStringChars += pathChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].ProcessImage = StringBuffer + copiedStringChars;
+            if (processChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].ProcessImage, entry[index].ProcessImageLengthBytes);
+                copiedStringChars += processChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
     return DP_POLICY_API_SUCCESS;
 }
 

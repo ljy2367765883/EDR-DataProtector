@@ -51,6 +51,32 @@ DpAllocateIoContext(
     return context;
 }
 
+PDP_IO_CONTEXT
+DpAllocateAuditIoContext(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ DP_IO_OPERATION Operation,
+    _In_ ULONG Length
+    )
+{
+    PDP_IO_CONTEXT context;
+
+    context = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                    sizeof(DP_IO_CONTEXT),
+                                    DP_TAG_IO_CONTEXT);
+
+    if (context == NULL) {
+        return NULL;
+    }
+
+    RtlZeroMemory(context, sizeof(DP_IO_CONTEXT));
+    context->Instance = Instance;
+    context->Operation = Operation;
+    context->Length = Length;
+    context->FileHunterAuditOnly = TRUE;
+
+    return context;
+}
+
 VOID
 DpFreeIoContext(
     _In_opt_ PDP_IO_CONTEXT Context
@@ -71,6 +97,11 @@ DpFreeIoContext(
     if (Context->HandleContext != NULL) {
         FltReleaseContext(Context->HandleContext);
         Context->HandleContext = NULL;
+    }
+
+    if (Context->FileHunterContext != NULL) {
+        DpFileHunterFreeReadContext(Context->FileHunterContext);
+        Context->FileHunterContext = NULL;
     }
 
     ExFreePoolWithTag(Context, DP_TAG_IO_CONTEXT);

@@ -377,18 +377,20 @@ namespace DataProtectorWebBridge.Services
             heartbeatIndex++;
             AuditLog.AuditRecord[] smtpRecords = DrainAuditSource("smtp", policyService.DrainSmtpAuditRecords);
             AuditLog.AuditRecord[] webShellRecords = DrainAuditSource("webshell", policyService.DrainWebShellAuditRecords);
+            AuditLog.AuditRecord[] fileHunterRecords = DrainAuditSource("filehunter", policyService.DrainFileHunterAuditRecords);
             AuditLog.AuditRecord[] hashProtectRecords = DrainAuditSource("hashprotect", policyService.DrainHashProtectAuditRecords);
             AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
             AuditLog.AuditRecord[] userHookRecords = DrainAuditSource("userhook", () => policyService.DrainUserHookDefenseAuditRecords(currentUserHookDefensePolicy));
             AuditLog.AuditRecord[] dlpRecords = DrainAuditSource("dlp", dlpProtectionService.DrainAuditRecords);
-            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0 || userHookRecords.Length > 0 || dlpRecords.Length > 0)
+            if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || fileHunterRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0 || userHookRecords.Length > 0 || dlpRecords.Length > 0)
             {
-                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ", userhook=" + userHookRecords.Length + ", dlp=" + dlpRecords.Length + ".");
+                Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", filehunter=" + fileHunterRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ", userhook=" + userHookRecords.Length + ", dlp=" + dlpRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + hashProtectRecords.Length + lateralRecords.Length + userHookRecords.Length + dlpRecords.Length);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + fileHunterRecords.Length + hashProtectRecords.Length + lateralRecords.Length + userHookRecords.Length + dlpRecords.Length);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
+            records.AddRange(fileHunterRecords);
             records.AddRange(hashProtectRecords);
             records.AddRange(lateralRecords);
             records.AddRange(userHookRecords);
@@ -947,6 +949,15 @@ namespace DataProtectorWebBridge.Services
                 return;
             }
 
+            clear = policyService.ClearFileHunterRules("central-agent");
+            if (!clear.succeeded)
+            {
+                lastApplyStatus = clear.statusText;
+                lastApplyMessage = "Cannot clear local file hunter policy before central apply: " + clear.message;
+                SaveState();
+                return;
+            }
+
             clear = policyService.ClearDeviceRules("central-agent");
             if (!clear.succeeded)
             {
@@ -1013,6 +1024,23 @@ namespace DataProtectorWebBridge.Services
                 {
                     lastApplyStatus = result.statusText;
                     lastApplyMessage = "Cannot apply central WebShell rule " + rule.directory + ": " + result.message;
+                    SaveState();
+                    return;
+                }
+            }
+
+            foreach (string safeFolder in dlpProtectionPolicy.safeFolders ?? new string[0])
+            {
+                PolicyBridgeService.OperationResult result = policyService.AddFileHunterRule(new PolicyBridgeService.FileHunterRuleRequest
+                {
+                    directory = safeFolder,
+                    actor = "central-agent"
+                });
+
+                if (!result.succeeded)
+                {
+                    lastApplyStatus = result.statusText;
+                    lastApplyMessage = "Cannot apply central safe folder " + safeFolder + ": " + result.message;
                     SaveState();
                     return;
                 }
@@ -1134,7 +1162,7 @@ namespace DataProtectorWebBridge.Services
 
             appliedPolicyVersion = policyVersion;
             lastApplyStatus = "0x00000000";
-            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", process threat insight: " + PolicyBridgeService.UserHookDefensePolicySummary(userHookDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
+            lastApplyMessage = "Central policy applied. File rules: " + rules.Length + ", network rules: " + networkRules.Length + ", WebShell rules: " + webShellRules.Length + ", safe folders: " + (dlpProtectionPolicy.safeFolders == null ? 0 : dlpProtectionPolicy.safeFolders.Length) + ", device rules: " + deviceRules.Length + ", hash protection: " + PolicyBridgeService.HashProtectPolicySummary(hashProtectPolicy) + ", lateral defense: " + PolicyBridgeService.LateralDefensePolicySummary(lateralDefensePolicy) + ", process threat insight: " + PolicyBridgeService.UserHookDefensePolicySummary(userHookDefensePolicy) + ", USB crypt: " + PolicyBridgeService.UsbCryptPolicySummary(usbCryptPolicy) + ", DLP: " + PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionPolicy);
             SaveState();
         }
 

@@ -121,6 +121,18 @@ DpControlMessageNotify(
                                      ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryFileHunterRules) {
+        return DpFileHunterQueryRules(OutputBuffer,
+                                      OutputBufferLength,
+                                      ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryFileHunterEvents) {
+        return DpFileHunterQueryEvents(OutputBuffer,
+                                       OutputBufferLength,
+                                       ReturnOutputBufferLength);
+    }
+
     if (message->Command == DpPolicyCommandQueryDeviceRules) {
         return DpDeviceControlQueryRules(OutputBuffer,
                                          OutputBufferLength,
@@ -293,6 +305,30 @@ DpControlMessageNotify(
 
     if (message->Command == DpPolicyCommandClearWebShellRules) {
         DpWebShellClearRules();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandAddFileHunterRule ||
+        message->Command == DpPolicyCommandRemoveFileHunterRule) {
+
+        PDP_FILE_HUNTER_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_FILE_HUNTER_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_FILE_HUNTER_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_FILE_HUNTER_RULE_MESSAGE)message->Data;
+        if (message->Command == DpPolicyCommandAddFileHunterRule) {
+            return DpFileHunterAddRule(rule);
+        }
+
+        return DpFileHunterRemoveRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandClearFileHunterRules) {
+        DpFileHunterClearRules();
         return STATUS_SUCCESS;
     }
 

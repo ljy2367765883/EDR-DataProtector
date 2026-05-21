@@ -75,6 +75,12 @@ Abstract:
 #define DP_HASH_TRACE(_format, ...) ((void)0)
 #endif
 
+#if !DP_ENABLE_HASH_PROTECT_TRACE
+#define DP_HASH_TRACE_VALUE(_value) UNREFERENCED_PARAMETER(_value)
+#else
+#define DP_HASH_TRACE_VALUE(_value) ((void)0)
+#endif
+
 #define DP_HASH_OB_ALTITUDE       L"385201.77"
 #define DP_HASH_REG_ALTITUDE      L"385202.77"
 #define DP_HASH_LSASS_DEDUP_SLOTS 64
@@ -2658,6 +2664,7 @@ DpHashProtectQueryEvents(
             ULONGLONG drainedSequence = event->Event.Sequence;
             ULONG remainingEvents;
 
+            DP_HASH_TRACE_VALUE(drainedSequence);
             gDpHashProtectEventCount--;
             remainingEvents = gDpHashProtectEventCount;
             KeReleaseSpinLock(&gDpHashProtectEventLock, oldIrql);

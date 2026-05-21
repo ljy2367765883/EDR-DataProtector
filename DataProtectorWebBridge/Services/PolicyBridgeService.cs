@@ -475,6 +475,98 @@ namespace DataProtectorWebBridge.Services
             return result;
         }
 
+        public FileHunterRuleDto[] QueryFileHunterRules()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint ruleCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryFileHunterRules(
+                    new DataProtectorPolicyNative.NativeFileHunterRule[0],
+                    0,
+                    out ruleCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeFileHunterRule[] nativeRules =
+                    new DataProtectorPolicyNative.NativeFileHunterRule[checked((int)ruleCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryFileHunterRules(
+                        nativeRules,
+                        (uint)nativeRules.Length,
+                        out ruleCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)ruleCount);
+                        List<FileHunterRuleDto> rules = new List<FileHunterRuleDto>();
+                        for (int index = 0; index < returned && index < nativeRules.Length; index++)
+                        {
+                            rules.Add(ConvertFileHunterRule(nativeRules[index]));
+                        }
+
+                        return rules.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver file hunter rule set changed while querying. Please retry.");
+        }
+
+        public OperationResult AddFileHunterRule(FileHunterRuleRequest request)
+        {
+            FileHunterRuleDto normalized = NormalizeFileHunterRule(request);
+            OperationResult result = Invoke(() => DataProtectorPolicyNative.DpPolicyAddFileHunterRule(normalized.directory));
+            auditLog.Append(normalized.actor, "policy.filehunter.add", normalized.directory, "safe-folder", result.succeeded, result.status, result.message);
+            return result;
+        }
+
+        public OperationResult RemoveFileHunterRule(FileHunterRuleRequest request)
+        {
+            FileHunterRuleDto normalized = NormalizeFileHunterRule(request);
+            OperationResult result = Invoke(() => DataProtectorPolicyNative.DpPolicyRemoveFileHunterRule(normalized.directory));
+            auditLog.Append(normalized.actor, "policy.filehunter.remove", normalized.directory, "safe-folder", result.succeeded, result.status, result.message);
+            return result;
+        }
+
+        public OperationResult ClearFileHunterRules(string actor)
+        {
+            OperationResult result = Invoke(DataProtectorPolicyNative.DpPolicyClearFileHunterRules);
+            auditLog.Append(actor, "policy.filehunter.clear", "*", "safe-folder", result.succeeded, result.status, result.message);
+            return result;
+        }
+
         public DeviceRuleDto[] QueryDeviceRules()
         {
             uint status = SuccessStatus;
@@ -715,6 +807,75 @@ namespace DataProtectorWebBridge.Services
             }
 
             throw new BridgeException(BufferTooSmallStatus, "The driver WebShell event queue changed while querying. Please retry.");
+        }
+
+        public FileHunterEventDto[] QueryFileHunterEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryFileHunterEvents(
+                    new DataProtectorPolicyNative.NativeFileHunterEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeFileHunterEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeFileHunterEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryFileHunterEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<FileHunterEventDto> events = new List<FileHunterEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertFileHunterEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver file hunter event queue changed while querying. Please retry.");
         }
 
         public HashProtectEventDto[] QueryHashProtectEvents()
@@ -1220,6 +1381,7 @@ namespace DataProtectorWebBridge.Services
             List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
             records.AddRange(TryDrainSecurityAuditSource("smtp", DrainSmtpAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("webshell", DrainWebShellAuditRecords));
+            records.AddRange(TryDrainSecurityAuditSource("filehunter", DrainFileHunterAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("hashprotect", DrainHashProtectAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("lateral", DrainLateralDefenseAuditRecords));
             records.AddRange(TryDrainSecurityAuditSource("userhook", DrainUserHookDefenseAuditRecords));
@@ -1248,6 +1410,55 @@ namespace DataProtectorWebBridge.Services
                     Succeeded = allowed,
                     Status = "0x" + status.ToString("X8"),
                     Message = message + " Sample: " + item.sample
+                };
+
+                records.Add(record);
+                TryAppendAudit(record);
+            }
+
+            return records.ToArray();
+        }
+
+        public AuditLog.AuditRecord[] DrainFileHunterAuditRecords()
+        {
+            FileHunterEventDto[] events = QueryFileHunterEvents();
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+
+            foreach (FileHunterEventDto item in events)
+            {
+                string process = string.IsNullOrWhiteSpace(item.processImage) ? "unknown" : item.processImage;
+                string message =
+                    "process=" + process +
+                    ";pid=" + item.processId.ToString(CultureInfo.InvariantCulture) +
+                    ";object=file;path=" + item.path +
+                    ";bytes=" + item.bytesRead.ToString(CultureInfo.InvariantCulture) +
+                    ";offset=" + item.byteOffset.ToString(CultureInfo.InvariantCulture) +
+                    ";flags=0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture) +
+                    ";disposition=observed;severity=warning";
+
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
+                    Actor = "file-hunter-sensor",
+                    Action = "dlp.file.read",
+                    Target = item.path,
+                    Extension = process,
+                    Succeeded = true,
+                    Status = item.statusText,
+                    Message = message,
+                    SourceHost = Environment.MachineName,
+                    SourceProcess = process,
+                    SourcePid = item.processId.ToString(CultureInfo.InvariantCulture),
+                    ObjectType = "file",
+                    ObjectName = item.path,
+                    ObjectFormat = "bytes=" + item.bytesRead.ToString(CultureInfo.InvariantCulture) +
+                        ";offset=" + item.byteOffset.ToString(CultureInfo.InvariantCulture) +
+                        ";flags=0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture),
+                    PolicyName = "file-thief-hunter",
+                    Disposition = "observed",
+                    Severity = "warning",
+                    EventDetails = message
                 };
 
                 records.Add(record);
@@ -2051,6 +2262,14 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
+        private static FileHunterRuleDto ConvertFileHunterRule(DataProtectorPolicyNative.NativeFileHunterRule nativeRule)
+        {
+            return new FileHunterRuleDto
+            {
+                directory = NormalizeDevicePath(Marshal.PtrToStringUni(nativeRule.Directory) ?? string.Empty)
+            };
+        }
+
         private static DeviceRuleDto ConvertDeviceRule(DataProtectorPolicyNative.NativeDeviceRule nativeRule)
         {
             return new DeviceRuleDto
@@ -2075,6 +2294,22 @@ namespace DataProtectorWebBridge.Services
                 path = Marshal.PtrToStringUni(nativeEvent.Path) ?? string.Empty,
                 extension = Marshal.PtrToStringUni(nativeEvent.Extension) ?? string.Empty,
                 sample = sample
+            };
+        }
+
+        private static FileHunterEventDto ConvertFileHunterEvent(DataProtectorPolicyNative.NativeFileHunterEvent nativeEvent)
+        {
+            return new FileHunterEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                processId = nativeEvent.ProcessId,
+                bytesRead = nativeEvent.BytesRead,
+                byteOffset = nativeEvent.ByteOffset,
+                status = nativeEvent.Status,
+                statusText = "0x" + nativeEvent.Status.ToString("X8", CultureInfo.InvariantCulture),
+                flags = nativeEvent.Flags,
+                path = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Path) ?? string.Empty),
+                processImage = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty)
             };
         }
 
@@ -3286,6 +3521,7 @@ namespace DataProtectorWebBridge.Services
                 blockPrintScreenHotkeys = true,
                 trustedProcessNames = new string[0],
                 trustedProcessDirectories = new string[0],
+                safeFolders = new string[0],
                 actor = "system"
             };
         }
@@ -3307,6 +3543,7 @@ namespace DataProtectorWebBridge.Services
                 blockPrintScreenHotkeys = source.blockPrintScreenHotkeys,
                 trustedProcessNames = NormalizeDlpStringList(source.trustedProcessNames),
                 trustedProcessDirectories = NormalizeDlpStringList(source.trustedProcessDirectories),
+                safeFolders = NormalizeDlpStringList(source.safeFolders),
                 actor = string.IsNullOrWhiteSpace(source.actor) ? "system" : source.actor.Trim()
             };
         }
@@ -3332,6 +3569,7 @@ namespace DataProtectorWebBridge.Services
                 blockPrintScreenHotkeys = request.blockPrintScreenHotkeys,
                 trustedProcessNames = NormalizeDlpStringList(request.trustedProcessNames),
                 trustedProcessDirectories = NormalizeDlpStringList(request.trustedProcessDirectories),
+                safeFolders = NormalizeDlpStringList(request.safeFolders),
                 actor = string.IsNullOrWhiteSpace(request.actor) ? "web-admin" : request.actor.Trim()
             };
         }
@@ -3341,7 +3579,7 @@ namespace DataProtectorWebBridge.Services
             DlpProtectionPolicyDto normalized = CloneDlpProtectionPolicy(policy);
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "enabled={0};clipboard={1};clipboardMode={2};screenshots={3};screenshotMode={4};hotkeys={5};trustedProcesses={6};trustedDirectories={7}",
+                "enabled={0};clipboard={1};clipboardMode={2};screenshots={3};screenshotMode={4};hotkeys={5};trustedProcesses={6};trustedDirectories={7};safeFolders={8}",
                 normalized.enabled,
                 normalized.protectClipboard,
                 normalized.clipboardMode,
@@ -3349,7 +3587,8 @@ namespace DataProtectorWebBridge.Services
                 normalized.screenshotMode,
                 normalized.blockPrintScreenHotkeys,
                 normalized.trustedProcessNames.Length,
-                normalized.trustedProcessDirectories.Length);
+                normalized.trustedProcessDirectories.Length,
+                normalized.safeFolders.Length);
         }
 
         internal static bool SameDlpProtectionPolicy(DlpProtectionPolicyDto left, DlpProtectionPolicyDto right)
@@ -3367,7 +3606,8 @@ namespace DataProtectorWebBridge.Services
                    a.clearScreenshotClipboard == b.clearScreenshotClipboard &&
                    a.blockPrintScreenHotkeys == b.blockPrintScreenHotkeys &&
                    SameStringSet(a.trustedProcessNames, b.trustedProcessNames) &&
-                   SameStringSet(a.trustedProcessDirectories, b.trustedProcessDirectories);
+                   SameStringSet(a.trustedProcessDirectories, b.trustedProcessDirectories) &&
+                   SameStringSet(a.safeFolders, b.safeFolders);
         }
 
         private static string NormalizeDlpMode(string value, string fallback)
@@ -3460,6 +3700,26 @@ namespace DataProtectorWebBridge.Services
             {
                 directory = directory,
                 actor = request.actor
+            };
+        }
+
+        private static FileHunterRuleDto NormalizeFileHunterRule(FileHunterRuleRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(1, "File hunter rule request body is required.");
+            }
+
+            string directory = (request.directory ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                throw new BridgeException(1, "Safe folder directory is required.");
+            }
+
+            return new FileHunterRuleDto
+            {
+                directory = directory,
+                actor = string.IsNullOrWhiteSpace(request.actor) ? "web-admin" : request.actor.Trim()
             };
         }
 
@@ -5364,11 +5624,35 @@ namespace DataProtectorWebBridge.Services
             public bool blockPrintScreenHotkeys { get; set; }
             public string[] trustedProcessNames { get; set; }
             public string[] trustedProcessDirectories { get; set; }
+            public string[] safeFolders { get; set; }
             public string actor { get; set; }
         }
 
         public sealed class DlpProtectionPolicyDto : DlpProtectionPolicyRequest
         {
+        }
+
+        public class FileHunterRuleRequest
+        {
+            public string directory { get; set; }
+            public string actor { get; set; }
+        }
+
+        public sealed class FileHunterRuleDto : FileHunterRuleRequest
+        {
+        }
+
+        public sealed class FileHunterEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong processId { get; set; }
+            public ulong bytesRead { get; set; }
+            public ulong byteOffset { get; set; }
+            public uint status { get; set; }
+            public string statusText { get; set; }
+            public uint flags { get; set; }
+            public string path { get; set; }
+            public string processImage { get; set; }
         }
 
         public sealed class OperationResult

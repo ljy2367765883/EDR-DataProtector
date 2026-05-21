@@ -44,6 +44,12 @@ KeAlertThread(
 #define DP_USER_HOOK_TRACE(_format, ...) ((void)0)
 #endif
 
+#if !DP_ENABLE_USER_HOOK_DEFENSE_TRACE
+#define DP_USER_HOOK_TRACE_VALUE(_value) UNREFERENCED_PARAMETER(_value)
+#else
+#define DP_USER_HOOK_TRACE_VALUE(_value) ((void)0)
+#endif
+
 #define DP_USER_HOOK_DEDUP_SLOTS 128
 #define DP_USER_HOOK_TARGET_SLOTS 1024
 #define DP_USER_HOOK_DEDUP_WINDOW_100NS (10LL * 1000LL * 10000LL)
@@ -2729,6 +2735,7 @@ DpUserHookDefenseQueryEvents(
             ULONGLONG sequence = event->Event.Sequence;
             ULONG remainingEvents;
 
+            DP_USER_HOOK_TRACE_VALUE(sequence);
             gDpUserHookEventCount--;
             remainingEvents = gDpUserHookEventCount;
             KeReleaseSpinLock(&gDpUserHookEventLock, oldIrql);

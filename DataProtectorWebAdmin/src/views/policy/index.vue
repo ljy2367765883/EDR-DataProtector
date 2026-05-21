@@ -135,10 +135,12 @@ const dlpProtectionPolicy = reactive<Api.DataProtector.DlpProtectionPolicy>({
   blockPrintScreenHotkeys: true,
   trustedProcessNames: [],
   trustedProcessDirectories: [],
+  safeFolders: [],
   actor: 'web-admin'
 });
 const dlpTrustedProcessesText = ref('');
 const dlpTrustedDirectoriesText = ref('');
+const dlpSafeFoldersText = ref('');
 const formRef = ref<FormInst | null>(null);
 const networkFormRef = ref<FormInst | null>(null);
 const webShellFormRef = ref<FormInst | null>(null);
@@ -399,13 +401,15 @@ const dlpGroups = computed(() => {
     dlpProtectionPolicy.enabled && dlpProtectionPolicy.clearClipboardImages,
     dlpProtectionPolicy.enabled && dlpProtectionPolicy.clearClipboardFiles,
     dlpProtectionPolicy.enabled && dlpProtectionPolicy.clearScreenshotClipboard,
-    dlpProtectionPolicy.enabled && dlpProtectionPolicy.blockPrintScreenHotkeys
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.blockPrintScreenHotkeys,
+    dlpProtectionPolicy.enabled && dlpProtectionPolicy.safeFolders.length > 0
   ].filter(Boolean).length;
 
   return {
     mode: dlpProtectionPolicy.enabled ? $t('dataprotector.common.enforcing') : $t('dataprotector.common.disabled'),
     activeControls,
-    trustedEntries: dlpProtectionPolicy.trustedProcessNames.length + dlpProtectionPolicy.trustedProcessDirectories.length
+    trustedEntries: dlpProtectionPolicy.trustedProcessNames.length + dlpProtectionPolicy.trustedProcessDirectories.length,
+    safeFolders: dlpProtectionPolicy.safeFolders.length
   };
 });
 
@@ -440,6 +444,13 @@ const dlpSurfaces = computed(() => [
     detail: $t('dataprotector.policy.dlp.surfacesList.clipboardFilesDetail'),
     enabled: dlpProtectionPolicy.enabled && dlpProtectionPolicy.protectClipboard && dlpProtectionPolicy.clearClipboardFiles,
     icon: 'mdi:file-lock-outline'
+  },
+  {
+    key: 'file-hunter',
+    title: $t('dataprotector.policy.dlp.surfacesList.fileHunterTitle'),
+    detail: $t('dataprotector.policy.dlp.surfacesList.fileHunterDetail'),
+    enabled: dlpProtectionPolicy.enabled && dlpProtectionPolicy.safeFolders.length > 0,
+    icon: 'mdi:folder-search-outline'
   }
 ]);
 
@@ -1112,9 +1123,11 @@ function applyDlpProtectionPolicy(policy?: Api.DataProtector.DlpProtectionPolicy
   dlpProtectionPolicy.blockPrintScreenHotkeys = Boolean(policy.blockPrintScreenHotkeys);
   dlpProtectionPolicy.trustedProcessNames = policy.trustedProcessNames || [];
   dlpProtectionPolicy.trustedProcessDirectories = policy.trustedProcessDirectories || [];
+  dlpProtectionPolicy.safeFolders = policy.safeFolders || [];
   dlpProtectionPolicy.actor = 'web-admin';
   dlpTrustedProcessesText.value = dlpProtectionPolicy.trustedProcessNames.join('\n');
   dlpTrustedDirectoriesText.value = dlpProtectionPolicy.trustedProcessDirectories.join('\n');
+  dlpSafeFoldersText.value = dlpProtectionPolicy.safeFolders.join('\n');
 }
 
 async function refresh() {
@@ -1477,6 +1490,7 @@ async function saveDlpProtectionPolicy() {
   try {
     const trustedProcessNames = linesToList(dlpTrustedProcessesText.value);
     const trustedProcessDirectories = linesToList(dlpTrustedDirectoriesText.value);
+    const safeFolders = linesToList(dlpSafeFoldersText.value);
     const { error, data } = await fetchUpdateDlpProtectionPolicy({
       enabled: dlpProtectionPolicy.enabled,
       protectClipboard: dlpProtectionPolicy.protectClipboard,
@@ -1490,6 +1504,7 @@ async function saveDlpProtectionPolicy() {
       blockPrintScreenHotkeys: dlpProtectionPolicy.blockPrintScreenHotkeys,
       trustedProcessNames,
       trustedProcessDirectories,
+      safeFolders,
       actor: 'web-admin'
     });
 
@@ -2364,6 +2379,7 @@ onMounted(refresh);
                   <NSpace>
                     <NTag type="info">{{ $t('dataprotector.policy.dlp.activeControls', { count: dlpGroups.activeControls }) }}</NTag>
                     <NTag type="warning">{{ $t('dataprotector.policy.dlp.trustedEntries', { count: dlpGroups.trustedEntries }) }}</NTag>
+                    <NTag type="error">{{ $t('dataprotector.policy.dlp.safeFolders', { count: dlpGroups.safeFolders }) }}</NTag>
                   </NSpace>
                   <NButton type="primary" :loading="dlpSubmitting" @click="saveDlpProtectionPolicy">
                     <template #icon><SvgIcon icon="mdi:content-save-lock-outline" /></template>
@@ -2413,6 +2429,16 @@ onMounted(refresh);
                       type="textarea"
                       :autosize="{ minRows: 5, maxRows: 8 }"
                       :placeholder="$t('dataprotector.policy.dlp.trustedDirectoryPlaceholder')"
+                    />
+                  </NFormItem>
+                </NGi>
+                <NGi>
+                  <NFormItem :label="$t('dataprotector.policy.dlp.safeFolderList')">
+                    <NInput
+                      v-model:value="dlpSafeFoldersText"
+                      type="textarea"
+                      :autosize="{ minRows: 5, maxRows: 8 }"
+                      :placeholder="$t('dataprotector.policy.dlp.safeFolderPlaceholder')"
                     />
                   </NFormItem>
                 </NGi>

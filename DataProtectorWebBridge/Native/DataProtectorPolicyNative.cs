@@ -105,6 +105,33 @@ namespace DataProtectorWebBridge.Native
             out uint stringBufferCharsRequired);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyAddFileHunterRule(string directoryPath);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyRemoveFileHunterRule(string directoryPath);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyClearFileHunterRules();
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryFileHunterRules(
+            [Out] NativeFileHunterRule[] rules,
+            uint ruleCapacity,
+            out uint ruleCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryFileHunterEvents(
+            [Out] NativeFileHunterEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyQueryHashProtectEvents(
             [Out] NativeHashProtectEvent[] events,
             uint eventCapacity,
@@ -274,6 +301,25 @@ namespace DataProtectorWebBridge.Native
             public IntPtr Extension;
 
             public SampleBuffer Sample;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeFileHunterRule
+        {
+            public IntPtr Directory;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeFileHunterEvent
+        {
+            public ulong Sequence;
+            public ulong ProcessId;
+            public ulong BytesRead;
+            public ulong ByteOffset;
+            public uint Status;
+            public uint Flags;
+            public IntPtr Path;
+            public IntPtr ProcessImage;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

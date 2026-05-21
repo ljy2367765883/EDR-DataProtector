@@ -22,6 +22,12 @@ Abstract:
 #define DP_LATERAL_TRACE(_format, ...) ((void)0)
 #endif
 
+#if !DP_ENABLE_LATERAL_DEFENSE_TRACE
+#define DP_LATERAL_TRACE_VALUE(_value) UNREFERENCED_PARAMETER(_value)
+#else
+#define DP_LATERAL_TRACE_VALUE(_value) ((void)0)
+#endif
+
 typedef struct _DP_LATERAL_DEFENSE_EVENT_ENTRY {
     LIST_ENTRY Link;
     DP_LATERAL_DEFENSE_EVENT_QUERY_ENTRY Event;
@@ -1292,6 +1298,7 @@ DpLateralDefenseQueryEvents(
             ULONGLONG sequence = event->Event.Sequence;
             ULONG remainingEvents;
 
+            DP_LATERAL_TRACE_VALUE(sequence);
             gDpLateralEventCount--;
             remainingEvents = gDpLateralEventCount;
             KeReleaseSpinLock(&gDpLateralEventLock, oldIrql);

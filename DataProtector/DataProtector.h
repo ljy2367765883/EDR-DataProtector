@@ -40,6 +40,9 @@ Abstract:
 #define DP_TAG_WEBSHELL_RULE   'rWpD'
 #define DP_TAG_WEBSHELL_EVENT  'eWpD'
 #define DP_TAG_WEBSHELL_BUFFER 'bWpD'
+#define DP_TAG_FILE_HUNTER_RULE 'rFpD'
+#define DP_TAG_FILE_HUNTER_EVENT 'eFpD'
+#define DP_TAG_FILE_HUNTER_CONTEXT 'cFpD'
 #define DP_TAG_DEVICE_RULE     'rDpD'
 #define DP_TAG_HASH_PROTECT    'hHpD'
 #define DP_TAG_LATERAL_DEFENSE 'lLpD'
@@ -61,6 +64,12 @@ Abstract:
 #define DP_WEBSHELL_MAX_SAMPLE_BYTES 100
 #define DP_WEBSHELL_EVENT_PATH_CHARS 512
 #define DP_WEBSHELL_EVENT_EXTENSION_CHARS 32
+#define DP_FILE_HUNTER_MAX_RULES 256
+#define DP_FILE_HUNTER_MAX_EVENTS 512
+#define DP_FILE_HUNTER_PATH_CHARS 512
+#define DP_FILE_HUNTER_PROCESS_CHARS 64
+#define DP_FILE_HUNTER_DEDUP_SLOTS 512
+#define DP_FILE_HUNTER_DUPLICATE_WINDOW_100NS (10ll * 1000ll * 10000ll)
 #define DP_DEVICE_MAX_RULES 256
 #define DP_DEVICE_MAX_ID_CHARS 260
 #define DP_DEVICE_MAX_ID_BYTES (DP_DEVICE_MAX_ID_CHARS * sizeof(WCHAR))
@@ -104,19 +113,19 @@ Abstract:
 // When enabled, the driver emits DbgPrintEx lines only for .pptx paths
 // and DataProtector internal streams/metadata.
 //
-#define DP_ENABLE_PPTX_OPERATION_TRACE 1
+#define DP_ENABLE_PPTX_OPERATION_TRACE 0
 
 //
 // Targeted WebShell investigation switch. Emits DataProtector77 lines through
 // DbgPrintEx while diagnosing policy, event queue, and reporting paths.
 //
-#define DP_ENABLE_WEBSHELL_OPERATION_TRACE 1
+#define DP_ENABLE_WEBSHELL_OPERATION_TRACE 0
 
 //
 // Targeted hash-dump protection diagnostics. Emits only registration failures
 // and blocked credential-dump attempts.
 //
-#define DP_ENABLE_HASH_PROTECT_TRACE 1
+#define DP_ENABLE_HASH_PROTECT_TRACE 0
 
 //
 // Blocks well-known built-in hive export tools at process creation time so
@@ -129,13 +138,13 @@ Abstract:
 // Targeted lateral movement defense diagnostics. The module only prints when
 // it blocks or queues high-risk IPC/SMB activity.
 //
-#define DP_ENABLE_LATERAL_DEFENSE_TRACE 1
+#define DP_ENABLE_LATERAL_DEFENSE_TRACE 0
 
 //
 // Application-layer API hook defense diagnostics. The module prints only
 // policy updates, callback registration failures, and queued protection events.
 //
-#define DP_ENABLE_USER_HOOK_DEFENSE_TRACE 1
+#define DP_ENABLE_USER_HOOK_DEFENSE_TRACE 0
 
 //
 // Cached transparent encryption keeps plaintext in the system file cache.
@@ -192,6 +201,8 @@ typedef struct _DP_IO_CONTEXT {
     ULONG FileKeyLength;
     UCHAR FileKey[DP_FILE_KEY_LENGTH];
     BOOLEAN TransformInPlace;
+    BOOLEAN FileHunterAuditOnly;
+    struct _DP_FILE_HUNTER_READ_CONTEXT *FileHunterContext;
 } DP_IO_CONTEXT, *PDP_IO_CONTEXT;
 
 #pragma pack(push, 1)
@@ -244,6 +255,16 @@ typedef struct _DP_CREATE_CONTEXT {
     UNICODE_STRING ShadowName;
 } DP_CREATE_CONTEXT, *PDP_CREATE_CONTEXT;
 
+typedef struct _DP_FILE_HUNTER_READ_CONTEXT {
+    HANDLE ProcessId;
+    LARGE_INTEGER ByteOffset;
+    ULONG Flags;
+    WCHAR Path[DP_FILE_HUNTER_PATH_CHARS];
+    ULONG PathLengthBytes;
+    WCHAR ProcessImage[DP_FILE_HUNTER_PROCESS_CHARS];
+    ULONG ProcessImageLengthBytes;
+} DP_FILE_HUNTER_READ_CONTEXT, *PDP_FILE_HUNTER_READ_CONTEXT;
+
 typedef enum _DP_PROCESS_TRUST_RULE_TYPE {
     DpProcessTrustRuleImageName = 1,
     DpProcessTrustRuleImageDirectory = 2,
@@ -283,6 +304,11 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryUserHookDefenseEvents = 110,
     DpPolicyCommandSetUserHookDefensePolicy = 111,
     DpPolicyCommandQueryUserHookDefensePolicy = 112,
+    DpPolicyCommandAddFileHunterRule = 120,
+    DpPolicyCommandRemoveFileHunterRule = 121,
+    DpPolicyCommandClearFileHunterRules = 122,
+    DpPolicyCommandQueryFileHunterRules = 123,
+    DpPolicyCommandQueryFileHunterEvents = 124,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -514,6 +540,51 @@ typedef struct _DP_WEBSHELL_EVENT_QUERY_ENTRY {
 #define DP_WEBSHELL_RULE_QUERY_VERSION 1
 #define DP_WEBSHELL_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_WEBSHELL_RULE_QUERY_ENTRY, Directory)
 #define DP_WEBSHELL_EVENT_QUERY_VERSION 1
+
+typedef struct _DP_FILE_HUNTER_RULE_MESSAGE {
+    ULONG Version;
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[512];
+} DP_FILE_HUNTER_RULE_MESSAGE, *PDP_FILE_HUNTER_RULE_MESSAGE;
+
+typedef struct _DP_FILE_HUNTER_RULE_QUERY_HEADER {
+    ULONG Version;
+    ULONG RuleCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_FILE_HUNTER_RULE_QUERY_HEADER, *PDP_FILE_HUNTER_RULE_QUERY_HEADER;
+
+typedef struct _DP_FILE_HUNTER_RULE_QUERY_ENTRY {
+    ULONG DirectoryLengthBytes;
+    WCHAR Directory[1];
+} DP_FILE_HUNTER_RULE_QUERY_ENTRY, *PDP_FILE_HUNTER_RULE_QUERY_ENTRY;
+
+typedef struct _DP_FILE_HUNTER_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_FILE_HUNTER_EVENT_QUERY_HEADER, *PDP_FILE_HUNTER_EVENT_QUERY_HEADER;
+
+typedef struct _DP_FILE_HUNTER_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG ProcessId;
+    ULONGLONG BytesRead;
+    ULONGLONG ByteOffset;
+    ULONG Status;
+    ULONG Flags;
+    ULONG PathLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    WCHAR Path[DP_FILE_HUNTER_PATH_CHARS];
+    WCHAR ProcessImage[DP_FILE_HUNTER_PROCESS_CHARS];
+} DP_FILE_HUNTER_EVENT_QUERY_ENTRY, *PDP_FILE_HUNTER_EVENT_QUERY_ENTRY;
+
+#define DP_FILE_HUNTER_RULE_MESSAGE_VERSION 1
+#define DP_FILE_HUNTER_RULE_QUERY_VERSION 1
+#define DP_FILE_HUNTER_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_FILE_HUNTER_RULE_QUERY_ENTRY, Directory)
+#define DP_FILE_HUNTER_EVENT_QUERY_VERSION 1
+#define DP_FILE_HUNTER_READ_FLAG_PAGING_IO 0x00000001u
 
 typedef struct _DP_DEVICE_RULE_MESSAGE {
     ULONG Version;
@@ -1258,6 +1329,65 @@ DpWebShellInspectFileObject(
     );
 
 NTSTATUS
+DpFileHunterInitialize(
+    VOID
+    );
+
+VOID
+DpFileHunterUninitialize(
+    VOID
+    );
+
+NTSTATUS
+DpFileHunterAddRule(
+    _In_ const DP_FILE_HUNTER_RULE_MESSAGE *Rule
+    );
+
+NTSTATUS
+DpFileHunterRemoveRule(
+    _In_ const DP_FILE_HUNTER_RULE_MESSAGE *Rule
+    );
+
+VOID
+DpFileHunterClearRules(
+    VOID
+    );
+
+NTSTATUS
+DpFileHunterQueryRules(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpFileHunterQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpFileHunterPrepareReadAudit(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ ULONG Length,
+    _Outptr_result_maybenull_ PDP_FILE_HUNTER_READ_CONTEXT *ReadContext
+    );
+
+VOID
+DpFileHunterReportReadSuccess(
+    _Inout_ PDP_FILE_HUNTER_READ_CONTEXT ReadContext,
+    _In_ ULONG Status,
+    _In_ ULONG_PTR BytesRead
+    );
+
+VOID
+DpFileHunterFreeReadContext(
+    _In_opt_ PDP_FILE_HUNTER_READ_CONTEXT ReadContext
+    );
+
+NTSTATUS
 DpNetFilterAddRule(
     _In_ const DP_NETWORK_RULE_MESSAGE *Rule
     );
@@ -1313,6 +1443,13 @@ DpReleaseHandleContext(
 
 PDP_IO_CONTEXT
 DpAllocateIoContext(
+    _In_ PFLT_INSTANCE Instance,
+    _In_ DP_IO_OPERATION Operation,
+    _In_ ULONG Length
+    );
+
+PDP_IO_CONTEXT
+DpAllocateAuditIoContext(
     _In_ PFLT_INSTANCE Instance,
     _In_ DP_IO_OPERATION Operation,
     _In_ ULONG Length

@@ -1236,6 +1236,9 @@
         trustedProcessPlaceholder: '每行一个进程，例如 SnippingTool.exe',
         trustedDirectories: '可信进程目录',
         trustedDirectoryPlaceholder: '每行一个目录，例如 C:\\Program Files\\TrustedApp',
+        safeFolders: '安全文件夹：{count}',
+        safeFolderList: '安全文件夹',
+        safeFolderPlaceholder: '每行一个目录，例如 C:\\Users\\Public\\Sensitive',
         activeControls: '生效控制：{count}',
         trustedEntries: '可信项：{count}',
         save: '保存 DLP 策略',
@@ -1249,7 +1252,9 @@
           clipboardTextTitle: '剪贴板文本',
           clipboardTextDetail: '控制纯文本、Unicode 文本、HTML 和 RTF 等文本格式。',
           clipboardFilesTitle: '剪贴板文件拖放',
-          clipboardFilesDetail: '控制 CF_HDROP 文件转移数据，降低复制外泄路径。'
+          clipboardFilesDetail: '控制 CF_HDROP 文件转移数据，降低复制外泄路径。',
+          fileHunterTitle: '文件小偷猎手',
+          fileHunterDetail: '安全文件夹内任意文件被成功读取后上报审计。'
         }
       },
       webshell: {

@@ -236,8 +236,18 @@ DriverEntry(
         return status;
     }
 
+    status = DpFileHunterInitialize();
+    if (!NT_SUCCESS(status)) {
+        DpWebShellUninitialize();
+        DpCryptoUninitialize();
+        DpProcessPolicyUninitialize();
+        DpShadowUninitialize();
+        return status;
+    }
+
     status = DpDeviceControlInitialize();
     if (!NT_SUCCESS(status)) {
+        DpFileHunterUninitialize();
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
@@ -248,6 +258,7 @@ DriverEntry(
     status = DpLateralDefenseInitialize();
     if (!NT_SUCCESS(status)) {
         DpDeviceControlUninitialize();
+        DpFileHunterUninitialize();
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
@@ -259,6 +270,7 @@ DriverEntry(
     if (!NT_SUCCESS(status)) {
         DpLateralDefenseUninitialize();
         DpDeviceControlUninitialize();
+        DpFileHunterUninitialize();
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
@@ -271,6 +283,7 @@ DriverEntry(
         DpHashProtectUninitialize();
         DpLateralDefenseUninitialize();
         DpDeviceControlUninitialize();
+        DpFileHunterUninitialize();
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
@@ -314,6 +327,7 @@ DriverEntry(
         DpHashProtectUninitialize();
         DpLateralDefenseUninitialize();
         DpDeviceControlUninitialize();
+        DpFileHunterUninitialize();
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
@@ -343,6 +357,8 @@ DataProtectorUnload(
     DpLateralDefenseUninitialize();
 
     DpDeviceControlUninitialize();
+
+    DpFileHunterUninitialize();
 
     DpWebShellUninitialize();
 

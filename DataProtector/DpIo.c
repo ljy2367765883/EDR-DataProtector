@@ -77,6 +77,42 @@ DpGetSystemBufferAddress(
     return NULL;
 }
 
+static
+FLT_PREOP_CALLBACK_STATUS
+DpArmFileHunterAuditRead(
+    _Inout_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ ULONG Length,
+    _Inout_ PDP_FILE_HUNTER_READ_CONTEXT *FileHunterContext,
+    _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
+    )
+{
+    PDP_IO_CONTEXT ioContext;
+
+    if (FileHunterContext == NULL ||
+        *FileHunterContext == NULL ||
+        CompletionContext == NULL) {
+
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    ioContext = DpAllocateAuditIoContext(FltObjects->Instance, DpIoRead, Length);
+    if (ioContext == NULL) {
+        DpFileHunterFreeReadContext(*FileHunterContext);
+        *FileHunterContext = NULL;
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    ioContext->OriginalBuffer = Data->Iopb->Parameters.Read.ReadBuffer;
+    ioContext->OriginalMdl = Data->Iopb->Parameters.Read.MdlAddress;
+    ioContext->ByteOffset = Data->Iopb->Parameters.Read.ByteOffset;
+    ioContext->FileHunterContext = *FileHunterContext;
+    *FileHunterContext = NULL;
+    *CompletionContext = ioContext;
+
+    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+}
+
 typedef struct _DP_RENAME_CONTEXT {
     BOOLEAN EncryptAfterRename;
     BOOLEAN InspectWebShellAfterRename;
@@ -1203,6 +1239,12 @@ DpArmTrustedPathEncryptOnCleanup(
     BOOLEAN pathProtected = FALSE;
     BOOLEAN trusted = FALSE;
 
+#if !DP_ENABLE_PPTX_DATA_TRACE
+    UNREFERENCED_PARAMETER(Operation);
+    UNREFERENCED_PARAMETER(Detail1);
+    UNREFERENCED_PARAMETER(Detail2);
+#endif
+
     if (Data == NULL ||
         FltObjects == NULL ||
         FltObjects->FileObject == NULL ||
@@ -1940,6 +1982,7 @@ DpPreRead(
     LONGLONG readOffset;
     PDP_IO_CONTEXT ioContext;
     PDP_HANDLE_CONTEXT handleContext = NULL;
+    PDP_FILE_HUNTER_READ_CONTEXT fileHunterContext = NULL;
     PFLT_IO_PARAMETER_BLOCK iopb = Data->Iopb;
 
     *CompletionContext = NULL;
@@ -1961,6 +2004,14 @@ DpPreRead(
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
+    status = DpFileHunterPrepareReadAudit(Data,
+                                          FltObjects,
+                                          length,
+                                          &fileHunterContext);
+    if (!NT_SUCCESS(status)) {
+        fileHunterContext = NULL;
+    }
+
     status = DpGetHandleTrust(FltObjects, &isProtected, &isTrusted);
     if (!NT_SUCCESS(status) || !isProtected) {
         DP_TRACE_PPTX_DATA("PreReadBypass",
@@ -1971,7 +2022,11 @@ DpPreRead(
                            isTrusted,
                            length,
                            DpIsPagingIo(Data));
-        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        return DpArmFileHunterAuditRead(Data,
+                                        FltObjects,
+                                        length,
+                                        &fileHunterContext,
+                                        CompletionContext);
     }
 
     status = DpGetLogicalSizeForHandle(FltObjects,
@@ -1983,6 +2038,7 @@ DpPreRead(
 
         if (readOffset < 0 || readOffset >= logicalSize.QuadPart) {
             DpReleaseHandleContext(handleContext);
+            DpFileHunterFreeReadContext(fileHunterContext);
             Data->IoStatus.Status = STATUS_END_OF_FILE;
             Data->IoStatus.Information = 0;
             return FLT_PREOP_COMPLETE;
@@ -2017,12 +2073,20 @@ DpPreRead(
                            isTrusted,
                            originalLength,
                            DpIsPagingIo(Data));
-        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        return DpArmFileHunterAuditRead(Data,
+                                        FltObjects,
+                                        length,
+                                        &fileHunterContext,
+                                        CompletionContext);
     }
 
     if (!DpIsPagingIo(Data) && isTrusted && plaintextCacheEnabled) {
         DpReleaseHandleContext(handleContext);
-        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        return DpArmFileHunterAuditRead(Data,
+                                        FltObjects,
+                                        length,
+                                        &fileHunterContext,
+                                        CompletionContext);
     }
 
     if (DpIsPagingIo(Data) && !plaintextCacheEnabled) {
@@ -2035,7 +2099,11 @@ DpPreRead(
                            isTrusted,
                            originalLength,
                            plaintextCacheEnabled);
-        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        return DpArmFileHunterAuditRead(Data,
+                                        FltObjects,
+                                        length,
+                                        &fileHunterContext,
+                                        CompletionContext);
     }
 
     if (!DpCryptoIsReady()) {
@@ -2048,6 +2116,7 @@ DpPreRead(
                            originalLength,
                            DpIsPagingIo(Data));
         DpReleaseHandleContext(handleContext);
+        DpFileHunterFreeReadContext(fileHunterContext);
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -2057,6 +2126,7 @@ DpPreRead(
         ioContext = DpAllocateIoContext(FltObjects->Instance, DpIoRead, 1);
         if (ioContext == NULL) {
             DpReleaseHandleContext(handleContext);
+            DpFileHunterFreeReadContext(fileHunterContext);
             Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
             Data->IoStatus.Information = 0;
             return FLT_PREOP_COMPLETE;
@@ -2066,6 +2136,8 @@ DpPreRead(
         ioContext->OriginalMdl = iopb->Parameters.Read.MdlAddress;
         ioContext->ByteOffset = iopb->Parameters.Read.ByteOffset;
         ioContext->Length = length;
+        ioContext->FileHunterContext = fileHunterContext;
+        fileHunterContext = NULL;
         if (handleContext != NULL && handleContext->FileKeyLength != 0) {
             ioContext->FileKeyLength = handleContext->FileKeyLength;
             RtlCopyMemory(ioContext->FileKey,
@@ -2090,6 +2162,7 @@ DpPreRead(
     ioContext = DpAllocateIoContext(FltObjects->Instance, DpIoRead, length);
     if (ioContext == NULL) {
         DpReleaseHandleContext(handleContext);
+        DpFileHunterFreeReadContext(fileHunterContext);
         Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -2098,6 +2171,8 @@ DpPreRead(
     ioContext->OriginalBuffer = iopb->Parameters.Read.ReadBuffer;
     ioContext->OriginalMdl = iopb->Parameters.Read.MdlAddress;
     ioContext->ByteOffset = iopb->Parameters.Read.ByteOffset;
+    ioContext->FileHunterContext = fileHunterContext;
+    fileHunterContext = NULL;
     if (handleContext != NULL && handleContext->FileKeyLength != 0) {
         ioContext->FileKeyLength = handleContext->FileKeyLength;
         RtlCopyMemory(ioContext->FileKey,
@@ -2163,6 +2238,18 @@ DpPostRead(
 
     if (NT_SUCCESS(Data->IoStatus.Status) && Data->IoStatus.Information > 0) {
         bytesRead = (ULONG)min(Data->IoStatus.Information, ioContext->Length);
+
+        if (ioContext->FileHunterContext != NULL) {
+            DpFileHunterReportReadSuccess(ioContext->FileHunterContext,
+                                          (ULONG)Data->IoStatus.Status,
+                                          Data->IoStatus.Information);
+        }
+
+        if (ioContext->FileHunterAuditOnly) {
+            DpFreeIoContext(ioContext);
+            return FLT_POSTOP_FINISHED_PROCESSING;
+        }
+
         DP_TRACE_PPTX_DATA("PostReadTransform",
                            Data,
                            FltObjects,
@@ -2208,6 +2295,9 @@ DpPostRead(
         } else {
             RtlCopyMemory(destination, ioContext->SwapBuffer, bytesRead);
         }
+    } else if (ioContext->FileHunterAuditOnly) {
+        DpFreeIoContext(ioContext);
+        return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
     Data->Iopb->Parameters.Read.ReadBuffer = ioContext->OriginalBuffer;
@@ -2550,6 +2640,8 @@ DpPostWrite(
     )
 {
     PDP_IO_CONTEXT ioContext = (PDP_IO_CONTEXT)CompletionContext;
+
+    UNREFERENCED_PARAMETER(FltObjects);
 
     if (ioContext == NULL) {
         return FLT_POSTOP_FINISHED_PROCESSING;
