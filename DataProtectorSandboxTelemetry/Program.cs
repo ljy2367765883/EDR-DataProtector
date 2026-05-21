@@ -54,6 +54,8 @@ namespace DataProtectorSandboxTelemetry
             List<BehaviorRecord> behaviors = new List<BehaviorRecord>();
             List<string> errors = new List<string>();
             SuspendedProcess suspendedProcess = null;
+            List<ProcessRecord> observedProcesses = new List<ProcessRecord>();
+            List<NetworkRecord> observedNetwork = new List<NetworkRecord>();
             int samplePid = 0;
             int exitCode = -1;
             bool timedOut = false;
@@ -90,7 +92,7 @@ namespace DataProtectorSandboxTelemetry
                 {
                     ResumeThread(suspendedProcess.MainThreadHandle);
                 }
-                ObserveProcess(samplePid, suspendedProcess.ProcessHandle, options.TimeoutSeconds, behaviors, errors, out timedOut, out exitCode);
+                ObserveProcess(samplePid, suspendedProcess.ProcessHandle, options.TimeoutSeconds, behaviors, errors, observedProcesses, observedNetwork, out timedOut, out exitCode);
             }
             catch (Exception ex)
             {
@@ -110,8 +112,8 @@ namespace DataProtectorSandboxTelemetry
             }
 
             Snapshot after = Snapshot.Capture(errors);
-            List<ProcessRecord> processes = CollectProcessRecords(samplePid, before, after);
-            List<NetworkRecord> network = CollectNetworkRecords(processes);
+            List<ProcessRecord> processes = CollectProcessRecords(samplePid, options.SamplePath, observedProcesses, before, after);
+            List<NetworkRecord> network = MergeNetworkRecords(observedNetwork, CollectNetworkRecords(processes));
             List<RegistryRecord> registry = CompareRegistry(before.Autoruns, after.Autoruns, behaviors);
             List<ServiceRecord> services = CompareServices(before.Services, after.Services, behaviors);
             List<TaskRecord> tasks = CompareTasks(before.Tasks, after.Tasks, behaviors);
@@ -240,7 +242,16 @@ namespace DataProtectorSandboxTelemetry
             }
         }
 
-        private static void ObserveProcess(int processId, IntPtr processHandle, int timeoutSeconds, List<BehaviorRecord> behaviors, List<string> errors, out bool timedOut, out int exitCode)
+        private static void ObserveProcess(
+            int processId,
+            IntPtr processHandle,
+            int timeoutSeconds,
+            List<BehaviorRecord> behaviors,
+            List<string> errors,
+            List<ProcessRecord> observedProcesses,
+            List<NetworkRecord> observedNetwork,
+            out bool timedOut,
+            out int exitCode)
         {
             timedOut = false;
             exitCode = -1;
@@ -252,10 +263,16 @@ namespace DataProtectorSandboxTelemetry
                 List<ProcessRecord> tree = CollectProcessTree(processId);
                 foreach (ProcessRecord record in tree)
                 {
+                    MergeProcessRecord(observedProcesses, record);
                     if (observed.Add(record.pid))
                     {
                         AnalyzeProcess(record, behaviors);
                     }
+                }
+
+                foreach (NetworkRecord connection in CollectNetworkRecords(tree))
+                {
+                    MergeNetworkRecord(observedNetwork, connection);
                 }
 
                 uint wait = WaitForSingleObject(processHandle, 0);
@@ -395,6 +412,23 @@ namespace DataProtectorSandboxTelemetry
             return string.Empty;
         }
 
+        private static string GetNativeSystemDriverPath(string fileName)
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            if (Environment.Is64BitOperatingSystem && !Environment.Is64BitProcess)
+            {
+                return Path.Combine(windows, "Sysnative", "drivers", fileName);
+            }
+
+            return Path.Combine(windows, "System32", "drivers", fileName);
+        }
+
+        private static void CopyFileNoWow64Redirect(string source, string destination)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? ".");
+            File.Copy(source, destination, true);
+        }
+
         private static void PrepareRuntimePolicy(List<string> errors)
         {
             try
@@ -450,12 +484,8 @@ namespace DataProtectorSandboxTelemetry
 
             try
             {
-                string destinationDriver = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                    "System32",
-                    "drivers",
-                    KernelSensorDriverFileName);
-                File.Copy(sourceDriver, destinationDriver, true);
+                string destinationDriver = GetNativeSystemDriverPath(KernelSensorDriverFileName);
+                CopyFileNoWow64Redirect(sourceDriver, destinationDriver);
                 sensor.driverPath = destinationDriver;
 
                 SetMiniFilterInstanceRegistry(sensor.serviceName);
@@ -898,7 +928,7 @@ namespace DataProtectorSandboxTelemetry
                 {
                     Dictionary<string, object> item = Serializer.Deserialize<Dictionary<string, object>>(line);
                     RuntimeEventRecord record = RuntimeEventRecord.From(item);
-                    if (IsRuntimeEventBeforeRun(record, startedUtc))
+                    if (IsRuntimeEventBeforeRun(record, startedUtc) || IsRuntimeNoise(record))
                     {
                         continue;
                     }
@@ -1040,14 +1070,55 @@ namespace DataProtectorSandboxTelemetry
             return parsed.ToUniversalTime() < startedUtc.AddSeconds(-2);
         }
 
-        private static List<ProcessRecord> CollectProcessRecords(int rootPid, Snapshot before, Snapshot after)
+        private static List<ProcessRecord> CollectProcessRecords(int rootPid, string samplePath, List<ProcessRecord> observedProcesses, Snapshot before, Snapshot after)
         {
-            List<ProcessRecord> tree = CollectProcessTree(rootPid);
+            List<ProcessRecord> tree = (observedProcesses ?? new List<ProcessRecord>())
+                .Where(item => item != null)
+                .GroupBy(item => item.pid)
+                .Select(group => group.OrderByDescending(item => string.IsNullOrWhiteSpace(item.path) ? 0 : 1)
+                                      .ThenByDescending(item => string.IsNullOrWhiteSpace(item.commandLine) ? 0 : 1)
+                                      .First())
+                .OrderBy(item => item.createdUtc)
+                .ToList();
             if (tree.Count > 0)
             {
                 return tree;
             }
 
+            tree = CollectProcessTree(rootPid);
+            if (tree.Count > 0)
+            {
+                return tree;
+            }
+
+            if (rootPid > 0)
+            {
+                ProcessRecord root;
+                if (before.Processes.TryGetValue(rootPid, out root) || after.Processes.TryGetValue(rootPid, out root))
+                {
+                    return new List<ProcessRecord> { root };
+                }
+
+                return new List<ProcessRecord>
+                {
+                    new ProcessRecord
+                    {
+                        pid = rootPid,
+                        parentPid = 0,
+                        name = Path.GetFileName(samplePath),
+                        path = samplePath,
+                        commandLine = Quote(samplePath),
+                        createdUtc = string.Empty,
+                        signature = GetSignature(samplePath)
+                    }
+                };
+            }
+
+            return new List<ProcessRecord>();
+        }
+
+        private static List<ProcessRecord> CollectNewProcessRecords(Snapshot before, Snapshot after)
+        {
             return after.Processes.Values
                 .Where(item => !before.Processes.ContainsKey(item.pid))
                 .OrderBy(item => item.createdUtc)
@@ -1151,6 +1222,72 @@ namespace DataProtectorSandboxTelemetry
             }
 
             return records;
+        }
+
+        private static void MergeProcessRecord(List<ProcessRecord> records, ProcessRecord record)
+        {
+            if (records == null || record == null || record.pid <= 0)
+            {
+                return;
+            }
+
+            int index = records.FindIndex(item => item.pid == record.pid);
+            if (index < 0)
+            {
+                records.Add(record);
+                return;
+            }
+
+            ProcessRecord existing = records[index];
+            if (string.IsNullOrWhiteSpace(existing.path) && !string.IsNullOrWhiteSpace(record.path))
+            {
+                existing.path = record.path;
+            }
+
+            if (string.IsNullOrWhiteSpace(existing.commandLine) && !string.IsNullOrWhiteSpace(record.commandLine))
+            {
+                existing.commandLine = record.commandLine;
+            }
+
+            if (existing.signature == null || string.Equals(existing.signature.status, "Unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                existing.signature = record.signature;
+            }
+        }
+
+        private static List<NetworkRecord> MergeNetworkRecords(List<NetworkRecord> first, List<NetworkRecord> second)
+        {
+            List<NetworkRecord> records = new List<NetworkRecord>();
+            foreach (NetworkRecord record in first ?? new List<NetworkRecord>())
+            {
+                MergeNetworkRecord(records, record);
+            }
+
+            foreach (NetworkRecord record in second ?? new List<NetworkRecord>())
+            {
+                MergeNetworkRecord(records, record);
+            }
+
+            return records;
+        }
+
+        private static void MergeNetworkRecord(List<NetworkRecord> records, NetworkRecord record)
+        {
+            if (records == null || record == null)
+            {
+                return;
+            }
+
+            bool exists = records.Any(item =>
+                item.pid == record.pid &&
+                string.Equals(item.localAddress, record.localAddress, StringComparison.OrdinalIgnoreCase) &&
+                item.localPort == record.localPort &&
+                string.Equals(item.remoteAddress, record.remoteAddress, StringComparison.OrdinalIgnoreCase) &&
+                item.remotePort == record.remotePort);
+            if (!exists)
+            {
+                records.Add(record);
+            }
         }
 
         private static List<FileArtifactRecord> EnumerateArtifacts(string workspace, List<BehaviorRecord> behaviors, List<string> errors)
@@ -1433,6 +1570,7 @@ namespace DataProtectorSandboxTelemetry
             network.RemoveAll(item => item == null || internalPids.Contains(item.pid));
             runtimeEvents.RemoveAll(item =>
                 item == null ||
+                IsRuntimeNoise(item) ||
                 internalPids.Contains(item.pid) ||
                 (item.targetPid != 0 && internalPids.Contains(item.targetPid)) ||
                 IsInternalTelemetryText(item.processImage) ||
