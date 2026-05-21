@@ -60,7 +60,7 @@ namespace DataProtectorSandboxTelemetry
             string workspace = Path.GetDirectoryName(options.SamplePath) ?? Environment.CurrentDirectory;
 
             PrepareRuntimePolicy(errors);
-            TryDelete(RuntimeEventPath);
+            ResetRuntimeEventLog(errors);
 
             string sha256 = ComputeSha256(options.SamplePath);
             string architecture = ReadPeArchitecture(options.SamplePath);
@@ -116,11 +116,12 @@ namespace DataProtectorSandboxTelemetry
             List<ServiceRecord> services = CompareServices(before.Services, after.Services, behaviors);
             List<TaskRecord> tasks = CompareTasks(before.Tasks, after.Tasks, behaviors);
             List<FileArtifactRecord> artifacts = EnumerateArtifacts(workspace, behaviors, errors);
-            List<RuntimeEventRecord> runtimeEvents = ReadRuntimeEvents(RuntimeEventPath, behaviors, errors);
+            List<RuntimeEventRecord> runtimeEvents = ReadRuntimeEvents(RuntimeEventPath, startedUtc, behaviors, errors);
             List<KernelSensorEventRecord> kernelEvents = DrainKernelSensorEvents(kernelSensor, behaviors, errors);
+            AddExecutionOutcome(samplePid, timedOut, exitCode, behaviors);
 
             RemoveInternalTelemetryNoise(behaviors, processes, network, artifacts, runtimeEvents, kernelEvents, services, tasks);
-            AddRuleDetections(processes, network, runtimeEvents, kernelEvents, services, tasks, behaviors);
+            AddRuleDetections(samplePid, processes, network, runtimeEvents, kernelEvents, services, tasks, behaviors);
             RemoveInternalTelemetryNoise(behaviors, processes, network, artifacts, runtimeEvents, kernelEvents, services, tasks);
             Report report = new Report
             {
@@ -830,16 +831,14 @@ namespace DataProtectorSandboxTelemetry
                     type = "credential-process-access";
                     severity = "high";
                 }
-                else if (HasCrossProcessInjectionAccess(record))
-                {
-                    type = "cross-process-injection-evidence";
-                    severity = "medium";
-                }
             }
             else if (record.operation == 15)
             {
-                type = "cross-process-execution";
-                severity = IsKnownBenignKernelRelationship(record) ? "medium" : "high";
+                if (!IsKnownBenignKernelRelationship(record) && !IsCrashHandlerKernelRelationship(record))
+                {
+                    type = "cross-process-execution";
+                    severity = "high";
+                }
             }
             else if (record.operation == 13 || record.operation == 14)
             {
@@ -853,47 +852,113 @@ namespace DataProtectorSandboxTelemetry
             }
         }
 
-        private static List<RuntimeEventRecord> ReadRuntimeEvents(string path, List<BehaviorRecord> behaviors, List<string> errors)
+        private static List<RuntimeEventRecord> ReadRuntimeEvents(string path, DateTime startedUtc, List<BehaviorRecord> behaviors, List<string> errors)
         {
             List<RuntimeEventRecord> records = new List<RuntimeEventRecord>();
-            try
+            string[] lines = null;
+            Exception lastError = null;
+            for (int attempt = 0; attempt < 8; attempt++)
             {
-                if (!File.Exists(path))
+                try
                 {
-                    return records;
+                    lines = ReadRuntimeEventLinesShared(path, errors);
+                    lastError = null;
+                    break;
+                }
+                catch (IOException ex)
+                {
+                    lastError = ex;
+                    Thread.Sleep(75 + attempt * 50);
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    lastError = ex;
+                    Thread.Sleep(75 + attempt * 50);
+                }
+            }
+
+            if (lines == null)
+            {
+                if (lastError != null)
+                {
+                    errors.Add("Runtime event read failed after shared-read retries: " + lastError.Message);
                 }
 
-                FileInfo info = new FileInfo(path);
-                if (info.Length > MaxRuntimeEventBytes)
+                return records;
+            }
+
+            foreach (string line in lines.Take(4096))
+            {
+                if (string.IsNullOrWhiteSpace(line))
                 {
-                    errors.Add("Runtime event log exceeded telemetry limit and was truncated.");
+                    continue;
                 }
 
-                foreach (string line in File.ReadLines(path).Take(4096))
+                try
                 {
-                    if (string.IsNullOrWhiteSpace(line))
+                    Dictionary<string, object> item = Serializer.Deserialize<Dictionary<string, object>>(line);
+                    RuntimeEventRecord record = RuntimeEventRecord.From(item);
+                    if (IsRuntimeEventBeforeRun(record, startedUtc))
                     {
                         continue;
                     }
 
-                    try
+                    records.Add(record);
+                    AddRuntimeBehavior(record, behaviors);
+                }
+                catch
+                {
+                }
+            }
+
+            return records;
+        }
+
+        private static string[] ReadRuntimeEventLinesShared(string path, List<string> errors)
+        {
+            if (!File.Exists(path))
+            {
+                return new string[0];
+            }
+
+            FileInfo info = new FileInfo(path);
+            if (info.Length > MaxRuntimeEventBytes)
+            {
+                errors.Add("Runtime event log exceeded telemetry limit and was truncated.");
+            }
+
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                if (stream.Length > MaxRuntimeEventBytes)
+                {
+                    stream.Seek(-MaxRuntimeEventBytes, SeekOrigin.End);
+                    using (StreamReader tailReader = new StreamReader(stream, Encoding.UTF8, true, 4096))
                     {
-                        Dictionary<string, object> item = Serializer.Deserialize<Dictionary<string, object>>(line);
-                        RuntimeEventRecord record = RuntimeEventRecord.From(item);
-                        records.Add(record);
-                        AddRuntimeBehavior(record, behaviors);
+                        tailReader.ReadLine();
+                        return tailReader.ReadToEnd().Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
                     }
-                    catch
-                    {
-                    }
+                }
+
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true, 4096))
+                {
+                    return reader.ReadToEnd().Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+                }
+            }
+        }
+
+        private static void ResetRuntimeEventLog(List<string> errors)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(RuntimeEventPath) ?? ".");
+                using (FileStream stream = new FileStream(RuntimeEventPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+                {
                 }
             }
             catch (Exception ex)
             {
-                errors.Add("Runtime event read failed: " + ex.Message);
+                errors.Add("Runtime event log reset failed; stale events will be filtered by timestamp: " + ex.Message);
             }
-
-            return records;
         }
 
         private static void AddRuntimeBehavior(RuntimeEventRecord record, List<BehaviorRecord> behaviors)
@@ -909,7 +974,7 @@ namespace DataProtectorSandboxTelemetry
 
             string severity = "medium";
             string type = "api-hook-event";
-            if (record.action.IndexOf("create-hook-failed", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (IsRuntimeNoise(record))
             {
                 return;
             }
@@ -957,6 +1022,22 @@ namespace DataProtectorSandboxTelemetry
             }
 
             AddBehavior(behaviors, type, severity, record.action + ": " + record.target, record.pid);
+        }
+
+        private static bool IsRuntimeEventBeforeRun(RuntimeEventRecord record, DateTime startedUtc)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.timestampUtc))
+            {
+                return false;
+            }
+
+            DateTime parsed;
+            if (!DateTime.TryParse(record.timestampUtc, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out parsed))
+            {
+                return false;
+            }
+
+            return parsed.ToUniversalTime() < startedUtc.AddSeconds(-2);
         }
 
         private static List<ProcessRecord> CollectProcessRecords(int rootPid, Snapshot before, Snapshot after)
@@ -1164,14 +1245,14 @@ namespace DataProtectorSandboxTelemetry
             return records;
         }
 
-        private static void AddRuleDetections(List<ProcessRecord> processes, List<NetworkRecord> network, List<RuntimeEventRecord> runtimeEvents, List<KernelSensorEventRecord> kernelEvents, List<ServiceRecord> services, List<TaskRecord> tasks, List<BehaviorRecord> behaviors)
+        private static void AddRuleDetections(int rootPid, List<ProcessRecord> processes, List<NetworkRecord> network, List<RuntimeEventRecord> runtimeEvents, List<KernelSensorEventRecord> kernelEvents, List<ServiceRecord> services, List<TaskRecord> tasks, List<BehaviorRecord> behaviors)
         {
-            HashSet<int> sampleTreePids = new HashSet<int>(processes.Where(item => !IsBenignSystemProcessName(item.name)).Select(item => item.pid));
+            HashSet<int> sampleTreePids = BuildSampleTreePidSet(rootPid, processes);
             bool hasMaliciousCommand = processes.Any(IsHighRiskProcessCommand);
             bool hasScriptOrLolbinIntent = processes.Any(IsSuspiciousScriptOrLolbinProcess);
             bool hasCredentialAccess = kernelEvents.Any(item => sampleTreePids.Contains(item.pid) && IsCredentialKernelAccess(item) && !IsKernelEvidenceNoise(item)) ||
                                        processes.Any(HasCredentialCommandIntent);
-            bool hasInjectionChain = HasSampleInjectionChain(kernelEvents, runtimeEvents, sampleTreePids);
+            InjectionChainEvidence injectionChain = FindSampleInjectionChain(kernelEvents, runtimeEvents, sampleTreePids);
 
             foreach (ProcessRecord process in processes)
             {
@@ -1212,14 +1293,79 @@ namespace DataProtectorSandboxTelemetry
                 AddBehavior(behaviors, "credential-access", "critical", "Credential material or credential process access was observed.", 0);
             }
 
-            if (hasInjectionChain)
+            if (injectionChain.detected)
             {
-                AddBehavior(behaviors, "process-injection-chain", "critical", "Cross-process injection sequence was observed in the sample process tree.", 0);
+                AddBehavior(behaviors, "process-injection-chain", "critical", injectionChain.detail, 0);
             }
 
             if (hasMaliciousCommand)
             {
                 AddBehavior(behaviors, "malicious-command-line", "critical", "Sample process tree executed a high-risk command line.", 0);
+            }
+        }
+
+        private static HashSet<int> BuildSampleTreePidSet(int rootPid, List<ProcessRecord> processes)
+        {
+            HashSet<int> pids = new HashSet<int>();
+            if (rootPid > 0)
+            {
+                pids.Add(rootPid);
+            }
+
+            if (processes == null)
+            {
+                return pids;
+            }
+
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (ProcessRecord process in processes)
+                {
+                    if (process == null || IsBenignSystemProcessName(process.name))
+                    {
+                        continue;
+                    }
+
+                    if (process.pid == rootPid || pids.Contains(process.parentPid))
+                    {
+                        if (pids.Add(process.pid))
+                        {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            return pids;
+        }
+
+        private static void AddExecutionOutcome(int samplePid, bool timedOut, int exitCode, List<BehaviorRecord> behaviors)
+        {
+            if (timedOut || exitCode == 0 || exitCode == -1)
+            {
+                return;
+            }
+
+            string code = "0x" + unchecked((uint)exitCode).ToString("X8", CultureInfo.InvariantCulture);
+            string reason = DescribeExitCode(exitCode);
+            AddBehavior(behaviors, "sample-abnormal-exit", "medium", "Sample exited abnormally: " + code + " (" + reason + ").", samplePid);
+        }
+
+        private static string DescribeExitCode(int exitCode)
+        {
+            uint code = unchecked((uint)exitCode);
+            switch (code)
+            {
+                case 0xC0000005: return "access violation";
+                case 0xC00000FD: return "stack overflow";
+                case 0xC0000409: return "stack buffer overrun / fast fail";
+                case 0xC0000135: return "missing DLL";
+                case 0xC000013A: return "terminated by Ctrl+C";
+                case 0xC0000142: return "DLL initialization failed";
+                case 0xC000001D: return "illegal instruction";
+                default: return "non-zero exit";
             }
         }
 
@@ -1288,15 +1434,18 @@ namespace DataProtectorSandboxTelemetry
             runtimeEvents.RemoveAll(item =>
                 item == null ||
                 internalPids.Contains(item.pid) ||
+                (item.targetPid != 0 && internalPids.Contains(item.targetPid)) ||
                 IsInternalTelemetryText(item.processImage) ||
                 IsInternalTelemetryText(item.target) ||
-                IsInternalTelemetryText(item.action));
+                IsInternalTelemetryText(item.action) ||
+                IsInternalTelemetryText(item.commandLine));
             kernelEvents.RemoveAll(item =>
                 item == null ||
                 internalPids.Contains(item.pid) ||
                 IsInternalTelemetryText(item.processImage) ||
                 IsInternalTelemetryText(item.target) ||
-                IsInternalTelemetryText(item.description));
+                IsInternalTelemetryText(item.description) ||
+                IsKernelEvidenceNoise(item));
             artifacts.RemoveAll(item => item == null || IsInternalTelemetryText(item.path));
             services.RemoveAll(item =>
                 item == null ||
@@ -1318,6 +1467,7 @@ namespace DataProtectorSandboxTelemetry
             string detail = behavior.detail ?? string.Empty;
             return type.Equals("kernel-process-telemetry", StringComparison.OrdinalIgnoreCase) ||
                    type.Equals("kernel-early-injection-queued", StringComparison.OrdinalIgnoreCase) ||
+                   (type.Equals("cross-process-execution", StringComparison.OrdinalIgnoreCase) && IsCrashHandlerKernelText(detail)) ||
                    IsKnownBenignKernelText(detail);
         }
 
@@ -1352,7 +1502,6 @@ namespace DataProtectorSandboxTelemetry
                    text.Contains("dataprotectorsandbox.sys") ||
                    text.Contains("dataprotector\\sandbox") ||
                    text.Contains("\\dataprotector\\userhook") ||
-                   text.Contains("userhook.observed") ||
                    text.Contains("sandbox-kernel-sensor") ||
                    text.Contains("kernel-early-injection-policy");
         }
@@ -1365,6 +1514,7 @@ namespace DataProtectorSandboxTelemetry
             }
 
             return IsKnownBenignKernelRelationship(record) ||
+                   IsCrashHandlerKernelRelationship(record) ||
                    (IsQueryOnlyProcessAccess(record) && !IsCredentialKernelAccess(record)) ||
                    IsKnownBenignKernelText(record.description);
         }
@@ -1381,7 +1531,8 @@ namespace DataProtectorSandboxTelemetry
                 return true;
             }
 
-            if (IsOneOf(sourceName, "wmiprvse.exe", "wmiadap.exe", "wmiapsrv.exe", "svchost.exe", "explorer.exe", "conhost.exe", "taskhostw.exe", "dllhost.exe"))
+            if (IsWindowsSystemImage(record == null ? string.Empty : record.processImage) &&
+                IsOneOf(sourceName, "wmiprvse.exe", "wmiadap.exe", "wmiapsrv.exe", "svchost.exe", "explorer.exe", "conhost.exe", "taskhostw.exe", "dllhost.exe"))
             {
                 return true;
             }
@@ -1397,6 +1548,42 @@ namespace DataProtectorSandboxTelemetry
             }
 
             return false;
+        }
+
+        private static bool IsCrashHandlerKernelRelationship(KernelSensorEventRecord record)
+        {
+            string source = ExtractKernelField(record == null ? string.Empty : record.description, "source=");
+            string target = ExtractKernelField(record == null ? string.Empty : record.description, "target=");
+            string sourceName = NormalizeProcessName(source);
+            string targetName = NormalizeProcessName(target);
+
+            if (sourceName == "werfault.exe" && IsWindowsSystemImage(record == null ? string.Empty : record.processImage))
+            {
+                return true;
+            }
+
+            if (targetName == "werfault.exe" && IsOneOf(sourceName, "svchost.exe", "dwm.exe", "explorer.exe", "conhost.exe"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsWindowsSystemImage(string value)
+        {
+            string text = (value ?? string.Empty).ToLowerInvariant();
+            return text.Contains("\\windows\\system32\\") ||
+                   text.Contains("\\windows\\syswow64\\") ||
+                   text.Contains("\\windows\\winsxs\\");
+        }
+
+        private static bool IsCrashHandlerKernelText(string value)
+        {
+            string text = (value ?? string.Empty).ToLowerInvariant();
+            return text.Contains("source=werfault.exe") ||
+                   text.Contains("target=werfault.exe") ||
+                   text.Contains("\\windows\\system32\\werfault.exe");
         }
 
         private static bool IsKnownBenignKernelText(string value)
@@ -1463,24 +1650,150 @@ namespace DataProtectorSandboxTelemetry
                    text.Contains("target=system");
         }
 
-        private static bool HasSampleInjectionChain(List<KernelSensorEventRecord> kernelEvents, List<RuntimeEventRecord> runtimeEvents, HashSet<int> sampleTreePids)
+        private static InjectionChainEvidence FindSampleInjectionChain(List<KernelSensorEventRecord> kernelEvents, List<RuntimeEventRecord> runtimeEvents, HashSet<int> sampleTreePids)
         {
-            if (kernelEvents == null || sampleTreePids == null || sampleTreePids.Count == 0)
+            InjectionChainEvidence evidence = new InjectionChainEvidence();
+            if (sampleTreePids == null || sampleTreePids.Count == 0)
             {
-                return false;
+                return evidence;
             }
 
-            bool processAccess = kernelEvents.Any(item => sampleTreePids.Contains(item.pid) && HasCrossProcessInjectionAccess(item));
-            bool remoteThread = kernelEvents.Any(item => sampleTreePids.Contains(item.pid) && item.operation == 15 && !IsKernelEvidenceNoise(item));
-            bool memoryWrite = runtimeEvents != null && runtimeEvents.Any(item => sampleTreePids.Contains(item.pid) &&
-                ((item.action ?? string.Empty).IndexOf("write-process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 (item.action ?? string.Empty).IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0));
-            bool executableMemory = runtimeEvents != null && runtimeEvents.Any(item => sampleTreePids.Contains(item.pid) &&
-                ((item.action ?? string.Empty).IndexOf("remote-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 (item.action ?? string.Empty).IndexOf("nt-allocate-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 (item.action ?? string.Empty).IndexOf("nt-protect-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0));
+            List<KernelSensorEventRecord> sampleKernelEvents = (kernelEvents ?? new List<KernelSensorEventRecord>())
+                .Where(item => item != null && sampleTreePids.Contains(item.pid) && !IsKernelEvidenceNoise(item))
+                .ToList();
+            List<RuntimeEventRecord> sampleRuntimeEvents = (runtimeEvents ?? new List<RuntimeEventRecord>())
+                .Where(item => item != null && sampleTreePids.Contains(item.pid) && !IsRuntimeNoise(item))
+                .ToList();
 
-            return remoteThread && (processAccess || memoryWrite || executableMemory);
+            IEnumerable<int> candidateTargetPids = sampleRuntimeEvents
+                .Select(item => item.targetPid)
+                .Concat(sampleKernelEvents.Select(ExtractKernelTargetPid))
+                .Where(item => item > 0)
+                .Distinct()
+                .DefaultIfEmpty(0);
+
+            foreach (int targetPid in candidateTargetPids)
+            {
+                List<KernelSensorEventRecord> targetKernelEvents = targetPid == 0
+                    ? sampleKernelEvents
+                    : sampleKernelEvents.Where(item => ExtractKernelTargetPid(item) == targetPid).ToList();
+                List<RuntimeEventRecord> targetRuntimeEvents = targetPid == 0
+                    ? sampleRuntimeEvents
+                    : sampleRuntimeEvents.Where(item => item.targetPid == targetPid).ToList();
+
+                bool processAccess = targetKernelEvents.Any(HasCrossProcessInjectionAccess) ||
+                                     targetRuntimeEvents.Any(IsRuntimeProcessAccessPrimitive);
+                bool memoryWrite = targetRuntimeEvents.Any(IsRuntimeRemoteMemoryWrite);
+                bool executableMemory = targetRuntimeEvents.Any(IsRuntimeRemoteExecutableMemory);
+                bool remoteExecution = targetKernelEvents.Any(IsKernelRemoteExecutionPrimitive) ||
+                                       targetRuntimeEvents.Any(IsRuntimeRemoteExecutionPrimitive);
+                bool threadContext = targetRuntimeEvents.Any(IsRuntimeThreadContextPrimitive);
+                bool processHollowing = targetRuntimeEvents.Any(IsRuntimeProcessHollowingPrimitive);
+                bool remoteDllPath = targetRuntimeEvents.Any(IsRuntimeRemoteDllPathWrite);
+                bool remotePeWrite = targetRuntimeEvents.Any(IsRuntimeRemotePeWrite);
+
+                evidence.detected =
+                    (remoteExecution && (memoryWrite || executableMemory || remoteDllPath || remotePeWrite || processAccess)) ||
+                    (threadContext && (processHollowing || executableMemory || memoryWrite)) ||
+                    (processHollowing && (memoryWrite || executableMemory || threadContext));
+
+                if (!evidence.detected)
+                {
+                    continue;
+                }
+
+                List<string> parts = new List<string>();
+                if (processAccess) parts.Add("cross-process handle/thread access");
+                if (executableMemory) parts.Add("remote executable memory allocation/protection");
+                if (memoryWrite) parts.Add("remote memory write");
+                if (remoteDllPath) parts.Add("remote DLL path write");
+                if (remotePeWrite) parts.Add("remote PE image write");
+                if (processHollowing) parts.Add("section unmap / hollowing primitive");
+                if (threadContext) parts.Add("thread context or resume primitive");
+                if (remoteExecution) parts.Add("remote thread/APC execution");
+
+                evidence.detail = "Attack chain observed from the sample process tree" +
+                                  (targetPid > 0 ? " against pid " + targetPid.ToString(CultureInfo.InvariantCulture) : string.Empty) +
+                                  ": " + string.Join(" -> ", parts.ToArray()) + ".";
+                return evidence;
+            }
+
+            return evidence;
+        }
+
+        private static bool IsRuntimeNoise(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("create-hook-failed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("runtime.loaded", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("policy-", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("etw-provider-register", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("etw-provider-unregister", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsRuntimeProcessAccessPrimitive(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("open-process", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("open-thread", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsRuntimeRemoteMemoryWrite(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("write-process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   IsRuntimeRemoteDllPathWrite(record) ||
+                   IsRuntimeRemotePeWrite(record);
+        }
+
+        private static bool IsRuntimeRemoteDllPathWrite(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("remote-dll-path-write", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsRuntimeRemotePeWrite(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("remote-pe-image-write", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsRuntimeRemoteExecutableMemory(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("remote-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("remote-executable-protect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("nt-allocate-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("nt-protect-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsRuntimeRemoteExecutionPrimitive(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("create-remote-thread", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("create-remote-thread-ex", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("nt-create-thread-ex", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("queue-user-apc", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsRuntimeThreadContextPrimitive(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("set-thread-context", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("resume-thread", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsRuntimeProcessHollowingPrimitive(RuntimeEventRecord record)
+        {
+            string action = record == null ? string.Empty : (record.action ?? string.Empty);
+            return action.IndexOf("nt-unmap-view", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   action.IndexOf("suspended-process-create", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsKernelRemoteExecutionPrimitive(KernelSensorEventRecord record)
+        {
+            return record != null && record.operation == 15 && !IsKernelEvidenceNoise(record);
         }
 
         private static bool IsSuspiciousScriptOrLolbinProcess(ProcessRecord process)
@@ -1628,6 +1941,18 @@ namespace DataProtectorSandboxTelemetry
             return int.TryParse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out parsed) ? parsed : 0;
         }
 
+        private static int ParseDecimalField(string text, string prefix)
+        {
+            string value = ExtractKernelField(text, prefix);
+            int parsed;
+            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) ? parsed : 0;
+        }
+
+        private static int ExtractKernelTargetPid(KernelSensorEventRecord record)
+        {
+            return ParseDecimalField(record == null ? string.Empty : record.description, "targetPid=");
+        }
+
         private static string NormalizeProcessName(string value)
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -1760,20 +2085,6 @@ namespace DataProtectorSandboxTelemetry
         private static string Quote(string value)
         {
             return "\"" + (value ?? string.Empty).Replace("\"", "\\\"") + "\"";
-        }
-
-        private static void TryDelete(string path)
-        {
-            try
-            {
-                if (File.Exists(path))
-                {
-                    File.Delete(path);
-                }
-            }
-            catch
-            {
-            }
         }
 
         private static JavaScriptSerializer CreateSerializer()
@@ -2140,8 +2451,11 @@ namespace DataProtectorSandboxTelemetry
                 }
                 catch (Exception ex)
                 {
-                    errors.Add("Service WMI snapshot failed: " + ex.Message + ". Using registry fallback.");
                     QueryServicesFromRegistry(services, errors);
+                    if (services.Count == 0)
+                    {
+                        errors.Add("Service snapshot failed: WMI provider error and registry fallback returned no services. WMI error: " + ex.Message);
+                    }
                 }
 
                 return services;
@@ -2371,6 +2685,12 @@ namespace DataProtectorSandboxTelemetry
             public string timeUtc { get; set; }
         }
 
+        private sealed class InjectionChainEvidence
+        {
+            public bool detected { get; set; }
+            public string detail { get; set; }
+        }
+
         private sealed class ProcessRecord
         {
             public int pid { get; set; }
@@ -2430,10 +2750,16 @@ namespace DataProtectorSandboxTelemetry
             public string timestampUtc { get; set; }
             public string host { get; set; }
             public int pid { get; set; }
+            public int targetPid { get; set; }
             public string action { get; set; }
+            public string category { get; set; }
+            public string api { get; set; }
             public string target { get; set; }
             public string processImage { get; set; }
+            public string commandLine { get; set; }
             public string status { get; set; }
+            public long size { get; set; }
+            public long flags { get; set; }
             public bool blocked { get; set; }
 
             public static RuntimeEventRecord From(Dictionary<string, object> item)
@@ -2444,10 +2770,16 @@ namespace DataProtectorSandboxTelemetry
                     timestampUtc = Get(item, "timestampUtc"),
                     host = Get(item, "host"),
                     pid = ToInt(Get(item, "pid")),
+                    targetPid = ToInt(Get(item, "targetPid")),
                     action = Get(item, "action"),
+                    category = Get(item, "category"),
+                    api = Get(item, "api"),
                     target = Get(item, "target"),
                     processImage = Get(item, "processImage"),
+                    commandLine = Get(item, "commandLine"),
                     status = Get(item, "status"),
+                    size = ToLong(Get(item, "size")),
+                    flags = ToLong(Get(item, "flags")),
                     blocked = string.Equals(Get(item, "blocked"), "true", StringComparison.OrdinalIgnoreCase)
                 };
             }
@@ -2462,6 +2794,12 @@ namespace DataProtectorSandboxTelemetry
             {
                 int parsed;
                 return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) ? parsed : 0;
+            }
+
+            private static long ToLong(string value)
+            {
+                long parsed;
+                return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) ? parsed : 0;
             }
         }
 
