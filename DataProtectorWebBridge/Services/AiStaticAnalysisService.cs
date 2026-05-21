@@ -541,6 +541,18 @@ namespace DataProtectorWebBridge.Services
                 engineStatus = process.exitCode == 0 && File.Exists(ghidraReportPath) ? "completed" : "failed";
                 engineMessage = process.exitCode == 0 ? "Ghidra source-derived analyzer completed." : Truncate(process.stderr + "\n" + process.stdout, 8000);
                 progress?.Invoke(engineStatus == "completed" ? "ghidra" : "failed", engineStatus == "completed" ? "Ghidra 分析完成" : "Ghidra 分析失败", engineStatus == "completed" ? 70 : 100, engineMessage);
+                GhidraDiagnostics diagnostics = BuildGhidraDiagnostics(process.stdout, process.stderr);
+                if (diagnostics.errorCount > 0 || diagnostics.warningCount > 0)
+                {
+                    progress?.Invoke(
+                        diagnostics.errorCount > 0 ? "ghidra-warning" : "ghidra",
+                        diagnostics.errorCount > 0 ? "Ghidra 诊断发现解析错误" : "Ghidra 诊断发现警告",
+                        72,
+                        "errors=" + diagnostics.errorCount.ToString(CultureInfo.InvariantCulture) +
+                        "; warnings=" + diagnostics.warningCount.ToString(CultureInfo.InvariantCulture) +
+                        "; cliMetadataErrors=" + diagnostics.cliMetadataErrors.ToString(CultureInfo.InvariantCulture) +
+                        "; first=" + Truncate(diagnostics.firstDiagnostic, 500));
+                }
                 if (File.Exists(ghidraReportPath))
                 {
                     progress?.Invoke("ghidra", "读取 Ghidra JSON 报告", 74, ghidraReportPath);
@@ -550,6 +562,7 @@ namespace DataProtectorWebBridge.Services
                 {
                     ghidraReport = BuildFallbackReport(sample, engineMessage);
                 }
+                AttachGhidraDiagnostics(ghidraReport, diagnostics);
             }
 
             progress?.Invoke("scoring", "执行静态规则评分", 80, "规则数=" + (rules == null ? 0 : rules.Length).ToString(CultureInfo.InvariantCulture));
@@ -571,7 +584,9 @@ namespace DataProtectorWebBridge.Services
                         { "adapterScript", ResolveAnalyzerScriptPath() },
                         { "stdoutPath", ghidraStdoutPath },
                         { "stderrPath", ghidraStderrPath },
-                        { "reportPath", ghidraReportPath }
+                        { "reportPath", ghidraReportPath },
+                        { "diagnostics", GetValue(ghidraReport, "diagnostics") },
+                        { "coverage", GetValue(ghidraReport, "coverage") }
                     }
                 },
                 { "ghidra", ghidraReport },
@@ -680,6 +695,108 @@ namespace DataProtectorWebBridge.Services
                 File.WriteAllText(stderrPath, errText, Encoding.UTF8);
                 progress?.Invoke(process.ExitCode == 0 ? "ghidra" : "failed", "Ghidra 进程已退出", process.ExitCode == 0 ? 68 : 100, "exitCode=" + process.ExitCode.ToString(CultureInfo.InvariantCulture));
                 return new ProcessResult { exitCode = process.ExitCode, stdout = outText, stderr = errText };
+            }
+        }
+
+        private GhidraDiagnostics BuildGhidraDiagnostics(string stdout, string stderr)
+        {
+            List<string> errors = new List<string>();
+            List<string> warnings = new List<string>();
+            int cliMetadataErrors = 0;
+            foreach (string line in SplitLines((stdout ?? string.Empty) + "\n" + (stderr ?? string.Empty)))
+            {
+                string trimmed = line == null ? string.Empty : line.Trim();
+                if (trimmed.Length == 0)
+                {
+                    continue;
+                }
+
+                bool isError = trimmed.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isWarning = trimmed.IndexOf("WARN", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (!isError && !isWarning)
+                {
+                    continue;
+                }
+
+                if (trimmed.IndexOf("CliStreamMetadata", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    trimmed.IndexOf("CliStreamBlob", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    trimmed.IndexOf(".NET", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    trimmed.IndexOf("_CorExeMain", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    cliMetadataErrors++;
+                }
+
+                if (isError)
+                {
+                    errors.Add(Truncate(trimmed, 700));
+                }
+                else
+                {
+                    warnings.Add(Truncate(trimmed, 700));
+                }
+            }
+
+            return new GhidraDiagnostics
+            {
+                errorCount = errors.Count,
+                warningCount = warnings.Count,
+                cliMetadataErrors = cliMetadataErrors,
+                firstDiagnostic = errors.FirstOrDefault() ?? warnings.FirstOrDefault() ?? string.Empty,
+                errors = errors.Take(30).ToArray(),
+                warnings = warnings.Take(30).ToArray()
+            };
+        }
+
+        private void AttachGhidraDiagnostics(Dictionary<string, object> ghidraReport, GhidraDiagnostics diagnostics)
+        {
+            if (ghidraReport == null || diagnostics == null)
+            {
+                return;
+            }
+
+            List<Dictionary<string, object>> functions = EnumerateDictionaries(GetValue(ghidraReport, "functions")).ToList();
+            List<Dictionary<string, object>> callGraph = EnumerateDictionaries(GetValue(ghidraReport, "callGraph")).ToList();
+            bool managedEntryOnly = functions.Count <= 3 && functions.Any(item =>
+                Convert.ToString(GetValue(item, "pseudocode"), CultureInfo.InvariantCulture).IndexOf("_CorExeMain", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            Dictionary<string, object> coverage = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "exportedFunctions", functions.Count },
+                { "exportedCallEdges", callGraph.Count },
+                { "managedEntryOnly", managedEntryOnly },
+                { "lowCoverage", diagnostics.errorCount > 0 || managedEntryOnly || functions.Count <= 1 || callGraph.Count == 0 },
+                { "quality", diagnostics.errorCount > 0 || managedEntryOnly ? "low" : callGraph.Count == 0 ? "limited" : "normal" },
+                { "reason", diagnostics.cliMetadataErrors > 0 ? "Ghidra reported CLI/.NET metadata markup errors; native call graph coverage is incomplete." :
+                    managedEntryOnly ? "Only the managed _CorExeMain entry stub was recovered; use managed-code/decompiler evidence before final verdict." :
+                    callGraph.Count == 0 ? "No call graph edges were exported; static evidence is limited." : string.Empty }
+            };
+
+            Dictionary<string, object> diag = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "errorCount", diagnostics.errorCount },
+                { "warningCount", diagnostics.warningCount },
+                { "cliMetadataErrors", diagnostics.cliMetadataErrors },
+                { "firstDiagnostic", diagnostics.firstDiagnostic },
+                { "errors", diagnostics.errors ?? new string[0] },
+                { "warnings", diagnostics.warnings ?? new string[0] }
+            };
+
+            ghidraReport["diagnostics"] = diag;
+            ghidraReport["coverage"] = coverage;
+
+            Dictionary<string, object> features = GetValue(ghidraReport, "features") as Dictionary<string, object>;
+            if (features != null)
+            {
+                List<object> hits = EnumerateObjects(GetValue(features, "hits")).ToList();
+                if (diagnostics.cliMetadataErrors > 0)
+                {
+                    hits.Add("ghidra-cli-metadata-errors:" + diagnostics.cliMetadataErrors.ToString(CultureInfo.InvariantCulture));
+                }
+                if (Convert.ToBoolean(coverage["lowCoverage"], CultureInfo.InvariantCulture))
+                {
+                    hits.Add("static-analysis-low-coverage:" + Convert.ToString(coverage["reason"], CultureInfo.InvariantCulture));
+                }
+                features["hits"] = hits.Take(900).ToArray();
             }
         }
 
@@ -879,7 +996,7 @@ namespace DataProtectorWebBridge.Services
                             new Dictionary<string, object>
                             {
                                 { "role", "system" },
-                                { "content", "You are DataProtector Smart Static Analysis Master. Analyze reverse-engineering evidence, reduce false positives, and return standardized Chinese Markdown only. The first table must contain 判定, 置信度, 建议分数, 最终等级, 误报风险. 判定 must be one of malicious, suspicious, observed, clean with Chinese text." }
+                                { "content", "你是资深恶意代码逆向分析员。像真人分析员一样阅读原始调用关系、反汇编和伪代码证据，快速还原执行路线并判断是否形成恶意闭环。不要机械套模板，不要因为单个导入表或单个字符串就定恶意。输出中文 Markdown，结论必须清楚，判定值只使用 malicious/suspicious/observed/clean 之一。" }
                             },
                             new Dictionary<string, object>
                             {
@@ -909,10 +1026,10 @@ namespace DataProtectorWebBridge.Services
                     deltaCount++;
                     streamedChars += delta.Length;
                     DateTime now = DateTime.UtcNow;
-                    if ((now - lastDeltaLogUtc).TotalSeconds >= 2 || streamedChars < 80)
+                    if ((now - lastDeltaLogUtc).TotalSeconds >= 5)
                     {
                         lastDeltaLogUtc = now;
-                        progress?.Invoke("ai", "AI 正在流式输出", 90, "chunks=" + deltaCount.ToString(CultureInfo.InvariantCulture) + "; chars=" + streamedChars.ToString(CultureInfo.InvariantCulture) + "; preview=" + Truncate(delta.Replace("\r", " ").Replace("\n", " "), 120));
+                        progress?.Invoke("ai", "AI 正在流式输出", 90, "chunks=" + deltaCount.ToString(CultureInfo.InvariantCulture) + "; chars=" + streamedChars.ToString(CultureInfo.InvariantCulture));
                     }
                 });
 
@@ -942,22 +1059,17 @@ namespace DataProtectorWebBridge.Services
             Dictionary<string, object> compact = new Dictionary<string, object>
             {
                 { "sample", BuildSampleReport(sample) },
-                { "ruleScore", ruleScore },
-                { "ghidraSummary", BuildCompactGhidraSummary(ghidraReport) }
+                { "operatorRoute", BuildAiAnalysisRoute(ghidraReport) },
+                { "ghidraRawEvidence", BuildCompactGhidraSummary(ghidraReport) },
+                { "ruleScoreForReferenceOnly", ruleScore }
             };
 
-            return "请基于以下 Ghidra 源码架构分析结果判断样本是否恶意。重点关注导入表、字符串、反伪代码、调用图、规则命中之间是否构成完整恶意链路，避免把普通系统行为当作恶意。\n\n" +
-                   "必须按下面 Markdown 结构输出，禁止自由散文，禁止只给长段落：\n" +
-                   "## 结论\n" +
-                   "| 项目 | 结果 |\n| --- | --- |\n| 判定 | malicious/suspicious/observed/clean 之一，并附中文 |\n| 置信度 | 0.00-1.00 |\n| 建议分数 | 0-100 |\n| 最终等级 | 严重/警告/信息 |\n| 误报风险 | 高/中/低 |\n\n" +
-                   "## 证据矩阵\n" +
-                   "| 证据域 | 观察 | 支持恶意程度 | 可信度 | 说明 |\n| --- | --- | --- | --- | --- |\n\n" +
-                   "## 调用链判断\n" +
-                   "| 起点 | 关键调用 | 目标/资源 | 是否闭环 | 结论 |\n| --- | --- | --- | --- | --- |\n\n" +
-                   "## 规则复核\n" +
-                   "| 规则 | 原分 | 是否支持 | 调整建议 | 原因 |\n| --- | ---: | --- | --- | --- |\n\n" +
-                   "## 分析员下一步\n" +
-                   "| 优先级 | 验证动作 | 预期证据 |\n| --- | --- | --- |\n\n" +
+            return "下面是 Ghidra 导出的原生静态证据。请不要死板套规则，而是按逆向分析的快速路线判断：\n" +
+                   "1. 先看入口、调用图、关键函数和伪代码，尝试还原样本主执行路线。\n" +
+                   "2. 再看导入表和字符串是否能和调用路线闭环，例如网络接收命令、进程注入、凭据读取、持久化、释放执行、破坏恢复等。\n" +
+                   "3. 如果 Ghidra diagnostics/coverage 显示解析错误、CLI/.NET 元数据失败、只有 _CorExeMain 或调用图为空，必须明确说明静态覆盖不足，不能把缺失证据当成恶意证据。\n" +
+                   "4. ruleScore 只作为参考，不是最终结论；你可以推翻规则结论。\n" +
+                   "5. 输出自然的中文 Markdown：开头给“判定：malicious/suspicious/observed/clean、置信度、原因一句话”，后面按你认为最有效的顺序讲证据链、缺口和下一步。可以用表格，但不要为了表格牺牲判断质量。\n\n" +
                    Truncate(serializer.Serialize(compact), 70000);
         }
 
@@ -970,26 +1082,81 @@ namespace DataProtectorWebBridge.Services
             }
 
             summary["program"] = GetValue(report, "program");
+            summary["diagnostics"] = GetValue(report, "diagnostics");
+            summary["coverage"] = GetValue(report, "coverage");
             summary["features"] = GetValue(report, "features");
             summary["limits"] = GetValue(report, "limits");
             summary["imports"] = EnumerateDictionaries(GetValue(report, "imports")).Take(160).ToArray();
             summary["strings"] = EnumerateDictionaries(GetValue(report, "strings"))
-                .Where(item => Convert.ToString(GetValue(item, "suspicious"), CultureInfo.InvariantCulture).Equals("True", StringComparison.OrdinalIgnoreCase))
-                .Take(120)
+                .OrderByDescending(item => Convert.ToString(GetValue(item, "suspicious"), CultureInfo.InvariantCulture).Equals("True", StringComparison.OrdinalIgnoreCase))
+                .Take(180)
                 .ToArray();
             summary["functions"] = EnumerateDictionaries(GetValue(report, "functions"))
-                .Take(80)
+                .OrderByDescending(item => ScoreFunctionForAi(item))
+                .Take(120)
                 .Select(item => new Dictionary<string, object>
                 {
                     { "name", GetValue(item, "name") },
+                    { "entry", GetValue(item, "entry") },
                     { "signature", GetValue(item, "signature") },
                     { "called", GetValue(item, "called") },
+                    { "calling", GetValue(item, "calling") },
                     { "featureHits", GetValue(item, "featureHits") },
-                    { "pseudocode", Truncate(Convert.ToString(GetValue(item, "pseudocode"), CultureInfo.InvariantCulture), 3000) }
+                    { "instructions", GetValue(item, "instructions") },
+                    { "pseudocode", Truncate(Convert.ToString(GetValue(item, "pseudocode"), CultureInfo.InvariantCulture), 4500) }
                 })
                 .ToArray();
-            summary["callGraph"] = EnumerateDictionaries(GetValue(report, "callGraph")).Take(200).ToArray();
+            summary["callGraph"] = EnumerateDictionaries(GetValue(report, "callGraph")).Take(500).ToArray();
             return summary;
+        }
+
+        private Dictionary<string, object> BuildAiAnalysisRoute(Dictionary<string, object> report)
+        {
+            Dictionary<string, object> route = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (report == null)
+            {
+                return route;
+            }
+
+            List<Dictionary<string, object>> functions = EnumerateDictionaries(GetValue(report, "functions")).ToList();
+            List<Dictionary<string, object>> edges = EnumerateDictionaries(GetValue(report, "callGraph")).ToList();
+            route["coverage"] = GetValue(report, "coverage");
+            route["diagnostics"] = GetValue(report, "diagnostics");
+            route["entryFunctions"] = functions
+                .Where(item => Convert.ToString(GetValue(item, "name"), CultureInfo.InvariantCulture).IndexOf("entry", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                               Convert.ToString(GetValue(item, "pseudocode"), CultureInfo.InvariantCulture).IndexOf("_CorExeMain", StringComparison.OrdinalIgnoreCase) >= 0)
+                .Take(12)
+                .ToArray();
+            route["highSignalFunctions"] = functions
+                .OrderByDescending(item => ScoreFunctionForAi(item))
+                .Take(40)
+                .ToArray();
+            route["callEdges"] = edges.Take(500).ToArray();
+            route["dangerousImports"] = EnumerateDictionaries(GetValue(report, "imports"))
+                .Where(item => Convert.ToString(GetValue(item, "danger"), CultureInfo.InvariantCulture).Equals("True", StringComparison.OrdinalIgnoreCase))
+                .Take(200)
+                .ToArray();
+            route["strings"] = EnumerateDictionaries(GetValue(report, "strings"))
+                .OrderByDescending(item => Convert.ToString(GetValue(item, "suspicious"), CultureInfo.InvariantCulture).Equals("True", StringComparison.OrdinalIgnoreCase))
+                .Take(180)
+                .ToArray();
+            return route;
+        }
+
+        private static int ScoreFunctionForAi(Dictionary<string, object> function)
+        {
+            if (function == null)
+            {
+                return 0;
+            }
+
+            int score = 0;
+            score += EnumerateObjects(GetValue(function, "featureHits")).Count() * 100;
+            score += EnumerateObjects(GetValue(function, "called")).Count() * 8;
+            score += EnumerateObjects(GetValue(function, "calling")).Count() * 3;
+            score += Math.Min(80, Convert.ToString(GetValue(function, "pseudocode"), CultureInfo.InvariantCulture).Length / 120);
+            score += Math.Min(40, EnumerateObjects(GetValue(function, "instructions")).Count() * 2);
+            return score;
         }
 
         private AiHttpResult PostJsonStream(string endpoint, string token, string body, int timeoutSeconds, Action<string> onDelta)
@@ -1210,36 +1377,10 @@ namespace DataProtectorWebBridge.Services
             string value = (text ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(value))
             {
-                return "## 结论\n\n| 项目 | 结果 |\n| --- | --- |\n| 判定 | observed / 未得到 AI 正文 |\n| 置信度 | 0.00 |\n| 建议分数 | - |\n| 最终等级 | 信息 |\n| 误报风险 | 中 |\n";
+                return "## 结论\n\n判定：observed\n\n置信度：0.00\n\n原因：AI 接口返回成功但没有正文，需要重新分析。";
             }
 
-            if (value.IndexOf("| 项目 |", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                value.IndexOf("| 判定 |", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                return value;
-            }
-
-            string verdict = InferAiVerdict(value);
-            string cnVerdict = verdict == "malicious" ? "恶意" :
-                verdict == "suspicious" ? "可疑" :
-                verdict == "clean" ? "干净" :
-                verdict == "observed" ? "观察" : "未知";
-
-            StringBuilder markdown = new StringBuilder();
-            markdown.AppendLine("## 结论");
-            markdown.AppendLine();
-            markdown.AppendLine("| 项目 | 结果 |");
-            markdown.AppendLine("| --- | --- |");
-            markdown.AppendLine("| 判定 | " + verdict + " / " + cnVerdict + " |");
-            markdown.AppendLine("| 置信度 | 未提取 |");
-            markdown.AppendLine("| 建议分数 | 未提取 |");
-            markdown.AppendLine("| 最终等级 | " + (verdict == "malicious" ? "严重" : verdict == "suspicious" ? "警告" : "信息") + " |");
-            markdown.AppendLine("| 误报风险 | 需人工复核 |");
-            markdown.AppendLine();
-            markdown.AppendLine("## 模型原始分析");
-            markdown.AppendLine();
-            markdown.AppendLine(value);
-            return markdown.ToString();
+            return value;
         }
 
         private Dictionary<string, object> BuildFallbackReport(StaticAnalysisSampleState sample, string message)
@@ -1930,17 +2071,18 @@ namespace DataProtectorWebBridge.Services
 
             DateTime now = DateTime.UtcNow;
             string trimmed = Truncate(line.Trim(), 700);
-            if (stream == "stderr" ||
+            bool isError = stream == "stderr" || trimmed.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool isWarning = trimmed.IndexOf("WARN", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (isError ||
+                isWarning ||
                 trimmed.IndexOf("DataProtector", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 trimmed.IndexOf("Analyzing", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 trimmed.IndexOf("Importing", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 trimmed.IndexOf("Decompiler", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                trimmed.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                trimmed.IndexOf("WARN", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 (now - lastProgressUtc).TotalSeconds >= 3)
             {
                 lastProgressUtc = now;
-                progress("ghidra", "Ghidra 正在分析", 45, "[" + stream + "] " + trimmed);
+                progress(isError ? "ghidra-warning" : "ghidra", isError ? "Ghidra 输出 ERROR" : isWarning ? "Ghidra 输出 WARN" : "Ghidra 正在分析", 45, "[" + stream + "] " + trimmed);
             }
         }
 
@@ -1996,6 +2138,23 @@ namespace DataProtectorWebBridge.Services
                 foreach (object item in enumerable)
                 {
                     yield return item;
+                }
+            }
+        }
+
+        private static IEnumerable<string> SplitLines(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                yield break;
+            }
+
+            using (StringReader reader = new StringReader(value))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    yield return line;
                 }
             }
         }
@@ -2454,6 +2613,16 @@ namespace DataProtectorWebBridge.Services
             public int exitCode { get; set; }
             public string stdout { get; set; }
             public string stderr { get; set; }
+        }
+
+        private sealed class GhidraDiagnostics
+        {
+            public int errorCount { get; set; }
+            public int warningCount { get; set; }
+            public int cliMetadataErrors { get; set; }
+            public string firstDiagnostic { get; set; }
+            public string[] errors { get; set; }
+            public string[] warnings { get; set; }
         }
 
         private sealed class AiHttpResult
