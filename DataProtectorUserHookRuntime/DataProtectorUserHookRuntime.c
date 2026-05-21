@@ -80,6 +80,8 @@ typedef HANDLE (WINAPI *PFN_CreateRemoteThreadEx)(
     HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPPROC_THREAD_ATTRIBUTE_LIST, LPDWORD);
 typedef BOOL (WINAPI *PFN_CreateProcessW)(
     LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
+typedef BOOL (WINAPI *PFN_CreateProcessA)(
+    LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
 typedef BOOL (WINAPI *PFN_WriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T *);
 typedef LPVOID (WINAPI *PFN_VirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
 typedef BOOL (WINAPI *PFN_VirtualProtectEx)(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD);
@@ -89,6 +91,7 @@ typedef HHOOK (WINAPI *PFN_SetWindowsHookExA)(int, HOOKPROC, HINSTANCE, DWORD);
 typedef HMODULE (WINAPI *PFN_LoadLibraryW)(LPCWSTR);
 typedef HMODULE (WINAPI *PFN_LoadLibraryExW)(LPCWSTR, HANDLE, DWORD);
 typedef LONG (WINAPI *PFN_RegSetValueExW)(HKEY, LPCWSTR, DWORD, DWORD, const BYTE *, DWORD);
+typedef LONG (WINAPI *PFN_RegSetValueExA)(HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD);
 typedef BOOL (WINAPI *PFN_SetThreadContext)(HANDLE, const CONTEXT *);
 typedef DWORD (WINAPI *PFN_ResumeThread)(HANDLE);
 typedef int (WSAAPI *PFN_connect)(SOCKET, const struct sockaddr *, int);
@@ -99,6 +102,7 @@ typedef NTSTATUS (NTAPI *PFN_NtWriteVirtualMemory)(HANDLE, PVOID, PVOID, SIZE_T,
 typedef NTSTATUS (NTAPI *PFN_NtAllocateVirtualMemory)(HANDLE, PVOID *, ULONG_PTR, PSIZE_T, ULONG, ULONG);
 typedef NTSTATUS (NTAPI *PFN_NtProtectVirtualMemory)(HANDLE, PVOID *, PSIZE_T, ULONG, PULONG);
 typedef NTSTATUS (NTAPI *PFN_NtUnmapViewOfSection)(HANDLE, PVOID);
+typedef NTSTATUS (NTAPI *PFN_NtQueryKey)(HANDLE, INT, PVOID, ULONG, PULONG);
 typedef ULONG (WINAPI *PFN_EventRegister)(LPCGUID, PENABLECALLBACK, PVOID, PREGHANDLE);
 typedef ULONG (WINAPI *PFN_EventUnregister)(REGHANDLE);
 typedef ULONG (WINAPI *PFN_EventWrite)(REGHANDLE, PCEVENT_DESCRIPTOR, ULONG, PEVENT_DATA_DESCRIPTOR);
@@ -110,6 +114,7 @@ typedef NTSTATUS (NTAPI *PFN_EtwEventWriteTransfer)(REGHANDLE, PCEVENT_DESCRIPTO
 static PFN_CreateRemoteThread gRealCreateRemoteThread;
 static PFN_CreateRemoteThreadEx gRealCreateRemoteThreadEx;
 static PFN_CreateProcessW gRealCreateProcessW;
+static PFN_CreateProcessA gRealCreateProcessA;
 static PFN_WriteProcessMemory gRealWriteProcessMemory;
 static PFN_VirtualAllocEx gRealVirtualAllocEx;
 static PFN_VirtualProtectEx gRealVirtualProtectEx;
@@ -119,6 +124,7 @@ static PFN_SetWindowsHookExA gRealSetWindowsHookExA;
 static PFN_LoadLibraryW gRealLoadLibraryW;
 static PFN_LoadLibraryExW gRealLoadLibraryExW;
 static PFN_RegSetValueExW gRealRegSetValueExW;
+static PFN_RegSetValueExA gRealRegSetValueExA;
 static PFN_SetThreadContext gRealSetThreadContext;
 static PFN_ResumeThread gRealResumeThread;
 static PFN_connect gRealConnect;
@@ -156,6 +162,11 @@ static DWORD gHookEntryCount;
 static DP_RUNTIME_MEMORY_REPORT_ENTRY gMemoryReportCache[DP_RUNTIME_MEMORY_REPORT_CACHE_SIZE];
 static DWORD gLastMemoryScanTick;
 static volatile LONG gEtwUnregisterReports;
+
+typedef struct _DP_RUNTIME_KEY_NAME_INFORMATION {
+    ULONG NameLength;
+    WCHAR Name[1];
+} DP_RUNTIME_KEY_NAME_INFORMATION;
 
 static VOID
 DpRuntimeWriteEvent(
@@ -1024,6 +1035,258 @@ DpRuntimeIsWritableExecutableProtection(
            baseProtection == PAGE_EXECUTE_WRITECOPY;
 }
 
+static WCHAR
+DpRuntimeLowerWideChar(
+    _In_ WCHAR Value
+    )
+{
+    return (Value >= L'A' && Value <= L'Z') ? (WCHAR)(Value - L'A' + L'a') : Value;
+}
+
+static CHAR
+DpRuntimeLowerAsciiChar(
+    _In_ CHAR Value
+    )
+{
+    return (Value >= 'A' && Value <= 'Z') ? (CHAR)(Value - 'A' + 'a') : Value;
+}
+
+static BOOL
+DpRuntimeContainsWideInsensitive(
+    _In_z_ LPCWSTR Text,
+    _In_z_ LPCWSTR Needle
+    )
+{
+    SIZE_T i;
+    SIZE_T j;
+    SIZE_T textLength;
+    SIZE_T needleLength;
+
+    if (Text == NULL || Needle == NULL) {
+        return FALSE;
+    }
+
+    textLength = wcslen(Text);
+    needleLength = wcslen(Needle);
+    if (needleLength == 0 || textLength < needleLength) {
+        return FALSE;
+    }
+
+    for (i = 0; i + needleLength <= textLength; i++) {
+        for (j = 0; j < needleLength; j++) {
+            if (DpRuntimeLowerWideChar(Text[i + j]) != DpRuntimeLowerWideChar(Needle[j])) {
+                break;
+            }
+        }
+
+        if (j == needleLength) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeContainsAsciiInsensitive(
+    _In_z_ const CHAR *Text,
+    _In_z_ const CHAR *Needle
+    )
+{
+    SIZE_T i;
+    SIZE_T j;
+    SIZE_T textLength;
+    SIZE_T needleLength;
+
+    if (Text == NULL || Needle == NULL) {
+        return FALSE;
+    }
+
+    textLength = strlen(Text);
+    needleLength = strlen(Needle);
+    if (needleLength == 0 || textLength < needleLength) {
+        return FALSE;
+    }
+
+    for (i = 0; i + needleLength <= textLength; i++) {
+        for (j = 0; j < needleLength; j++) {
+            if (DpRuntimeLowerAsciiChar(Text[i + j]) != DpRuntimeLowerAsciiChar(Needle[j])) {
+                break;
+            }
+        }
+
+        if (j == needleLength) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeDescribeRemoteWritePayload(
+    _In_reads_bytes_opt_(Size) LPCVOID Buffer,
+    _In_ SIZE_T Size,
+    _Out_writes_(ActionChars) WCHAR *Action,
+    _In_ DWORD ActionChars,
+    _Out_writes_(TargetChars) WCHAR *Target,
+    _In_ DWORD TargetChars
+    )
+{
+    BYTE sample[DP_RUNTIME_MEMORY_SAMPLE_BYTES];
+    CHAR ascii[257];
+    WCHAR wide[257];
+    SIZE_T bytesToCopy;
+    SIZE_T i;
+    SIZE_T asciiChars;
+    SIZE_T wideChars;
+    BOOL asciiReadable;
+
+    if (Action == NULL || Target == NULL || ActionChars == 0 || TargetChars == 0) {
+        return FALSE;
+    }
+
+    Action[0] = L'\0';
+    Target[0] = L'\0';
+    if (Buffer == NULL || Size < 2) {
+        return FALSE;
+    }
+
+    bytesToCopy = min(Size, (SIZE_T)sizeof(sample));
+    __try {
+        CopyMemory(sample, Buffer, bytesToCopy);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+
+    if (bytesToCopy >= 2 && sample[0] == 'M' && sample[1] == 'Z') {
+        if (SUCCEEDED(StringCchCopyW(Action, ActionChars, L"userhook.observed.remote-pe-image-write")) &&
+            SUCCEEDED(StringCchCopyW(Target, TargetChars, L"PE image header written to remote process"))) {
+            return TRUE;
+        }
+
+        return FALSE;
+    }
+
+    asciiChars = min(bytesToCopy, (SIZE_T)(ARRAYSIZE(ascii) - 1));
+    asciiReadable = FALSE;
+    for (i = 0; i < asciiChars; i++) {
+        if (sample[i] == 0) {
+            break;
+        }
+
+        if (sample[i] < 0x20 || sample[i] > 0x7E) {
+            break;
+        }
+
+        ascii[i] = (CHAR)sample[i];
+        asciiReadable = TRUE;
+    }
+
+    ascii[i] = '\0';
+    if (asciiReadable && DpRuntimeContainsAsciiInsensitive(ascii, ".dll")) {
+        if (SUCCEEDED(StringCchCopyW(Action, ActionChars, L"userhook.observed.remote-dll-path-write"))) {
+            if (MultiByteToWideChar(CP_ACP, 0, ascii, -1, Target, TargetChars) > 0) {
+                return TRUE;
+            }
+
+            if (SUCCEEDED(StringCchCopyW(Target, TargetChars, L"DLL path written to remote process"))) {
+                return TRUE;
+            }
+        }
+
+        return FALSE;
+    }
+
+    wideChars = min(bytesToCopy / sizeof(WCHAR), (SIZE_T)(ARRAYSIZE(wide) - 1));
+    if (wideChars >= 4) {
+        CopyMemory(wide, sample, wideChars * sizeof(WCHAR));
+        wide[wideChars] = L'\0';
+        if (DpRuntimeContainsWideInsensitive(wide, L".dll")) {
+            if (SUCCEEDED(StringCchCopyW(Action, ActionChars, L"userhook.observed.remote-dll-path-write")) &&
+                SUCCEEDED(StringCchCopyW(Target, TargetChars, wide))) {
+                return TRUE;
+            }
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL
+DpRuntimeQueryRegistryKeyPath(
+    _In_ HKEY Key,
+    _Out_writes_(BufferChars) WCHAR *Buffer,
+    _In_ DWORD BufferChars
+    )
+{
+    HMODULE ntdll;
+    PFN_NtQueryKey ntQueryKey;
+    BYTE localBuffer[2048];
+    DP_RUNTIME_KEY_NAME_INFORMATION *nameInfo;
+    ULONG resultLength = 0;
+    NTSTATUS status;
+    SIZE_T chars;
+
+    if (Buffer == NULL || BufferChars == 0) {
+        return FALSE;
+    }
+
+    Buffer[0] = L'\0';
+    if (Key == NULL) {
+        return FALSE;
+    }
+
+    ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll == NULL) {
+        return FALSE;
+    }
+
+    ntQueryKey = (PFN_NtQueryKey)GetProcAddress(ntdll, "NtQueryKey");
+    if (ntQueryKey == NULL) {
+        return FALSE;
+    }
+
+    status = ntQueryKey((HANDLE)Key, 3, localBuffer, sizeof(localBuffer), &resultLength);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    nameInfo = (DP_RUNTIME_KEY_NAME_INFORMATION *)localBuffer;
+    chars = min(nameInfo->NameLength / sizeof(WCHAR), (SIZE_T)(BufferChars - 1));
+    CopyMemory(Buffer, nameInfo->Name, chars * sizeof(WCHAR));
+    Buffer[chars] = L'\0';
+    return TRUE;
+}
+
+static VOID
+DpRuntimeBuildRegistryValueTarget(
+    _In_ HKEY Key,
+    _In_opt_z_ LPCWSTR ValueName,
+    _Out_writes_(BufferChars) WCHAR *Buffer,
+    _In_ DWORD BufferChars
+    )
+{
+    DWORD length;
+
+    if (Buffer == NULL || BufferChars == 0) {
+        return;
+    }
+
+    Buffer[0] = L'\0';
+    if (!DpRuntimeQueryRegistryKeyPath(Key, Buffer, BufferChars)) {
+        (VOID)StringCchCopyW(Buffer, BufferChars, L"registry");
+    }
+
+    if (ValueName != NULL && ValueName[0] != L'\0') {
+        length = (DWORD)wcslen(Buffer);
+        if (length + 1 < BufferChars) {
+            (VOID)StringCchCatW(Buffer, BufferChars, L"\\");
+            (VOID)StringCchCatW(Buffer, BufferChars, ValueName);
+        }
+    }
+}
+
 static BOOL
 DpRuntimeReadCodeBytes(
     _In_ LPVOID Address,
@@ -1688,10 +1951,19 @@ DpHookWriteProcessMemory(
     )
 {
     DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
+    WCHAR payloadAction[128];
+    WCHAR payloadTarget[DP_RUNTIME_MAX_TEXT];
+
     if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
         SetLastError(ERROR_ACCESS_DENIED);
         DpRuntimeWriteBehaviorEvent(L"userhook.blocked.write-process-memory", L"injection", L"WriteProcessMemory", L"WriteProcessMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, size, 0, NULL);
         return FALSE;
+    }
+
+    if (targetPid != 0 &&
+        targetPid != gCurrentProcessId &&
+        DpRuntimeDescribeRemoteWritePayload(buffer, size, payloadAction, ARRAYSIZE(payloadAction), payloadTarget, ARRAYSIZE(payloadTarget))) {
+        DpRuntimeWriteBehaviorEvent(payloadAction, L"injection", L"WriteProcessMemory", payloadTarget, ERROR_SUCCESS, FALSE, targetPid, size, 0, NULL);
     }
 
     DpRuntimeWriteBehaviorEvent(L"userhook.observed.write-process-memory", L"injection", L"WriteProcessMemory", L"WriteProcessMemory", ERROR_SUCCESS, FALSE, targetPid, size, 0, NULL);
@@ -1845,6 +2117,53 @@ DpHookCreateProcessW(
                                processInformation);
 }
 
+static BOOL WINAPI
+DpHookCreateProcessA(
+    LPCSTR applicationName,
+    LPSTR commandLine,
+    LPSECURITY_ATTRIBUTES processAttributes,
+    LPSECURITY_ATTRIBUTES threadAttributes,
+    BOOL inheritHandles,
+    DWORD creationFlags,
+    LPVOID environment,
+    LPCSTR currentDirectory,
+    LPSTARTUPINFOA startupInfo,
+    LPPROCESS_INFORMATION processInformation
+    )
+{
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+    WCHAR command[DP_RUNTIME_MAX_TEXT];
+
+    target[0] = L'\0';
+    command[0] = L'\0';
+    if (applicationName != NULL) {
+        MultiByteToWideChar(CP_ACP, 0, applicationName, -1, target, ARRAYSIZE(target));
+    } else if (commandLine != NULL) {
+        MultiByteToWideChar(CP_ACP, 0, commandLine, -1, target, ARRAYSIZE(target));
+    }
+
+    if (commandLine != NULL) {
+        MultiByteToWideChar(CP_ACP, 0, commandLine, -1, command, ARRAYSIZE(command));
+    }
+
+    if ((creationFlags & CREATE_SUSPENDED) != 0) {
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.suspended-process-create", L"process", L"CreateProcessA", target, ERROR_SUCCESS, FALSE, 0, 0, creationFlags, command);
+    } else {
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.process-create", L"process", L"CreateProcessA", target, ERROR_SUCCESS, FALSE, 0, 0, creationFlags, command);
+    }
+
+    return gRealCreateProcessA(applicationName,
+                               commandLine,
+                               processAttributes,
+                               threadAttributes,
+                               inheritHandles,
+                               creationFlags,
+                               environment,
+                               currentDirectory,
+                               startupInfo,
+                               processInformation);
+}
+
 static HMODULE WINAPI
 DpHookLoadLibraryW(
     LPCWSTR fileName
@@ -1875,14 +2194,44 @@ DpHookRegSetValueExW(
     DWORD dataBytes
     )
 {
-    UNREFERENCED_PARAMETER(key);
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
     UNREFERENCED_PARAMETER(reserved);
     UNREFERENCED_PARAMETER(type);
     UNREFERENCED_PARAMETER(data);
     UNREFERENCED_PARAMETER(dataBytes);
 
-    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-set-value", L"registry", L"RegSetValueExW", valueName, ERROR_SUCCESS, FALSE, 0, dataBytes, type, NULL);
+    DpRuntimeBuildRegistryValueTarget(key, valueName, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-set-value", L"registry", L"RegSetValueExW", target, ERROR_SUCCESS, FALSE, 0, dataBytes, type, NULL);
     return gRealRegSetValueExW(key, valueName, reserved, type, data, dataBytes);
+}
+
+static LONG WINAPI
+DpHookRegSetValueExA(
+    HKEY key,
+    LPCSTR valueName,
+    DWORD reserved,
+    DWORD type,
+    const BYTE *data,
+    DWORD dataBytes
+    )
+{
+    WCHAR valueNameWide[DP_RUNTIME_MAX_TEXT];
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    UNREFERENCED_PARAMETER(reserved);
+    UNREFERENCED_PARAMETER(type);
+    UNREFERENCED_PARAMETER(data);
+    UNREFERENCED_PARAMETER(dataBytes);
+
+    valueNameWide[0] = L'\0';
+    if (valueName != NULL) {
+        MultiByteToWideChar(CP_ACP, 0, valueName, -1, valueNameWide, ARRAYSIZE(valueNameWide));
+    }
+
+    DpRuntimeBuildRegistryValueTarget(key, valueNameWide, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-set-value", L"registry", L"RegSetValueExA", target, ERROR_SUCCESS, FALSE, 0, dataBytes, type, NULL);
+    return gRealRegSetValueExA(key, valueName, reserved, type, data, dataBytes);
 }
 
 static BOOL WINAPI
@@ -2025,9 +2374,18 @@ DpHookNtWriteVirtualMemory(
     )
 {
     DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
+    WCHAR payloadAction[128];
+    WCHAR payloadTarget[DP_RUNTIME_MAX_TEXT];
+
     if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
         DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-write-virtual-memory", L"injection", L"NtWriteVirtualMemory", L"NtWriteVirtualMemory", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, size, 0, NULL);
         return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
+    }
+
+    if (targetPid != 0 &&
+        targetPid != gCurrentProcessId &&
+        DpRuntimeDescribeRemoteWritePayload(buffer, size, payloadAction, ARRAYSIZE(payloadAction), payloadTarget, ARRAYSIZE(payloadTarget))) {
+        DpRuntimeWriteBehaviorEvent(payloadAction, L"injection", L"NtWriteVirtualMemory", payloadTarget, ERROR_SUCCESS, FALSE, targetPid, size, 0, NULL);
     }
 
     DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-write-virtual-memory", L"injection", L"NtWriteVirtualMemory", L"NtWriteVirtualMemory", ERROR_SUCCESS, FALSE, targetPid, size, 0, NULL);
@@ -2270,6 +2628,7 @@ DpRuntimeInitializeOnce(
         DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThread", DpHookCreateRemoteThread, (LPVOID *)&gRealCreateRemoteThread);
         DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThreadEx", DpHookCreateRemoteThreadEx, (LPVOID *)&gRealCreateRemoteThreadEx);
         DpRuntimeHookApi(L"kernel32.dll", "CreateProcessW", DpHookCreateProcessW, (LPVOID *)&gRealCreateProcessW);
+        DpRuntimeHookApi(L"kernel32.dll", "CreateProcessA", DpHookCreateProcessA, (LPVOID *)&gRealCreateProcessA);
         DpRuntimeHookApi(L"kernel32.dll", "WriteProcessMemory", DpHookWriteProcessMemory, (LPVOID *)&gRealWriteProcessMemory);
         DpRuntimeHookApi(L"kernel32.dll", "VirtualAllocEx", DpHookVirtualAllocEx, (LPVOID *)&gRealVirtualAllocEx);
         DpRuntimeHookApi(L"kernel32.dll", "VirtualProtectEx", DpHookVirtualProtectEx, (LPVOID *)&gRealVirtualProtectEx);
@@ -2281,6 +2640,7 @@ DpRuntimeInitializeOnce(
         DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExW", DpHookSetWindowsHookExW, (LPVOID *)&gRealSetWindowsHookExW);
         DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExA", DpHookSetWindowsHookExA, (LPVOID *)&gRealSetWindowsHookExA);
         DpRuntimeHookApi(L"advapi32.dll", "RegSetValueExW", DpHookRegSetValueExW, (LPVOID *)&gRealRegSetValueExW);
+        DpRuntimeHookApi(L"advapi32.dll", "RegSetValueExA", DpHookRegSetValueExA, (LPVOID *)&gRealRegSetValueExA);
         DpRuntimeHookApi(L"ws2_32.dll", "connect", DpHookConnect, (LPVOID *)&gRealConnect);
         DpRuntimeHookApi(L"ws2_32.dll", "WSAConnect", DpHookWSAConnect, (LPVOID *)&gRealWSAConnect);
         DpRuntimeHookApi(L"ntdll.dll", "NtCreateThreadEx", DpHookNtCreateThreadEx, (LPVOID *)&gRealNtCreateThreadEx);

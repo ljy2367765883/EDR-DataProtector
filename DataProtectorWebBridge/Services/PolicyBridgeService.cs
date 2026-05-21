@@ -2865,7 +2865,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.injection-chain",
                     "跨进程注入链",
-                    new[] { "userhook.behavior-process-access", "userhook.observed.remote-executable-memory", "userhook.observed.write-process-memory", "userhook.behavior-remote-thread-create", "userhook.observed.nt-create-thread-ex" },
+                    new[] { "userhook.behavior-process-access", "userhook.behavior-thread-access", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.behavior-remote-thread-create", "userhook.observed.create-remote-thread", "userhook.observed.nt-create-thread-ex" },
                     null,
                     90,
                     4,
@@ -2875,6 +2875,32 @@ namespace DataProtectorWebBridge.Services
                     "Defense Evasion / Privilege Escalation",
                     "T1055 Process Injection",
                     "OpenProcess/VirtualAllocEx/WriteProcessMemory/CreateRemoteThread 类行为在同一进程窗口内连续出现，按注入链判定。"),
+                NewBehaviorRule(
+                    "dp.behavior.remote-dll-injection",
+                    "远程 DLL 注入链",
+                    new[] { "userhook.behavior-process-access", "userhook.observed.remote-dll-path-write", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.create-remote-thread", "userhook.observed.create-remote-thread-ex", "userhook.observed.nt-create-thread-ex", "userhook.behavior-remote-thread-create" },
+                    new[] { "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory" },
+                    90,
+                    4,
+                    100,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion / Execution",
+                    "T1055.001 Dynamic-link library injection",
+                    "打开目标进程、写入 DLL 路径并通过远程线程或 NtCreateThreadEx 触发加载，按 DLL 注入闭环判定。"),
+                NewBehaviorRule(
+                    "dp.behavior.shellcode-injection",
+                    "远程 Shellcode 注入链",
+                    new[] { "userhook.behavior-process-access", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.remote-executable-protect", "userhook.observed.nt-protect-executable-memory", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.remote-pe-image-write", "userhook.observed.create-remote-thread", "userhook.observed.nt-create-thread-ex", "userhook.behavior-remote-thread-create" },
+                    null,
+                    90,
+                    4,
+                    100,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion / Execution",
+                    "T1055 Process Injection",
+                    "目标进程内出现远程可执行内存、远程写入和远程执行，按 Shellcode/PE 载荷注入闭环判定。"),
                 NewBehaviorRule(
                     "dp.behavior.process-hollowing",
                     "进程空洞化链",
@@ -2901,6 +2927,32 @@ namespace DataProtectorWebBridge.Services
                     "Defense Evasion / Execution",
                     "T1055.004 APC Injection",
                     "跨进程写入或分配可执行内存后排队 APC，属于常见无远程线程注入变体。"),
+                NewBehaviorRule(
+                    "dp.behavior.thread-hijack",
+                    "线程劫持注入链",
+                    new[] { "userhook.behavior-thread-access", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.set-thread-context", "userhook.observed.resume-thread" },
+                    null,
+                    120,
+                    4,
+                    95,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion / Execution",
+                    "T1055.003 Thread Execution Hijacking",
+                    "获取远程线程权限后写入载荷、修改线程上下文并恢复线程，按线程劫持注入判定。"),
+                NewBehaviorRule(
+                    "dp.behavior.ntdll-reload-bypass",
+                    "NTDLL 重载与 Hook 绕过链",
+                    new[] { "userhook.sensitive-image-reload", "userhook.sensitive-image-abnormal-path", "userhook.runtime.unhook-detected", "userhook.runtime.hook-overwrite-detected", "userhook.runtime.syscall-bypass-risk", "userhook.runtime.memory-private-syscall-stub" },
+                    null,
+                    180,
+                    2,
+                    90,
+                    "critical",
+                    "suspicious",
+                    "Defense Evasion",
+                    "T1562 Impair Defenses / T1106 Native API",
+                    "检测 NTDLL 等敏感模块重载、异常路径加载、Hook 被还原或私有 syscall stub，用于识别绕过用户态 Hook 的行为链。"),
                 NewBehaviorRule(
                     "dp.behavior.hook-bypass",
                     "Hook 绕过与直接系统调用",
@@ -3004,7 +3056,137 @@ namespace DataProtectorWebBridge.Services
                     "suspicious",
                     "Execution / Command and Control",
                     "T1059 Command and Scripting Interpreter",
-                    "powershell、wscript、cscript、mshta、cmd 等脚本宿主启动后外联。")
+                    "powershell、wscript、cscript、mshta、cmd 等脚本宿主启动后外联。"),
+                NewBehaviorRule(
+                    "dp.behavior.script-download-execute",
+                    "脚本下载执行链",
+                    new[] { "userhook.observed.process-create", "userhook.observed.network-connect", "userhook.observed.network-wsaconnect" },
+                    null,
+                    180,
+                    1,
+                    90,
+                    "critical",
+                    "malicious",
+                    "Execution / Command and Control",
+                    "T1059 / T1105",
+                    "脚本解释器带下载、解码、IEX 或远程脚本参数启动，并在同一窗口内出现外联。"),
+                NewBehaviorRule(
+                    "dp.behavior.credential-dump-chain",
+                    "凭据转储链",
+                    new[] { "userhook.behavior-process-access", "userhook.observed.process-create" },
+                    null,
+                    120,
+                    1,
+                    95,
+                    "critical",
+                    "malicious",
+                    "Credential Access",
+                    "T1003 OS Credential Dumping",
+                    "发现 LSASS/注册表凭据目标访问，或 procdump/comsvcs/reg save/mimikatz 语义命令。"),
+                NewBehaviorRule(
+                    "dp.behavior.defense-impairment",
+                    "安全防护削弱链",
+                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value" },
+                    null,
+                    120,
+                    1,
+                    95,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion",
+                    "T1562 Impair Defenses",
+                    "检测 Defender/EDR 停止、排除项添加、安全服务禁用、日志清理或策略篡改命令。"),
+                NewBehaviorRule(
+                    "dp.behavior.service-persistence",
+                    "服务持久化链",
+                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value" },
+                    null,
+                    120,
+                    1,
+                    85,
+                    "critical",
+                    "suspicious",
+                    "Persistence / Privilege Escalation",
+                    "T1543.003 Windows Service",
+                    "sc/new-service/服务注册表写入创建自动启动服务。"),
+                NewBehaviorRule(
+                    "dp.behavior.scheduled-task-persistence",
+                    "计划任务持久化链",
+                    new[] { "userhook.observed.process-create" },
+                    null,
+                    120,
+                    1,
+                    80,
+                    "warning",
+                    "suspicious",
+                    "Persistence",
+                    "T1053.005 Scheduled Task",
+                    "schtasks /create 或 PowerShell ScheduledTask 创建自启动任务。"),
+                NewBehaviorRule(
+                    "dp.behavior.lateral-tool-execution",
+                    "横向移动工具链",
+                    new[] { "userhook.observed.process-create", "userhook.observed.network-connect", "userhook.observed.network-wsaconnect" },
+                    null,
+                    240,
+                    1,
+                    90,
+                    "critical",
+                    "suspicious",
+                    "Lateral Movement",
+                    "T1021 Remote Services / T1047 WMI",
+                    "wmic/psexec/sc/schtasks/PowerShell 远程执行或管理工具带远程主机参数启动。"),
+                NewBehaviorRule(
+                    "dp.behavior.ransomware-impact-chain",
+                    "勒索破坏前置链",
+                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value" },
+                    null,
+                    180,
+                    1,
+                    95,
+                    "critical",
+                    "malicious",
+                    "Impact",
+                    "T1486 Data Encrypted for Impact / T1490",
+                    "恢复破坏、启动修复关闭、安全模式/日志/备份清理等勒索前置行为。"),
+                NewBehaviorRule(
+                    "dp.behavior.archive-exfil-chain",
+                    "归档外传链",
+                    new[] { "userhook.observed.process-create", "userhook.observed.network-connect", "userhook.observed.network-wsaconnect" },
+                    null,
+                    300,
+                    2,
+                    75,
+                    "warning",
+                    "suspicious",
+                    "Collection / Exfiltration",
+                    "T1560 Archive Collected Data / T1041 Exfiltration Over C2 Channel",
+                    "归档工具或脚本压缩敏感目录后同进程外联，按外传准备链判定。"),
+                NewBehaviorRule(
+                    "dp.behavior.global-windows-hook",
+                    "全局 Windows Hook 链",
+                    new[] { "userhook.observed.windows-hook", "userhook.blocked.global-windows-hook" },
+                    null,
+                    60,
+                    1,
+                    75,
+                    "warning",
+                    "suspicious",
+                    "Credential Access / Collection",
+                    "T1056 Input Capture / T1179 Hooking",
+                    "非受信进程注册全局 Windows Hook，可能用于键盘记录、消息窃取或注入。"),
+                NewBehaviorRule(
+                    "dp.behavior.user-writable-dll-load",
+                    "用户可写目录 DLL 加载链",
+                    new[] { "userhook.observed.load-library", "userhook.observed.load-library-ex" },
+                    null,
+                    120,
+                    1,
+                    70,
+                    "warning",
+                    "suspicious",
+                    "Defense Evasion / Persistence",
+                    "T1574 Hijack Execution Flow",
+                    "进程从用户可写目录加载 DLL，按 DLL 劫持/侧载可疑链处理。")
             };
         }
 
@@ -3048,8 +3230,12 @@ namespace DataProtectorWebBridge.Services
         private static string FriendlyDefaultBehaviorRuleName(string ruleId, string fallback)
         {
             if (string.Equals(ruleId, "dp.behavior.injection-chain", StringComparison.OrdinalIgnoreCase)) return "Cross-process injection chain";
+            if (string.Equals(ruleId, "dp.behavior.remote-dll-injection", StringComparison.OrdinalIgnoreCase)) return "Remote DLL injection chain";
+            if (string.Equals(ruleId, "dp.behavior.shellcode-injection", StringComparison.OrdinalIgnoreCase)) return "Remote shellcode injection chain";
             if (string.Equals(ruleId, "dp.behavior.process-hollowing", StringComparison.OrdinalIgnoreCase)) return "Process hollowing chain";
             if (string.Equals(ruleId, "dp.behavior.apc-injection", StringComparison.OrdinalIgnoreCase)) return "APC injection chain";
+            if (string.Equals(ruleId, "dp.behavior.thread-hijack", StringComparison.OrdinalIgnoreCase)) return "Thread hijacking injection chain";
+            if (string.Equals(ruleId, "dp.behavior.ntdll-reload-bypass", StringComparison.OrdinalIgnoreCase)) return "NTDLL reload and hook bypass chain";
             if (string.Equals(ruleId, "dp.behavior.hook-bypass", StringComparison.OrdinalIgnoreCase)) return "Hook bypass and direct syscall behavior";
             if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase)) return "Telemetry impairment and ETW tamper";
             if (string.Equals(ruleId, "dp.behavior.manual-map", StringComparison.OrdinalIgnoreCase)) return "Manual map or executable memory chain";
@@ -3058,14 +3244,28 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase)) return "System recovery inhibition";
             if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase)) return "Autostart persistence chain";
             if (string.Equals(ruleId, "dp.behavior.script-network", StringComparison.OrdinalIgnoreCase)) return "Script interpreter network chain";
+            if (string.Equals(ruleId, "dp.behavior.script-download-execute", StringComparison.OrdinalIgnoreCase)) return "Script download and execute chain";
+            if (string.Equals(ruleId, "dp.behavior.credential-dump-chain", StringComparison.OrdinalIgnoreCase)) return "Credential dumping chain";
+            if (string.Equals(ruleId, "dp.behavior.defense-impairment", StringComparison.OrdinalIgnoreCase)) return "Security defense impairment chain";
+            if (string.Equals(ruleId, "dp.behavior.service-persistence", StringComparison.OrdinalIgnoreCase)) return "Service persistence chain";
+            if (string.Equals(ruleId, "dp.behavior.scheduled-task-persistence", StringComparison.OrdinalIgnoreCase)) return "Scheduled task persistence chain";
+            if (string.Equals(ruleId, "dp.behavior.lateral-tool-execution", StringComparison.OrdinalIgnoreCase)) return "Lateral movement tool execution chain";
+            if (string.Equals(ruleId, "dp.behavior.ransomware-impact-chain", StringComparison.OrdinalIgnoreCase)) return "Ransomware impact preparation chain";
+            if (string.Equals(ruleId, "dp.behavior.archive-exfil-chain", StringComparison.OrdinalIgnoreCase)) return "Archive and exfiltration chain";
+            if (string.Equals(ruleId, "dp.behavior.global-windows-hook", StringComparison.OrdinalIgnoreCase)) return "Global Windows hook behavior";
+            if (string.Equals(ruleId, "dp.behavior.user-writable-dll-load", StringComparison.OrdinalIgnoreCase)) return "User-writable DLL load chain";
             return string.IsNullOrWhiteSpace(fallback) ? ruleId : fallback;
         }
 
         private static string FriendlyDefaultBehaviorRuleDescription(string ruleId, string fallback)
         {
             if (string.Equals(ruleId, "dp.behavior.injection-chain", StringComparison.OrdinalIgnoreCase)) return "Correlates cross-process access, executable memory, memory write and remote execution before alerting.";
+            if (string.Equals(ruleId, "dp.behavior.remote-dll-injection", StringComparison.OrdinalIgnoreCase)) return "Correlates target process access, remote DLL-path write and remote thread creation as a DLL injection chain.";
+            if (string.Equals(ruleId, "dp.behavior.shellcode-injection", StringComparison.OrdinalIgnoreCase)) return "Correlates remote executable memory allocation or protection, remote payload write and remote execution.";
             if (string.Equals(ruleId, "dp.behavior.process-hollowing", StringComparison.OrdinalIgnoreCase)) return "Correlates suspended process creation, image unmap, remote write, thread context changes and resume behavior.";
             if (string.Equals(ruleId, "dp.behavior.apc-injection", StringComparison.OrdinalIgnoreCase)) return "Correlates QueueUserAPC with remote memory allocation or cross-process memory writes.";
+            if (string.Equals(ruleId, "dp.behavior.thread-hijack", StringComparison.OrdinalIgnoreCase)) return "Correlates remote thread access, payload write, thread context manipulation and thread resume.";
+            if (string.Equals(ruleId, "dp.behavior.ntdll-reload-bypass", StringComparison.OrdinalIgnoreCase)) return "Correlates sensitive module reloads, abnormal module paths, hook overwrite and private syscall stub evidence.";
             if (string.Equals(ruleId, "dp.behavior.hook-bypass", StringComparison.OrdinalIgnoreCase)) return "Correlates hook tamper, private syscall stubs and direct NT API behavior.";
             if (string.Equals(ruleId, "dp.behavior.telemetry-impairment", StringComparison.OrdinalIgnoreCase)) return "Detects verified ETW patching or telemetry entry-point tamper signals.";
             if (string.Equals(ruleId, "dp.behavior.manual-map", StringComparison.OrdinalIgnoreCase)) return "Correlates manual mapped PE evidence, RWX memory and private executable memory.";
@@ -3074,6 +3274,16 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase)) return "Detects VSS, backup or boot recovery destruction command execution.";
             if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase)) return "Correlates Run, RunOnce, startup folder, task or service persistence behavior.";
             if (string.Equals(ruleId, "dp.behavior.script-network", StringComparison.OrdinalIgnoreCase)) return "Correlates script interpreter execution with outbound network behavior.";
+            if (string.Equals(ruleId, "dp.behavior.script-download-execute", StringComparison.OrdinalIgnoreCase)) return "Requires a script interpreter with download/decode/execute intent and optional same-process network activity.";
+            if (string.Equals(ruleId, "dp.behavior.credential-dump-chain", StringComparison.OrdinalIgnoreCase)) return "Requires LSASS, SAM/SYSTEM/SECURITY, procdump, comsvcs, reg save or Mimikatz-like credential access intent.";
+            if (string.Equals(ruleId, "dp.behavior.defense-impairment", StringComparison.OrdinalIgnoreCase)) return "Detects commands or registry writes that disable Defender, logging, services or security telemetry.";
+            if (string.Equals(ruleId, "dp.behavior.service-persistence", StringComparison.OrdinalIgnoreCase)) return "Detects service creation or service registry autorun writes.";
+            if (string.Equals(ruleId, "dp.behavior.scheduled-task-persistence", StringComparison.OrdinalIgnoreCase)) return "Detects scheduled task creation through schtasks or PowerShell scheduled task APIs.";
+            if (string.Equals(ruleId, "dp.behavior.lateral-tool-execution", StringComparison.OrdinalIgnoreCase)) return "Detects remote execution tools and commands with remote host/service/WMI intent.";
+            if (string.Equals(ruleId, "dp.behavior.ransomware-impact-chain", StringComparison.OrdinalIgnoreCase)) return "Detects recovery destruction and common ransomware preparation commands.";
+            if (string.Equals(ruleId, "dp.behavior.archive-exfil-chain", StringComparison.OrdinalIgnoreCase)) return "Correlates archive collection command intent with network activity.";
+            if (string.Equals(ruleId, "dp.behavior.global-windows-hook", StringComparison.OrdinalIgnoreCase)) return "Detects global Windows hook registration from monitored processes.";
+            if (string.Equals(ruleId, "dp.behavior.user-writable-dll-load", StringComparison.OrdinalIgnoreCase)) return "Detects DLL loads from user-writable directories often used for side-loading or hijacking.";
             return fallback ?? string.Empty;
         }
 
@@ -3099,6 +3309,46 @@ namespace DataProtectorWebBridge.Services
                 return new[] { "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe", "cmd.exe", "rundll32.exe", "regsvr32.exe" };
             }
 
+            if (string.Equals(ruleId, "dp.behavior.script-download-execute", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe", "cmd.exe", "rundll32.exe", "regsvr32.exe", "msbuild.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.credential-dump-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "procdump.exe", "rundll32.exe", "reg.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "wmic.exe", "taskmgr.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.defense-impairment", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "powershell.exe", "pwsh.exe", "cmd.exe", "reg.exe", "sc.exe", "net.exe", "net1.exe", "wevtutil.exe", "bcdedit.exe", "auditpol.exe", "wmic.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.service-persistence", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "sc.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "reg.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.scheduled-task-persistence", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "schtasks.exe", "powershell.exe", "pwsh.exe", "cmd.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.lateral-tool-execution", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "wmic.exe", "psexec.exe", "paexec.exe", "sc.exe", "schtasks.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "net.exe", "net1.exe", "winrs.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.ransomware-impact-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "vssadmin.exe", "wbadmin.exe", "bcdedit.exe", "wmic.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "reagentc.exe", "wevtutil.exe", "fsutil.exe" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.archive-exfil-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "powershell.exe", "pwsh.exe", "cmd.exe", "rar.exe", "winrar.exe", "7z.exe", "7za.exe", "tar.exe", "makecab.exe" };
+            }
+
             return new string[0];
         }
 
@@ -3117,6 +3367,26 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(ruleId, "dp.behavior.persistence-autostart", StringComparison.OrdinalIgnoreCase))
             {
                 return new[] { "\\run", "\\runonce", "currentversion\\run", "startup", "create service", "new-service", "sc.exe create" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.credential-dump-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "lsass", "sam", "security", "system", "ntds.dit", "comsvcs.dll", "minidump", "procdump" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.defense-impairment", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "windefend", "defender", "real-time protection", "disableantispyware", "disablerealtimemonitoring", "exclusionpath", "eventlog", "sysmon", "dataprotector", "security center" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.service-persistence", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "\\services\\", "imagepath", "start", "objectname", "sc create", "new-service" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.user-writable-dll-load", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "\\users\\", "\\appdata\\", "\\temp\\", "\\programdata\\", "\\downloads\\", ".dll" };
             }
 
             return new string[0];
@@ -3144,6 +3414,46 @@ namespace DataProtectorWebBridge.Services
                 return new[] { "schtasks /create", "schtasks.exe /create", " /create ", "sc create", "new-service", "currentversion\\run", "runonce", "startup" };
             }
 
+            if (string.Equals(ruleId, "dp.behavior.script-download-execute", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "-enc", "-encodedcommand", "frombase64string", "downloadstring", "downloadfile", "invoke-webrequest", "iwr ", "curl ", "wget ", "invoke-expression", " iex ", "http://", "https://", "mshta", "regsvr32", "rundll32", "javascript:", "vbscript:" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.credential-dump-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "lsass", "sekurlsa", "lsadump", "privilege::debug", "procdump", "comsvcs.dll", "minidump", "reg save hklm\\sam", "reg save hklm\\system", "reg save hklm\\security", "ntds.dit", "vssadmin", "esentutl" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.defense-impairment", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "set-mppreference", "disablerealtimemonitoring", "disableantispyware", "add-mppreference", "exclusionpath", "windefend", "sc stop", "sc config", "net stop", "wevtutil cl", "auditpol /clear", "sysmon", "eventlog", "dataprotector", "tamperprotection" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.service-persistence", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "sc create", "sc.exe create", "new-service", "create service", "start= auto", "binpath=", "\\services\\", "imagepath" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.scheduled-task-persistence", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "schtasks /create", "schtasks.exe /create", "new-scheduledtask", "register-scheduledtask", " /sc ", " /tn ", " /tr ", " /ru " };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.lateral-tool-execution", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "\\\\", "/node:", "process call create", "wmic ", "psexec", "paexec", "winrs", "invoke-command", "enter-pssession", "new-pssession", "sc \\\\", "schtasks /s", " /s " };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.ransomware-impact-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete", "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "reagentc /disable", "wevtutil cl", "bcdedit", "vssadmin", "cipher /w" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.archive-exfil-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { ".zip", ".rar", ".7z", "compress-archive", "makecab", "tar -", " a -", " -mx", "desktop", "documents", "downloads", "http://", "https://" };
+            }
+
             return new string[0];
         }
 
@@ -3152,6 +3462,26 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(ruleId, "dp.behavior.injection-chain", StringComparison.OrdinalIgnoreCase))
             {
                 return new[] { "MITRE ATT&CK T1055", "MITRE DET0106", "Sysmon Event ID 8/10" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.remote-dll-injection", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1055.001", "Sysmon Event ID 8/10", "OpenProcess/WriteProcessMemory/CreateRemoteThread" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.shellcode-injection", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1055", "VirtualAllocEx/WriteProcessMemory/CreateRemoteThread", "NtAllocateVirtualMemory/NtCreateThreadEx" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.thread-hijack", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1055.003", "SetThreadContext", "ResumeThread" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.ntdll-reload-bypass", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1562", "MITRE ATT&CK T1106", "Ntdll reload / direct syscall evasion" };
             }
 
             if (string.Equals(ruleId, "dp.behavior.recovery-inhibit", StringComparison.OrdinalIgnoreCase))
@@ -3169,6 +3499,41 @@ namespace DataProtectorWebBridge.Services
                 return new[] { "LOLBAS", "MITRE ATT&CK T1218/T1105" };
             }
 
+            if (string.Equals(ruleId, "dp.behavior.credential-dump-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1003", "LSASS access", "Mimikatz/procdump/comsvcs/reg save patterns" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.defense-impairment", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1562", "Defender tamper patterns", "Windows Event Log clearing" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.service-persistence", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1543.003", "Windows service creation" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.scheduled-task-persistence", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1053.005", "Scheduled task creation" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.lateral-tool-execution", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1021/T1047", "WMI/SMB/WinRM remote execution" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.ransomware-impact-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1486/T1490", "Ransomware recovery destruction patterns" };
+            }
+
+            if (string.Equals(ruleId, "dp.behavior.archive-exfil-chain", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "MITRE ATT&CK T1560/T1041", "Archive and exfiltration behavior" };
+            }
+
             return new[] { "MITRE ATT&CK", "Sigma / Elastic public detection engineering patterns" };
         }
 
@@ -3178,7 +3543,7 @@ namespace DataProtectorWebBridge.Services
                 ? DefaultUserHookBehaviorRules()
                 : rules;
 
-            return source
+            return MergeDefaultBehaviorRules(source)
                 .Where(rule => rule != null)
                 .Select(NormalizeUserHookBehaviorRule)
                 .Where(rule => !string.IsNullOrWhiteSpace(rule.ruleId))
@@ -3186,6 +3551,34 @@ namespace DataProtectorWebBridge.Services
                 .Select(group => group.First())
                 .Take(MaxBehaviorChainRules)
                 .ToArray();
+        }
+
+        private static IEnumerable<UserHookBehaviorRule> MergeDefaultBehaviorRules(IEnumerable<UserHookBehaviorRule> rules)
+        {
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<UserHookBehaviorRule> merged = new List<UserHookBehaviorRule>();
+
+            foreach (UserHookBehaviorRule rule in rules ?? new UserHookBehaviorRule[0])
+            {
+                if (rule == null || string.IsNullOrWhiteSpace(rule.ruleId) || !seen.Add(rule.ruleId))
+                {
+                    continue;
+                }
+
+                merged.Add(rule);
+            }
+
+            foreach (UserHookBehaviorRule rule in DefaultUserHookBehaviorRules())
+            {
+                if (rule == null || string.IsNullOrWhiteSpace(rule.ruleId) || !seen.Add(rule.ruleId))
+                {
+                    continue;
+                }
+
+                merged.Add(rule);
+            }
+
+            return merged;
         }
 
         private static UserHookBehaviorRule NormalizeUserHookBehaviorRule(UserHookBehaviorRule rule)
@@ -4609,6 +5002,11 @@ namespace DataProtectorWebBridge.Services
                     parts.Add("reason=" + evaluation.Reason);
                 }
 
+                if (!string.IsNullOrWhiteSpace(evaluation.AttackStory))
+                {
+                    parts.Add("story=" + evaluation.AttackStory);
+                }
+
                 parts.Add("actions=" + string.Join(",", matchedActions.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()));
                 return string.Join(";", parts.ToArray());
             }
@@ -4658,27 +5056,117 @@ namespace DataProtectorWebBridge.Services
 
             private static string BuildRuleMatchMessage(UserHookBehaviorRule rule, HashSet<string> matchedActions, List<UserHookBehaviorAtom> candidates, BehaviorMatchEvaluation evaluation)
             {
-                string message = "Behavior chain matched: " + rule.name + ".";
-                message += " Severity=" + rule.severity + "; disposition=" + rule.disposition + "; score=" + evaluation.Score.ToString(CultureInfo.InvariantCulture) + "; events=" + candidates.Count.ToString(CultureInfo.InvariantCulture) + ".";
+                string message = "检测到行为链：" + rule.name + "。";
+                message += " 结论=" + rule.disposition + "；级别=" + rule.severity + "；评分=" + evaluation.Score.ToString(CultureInfo.InvariantCulture) + "；事件数=" + candidates.Count.ToString(CultureInfo.InvariantCulture) + "。";
                 if (!string.IsNullOrWhiteSpace(rule.technique))
                 {
-                    message += " Technique: " + rule.technique + ".";
+                    message += " 技术=" + rule.technique + "。";
                 }
 
-                message += " EvidenceClasses: " + string.Join(",", evaluation.EvidenceClasses.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()) + ".";
-                message += " Source: " + evaluation.PrimaryProcess + "; Target: " + evaluation.PrimaryTarget + ".";
+                message += " 来源进程=" + evaluation.PrimaryProcess + "；目标=" + evaluation.PrimaryTarget + "。";
+                if (!string.IsNullOrWhiteSpace(evaluation.AttackStory))
+                {
+                    message += " 攻击流程=" + evaluation.AttackStory;
+                }
+
                 if (!string.IsNullOrWhiteSpace(evaluation.Reason))
                 {
-                    message += " Reason: " + evaluation.Reason + ".";
+                    message += " 判定原因=" + evaluation.Reason + "。";
                 }
 
-                message += " Actions: " + string.Join(",", matchedActions.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray()) + ".";
+                message += " 时间线：" + BuildBehaviorTimeline(candidates) + "。";
                 if (!string.IsNullOrWhiteSpace(rule.description))
                 {
-                    message += " " + rule.description;
+                    message += " 规则说明：" + rule.description;
                 }
 
                 return message;
+            }
+
+            private static string BuildBehaviorTimeline(List<UserHookBehaviorAtom> candidates)
+            {
+                if (candidates == null || candidates.Count == 0)
+                {
+                    return "无事件";
+                }
+
+                return string.Join(" -> ",
+                    candidates
+                        .OrderBy(item => item.TimestampUtc)
+                        .Take(8)
+                        .Select(DescribeBehaviorAtom)
+                        .ToArray());
+            }
+
+            private static string DescribeBehaviorAtom(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return "未知行为";
+                }
+
+                string action = atom.Action ?? string.Empty;
+                if (action.IndexOf("behavior-process-access", StringComparison.OrdinalIgnoreCase) >= 0) return "打开目标进程句柄";
+                if (action.IndexOf("behavior-thread-access", StringComparison.OrdinalIgnoreCase) >= 0) return "打开目标线程句柄";
+                if (action.IndexOf("remote-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-allocate-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0) return "申请远程可执行内存";
+                if (action.IndexOf("remote-executable-protect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-protect-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0) return "改远程内存为可执行";
+                if (action.IndexOf("remote-dll-path-write", StringComparison.OrdinalIgnoreCase) >= 0) return "写入 DLL 路径";
+                if (action.IndexOf("remote-pe-image-write", StringComparison.OrdinalIgnoreCase) >= 0) return "写入 PE 载荷";
+                if (action.IndexOf("write-process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0) return "写入远程进程内存";
+                if (action.IndexOf("remote-thread-create", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("create-remote-thread", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-create-thread-ex", StringComparison.OrdinalIgnoreCase) >= 0) return "创建远程线程执行";
+                if (action.IndexOf("queue-user-apc", StringComparison.OrdinalIgnoreCase) >= 0) return "排队 APC 执行";
+                if (action.IndexOf("set-thread-context", StringComparison.OrdinalIgnoreCase) >= 0) return "改写线程上下文";
+                if (action.IndexOf("resume-thread", StringComparison.OrdinalIgnoreCase) >= 0) return "恢复线程";
+                if (action.IndexOf("nt-unmap-view", StringComparison.OrdinalIgnoreCase) >= 0) return "卸载进程原始映像";
+                if (action.IndexOf("suspended-process-create", StringComparison.OrdinalIgnoreCase) >= 0) return "挂起创建进程";
+                if (action.IndexOf("process-create", StringComparison.OrdinalIgnoreCase) >= 0) return "启动进程/命令";
+                if (action.IndexOf("network-connect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("network-wsaconnect", StringComparison.OrdinalIgnoreCase) >= 0) return "建立网络连接";
+                if (action.IndexOf("registry-set-value", StringComparison.OrdinalIgnoreCase) >= 0) return "写入注册表";
+                if (action.IndexOf("windows-hook", StringComparison.OrdinalIgnoreCase) >= 0) return "注册 Windows Hook";
+                if (action.IndexOf("load-library", StringComparison.OrdinalIgnoreCase) >= 0) return "加载 DLL";
+                if (action.IndexOf("syscall", StringComparison.OrdinalIgnoreCase) >= 0) return "出现 syscall 绕过信号";
+                if (action.IndexOf("unhook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("hook-overwrite", StringComparison.OrdinalIgnoreCase) >= 0) return "Hook 被篡改";
+                if (action.IndexOf("sensitive-image", StringComparison.OrdinalIgnoreCase) >= 0) return "敏感模块重载异常";
+                return action;
+            }
+
+            private static string BuildBehaviorTargetDisplay(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return string.Empty;
+                }
+
+                string targetProcess = ExtractKernelTargetProcess(atom.Target);
+                if (!string.IsNullOrWhiteSpace(targetProcess))
+                {
+                    return string.IsNullOrWhiteSpace(atom.TargetPid)
+                        ? targetProcess
+                        : targetProcess + "(PID " + atom.TargetPid + ")";
+                }
+
+                if (!string.IsNullOrWhiteSpace(atom.TargetPid) &&
+                    (string.Equals(atom.Target, "CreateRemoteThread", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "CreateRemoteThreadEx", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "NtCreateThreadEx", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "WriteProcessMemory", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "NtWriteVirtualMemory", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "VirtualAllocEx", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "NtAllocateVirtualMemory", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "SetThreadContext", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(atom.Target, "QueueUserAPC", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return "PID " + atom.TargetPid;
+                }
+
+                return atom.Target ?? string.Empty;
             }
 
             private static BehaviorMatchEvaluation EvaluateBehaviorChain(UserHookBehaviorRule rule, UserHookBehaviorAtom atom, List<UserHookBehaviorAtom> candidates, HashSet<string> matchedActions)
@@ -4692,7 +5180,7 @@ namespace DataProtectorWebBridge.Services
                 bool ordered = HasPlausibleOrder(candidates);
 
                 evaluation.PrimaryProcess = FirstNonEmpty(atom.ProcessImage, candidates.Select(item => item.ProcessImage).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item)), "-");
-                evaluation.PrimaryTarget = FirstNonEmpty(atom.Target, candidates.Select(item => item.Target).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item)), "-");
+                evaluation.PrimaryTarget = FirstNonEmpty(BuildBehaviorTargetDisplay(atom), candidates.Select(BuildBehaviorTargetDisplay).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item)), "-");
                 evaluation.PrimaryTargetPid = FirstNonEmpty(atom.TargetPid, candidates.Select(item => item.TargetPid).FirstOrDefault(item => !string.IsNullOrWhiteSpace(item)), string.Empty);
                 evaluation.ScopeKey = BuildScopeKey(rule, atom);
 
@@ -4788,6 +5276,11 @@ namespace DataProtectorWebBridge.Services
                     return evaluation;
                 }
 
+                if (!EvaluateTechniqueRequirements(rule, candidates, matchedActions, evaluation))
+                {
+                    return evaluation;
+                }
+
                 if (!ordered)
                 {
                     evaluation.Reason = "events are not in a plausible order";
@@ -4800,6 +5293,326 @@ namespace DataProtectorWebBridge.Services
                 return evaluation;
             }
 
+            private static bool EvaluateTechniqueRequirements(UserHookBehaviorRule rule, List<UserHookBehaviorAtom> candidates, HashSet<string> matchedActions, BehaviorMatchEvaluation evaluation)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+
+                if (id.IndexOf("remote-dll-injection", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!HasActionLike(matchedActions, "process-access") &&
+                        !HasActionLike(matchedActions, "thread-access"))
+                    {
+                        evaluation.Reason = "missing target process or thread access";
+                        return false;
+                    }
+
+                    if (!candidates.Any(IsRemoteDllPathWriteAtom) && !HasActionLike(matchedActions, "dll-path-write"))
+                    {
+                        evaluation.Reason = "missing remote DLL path write";
+                        return false;
+                    }
+
+                    if (!candidates.Any(IsRemoteExecutionAtom))
+                    {
+                        evaluation.Reason = "missing remote execution trigger";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "目标进程被打开后写入 DLL 路径，并通过远程线程/NtCreateThreadEx 触发加载。";
+                    evaluation.Reason = "remote DLL injection chain";
+                    evaluation.Score += 50;
+                    return true;
+                }
+
+                if (id.IndexOf("shellcode-injection", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    string.Equals(id, "dp.behavior.injection-chain", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!candidates.Any(item => item.EvidenceClass == "memory" || IsRemotePayloadWriteAtom(item)) &&
+                        !HasActionLike(matchedActions, "executable-memory") &&
+                        !HasActionLike(matchedActions, "pe-image-write"))
+                    {
+                        evaluation.Reason = "missing remote executable memory or PE payload write";
+                        return false;
+                    }
+
+                    if (!candidates.Any(item => item.EvidenceClass == "write" || IsRemotePayloadWriteAtom(item)) &&
+                        !HasActionLike(matchedActions, "write-memory") &&
+                        !HasActionLike(matchedActions, "dll-path-write") &&
+                        !HasActionLike(matchedActions, "pe-image-write"))
+                    {
+                        evaluation.Reason = "missing remote memory write";
+                        return false;
+                    }
+
+                    if (!candidates.Any(IsRemoteExecutionAtom))
+                    {
+                        evaluation.Reason = "missing remote execution trigger";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "目标进程内出现远程内存准备、载荷写入和远程执行触发，形成注入闭环。";
+                    evaluation.Reason = "remote payload injection chain";
+                    evaluation.Score += 40;
+                    return true;
+                }
+
+                if (id.IndexOf("process-hollowing", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => item.Action.IndexOf("suspended-process-create", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        !candidates.Any(item => item.Action.IndexOf("nt-unmap-view", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (!candidates.Any(item => item.EvidenceClass == "write" || IsRemotePayloadWriteAtom(item)) && !HasActionLike(matchedActions, "write-memory")) ||
+                        !candidates.Any(item => item.Action.IndexOf("set-thread-context", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        !candidates.Any(item => item.Action.IndexOf("resume-thread", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        evaluation.Reason = "missing hollowing stage";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "进程被挂起创建后卸载原始映像、写入新载荷、改写线程上下文并恢复执行。";
+                    evaluation.Reason = "process hollowing chain";
+                    evaluation.Score += 45;
+                    return true;
+                }
+
+                if (id.IndexOf("apc", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => item.EvidenceClass == "apc"))
+                    {
+                        evaluation.Reason = "missing APC queue";
+                        return false;
+                    }
+
+                    if (!candidates.Any(item => item.EvidenceClass == "write" || item.EvidenceClass == "memory" || IsRemotePayloadWriteAtom(item)))
+                    {
+                        evaluation.Reason = "missing remote memory preparation before APC";
+                        return false;
+                    }
+
+                    if (!candidates.Any(item => item.Action.IndexOf("thread-access", StringComparison.OrdinalIgnoreCase) >= 0) &&
+                        !candidates.Any(item => item.Action.IndexOf("process-access", StringComparison.OrdinalIgnoreCase) >= 0) &&
+                        !candidates.Any(item => item.IsCrossProcess && (item.EvidenceClass == "write" || item.EvidenceClass == "memory")))
+                    {
+                        evaluation.Reason = "missing cross-process target context before APC";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "远程内存准备或载荷写入后向目标线程排队 APC，符合 APC 注入流程。";
+                    evaluation.Reason = "APC injection chain";
+                    evaluation.Score += 35;
+                    return true;
+                }
+
+                if (id.IndexOf("thread-hijack", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => item.Action.IndexOf("thread-access", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (!candidates.Any(item => item.EvidenceClass == "write" || IsRemotePayloadWriteAtom(item)) && !HasActionLike(matchedActions, "write-memory")) ||
+                        !candidates.Any(item => item.Action.IndexOf("set-thread-context", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        !candidates.Any(item => item.Action.IndexOf("resume-thread", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        evaluation.Reason = "missing thread hijack stage";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "目标线程被获取后写入载荷、改写线程上下文并恢复执行，符合线程劫持注入。";
+                    evaluation.Reason = "thread hijacking chain";
+                    evaluation.Score += 40;
+                    return true;
+                }
+
+                if (id.IndexOf("ntdll-reload-bypass", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => item.Action.IndexOf("sensitive-image-reload", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                item.Action.IndexOf("sensitive-image-abnormal-path", StringComparison.OrdinalIgnoreCase) >= 0) &&
+                        !candidates.Any(item => item.Action.IndexOf("syscall", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                item.Action.IndexOf("unhook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                item.Action.IndexOf("hook-overwrite", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        evaluation.Reason = "missing sensitive module reload or hook bypass evidence";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "敏感系统模块重载/异常路径加载与 Hook 篡改或 syscall 绕过信号同窗出现。";
+                    evaluation.Reason = "module reload and hook bypass chain";
+                    evaluation.Score += 35;
+                    return true;
+                }
+
+                if (id.IndexOf("script-download-execute", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => item.EvidenceClass == "process" && IsScriptInterpreterProcess(item) && HasScriptDownloadIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing script download or encoded execution intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "脚本解释器带下载、解码或 IEX 执行参数启动，并出现外联或远程脚本语义。";
+                    evaluation.Reason = "script download execution chain";
+                    evaluation.Score += candidates.Any(item => item.EvidenceClass == "network") ? 35 : 20;
+                    return true;
+                }
+
+                if (id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => item.EvidenceClass == "process" && IsScriptInterpreterProcess(item)))
+                    {
+                        evaluation.Reason = "missing script interpreter process";
+                        return false;
+                    }
+
+                    if (!candidates.Any(item => item.EvidenceClass == "network") && !candidates.Any(item => HasPublicNetworkIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing network activity";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "脚本解释器启动后同进程出现外联，符合脚本型下载/控制链。";
+                    evaluation.Reason = "script interpreter network chain";
+                    evaluation.Score += 25;
+                    return true;
+                }
+
+                if (id.IndexOf("lolbin-download-exec", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(IsLolbinProcessAtom))
+                    {
+                        evaluation.Reason = "missing LOLBin process";
+                        return false;
+                    }
+
+                    if (!candidates.Any(item => HasLolbinDownloadIntent(GetAtomText(item))) &&
+                        !candidates.Any(item => item.EvidenceClass == "network"))
+                    {
+                        evaluation.Reason = "missing download or network intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "系统自带工具带下载/代理执行参数启动，并伴随外联或远程资源语义。";
+                    evaluation.Reason = "LOLBIN download execution chain";
+                    evaluation.Score += 30;
+                    return true;
+                }
+
+                if (id.IndexOf("credential-dump", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => ContainsCredentialIntent(GetAtomText(item)) || IsLsassSensitiveAccess(item)))
+                    {
+                        evaluation.Reason = "missing credential target or dump intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "进程访问 LSASS/凭据文件或执行 procdump、comsvcs、reg save、Mimikatz 语义命令。";
+                    evaluation.Reason = "credential dumping chain";
+                    evaluation.Score += candidates.Any(IsLsassSensitiveAccess) ? 45 : 30;
+                    return true;
+                }
+
+                if (id.IndexOf("defense-impairment", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => ContainsDefenseImpairmentIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing defense impairment intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "进程尝试关闭安全服务、添加排除项、清理日志或削弱系统遥测。";
+                    evaluation.Reason = "defense impairment chain";
+                    evaluation.Score += 35;
+                    return true;
+                }
+
+                if (id.IndexOf("service-persistence", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => ContainsServicePersistenceIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing service persistence intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "创建或修改自动启动服务，具备服务型持久化特征。";
+                    evaluation.Reason = "service persistence chain";
+                    evaluation.Score += 30;
+                    return true;
+                }
+
+                if (id.IndexOf("scheduled-task", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => ContainsScheduledTaskIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing scheduled task creation intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "创建计划任务用于定时或登录自启动执行。";
+                    evaluation.Reason = "scheduled task persistence chain";
+                    evaluation.Score += 25;
+                    return true;
+                }
+
+                if (id.IndexOf("lateral-tool", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => ContainsLateralMovementIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing remote execution or lateral movement intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "远程管理/执行工具带远程主机、WMI、SMB、WinRM 或远程服务参数启动。";
+                    evaluation.Reason = "lateral movement execution chain";
+                    evaluation.Score += candidates.Any(item => item.EvidenceClass == "network") ? 35 : 25;
+                    return true;
+                }
+
+                if (id.IndexOf("ransomware-impact", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => ContainsRecoveryInhibitIntent(GetAtomText(item)) || ContainsRansomwareImpactIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing ransomware impact preparation intent";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "删除影子副本、关闭恢复、清理日志或破坏备份，符合勒索前置行为。";
+                    evaluation.Reason = "ransomware impact preparation chain";
+                    evaluation.Score += 35;
+                    return true;
+                }
+
+                if (id.IndexOf("archive-exfil", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => ContainsArchiveIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing archive collection intent";
+                        return false;
+                    }
+
+                    if (!candidates.Any(item => item.EvidenceClass == "network" || HasPublicNetworkIntent(GetAtomText(item))))
+                    {
+                        evaluation.Reason = "missing exfiltration network context";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "归档工具或脚本压缩用户数据后出现外联，符合收集后外传链。";
+                    evaluation.Reason = "archive and exfiltration chain";
+                    evaluation.Score += 25;
+                    return true;
+                }
+
+                if (id.IndexOf("user-writable-dll-load", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    if (!candidates.Any(item => item.EvidenceClass == "module" && IsUserWritablePath(item.Target) && item.Target.IndexOf(".dll", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        evaluation.Reason = "missing user-writable DLL load";
+                        return false;
+                    }
+
+                    evaluation.AttackStory = "进程从用户可写目录加载 DLL，可能是 DLL 劫持、侧载或投递后加载。";
+                    evaluation.Reason = "user-writable DLL load";
+                    evaluation.Score += 20;
+                    return true;
+                }
+
+                return true;
+            }
+
             private static bool IsRelatedBehaviorScope(UserHookBehaviorRule rule, UserHookBehaviorAtom anchor, UserHookBehaviorAtom candidate)
             {
                 if (!string.Equals(anchor.Host, candidate.Host, StringComparison.OrdinalIgnoreCase))
@@ -4807,14 +5620,39 @@ namespace DataProtectorWebBridge.Services
                     return false;
                 }
 
+                if (IsProcessHollowingRule(rule))
+                {
+                    if (string.Equals(anchor.ProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(anchor.ParentProcessKey) &&
+                        string.Equals(anchor.ParentProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(candidate.ParentProcessKey) &&
+                        string.Equals(candidate.ParentProcessKey, anchor.ProcessKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+
                 if (RuleRequiresCrossProcess(rule))
                 {
-                    string anchorTarget = FirstNonEmpty(anchor.TargetPid, anchor.Target);
-                    string candidateTarget = FirstNonEmpty(candidate.TargetPid, candidate.Target);
-                    return string.Equals(anchor.ProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase) &&
-                           (string.IsNullOrWhiteSpace(anchorTarget) ||
-                            string.IsNullOrWhiteSpace(candidateTarget) ||
-                            string.Equals(anchorTarget, candidateTarget, StringComparison.OrdinalIgnoreCase));
+                    if (!string.Equals(anchor.ProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(anchor.TargetPid) || string.IsNullOrWhiteSpace(candidate.TargetPid))
+                    {
+                        return true;
+                    }
+
+                    return string.Equals(anchor.TargetPid, candidate.TargetPid, StringComparison.OrdinalIgnoreCase);
                 }
 
                 if (string.Equals(anchor.ProcessKey, candidate.ProcessKey, StringComparison.OrdinalIgnoreCase))
@@ -4828,12 +5666,23 @@ namespace DataProtectorWebBridge.Services
 
             private static string BuildScopeKey(UserHookBehaviorRule rule, UserHookBehaviorAtom atom)
             {
+                if (IsProcessHollowingRule(rule))
+                {
+                    return atom.ProcessKey;
+                }
+
                 if (RuleRequiresCrossProcess(rule))
                 {
                     return atom.ProcessKey + "->" + FirstNonEmpty(atom.TargetPid, atom.Target, "unknown-target");
                 }
 
                 return atom.ProcessKey;
+            }
+
+            private static bool IsProcessHollowingRule(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("process-hollowing", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
             private static bool IsHighConfidenceSingleEventRule(UserHookBehaviorRule rule)
@@ -4848,7 +5697,8 @@ namespace DataProtectorWebBridge.Services
                 string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
                 return id.IndexOf("injection", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        id.IndexOf("hollow", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                       id.IndexOf("apc", StringComparison.OrdinalIgnoreCase) >= 0;
+                       id.IndexOf("apc", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("thread-hijack", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
             private static bool RuleRequiresSuspiciousContext(UserHookBehaviorRule rule)
@@ -4856,8 +5706,14 @@ namespace DataProtectorWebBridge.Services
                 string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
                 return id.IndexOf("lolbin", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("script-download", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        id.IndexOf("office-script", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                       id.IndexOf("persistence", StringComparison.OrdinalIgnoreCase) >= 0;
+                       id.IndexOf("persistence", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("credential", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("defense-impairment", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("lateral-tool", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("ransomware", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("archive-exfil", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
             private static bool RuleRequiresEtwPatchEvidence(UserHookBehaviorRule rule)
@@ -4872,7 +5728,16 @@ namespace DataProtectorWebBridge.Services
                 return id.IndexOf("persistence", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        id.IndexOf("recovery-inhibit", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        id.IndexOf("lolbin", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                       id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0;
+                       id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("script-download", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("credential", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("defense-impairment", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("lateral-tool", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("ransomware", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("archive-exfil", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("service-persistence", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("scheduled-task", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("user-writable-dll-load", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
             private static bool RuleRequiresExecutableMemoryContext(UserHookBehaviorRule rule)
@@ -4905,6 +5770,16 @@ namespace DataProtectorWebBridge.Services
                        ContainsPersistenceIntent(atom.Target) ||
                        ContainsRecoveryInhibitIntent(atom.CommandLine) ||
                        ContainsRecoveryInhibitIntent(atom.Target) ||
+                       ContainsDefenseImpairmentIntent(atom.CommandLine) ||
+                       ContainsDefenseImpairmentIntent(atom.Target) ||
+                       ContainsScriptDownloadIntent(atom.CommandLine) ||
+                       ContainsScriptDownloadIntent(atom.Target) ||
+                       ContainsLateralMovementIntent(atom.CommandLine) ||
+                       ContainsLateralMovementIntent(atom.Target) ||
+                       ContainsRansomwareImpactIntent(atom.CommandLine) ||
+                       ContainsRansomwareImpactIntent(atom.Target) ||
+                       ContainsArchiveIntent(atom.CommandLine) ||
+                       ContainsArchiveIntent(atom.Target) ||
                        HasPublicNetworkIntent(atom.CommandLine) ||
                        HasPublicNetworkIntent(atom.Target);
             }
@@ -4918,6 +5793,111 @@ namespace DataProtectorWebBridge.Services
                        action.IndexOf("syscall-bypass", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        action.IndexOf("unhook", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        action.IndexOf("hook-overwrite", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool HasActionLike(HashSet<string> actions, string normalizedAction)
+            {
+                if (actions == null || string.IsNullOrWhiteSpace(normalizedAction))
+                {
+                    return false;
+                }
+
+                return actions.Any(action => string.Equals(NormalizeActionAtom(action), normalizedAction, StringComparison.OrdinalIgnoreCase));
+            }
+
+            private static bool IsRemoteDllPathWriteAtom(UserHookBehaviorAtom atom)
+            {
+                return atom != null &&
+                       atom.IsCrossProcess &&
+                       atom.Action.IndexOf("remote-dll-path-write", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool IsRemotePayloadWriteAtom(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return false;
+                }
+
+                return atom.Action.IndexOf("remote-dll-path-write", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       atom.Action.IndexOf("remote-pe-image-write", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static bool IsRemoteExecutionAtom(UserHookBehaviorAtom atom)
+            {
+                if (atom == null || !atom.IsCrossProcess)
+                {
+                    return false;
+                }
+
+                return atom.EvidenceClass == "execute" ||
+                       atom.Action.IndexOf("remote-thread-create", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       atom.Action.IndexOf("create-remote-thread", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       atom.Action.IndexOf("nt-create-thread-ex", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            private static string GetAtomText(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return string.Empty;
+                }
+
+                return (atom.Action ?? string.Empty) + " " +
+                       (atom.ProcessImage ?? string.Empty) + " " +
+                       (atom.Target ?? string.Empty) + " " +
+                       (atom.CommandLine ?? string.Empty) + " " +
+                       (atom.ParentImage ?? string.Empty);
+            }
+
+            private static bool IsScriptInterpreterProcess(UserHookBehaviorAtom atom)
+            {
+                string name = ExtractFileName(FirstNonEmpty(atom == null ? string.Empty : atom.ProcessImage, atom == null ? string.Empty : atom.Target));
+                string text = GetAtomText(atom);
+                string[] names = { "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe", "msbuild.exe" };
+                return names.Any(item => string.Equals(item, name, StringComparison.OrdinalIgnoreCase)) ||
+                       names.Any(item => text.IndexOf(item, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool IsLolbinProcessAtom(UserHookBehaviorAtom atom)
+            {
+                string name = ExtractFileName(FirstNonEmpty(atom == null ? string.Empty : atom.ProcessImage, atom == null ? string.Empty : atom.Target));
+                string text = GetAtomText(atom);
+                string[] names =
+                {
+                    "certutil.exe", "bitsadmin.exe", "mshta.exe", "regsvr32.exe", "rundll32.exe", "msiexec.exe",
+                    "installutil.exe", "regasm.exe", "regsvcs.exe", "wmic.exe", "powershell.exe", "pwsh.exe",
+                    "msbuild.exe", "forfiles.exe", "mshta.exe", "odbcconf.exe"
+                };
+
+                return names.Any(item => string.Equals(item, name, StringComparison.OrdinalIgnoreCase)) ||
+                       names.Any(item => text.IndexOf(item, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool IsLsassSensitiveAccess(UserHookBehaviorAtom atom)
+            {
+                if (atom == null)
+                {
+                    return false;
+                }
+
+                string text = GetAtomText(atom);
+                if (text.IndexOf("lsass", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return false;
+                }
+
+                int access = ExtractHexInt(atom.Target, "access=");
+                if (access == 0)
+                {
+                    return atom.Action.IndexOf("process-access", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+
+                const int vmRead = 0x00000010;
+                const int dupHandle = 0x00000040;
+                const int queryInfo = 0x00000400;
+                const int queryLimited = 0x00001000;
+                return (access & (vmRead | dupHandle | queryInfo | queryLimited)) != 0;
             }
 
             private static bool HasPlausibleOrder(List<UserHookBehaviorAtom> candidates)
@@ -4963,6 +5943,11 @@ namespace DataProtectorWebBridge.Services
                     return false;
                 }
 
+                if (RuleUsesTechniqueLevelFiltering(rule))
+                {
+                    return true;
+                }
+
                 if (!MatchesOptionalList(rule.processNames, atom.ProcessImage) &&
                     !MatchesOptionalList(rule.processNames, atom.Target) &&
                     !MatchesOptionalList(rule.processNames, atom.CommandLine))
@@ -4986,6 +5971,22 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 return true;
+            }
+
+            private static bool RuleUsesTechniqueLevelFiltering(UserHookBehaviorRule rule)
+            {
+                string id = rule == null ? string.Empty : (rule.ruleId ?? string.Empty);
+                return id.IndexOf("lolbin", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("script-network", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("script-download", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("credential", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("defense-impairment", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("service-persistence", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("scheduled-task", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("lateral-tool", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("ransomware", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("archive-exfil", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       id.IndexOf("user-writable-dll-load", StringComparison.OrdinalIgnoreCase) >= 0;
             }
 
             private static bool MatchesAction(string[] actions, string action)
@@ -5026,33 +6027,59 @@ namespace DataProtectorWebBridge.Services
                 value = value.Replace("nt-", string.Empty);
                 value = value.Replace("behavior-", string.Empty);
                 value = value.Replace("-ex", string.Empty);
+                value = value.Replace("-", string.Empty);
 
-                if (value == "create-remote-thread" || value == "remote-thread-create" || value == "createthread")
+                if (value == "createremotethread" || value == "remotethreadcreate" || value == "createthread")
                 {
                     return "remote-thread";
                 }
 
-                if (value == "write-process-memory" || value == "write-virtual-memory")
+                if (value == "createremotethread" || value == "createremotethreadex" || value == "ntcreatethreadex")
+                {
+                    return "remote-thread";
+                }
+
+                if (value == "writeprocessmemory" || value == "writevirtualmemory")
                 {
                     return "write-memory";
                 }
 
-                if (value == "remote-executable-memory" || value == "allocate-executable-memory" || value == "protect-executable-memory")
+                if (value == "writeprocessmemory" || value == "ntwritevirtualmemory")
+                {
+                    return "write-memory";
+                }
+
+                if (value == "remotedllpathwrite")
+                {
+                    return "dll-path-write";
+                }
+
+                if (value == "remotepeimagewrite")
+                {
+                    return "pe-image-write";
+                }
+
+                if (value == "remoteexecutablememory" || value == "allocateexecutablememory" || value == "protectexecutablememory")
                 {
                     return "executable-memory";
                 }
 
-                if (value == "queue-user-apc")
+                if (value == "virtualallocex" || value == "virtualprotectex" || value == "ntallocatevirtualmemory" || value == "ntprotectvirtualmemory")
+                {
+                    return "executable-memory";
+                }
+
+                if (value == "queueuserapc")
                 {
                     return "queue-apc";
                 }
 
-                if (value == "process-access")
+                if (value == "processaccess")
                 {
                     return "process-access";
                 }
 
-                if (value == "thread-access")
+                if (value == "threadaccess")
                 {
                     return "thread-access";
                 }
@@ -5148,7 +6175,7 @@ namespace DataProtectorWebBridge.Services
                 };
                 atom.ProcessKey = string.IsNullOrWhiteSpace(atom.ProcessImage)
                     ? atom.Host + "|" + ExtractPid(record.Message)
-                    : atom.Host + "|" + atom.ProcessImage;
+                    : atom.Host + "|" + FirstNonEmpty(atom.ProcessPid, atom.ProcessImage);
                 atom.ParentProcessKey = string.IsNullOrWhiteSpace(atom.ParentImage) ? string.Empty : atom.Host + "|" + atom.ParentImage;
                 atom.EvidenceClass = ClassifyEvidenceClass(atom);
                 atom.IsCrossProcess = IsCrossProcessAtom(atom);
@@ -5166,7 +6193,9 @@ namespace DataProtectorWebBridge.Services
                 string api = (atom == null ? string.Empty : (atom.Target ?? string.Empty)) + " " + (atom == null ? string.Empty : (atom.CommandLine ?? string.Empty));
 
                 if (action.IndexOf("write-process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    action.IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0)
+                    action.IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("remote-dll-path-write", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("remote-pe-image-write", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return "write";
                 }
@@ -5241,6 +6270,15 @@ namespace DataProtectorWebBridge.Services
 
                 if (string.IsNullOrWhiteSpace(atom.TargetPid))
                 {
+                if (atom.Action.IndexOf("process-create", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    atom.Action.IndexOf("load-library", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    atom.Action.IndexOf("registry", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    atom.Action.IndexOf("network", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    atom.Action.IndexOf("windows-hook", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return false;
+                }
+
                     return atom.Action.IndexOf("remote", StringComparison.OrdinalIgnoreCase) >= 0 ||
                            atom.Action.IndexOf("process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
                            atom.Action.IndexOf("thread", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -5257,7 +6295,8 @@ namespace DataProtectorWebBridge.Services
                     "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe",
                     "regsvr32.exe", "certutil.exe", "bitsadmin.exe", "wmic.exe", "msiexec.exe", "installutil.exe",
                     "regasm.exe", "regsvcs.exe", "vssadmin.exe", "wbadmin.exe", "bcdedit.exe", "reagentc.exe",
-                    "schtasks.exe", "sc.exe", "psexec.exe", "procdump.exe"
+                    "schtasks.exe", "sc.exe", "psexec.exe", "paexec.exe", "procdump.exe", "reg.exe", "wevtutil.exe",
+                    "auditpol.exe", "net.exe", "net1.exe", "winrs.exe", "7z.exe", "7za.exe", "rar.exe", "winrar.exe"
                 };
 
                 return names.Any(item => string.Equals(item, name, StringComparison.OrdinalIgnoreCase));
@@ -5306,6 +6345,14 @@ namespace DataProtectorWebBridge.Services
                     return true;
                 }
 
+                if (IsKnownBenignWindowsServicePair(processName, targetName) &&
+                    !IsRemoteExecutionAtom(atom) &&
+                    !IsRemotePayloadWriteAtom(atom) &&
+                    !HasExplicitMaliciousIntent(atom))
+                {
+                    return true;
+                }
+
                 if (IsBenignSystemProcess(processName) && IsQueryOnlyProcessAccess(atom) && !ContainsCredentialIntent(text))
                 {
                     return true;
@@ -5317,6 +6364,38 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 if (processName == "conhost.exe" && (targetName == "cmd.exe" || targetName == "powershell.exe" || targetName == "schtasks.exe"))
+                {
+                    return true;
+                }
+
+                return false;
+            }
+
+            private static bool IsKnownBenignWindowsServicePair(string processName, string targetName)
+            {
+                if (string.IsNullOrWhiteSpace(processName) || string.IsNullOrWhiteSpace(targetName))
+                {
+                    return false;
+                }
+
+                if (processName == "svchost.exe" &&
+                    (targetName == "consent.exe" ||
+                     targetName == "smartscreen.exe" ||
+                     targetName == "explorer.exe" ||
+                     targetName == "everything.exe"))
+                {
+                    return true;
+                }
+
+                if (processName == "searchindexer.exe" &&
+                    (targetName == "searchfilterhost.exe" ||
+                     targetName == "searchprotocolhost.exe" ||
+                     targetName == "searchprotocol"))
+                {
+                    return true;
+                }
+
+                if (processName == "consent.exe" && targetName == "svchost.exe")
                 {
                     return true;
                 }
@@ -5400,7 +6479,51 @@ namespace DataProtectorWebBridge.Services
                 return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0) ||
                        ContainsCredentialIntent(value) ||
                        ContainsPersistenceIntent(value) ||
-                       ContainsRecoveryInhibitIntent(value);
+                       ContainsRecoveryInhibitIntent(value) ||
+                       ContainsDefenseImpairmentIntent(value) ||
+                       ContainsScriptDownloadIntent(value) ||
+                       ContainsLateralMovementIntent(value) ||
+                       ContainsRansomwareImpactIntent(value);
+            }
+
+            private static bool HasScriptDownloadIntent(string value)
+            {
+                return ContainsScriptDownloadIntent(value);
+            }
+
+            private static bool ContainsScriptDownloadIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "-enc", "-encodedcommand", "frombase64string", "downloadstring", "downloadfile",
+                    "invoke-webrequest", "invoke-restmethod", " iwr ", " irm ", "curl ", "wget ",
+                    "invoke-expression", " iex ", "http://", "https://", "javascript:", "vbscript:",
+                    "mshta", "regsvr32", "scrobj.dll", "/i:", "rundll32"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool HasLolbinDownloadIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "urlcache", "split", "decode", "download", "http://", "https://", "scrobj.dll",
+                    "javascript:", "vbscript:", "/i:", "installutil", "regasm", "regsvcs", "mshta",
+                    "rundll32", "regsvr32", "bitsadmin", "certutil"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
             }
 
             private static bool ContainsCredentialIntent(string value)
@@ -5436,6 +6559,38 @@ namespace DataProtectorWebBridge.Services
                 return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
             }
 
+            private static bool ContainsServicePersistenceIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "sc create", "sc.exe create", "new-service", "create service", "start= auto",
+                    "binpath=", "\\services\\", "imagepath", "service control", "servicemain"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool ContainsScheduledTaskIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "schtasks /create", "schtasks.exe /create", "new-scheduledtask", "register-scheduledtask",
+                    " /sc ", " /tn ", " /tr ", " /ru ", "\\tasks\\"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
             private static bool ContainsRecoveryInhibitIntent(string value)
             {
                 if (string.IsNullOrWhiteSpace(value))
@@ -5447,6 +6602,74 @@ namespace DataProtectorWebBridge.Services
                 {
                     "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete",
                     "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "reagentc /disable"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool ContainsDefenseImpairmentIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "set-mppreference", "disablerealtimemonitoring", "disableantispyware", "add-mppreference",
+                    "exclusionpath", "windefend", "sc stop", "sc config", "net stop", "wevtutil cl",
+                    "auditpol /clear", "tamperprotection", "defender", "securityhealthservice", "eventlog",
+                    "sysmon", "dataprotector", "disablebehavior monitoring", "disablescriptscanning"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool ContainsLateralMovementIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "\\\\", "/node:", "process call create", "wmic ", "psexec", "paexec", "winrs",
+                    "invoke-command", "enter-pssession", "new-pssession", "sc \\\\", "schtasks /s",
+                    " /s ", "admin$", "ipc$", "remote service", "smbexec", "wmiexec"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool ContainsRansomwareImpactIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "delete shadows", "shadowcopy delete", "resize shadowstorage", "wbadmin delete",
+                    "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "reagentc /disable",
+                    "wevtutil cl", "cipher /w", "vssadmin", "bcdedit", "fsutil usn deletejournal"
+                };
+
+                return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+
+            private static bool ContainsArchiveIntent(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return false;
+                }
+
+                string[] tokens =
+                {
+                    "compress-archive", ".zip", ".rar", ".7z", " 7z", "7za", "winrar", "rar a",
+                    "tar -", "makecab", "documents", "desktop", "downloads", "users\\", "appdata"
                 };
 
                 return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
@@ -5626,6 +6849,7 @@ namespace DataProtectorWebBridge.Services
             public string PrimaryProcess { get; set; }
             public string PrimaryTarget { get; set; }
             public string PrimaryTargetPid { get; set; }
+            public string AttackStory { get; set; }
             public HashSet<string> EvidenceClasses { get; private set; }
 
             public BehaviorMatchEvaluation()
@@ -5636,6 +6860,7 @@ namespace DataProtectorWebBridge.Services
                 PrimaryProcess = string.Empty;
                 PrimaryTarget = string.Empty;
                 PrimaryTargetPid = string.Empty;
+                AttackStory = string.Empty;
             }
         }
 
