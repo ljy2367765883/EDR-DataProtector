@@ -207,6 +207,12 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/filehunter/diagnostics")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryFileHunterDiagnostics(dlpProtectionService.QueryPolicy()));
+                    return;
+                }
+
                 if (method == "POST" && path == "/api/dlp/policy")
                 {
                     PolicyBridgeService.DlpProtectionPolicyRequest request =

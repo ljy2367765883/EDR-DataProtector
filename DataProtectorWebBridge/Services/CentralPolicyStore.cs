@@ -166,6 +166,45 @@ namespace DataProtectorWebBridge.Services
             }
         }
 
+        public object QueryFileHunterDiagnostics()
+        {
+            lock (syncRoot)
+            {
+                EnsureDlpProtectionPolicy();
+                AuditLog.AuditRecord[] recent = state.Audit
+                    .Where(record => record != null && string.Equals(record.Action, "dlp.file.read", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(record => record.TimestampUtc, StringComparer.OrdinalIgnoreCase)
+                    .Take(20)
+                    .Select(CloneAudit)
+                    .ToArray();
+
+                return new
+                {
+                    mode = "server",
+                    policyVersion = state.PolicyVersion,
+                    safeFolderCount = state.DlpProtectionPolicy.safeFolders == null ? 0 : state.DlpProtectionPolicy.safeFolders.Length,
+                    safeFolders = state.DlpProtectionPolicy.safeFolders ?? new string[0],
+                    recentFileHunterAuditCount = recent.Length,
+                    recentFileHunterAudit = recent,
+                    devices = state.Devices.Values
+                        .Select(device => new
+                        {
+                            deviceId = device.DeviceId,
+                            machine = device.Machine,
+                            user = device.User,
+                            online = IsOnline(device),
+                            lastSeenUtc = device.LastSeenUtc,
+                            policyVersion = device.PolicyVersion,
+                            lastApplyStatus = device.LastApplyStatus,
+                            lastApplyMessage = device.LastApplyMessage
+                        })
+                        .OrderBy(item => item.machine, StringComparer.OrdinalIgnoreCase)
+                        .ToArray(),
+                    note = "Server diagnostics shows central safe folders, agent apply status, and recent dlp.file.read audit received from agents. Local driver event queues are only visible on each agent."
+                };
+            }
+        }
+
         public UsbCryptDriverPackageInfo QueryUsbCryptDriverPackage()
         {
             lock (syncRoot)
@@ -1474,6 +1513,7 @@ namespace DataProtectorWebBridge.Services
                 if (request.Audit != null)
                 {
                     int acceptedAuditCount = 0;
+                    int fileHunterAuditCount = 0;
                     foreach (AuditLog.AuditRecord record in request.Audit)
                     {
                         AuditLog.AuditRecord normalized = CloneAudit(record);
@@ -1495,11 +1535,31 @@ namespace DataProtectorWebBridge.Services
 
                         state.Audit.Add(normalized);
                         acceptedAuditCount++;
+                        if (string.Equals(normalized.Action, "dlp.file.read", StringComparison.OrdinalIgnoreCase))
+                        {
+                            fileHunterAuditCount++;
+                            Console.WriteLine(
+                                DateTime.Now.ToString("s") +
+                                " Central received file hunter read from " +
+                                device.Machine +
+                                " (" +
+                                device.DeviceId +
+                                "): process=" +
+                                (normalized.SourceProcess ?? normalized.Extension ?? string.Empty) +
+                                "; pid=" +
+                                (normalized.SourcePid ?? string.Empty) +
+                                "; target=" +
+                                (normalized.Target ?? string.Empty));
+                        }
                     }
 
                     if (acceptedAuditCount > 0)
                     {
                         Console.WriteLine(DateTime.Now.ToString("s") + " Central received " + acceptedAuditCount + " audit event(s) from " + device.Machine + " (" + device.DeviceId + ").");
+                        if (fileHunterAuditCount > 0)
+                        {
+                            Console.WriteLine(DateTime.Now.ToString("s") + " Central accepted " + fileHunterAuditCount + " file hunter audit event(s) from " + device.Machine + ".");
+                        }
                     }
                 }
 

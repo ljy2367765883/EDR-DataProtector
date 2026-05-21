@@ -13,6 +13,13 @@ Abstract:
 
 #include "DataProtector.h"
 
+#if DP_ENABLE_FILE_HUNTER_TRACE
+#define DP_FILE_HUNTER_TRACE(_format, ...) \
+    DbgPrint("DataProtector[FileHunter] " _format, __VA_ARGS__)
+#else
+#define DP_FILE_HUNTER_TRACE(_format, ...) ((void)0)
+#endif
+
 typedef struct _DP_FILE_HUNTER_RULE_ENTRY {
     LIST_ENTRY Link;
     UNICODE_STRING Directory;
@@ -41,6 +48,8 @@ static ULONG gDpFileHunterRuleCount = 0;
 static ULONG gDpFileHunterEventCount = 0;
 static ULONGLONG gDpFileHunterEventSequence = 0;
 static ULONGLONG gDpFileHunterDroppedEvents = 0;
+static volatile LONG gDpFileHunterMissTraceCounter = 0;
+static volatile LONG gDpFileHunterSkipTraceCounter = 0;
 static DP_FILE_HUNTER_DEDUP_ENTRY gDpFileHunterDedup[DP_FILE_HUNTER_DEDUP_SLOTS];
 
 extern
@@ -48,6 +57,15 @@ UCHAR *
 PsGetProcessImageFileName(
     _In_ PEPROCESS Process
     );
+
+static
+BOOLEAN
+DpFileHunterCanTraceText(
+    VOID
+    )
+{
+    return KeGetCurrentIrql() == PASSIVE_LEVEL;
+}
 
 static
 VOID
@@ -427,8 +445,14 @@ DpFileHunterInitialize(
     gDpFileHunterEventCount = 0;
     gDpFileHunterEventSequence = 0;
     gDpFileHunterDroppedEvents = 0;
+    gDpFileHunterMissTraceCounter = 0;
+    gDpFileHunterSkipTraceCounter = 0;
     RtlZeroMemory(gDpFileHunterDedup, sizeof(gDpFileHunterDedup));
     gDpFileHunterInitialized = TRUE;
+
+    DP_FILE_HUNTER_TRACE("initialized maxRules=%lu maxEvents=%lu\n",
+                         DP_FILE_HUNTER_MAX_RULES,
+                         DP_FILE_HUNTER_MAX_EVENTS);
 
     return STATUS_SUCCESS;
 }
@@ -449,6 +473,8 @@ DpFileHunterUninitialize(
     DpFileHunterClearEvents();
     FltDeletePushLock(&gDpFileHunterRuleLock);
     gDpFileHunterInitialized = FALSE;
+
+    DP_FILE_HUNTER_TRACE("uninitialized\n", 0);
 }
 
 NTSTATUS
@@ -467,6 +493,9 @@ DpFileHunterAddRule(
         Rule->DirectoryLengthBytes > sizeof(Rule->Directory) ||
         Rule->DirectoryLengthBytes % sizeof(WCHAR) != 0) {
 
+        DP_FILE_HUNTER_TRACE("add rule rejected invalid initialized=%lu rule=%p\n",
+                             gDpFileHunterInitialized ? 1ul : 0ul,
+                             Rule);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -484,6 +513,15 @@ DpFileHunterAddRule(
     RtlZeroMemory(entry, sizeof(DP_FILE_HUNTER_RULE_ENTRY));
     status = DpFileHunterDuplicateDirectory(&source, &entry->Directory);
     if (!NT_SUCCESS(status)) {
+        if (DpFileHunterCanTraceText()) {
+            DP_FILE_HUNTER_TRACE("add rule normalize failed status=0x%08X source=%wZ\n",
+                                 status,
+                                 &source);
+        } else {
+            DP_FILE_HUNTER_TRACE("add rule normalize failed status=0x%08X sourceLength=%lu\n",
+                                 status,
+                                 source.Length);
+        }
         DpFileHunterFreeRule(entry);
         return status;
     }
@@ -502,6 +540,18 @@ DpFileHunterAddRule(
     }
 
     FltReleasePushLock(&gDpFileHunterRuleLock);
+
+    if (DpFileHunterCanTraceText()) {
+        DP_FILE_HUNTER_TRACE("add rule status=0x%08X count=%lu directory=%wZ\n",
+                             status == STATUS_OBJECT_NAME_COLLISION ? STATUS_SUCCESS : status,
+                             gDpFileHunterRuleCount,
+                             &source);
+    } else {
+        DP_FILE_HUNTER_TRACE("add rule status=0x%08X count=%lu directoryBytes=%lu\n",
+                             status == STATUS_OBJECT_NAME_COLLISION ? STATUS_SUCCESS : status,
+                             gDpFileHunterRuleCount,
+                             source.Length);
+    }
 
     DpFileHunterFreeRule(entry);
     return status == STATUS_OBJECT_NAME_COLLISION ? STATUS_SUCCESS : status;
@@ -525,6 +575,9 @@ DpFileHunterRemoveRule(
         Rule->DirectoryLengthBytes > sizeof(Rule->Directory) ||
         Rule->DirectoryLengthBytes % sizeof(WCHAR) != 0) {
 
+        DP_FILE_HUNTER_TRACE("remove rule rejected invalid initialized=%lu rule=%p\n",
+                             gDpFileHunterInitialized ? 1ul : 0ul,
+                             Rule);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -534,6 +587,15 @@ DpFileHunterRemoveRule(
 
     status = DpFileHunterDuplicateDirectory(&source, &normalized);
     if (!NT_SUCCESS(status)) {
+        if (DpFileHunterCanTraceText()) {
+            DP_FILE_HUNTER_TRACE("remove rule normalize failed status=0x%08X source=%wZ\n",
+                                 status,
+                                 &source);
+        } else {
+            DP_FILE_HUNTER_TRACE("remove rule normalize failed status=0x%08X sourceLength=%lu\n",
+                                 status,
+                                 source.Length);
+        }
         return status;
     }
 
@@ -555,7 +617,26 @@ DpFileHunterRemoveRule(
     DpFileHunterFreeUnicodeString(&normalized);
 
     if (matchedRule == NULL) {
+        if (DpFileHunterCanTraceText()) {
+            DP_FILE_HUNTER_TRACE("remove rule not found count=%lu directory=%wZ\n",
+                                 gDpFileHunterRuleCount,
+                                 &source);
+        } else {
+            DP_FILE_HUNTER_TRACE("remove rule not found count=%lu directoryBytes=%lu\n",
+                                 gDpFileHunterRuleCount,
+                                 source.Length);
+        }
         return STATUS_NOT_FOUND;
+    }
+
+    if (DpFileHunterCanTraceText()) {
+        DP_FILE_HUNTER_TRACE("remove rule success count=%lu directory=%wZ\n",
+                             gDpFileHunterRuleCount,
+                             &source);
+    } else {
+        DP_FILE_HUNTER_TRACE("remove rule success count=%lu directoryBytes=%lu\n",
+                             gDpFileHunterRuleCount,
+                             source.Length);
     }
 
     DpFileHunterFreeRule(matchedRule);
@@ -572,6 +653,9 @@ DpFileHunterClearRules(
     }
 
     FltAcquirePushLockExclusive(&gDpFileHunterRuleLock);
+    DP_FILE_HUNTER_TRACE("clear rules previous=%lu queuedEvents=%lu\n",
+                         gDpFileHunterRuleCount,
+                         gDpFileHunterEventCount);
     DpFileHunterClearRulesLocked();
     FltReleasePushLock(&gDpFileHunterRuleLock);
 }
@@ -652,6 +736,13 @@ DpFileHunterQueryRules(
     header->BytesRequired = bytesRequired;
     header->BytesReturned = bytesReturned;
     *ReturnOutputBufferLength = bytesReturned;
+
+    DP_FILE_HUNTER_TRACE("query rules sizing=%lu rules=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu\n",
+                         sizingOnly ? 1ul : 0ul,
+                         ruleCount,
+                         returnedRuleCount,
+                         bytesRequired,
+                         bytesReturned);
 
     if (sizingOnly) {
         return STATUS_SUCCESS;
@@ -736,6 +827,9 @@ DpFileHunterQueryEvents(
             PLIST_ENTRY eventLink = RemoveHeadList(&gDpFileHunterEvents);
             PDP_FILE_HUNTER_EVENT_ENTRY event = CONTAINING_RECORD(eventLink, DP_FILE_HUNTER_EVENT_ENTRY, Link);
             gDpFileHunterEventCount--;
+            DP_FILE_HUNTER_TRACE("query drain seq=%I64u remaining=%lu\n",
+                                 event->Event.Sequence,
+                                 gDpFileHunterEventCount);
             KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
             DpFileHunterFreeEvent(event);
             KeAcquireSpinLock(&gDpFileHunterEventLock, &oldIrql);
@@ -743,6 +837,14 @@ DpFileHunterQueryEvents(
     }
 
     KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
+
+    DP_FILE_HUNTER_TRACE("query events sizing=%lu events=%lu returned=%lu bytesRequired=%lu bytesReturned=%lu dropped=%I64u\n",
+                         sizingOnly ? 1ul : 0ul,
+                         eventCount,
+                         returnedEventCount,
+                         bytesRequired,
+                         bytesReturned,
+                         gDpFileHunterDroppedEvents);
 
     if (sizingOnly) {
         return STATUS_SUCCESS;
@@ -783,10 +885,26 @@ DpFileHunterPrepareReadAudit(
         Length == 0 ||
         FlagOn(FltObjects->FileObject->Flags, FO_VOLUME_OPEN)) {
 
+        if (gDpFileHunterInitialized && gDpFileHunterRuleCount != 0) {
+            LONG skip = InterlockedIncrement(&gDpFileHunterSkipTraceCounter);
+            if ((skip & 0x3F) == 1) {
+                DP_FILE_HUNTER_TRACE("read skip invalid length=%lu data=%p file=%p fsctx=%p flags=0x%08X rules=%lu sample=%ld\n",
+                                     Length,
+                                     Data,
+                                     FltObjects == NULL ? NULL : FltObjects->FileObject,
+                                     (FltObjects == NULL || FltObjects->FileObject == NULL) ? NULL : FltObjects->FileObject->FsContext,
+                                     (FltObjects == NULL || FltObjects->FileObject == NULL) ? 0ul : FltObjects->FileObject->Flags,
+                                     gDpFileHunterRuleCount,
+                                     skip);
+            }
+        }
         return STATUS_SUCCESS;
     }
 
     if (KeGetCurrentIrql() > APC_LEVEL) {
+        DP_FILE_HUNTER_TRACE("read skip irql=%lu rules=%lu\n",
+                             KeGetCurrentIrql(),
+                             gDpFileHunterRuleCount);
         return STATUS_SUCCESS;
     }
 
@@ -800,10 +918,30 @@ DpFileHunterPrepareReadAudit(
     }
 
     if (!NT_SUCCESS(status) || nameInfo == NULL) {
+        DP_FILE_HUNTER_TRACE("read name query failed status=0x%08X rules=%lu pid=%p\n",
+                             status,
+                             gDpFileHunterRuleCount,
+                             FltGetRequestorProcessIdEx(Data));
         return STATUS_SUCCESS;
     }
 
     if (!DpFileHunterIsProtectedPath(&nameInfo->Name)) {
+        LONG miss = InterlockedIncrement(&gDpFileHunterMissTraceCounter);
+        if ((miss & 0x7F) == 1) {
+            if (DpFileHunterCanTraceText()) {
+                DP_FILE_HUNTER_TRACE("read path miss rules=%lu pid=%p sample=%ld path=%wZ\n",
+                                     gDpFileHunterRuleCount,
+                                     FltGetRequestorProcessIdEx(Data),
+                                     miss,
+                                     &nameInfo->Name);
+            } else {
+                DP_FILE_HUNTER_TRACE("read path miss rules=%lu pid=%p sample=%ld pathBytes=%lu\n",
+                                     gDpFileHunterRuleCount,
+                                     FltGetRequestorProcessIdEx(Data),
+                                     miss,
+                                     nameInfo->Name.Length);
+            }
+        }
         FltReleaseFileNameInformation(nameInfo);
         return STATUS_SUCCESS;
     }
@@ -812,6 +950,15 @@ DpFileHunterPrepareReadAudit(
                                     sizeof(DP_FILE_HUNTER_READ_CONTEXT),
                                     DP_TAG_FILE_HUNTER_CONTEXT);
     if (context == NULL) {
+        if (DpFileHunterCanTraceText()) {
+            DP_FILE_HUNTER_TRACE("read context allocation failed pid=%p path=%wZ\n",
+                                 FltGetRequestorProcessIdEx(Data),
+                                 &nameInfo->Name);
+        } else {
+            DP_FILE_HUNTER_TRACE("read context allocation failed pid=%p pathBytes=%lu\n",
+                                 FltGetRequestorProcessIdEx(Data),
+                                 nameInfo->Name.Length);
+        }
         FltReleaseFileNameInformation(nameInfo);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -832,6 +979,22 @@ DpFileHunterPrepareReadAudit(
                                  requestorProcess,
                                  &context->ProcessImageLengthBytes);
 
+    if (DpFileHunterCanTraceText()) {
+        DP_FILE_HUNTER_TRACE("read armed pid=%p length=%lu flags=0x%08X path=%wZ process=%ws\n",
+                             context->ProcessId,
+                             Length,
+                             context->Flags,
+                             &nameInfo->Name,
+                             context->ProcessImage);
+    } else {
+        DP_FILE_HUNTER_TRACE("read armed pid=%p length=%lu flags=0x%08X pathBytes=%lu process=%ws\n",
+                             context->ProcessId,
+                             Length,
+                             context->Flags,
+                             nameInfo->Name.Length,
+                             context->ProcessImage);
+    }
+
     FltReleaseFileNameInformation(nameInfo);
     *ReadContext = context;
     return STATUS_SUCCESS;
@@ -846,17 +1009,51 @@ DpFileHunterReportReadSuccess(
 {
     PDP_FILE_HUNTER_EVENT_ENTRY entry;
     KIRQL oldIrql;
+    ULONGLONG queuedSequence;
+    ULONG queuedCount;
+    ULONGLONG droppedEvents;
 
     if (!gDpFileHunterInitialized ||
         ReadContext == NULL ||
         BytesRead == 0) {
 
+        if (gDpFileHunterInitialized && ReadContext != NULL) {
+            if (DpFileHunterCanTraceText()) {
+                DP_FILE_HUNTER_TRACE("read report skipped bytes=%Iu pid=%p path=%ws\n",
+                                     BytesRead,
+                                     ReadContext->ProcessId,
+                                     ReadContext->Path);
+            } else {
+                DP_FILE_HUNTER_TRACE("read report skipped bytes=%Iu pid=%p pathBytes=%lu\n",
+                                     BytesRead,
+                                     ReadContext->ProcessId,
+                                     ReadContext->PathLengthBytes);
+            }
+        }
         return;
     }
 
     KeAcquireSpinLock(&gDpFileHunterEventLock, &oldIrql);
     if (DpFileHunterShouldSuppressDuplicateLocked(ReadContext)) {
+        LONG skip = InterlockedIncrement(&gDpFileHunterSkipTraceCounter);
         KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
+        if ((skip & 0x3F) == 1) {
+            if (DpFileHunterCanTraceText()) {
+                DP_FILE_HUNTER_TRACE("read duplicate suppressed pid=%p bytes=%Iu sample=%ld path=%ws process=%ws\n",
+                                     ReadContext->ProcessId,
+                                     BytesRead,
+                                     skip,
+                                     ReadContext->Path,
+                                     ReadContext->ProcessImage);
+            } else {
+                DP_FILE_HUNTER_TRACE("read duplicate suppressed pid=%p bytes=%Iu sample=%ld pathBytes=%lu processBytes=%lu\n",
+                                     ReadContext->ProcessId,
+                                     BytesRead,
+                                     skip,
+                                     ReadContext->PathLengthBytes,
+                                     ReadContext->ProcessImageLengthBytes);
+            }
+        }
         return;
     }
     KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
@@ -868,6 +1065,17 @@ DpFileHunterReportReadSuccess(
         KeAcquireSpinLock(&gDpFileHunterEventLock, &oldIrql);
         gDpFileHunterDroppedEvents++;
         KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
+        if (DpFileHunterCanTraceText()) {
+            DP_FILE_HUNTER_TRACE("read event allocation failed dropped=%I64u pid=%p path=%ws\n",
+                                 gDpFileHunterDroppedEvents,
+                                 ReadContext->ProcessId,
+                                 ReadContext->Path);
+        } else {
+            DP_FILE_HUNTER_TRACE("read event allocation failed dropped=%I64u pid=%p pathBytes=%lu\n",
+                                 gDpFileHunterDroppedEvents,
+                                 ReadContext->ProcessId,
+                                 ReadContext->PathLengthBytes);
+        }
         return;
     }
 
@@ -891,18 +1099,47 @@ DpFileHunterReportReadSuccess(
     entry->Event.Sequence = ++gDpFileHunterEventSequence;
     InsertTailList(&gDpFileHunterEvents, &entry->Link);
     gDpFileHunterEventCount++;
+    queuedSequence = entry->Event.Sequence;
+    queuedCount = gDpFileHunterEventCount;
+    droppedEvents = gDpFileHunterDroppedEvents;
 
     while (gDpFileHunterEventCount > DP_FILE_HUNTER_MAX_EVENTS && !IsListEmpty(&gDpFileHunterEvents)) {
         PLIST_ENTRY oldLink = RemoveHeadList(&gDpFileHunterEvents);
         PDP_FILE_HUNTER_EVENT_ENTRY oldEvent = CONTAINING_RECORD(oldLink, DP_FILE_HUNTER_EVENT_ENTRY, Link);
         gDpFileHunterEventCount--;
         gDpFileHunterDroppedEvents++;
+        DP_FILE_HUNTER_TRACE("drop old seq=%I64u count=%lu dropped=%I64u\n",
+                             oldEvent->Event.Sequence,
+                             gDpFileHunterEventCount,
+                             gDpFileHunterDroppedEvents);
         KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
         DpFileHunterFreeEvent(oldEvent);
         KeAcquireSpinLock(&gDpFileHunterEventLock, &oldIrql);
     }
 
     KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
+
+    if (DpFileHunterCanTraceText()) {
+        DP_FILE_HUNTER_TRACE("queued seq=%I64u count=%lu dropped=%I64u pid=%I64u bytes=%I64u status=0x%08X path=%ws process=%ws\n",
+                             queuedSequence,
+                             queuedCount,
+                             droppedEvents,
+                             (ULONGLONG)(ULONG_PTR)ReadContext->ProcessId,
+                             (ULONGLONG)BytesRead,
+                             Status,
+                             ReadContext->Path,
+                             ReadContext->ProcessImage);
+    } else {
+        DP_FILE_HUNTER_TRACE("queued seq=%I64u count=%lu dropped=%I64u pid=%I64u bytes=%I64u status=0x%08X pathBytes=%lu processBytes=%lu\n",
+                             queuedSequence,
+                             queuedCount,
+                             droppedEvents,
+                             (ULONGLONG)(ULONG_PTR)ReadContext->ProcessId,
+                             (ULONGLONG)BytesRead,
+                             Status,
+                             ReadContext->PathLengthBytes,
+                             ReadContext->ProcessImageLengthBytes);
+    }
 }
 
 VOID

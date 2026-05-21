@@ -544,11 +544,65 @@ namespace DataProtectorWebBridge.Services
             throw new BridgeException(BufferTooSmallStatus, "The driver file hunter rule set changed while querying. Please retry.");
         }
 
+        public FileHunterDiagnosticsDto QueryFileHunterDiagnostics(DlpProtectionPolicyDto dlpPolicy)
+        {
+            OperationResult connection = Invoke(DataProtectorPolicyNative.DpPolicyCheckConnection);
+            FileHunterRuleDto[] rules = new FileHunterRuleDto[0];
+            string rulesStatus = "0x00000000";
+            string rulesMessage = "Success.";
+
+            try
+            {
+                rules = QueryFileHunterRules();
+            }
+            catch (BridgeException ex)
+            {
+                rulesStatus = "0x" + ex.Status.ToString("X8", CultureInfo.InvariantCulture);
+                rulesMessage = ex.Message;
+            }
+            catch (Exception ex)
+            {
+                rulesStatus = "0x00000001";
+                rulesMessage = ex.Message;
+            }
+
+            string[] safeFolders = dlpPolicy == null || dlpPolicy.safeFolders == null
+                ? new string[0]
+                : dlpPolicy.safeFolders.Where(item => !string.IsNullOrWhiteSpace(item)).Select(item => item.Trim()).ToArray();
+
+            return new FileHunterDiagnosticsDto
+            {
+                connected = connection.succeeded,
+                status = connection.statusText,
+                message = connection.message,
+                driverRuleStatus = rulesStatus,
+                driverRuleMessage = rulesMessage,
+                driverRuleCount = rules.Length,
+                driverRules = rules,
+                dlpSafeFolderCount = safeFolders.Length,
+                dlpSafeFolders = safeFolders,
+                auditPath = auditLog.FilePath,
+                bridgePid = System.Diagnostics.Process.GetCurrentProcess().Id,
+                machine = Environment.MachineName,
+                note = "Diagnostics does not query the event queue, so successful read events are not drained here."
+            };
+        }
+
         public OperationResult AddFileHunterRule(FileHunterRuleRequest request)
         {
             FileHunterRuleDto normalized = NormalizeFileHunterRule(request);
             OperationResult result = Invoke(() => DataProtectorPolicyNative.DpPolicyAddFileHunterRule(normalized.directory));
             auditLog.Append(normalized.actor, "policy.filehunter.add", normalized.directory, "safe-folder", result.succeeded, result.status, result.message);
+            Console.WriteLine(
+                DateTime.Now.ToString("s") +
+                " File hunter add rule: directory=" +
+                normalized.directory +
+                "; status=" +
+                result.statusText +
+                "; success=" +
+                result.succeeded +
+                "; message=" +
+                result.message);
             return result;
         }
 
@@ -564,6 +618,16 @@ namespace DataProtectorWebBridge.Services
         {
             OperationResult result = Invoke(DataProtectorPolicyNative.DpPolicyClearFileHunterRules);
             auditLog.Append(actor, "policy.filehunter.clear", "*", "safe-folder", result.succeeded, result.status, result.message);
+            Console.WriteLine(
+                DateTime.Now.ToString("s") +
+                " File hunter clear rules: actor=" +
+                (actor ?? string.Empty) +
+                "; status=" +
+                result.statusText +
+                "; success=" +
+                result.succeeded +
+                "; message=" +
+                result.message);
             return result;
         }
 
@@ -827,7 +891,13 @@ namespace DataProtectorWebBridge.Services
 
                 if (status != SuccessStatus && status != BufferTooSmallStatus)
                 {
+                    Console.Error.WriteLine(DateTime.Now.ToString("s") + " File hunter event sizing query failed: status=0x" + status.ToString("X8", CultureInfo.InvariantCulture) + "; message=" + ReadLastErrorMessage());
                     throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                if (eventCount > 0)
+                {
+                    Console.WriteLine(DateTime.Now.ToString("s") + " File hunter event queue has " + eventCount.ToString(CultureInfo.InvariantCulture) + " pending event(s).");
                 }
 
                 DataProtectorPolicyNative.NativeFileHunterEvent[] nativeEvents =
@@ -858,11 +928,17 @@ namespace DataProtectorWebBridge.Services
                             events.Add(ConvertFileHunterEvent(nativeEvents[index]));
                         }
 
+                        if (events.Count > 0)
+                        {
+                            Console.WriteLine(DateTime.Now.ToString("s") + " File hunter drained " + events.Count.ToString(CultureInfo.InvariantCulture) + " event(s) from driver.");
+                        }
+
                         return events.ToArray();
                     }
 
                     if (status != BufferTooSmallStatus)
                     {
+                        Console.Error.WriteLine(DateTime.Now.ToString("s") + " File hunter event drain failed: status=0x" + status.ToString("X8", CultureInfo.InvariantCulture) + "; message=" + ReadLastErrorMessage());
                         throw new BridgeException(status, ReadLastErrorMessage());
                     }
                 }
@@ -1463,6 +1539,16 @@ namespace DataProtectorWebBridge.Services
 
                 records.Add(record);
                 TryAppendAudit(record);
+                Console.WriteLine(
+                    DateTime.Now.ToString("s") +
+                    " File hunter audit appended: pid=" +
+                    item.processId.ToString(CultureInfo.InvariantCulture) +
+                    "; process=" +
+                    process +
+                    "; bytes=" +
+                    item.bytesRead.ToString(CultureInfo.InvariantCulture) +
+                    "; path=" +
+                    item.path);
             }
 
             return records.ToArray();
@@ -5640,6 +5726,23 @@ namespace DataProtectorWebBridge.Services
 
         public sealed class FileHunterRuleDto : FileHunterRuleRequest
         {
+        }
+
+        public sealed class FileHunterDiagnosticsDto
+        {
+            public bool connected { get; set; }
+            public string status { get; set; }
+            public string message { get; set; }
+            public string driverRuleStatus { get; set; }
+            public string driverRuleMessage { get; set; }
+            public int driverRuleCount { get; set; }
+            public FileHunterRuleDto[] driverRules { get; set; }
+            public int dlpSafeFolderCount { get; set; }
+            public string[] dlpSafeFolders { get; set; }
+            public string auditPath { get; set; }
+            public int bridgePid { get; set; }
+            public string machine { get; set; }
+            public string note { get; set; }
         }
 
         public sealed class FileHunterEventDto

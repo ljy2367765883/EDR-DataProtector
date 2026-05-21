@@ -21,6 +21,13 @@ Abstract:
 #define DP_WEBSHELL_IO_TRACE(_format, ...) ((void)0)
 #endif
 
+#if DP_ENABLE_FILE_HUNTER_TRACE
+#define DP_FILE_HUNTER_IO_TRACE(_format, ...) \
+    DbgPrint("DataProtector[FileHunter] " _format, __VA_ARGS__)
+#else
+#define DP_FILE_HUNTER_IO_TRACE(_format, ...) ((void)0)
+#endif
+
 static
 BOOLEAN
 DpIsPagingIo(
@@ -98,6 +105,17 @@ DpArmFileHunterAuditRead(
 
     ioContext = DpAllocateAuditIoContext(FltObjects->Instance, DpIoRead, Length);
     if (ioContext == NULL) {
+        if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+            DP_FILE_HUNTER_IO_TRACE("audit context allocation failed length=%lu path=%ws process=%ws\n",
+                                    Length,
+                                    (*FileHunterContext)->Path,
+                                    (*FileHunterContext)->ProcessImage);
+        } else {
+            DP_FILE_HUNTER_IO_TRACE("audit context allocation failed length=%lu pathBytes=%lu processBytes=%lu\n",
+                                    Length,
+                                    (*FileHunterContext)->PathLengthBytes,
+                                    (*FileHunterContext)->ProcessImageLengthBytes);
+        }
         DpFileHunterFreeReadContext(*FileHunterContext);
         *FileHunterContext = NULL;
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
@@ -109,6 +127,18 @@ DpArmFileHunterAuditRead(
     ioContext->FileHunterContext = *FileHunterContext;
     *FileHunterContext = NULL;
     *CompletionContext = ioContext;
+
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        DP_FILE_HUNTER_IO_TRACE("audit callback armed length=%lu path=%ws process=%ws\n",
+                                Length,
+                                ioContext->FileHunterContext->Path,
+                                ioContext->FileHunterContext->ProcessImage);
+    } else {
+        DP_FILE_HUNTER_IO_TRACE("audit callback armed length=%lu pathBytes=%lu processBytes=%lu\n",
+                                Length,
+                                ioContext->FileHunterContext->PathLengthBytes,
+                                ioContext->FileHunterContext->ProcessImageLengthBytes);
+    }
 
     return FLT_PREOP_SUCCESS_WITH_CALLBACK;
 }

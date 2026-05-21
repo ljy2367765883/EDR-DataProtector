@@ -128,6 +128,13 @@ Abstract:
 #define DP_ENABLE_HASH_PROTECT_TRACE 0
 
 //
+// Safe-folder file thief hunter diagnostics. Keep this enabled while the
+// feature is being validated so DbgView can show policy, path-match, queue,
+// and drain activity with the DataProtector[FileHunter] filter.
+//
+#define DP_ENABLE_FILE_HUNTER_TRACE 1
+
+//
 // Blocks well-known built-in hive export tools at process creation time so
 // failed reg.exe hive-save attempts still produce a security audit record even
 // when the Configuration Manager denies the request before registry callbacks.

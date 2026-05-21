@@ -382,6 +382,41 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
             AuditLog.AuditRecord[] userHookRecords = DrainAuditSource("userhook", () => policyService.DrainUserHookDefenseAuditRecords(currentUserHookDefensePolicy));
             AuditLog.AuditRecord[] dlpRecords = DrainAuditSource("dlp", dlpProtectionService.DrainAuditRecords);
+            if (fileHunterRecords.Length > 0)
+            {
+                foreach (AuditLog.AuditRecord record in fileHunterRecords.Take(5))
+                {
+                    Console.WriteLine(
+                        DateTime.Now.ToString("s") +
+                        " File hunter upload candidate: source=" +
+                        (record.SourceProcess ?? record.Extension ?? string.Empty) +
+                        "; pid=" +
+                        (record.SourcePid ?? string.Empty) +
+                        "; target=" +
+                        (record.Target ?? string.Empty));
+                }
+            }
+
+            if (fileHunterRecords.Length == 0 && heartbeatIndex % 20 == 0)
+            {
+                try
+                {
+                    PolicyBridgeService.FileHunterRuleDto[] rules = policyService.QueryFileHunterRules();
+                    if (rules.Length > 0)
+                    {
+                        Console.WriteLine(
+                            DateTime.Now.ToString("s") +
+                            " File hunter heartbeat: driverRules=" +
+                            rules.Length.ToString() +
+                            "; no read events drained in this heartbeat.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(DateTime.Now.ToString("s") + " File hunter heartbeat diagnostics failed: " + ex.Message);
+                }
+            }
+
             if (smtpRecords.Length > 0 || webShellRecords.Length > 0 || fileHunterRecords.Length > 0 || hashProtectRecords.Length > 0 || lateralRecords.Length > 0 || userHookRecords.Length > 0 || dlpRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", filehunter=" + fileHunterRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ", userhook=" + userHookRecords.Length + ", dlp=" + dlpRecords.Length + ".");
@@ -1044,6 +1079,26 @@ namespace DataProtectorWebBridge.Services
                     SaveState();
                     return;
                 }
+            }
+
+            try
+            {
+                PolicyBridgeService.FileHunterRuleDto[] hunterRules = policyService.QueryFileHunterRules();
+                Console.WriteLine(
+                    DateTime.Now.ToString("s") +
+                    " File hunter central safe folders applied: requested=" +
+                    (dlpProtectionPolicy.safeFolders == null ? 0 : dlpProtectionPolicy.safeFolders.Length).ToString() +
+                    "; driverRules=" +
+                    hunterRules.Length.ToString() +
+                    "; rules=" +
+                    string.Join(" | ", hunterRules.Select(rule => rule.directory ?? string.Empty).ToArray()));
+            }
+            catch (Exception ex)
+            {
+                lastApplyStatus = "0x00000001";
+                lastApplyMessage = "Cannot verify local file hunter safe folder policy after apply: " + ex.Message;
+                SaveState();
+                return;
             }
 
             foreach (PolicyBridgeService.DeviceRuleDto rule in deviceRules)
