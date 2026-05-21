@@ -1503,12 +1503,14 @@ namespace DataProtectorWebBridge.Services
             foreach (FileHunterEventDto item in events)
             {
                 string process = string.IsNullOrWhiteSpace(item.processImage) ? "unknown" : item.processImage;
+                string readKind = DescribeFileHunterReadFlags(item.flags);
                 string message =
                     "process=" + process +
                     ";pid=" + item.processId.ToString(CultureInfo.InvariantCulture) +
                     ";object=file;path=" + item.path +
                     ";bytes=" + item.bytesRead.ToString(CultureInfo.InvariantCulture) +
                     ";offset=" + item.byteOffset.ToString(CultureInfo.InvariantCulture) +
+                    ";readKind=" + readKind +
                     ";flags=0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture) +
                     ";disposition=observed;severity=warning";
 
@@ -1530,6 +1532,7 @@ namespace DataProtectorWebBridge.Services
                     ObjectName = item.path,
                     ObjectFormat = "bytes=" + item.bytesRead.ToString(CultureInfo.InvariantCulture) +
                         ";offset=" + item.byteOffset.ToString(CultureInfo.InvariantCulture) +
+                        ";readKind=" + readKind +
                         ";flags=0x" + item.flags.ToString("X8", CultureInfo.InvariantCulture),
                     PolicyName = "file-thief-hunter",
                     Disposition = "observed",
@@ -1545,6 +1548,8 @@ namespace DataProtectorWebBridge.Services
                     item.processId.ToString(CultureInfo.InvariantCulture) +
                     "; process=" +
                     process +
+                    "; readKind=" +
+                    readKind +
                     "; bytes=" +
                     item.bytesRead.ToString(CultureInfo.InvariantCulture) +
                     "; path=" +
@@ -2397,6 +2402,37 @@ namespace DataProtectorWebBridge.Services
                 path = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Path) ?? string.Empty),
                 processImage = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty)
             };
+        }
+
+        private static string DescribeFileHunterReadFlags(uint flags)
+        {
+            List<string> values = new List<string>();
+            if ((flags & 0x00000001u) != 0)
+            {
+                values.Add("paging-read");
+            }
+
+            if ((flags & 0x00000002u) != 0)
+            {
+                values.Add("read-open");
+            }
+
+            if ((flags & 0x00000004u) != 0)
+            {
+                values.Add("section-map");
+            }
+
+            if ((flags & 0x00000008u) != 0)
+            {
+                values.Add("image-section");
+            }
+
+            if ((flags & 0x00000010u) != 0)
+            {
+                values.Add("execute-access");
+            }
+
+            return values.Count == 0 ? "read" : string.Join("+", values.ToArray());
         }
 
         private static HashProtectEventDto ConvertHashProtectEvent(DataProtectorPolicyNative.NativeHashProtectEvent nativeEvent)

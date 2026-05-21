@@ -62,6 +62,36 @@ DpCanProcessOperation(
 }
 
 static
+BOOLEAN
+DpFileHunterCreateGrantsReadIntent(
+    _In_ ACCESS_MASK DesiredAccess
+    )
+{
+    ACCESS_MASK readMask = FILE_READ_DATA |
+                           FILE_EXECUTE |
+                           GENERIC_READ |
+                           GENERIC_EXECUTE |
+                           MAXIMUM_ALLOWED;
+
+    return (DesiredAccess & readMask) != 0;
+}
+
+static
+ULONG
+DpFileHunterFlagsFromCreateAccess(
+    _In_ ACCESS_MASK DesiredAccess
+    )
+{
+    ULONG flags = DP_FILE_HUNTER_READ_FLAG_CREATE_OPEN;
+
+    if ((DesiredAccess & (FILE_EXECUTE | GENERIC_EXECUTE)) != 0) {
+        flags |= DP_FILE_HUNTER_READ_FLAG_EXECUTE_ACCESS;
+    }
+
+    return flags;
+}
+
+static
 PVOID
 DpGetSystemBufferAddress(
     _In_ PFLT_CALLBACK_DATA Data,
@@ -1832,6 +1862,9 @@ DpPostCreate(
     PFLT_CONTEXT oldContext = NULL;
     PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
     ULONG createDisposition;
+    ACCESS_MASK desiredAccess = 0;
+    BOOLEAN hunterReadIntent = FALSE;
+    ULONG hunterFlags = DP_FILE_HUNTER_READ_FLAG_CREATE_OPEN;
 
     if (FlagOn(Flags, FLTFL_POST_OPERATION_DRAINING)) {
         DpShadowFreeCreateContext(createContext);
@@ -1881,7 +1914,35 @@ DpPostCreate(
                                            FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
                                            &nameInfo);
 
+        if (!NT_SUCCESS(status)) {
+            status = FltGetFileNameInformation(Data,
+                                               FLT_FILE_NAME_OPENED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                               &nameInfo);
+        }
+
         if (NT_SUCCESS(status)) {
+            createDisposition = Data->Iopb->Parameters.Create.Options >> 24;
+            createdOrReplaced = Data->IoStatus.Information == FILE_CREATED ||
+                                Data->IoStatus.Information == FILE_OVERWRITTEN ||
+                                Data->IoStatus.Information == FILE_SUPERSEDED ||
+                                DpCreateDispositionWillReplaceFile(createDisposition);
+
+            if (Data->Iopb->Parameters.Create.SecurityContext != NULL) {
+                desiredAccess = Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess;
+                hunterReadIntent = !createdOrReplaced &&
+                                   DpFileHunterCreateGrantsReadIntent(desiredAccess);
+                hunterFlags = DpFileHunterFlagsFromCreateAccess(desiredAccess);
+            }
+
+            if (hunterReadIntent) {
+                DpFileHunterReportReadByName(&nameInfo->Name,
+                                             FltGetRequestorProcess(Data),
+                                             FltGetRequestorProcessIdEx(Data),
+                                             hunterFlags,
+                                             (ULONG)Data->IoStatus.Status,
+                                             1);
+            }
+
             pathProtected = DpPolicyNameIsProtected(&nameInfo->Name) &&
                             !DpPolicyNameIsShadow(&nameInfo->Name);
 
@@ -1923,12 +1984,6 @@ DpPostCreate(
 
                 if (nameInfo != NULL) {
                     handleContext->IsTrusted = DpProcessPolicyIsTrusted(Data, &nameInfo->Name);
-
-                    createDisposition = Data->Iopb->Parameters.Create.Options >> 24;
-                    createdOrReplaced = Data->IoStatus.Information == FILE_CREATED ||
-                                        Data->IoStatus.Information == FILE_OVERWRITTEN ||
-                                        Data->IoStatus.Information == FILE_SUPERSEDED ||
-                                        DpCreateDispositionWillReplaceFile(createDisposition);
 
                     if (createdOrReplaced &&
                         DpWebShellIsProtectedPath(&nameInfo->Name) &&
@@ -3188,6 +3243,8 @@ DpPreAcquireForSectionSynchronization(
     NTSTATUS status;
     PFLT_IO_PARAMETER_BLOCK iopb = Data->Iopb;
     ULONG writeMask;
+    ULONG hunterFlags;
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
 
     *CompletionContext = NULL;
 
@@ -3205,6 +3262,39 @@ DpPreAcquireForSectionSynchronization(
     writeMask = PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY;
     if (FlagOn(iopb->Parameters.AcquireForSectionSynchronization.PageProtection, writeMask)) {
         (VOID)DpShadowMarkHandleDirty(FltObjects);
+    }
+
+    if (!FlagOn(iopb->Parameters.AcquireForSectionSynchronization.PageProtection, writeMask) &&
+        KeGetCurrentIrql() <= APC_LEVEL) {
+
+        status = FltGetFileNameInformation(Data,
+                                           FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                           &nameInfo);
+        if (!NT_SUCCESS(status)) {
+            status = FltGetFileNameInformation(Data,
+                                               FLT_FILE_NAME_OPENED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                               &nameInfo);
+        }
+
+        if (NT_SUCCESS(status) && nameInfo != NULL) {
+            hunterFlags = DP_FILE_HUNTER_READ_FLAG_SECTION_MAP;
+            if (iopb->Parameters.AcquireForSectionSynchronization.SyncType == SyncTypeCreateSection) {
+                if (FlagOn(iopb->Parameters.AcquireForSectionSynchronization.PageProtection,
+                           PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) {
+                    hunterFlags |= DP_FILE_HUNTER_READ_FLAG_IMAGE_SECTION |
+                                   DP_FILE_HUNTER_READ_FLAG_EXECUTE_ACCESS;
+                }
+            }
+
+            DpFileHunterReportReadByName(&nameInfo->Name,
+                                         FltGetRequestorProcess(Data),
+                                         FltGetRequestorProcessIdEx(Data),
+                                         hunterFlags,
+                                         STATUS_SUCCESS,
+                                         1);
+
+            FltReleaseFileNameInformation(nameInfo);
+        }
     }
 
 #if !DP_ENABLE_UNSAFE_PLAINTEXT_CACHE_FOR_MAPPED_IO

@@ -68,6 +68,15 @@ DpFileHunterCanTraceText(
 }
 
 static
+BOOLEAN
+DpFileHunterCanQueueSyntheticEvent(
+    VOID
+    )
+{
+    return KeGetCurrentIrql() <= DISPATCH_LEVEL;
+}
+
+static
 VOID
 DpFileHunterTrimTrailingSlash(
     _Inout_ PUNICODE_STRING String
@@ -218,6 +227,42 @@ DpFileHunterIsProtectedPath(
     FltReleasePushLock(&gDpFileHunterRuleLock);
 
     return protectedPath;
+}
+
+static
+VOID
+DpFileHunterTraceUnmatchedPath(
+    _In_ PCUNICODE_STRING Path,
+    _In_ HANDLE ProcessId,
+    _In_z_ PCSTR Reason
+    )
+{
+    LONG miss;
+
+    if (Path == NULL || Path->Buffer == NULL || Path->Length == 0) {
+        return;
+    }
+
+    miss = InterlockedIncrement(&gDpFileHunterMissTraceCounter);
+    if ((miss & 0x7F) != 1) {
+        return;
+    }
+
+    if (DpFileHunterCanTraceText()) {
+        DP_FILE_HUNTER_TRACE("read path miss reason=%s rules=%lu pid=%p sample=%ld path=%wZ\n",
+                             Reason,
+                             gDpFileHunterRuleCount,
+                             ProcessId,
+                             miss,
+                             Path);
+    } else {
+        DP_FILE_HUNTER_TRACE("read path miss reason=%s rules=%lu pid=%p sample=%ld pathBytes=%lu\n",
+                             Reason,
+                             gDpFileHunterRuleCount,
+                             ProcessId,
+                             miss,
+                             Path->Length);
+    }
 }
 
 static
@@ -926,22 +971,9 @@ DpFileHunterPrepareReadAudit(
     }
 
     if (!DpFileHunterIsProtectedPath(&nameInfo->Name)) {
-        LONG miss = InterlockedIncrement(&gDpFileHunterMissTraceCounter);
-        if ((miss & 0x7F) == 1) {
-            if (DpFileHunterCanTraceText()) {
-                DP_FILE_HUNTER_TRACE("read path miss rules=%lu pid=%p sample=%ld path=%wZ\n",
-                                     gDpFileHunterRuleCount,
-                                     FltGetRequestorProcessIdEx(Data),
-                                     miss,
-                                     &nameInfo->Name);
-            } else {
-                DP_FILE_HUNTER_TRACE("read path miss rules=%lu pid=%p sample=%ld pathBytes=%lu\n",
-                                     gDpFileHunterRuleCount,
-                                     FltGetRequestorProcessIdEx(Data),
-                                     miss,
-                                     nameInfo->Name.Length);
-            }
-        }
+        DpFileHunterTraceUnmatchedPath(&nameInfo->Name,
+                                       FltGetRequestorProcessIdEx(Data),
+                                       "irp-read");
         FltReleaseFileNameInformation(nameInfo);
         return STATUS_SUCCESS;
     }
@@ -1140,6 +1172,72 @@ DpFileHunterReportReadSuccess(
                              ReadContext->PathLengthBytes,
                              ReadContext->ProcessImageLengthBytes);
     }
+}
+
+VOID
+DpFileHunterReportReadByName(
+    _In_ PCUNICODE_STRING Path,
+    _In_opt_ PEPROCESS Process,
+    _In_ HANDLE ProcessId,
+    _In_ ULONG Flags,
+    _In_ ULONG Status,
+    _In_ ULONG_PTR BytesRead
+    )
+{
+    DP_FILE_HUNTER_READ_CONTEXT context;
+
+    if (!gDpFileHunterInitialized ||
+        gDpFileHunterRuleCount == 0 ||
+        Path == NULL ||
+        Path->Buffer == NULL ||
+        Path->Length == 0 ||
+        BytesRead == 0) {
+
+        return;
+    }
+
+    if (!DpFileHunterCanQueueSyntheticEvent()) {
+        DP_FILE_HUNTER_TRACE("synthetic read skipped irql=%lu flags=0x%08X\n",
+                             KeGetCurrentIrql(),
+                             Flags);
+        return;
+    }
+
+    if (!DpFileHunterIsProtectedPath(Path)) {
+        DpFileHunterTraceUnmatchedPath(Path, ProcessId, "synthetic");
+        return;
+    }
+
+    RtlZeroMemory(&context, sizeof(context));
+    context.ProcessId = ProcessId == NULL ? PsGetCurrentProcessId() : ProcessId;
+    context.ByteOffset.QuadPart = 0;
+    context.Flags = Flags;
+    DpFileHunterCopyUnicodeString(context.Path,
+                                  RTL_NUMBER_OF(context.Path),
+                                  Path,
+                                  &context.PathLengthBytes);
+    DpFileHunterCopyProcessImage(context.ProcessImage,
+                                 RTL_NUMBER_OF(context.ProcessImage),
+                                 Process,
+                                 &context.ProcessImageLengthBytes);
+
+    if (DpFileHunterCanTraceText()) {
+        DP_FILE_HUNTER_TRACE("synthetic read matched pid=%p flags=0x%08X bytes=%Iu path=%wZ process=%ws\n",
+                             context.ProcessId,
+                             Flags,
+                             BytesRead,
+                             Path,
+                             context.ProcessImage);
+    } else {
+        DP_FILE_HUNTER_TRACE("synthetic read matched pid=%p flags=0x%08X bytes=%Iu pathBytes=%lu process=%ws\n",
+                             context.ProcessId,
+                             Flags,
+                             BytesRead,
+                             Path->Length,
+                             context.ProcessImage);
+    }
+
+    DpFileHunterReportReadSuccess(&context, Status, BytesRead);
 }
 
 VOID
