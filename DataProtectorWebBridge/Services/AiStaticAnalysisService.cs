@@ -518,6 +518,8 @@ namespace DataProtectorWebBridge.Services
             string ghidraReportPath = Path.Combine(runRoot, "ghidra-report.json");
             string ghidraStdoutPath = Path.Combine(runRoot, "ghidra.stdout.log");
             string ghidraStderrPath = Path.Combine(runRoot, "ghidra.stderr.log");
+            PackedSamplePreprocessResult preprocess = PreparePackedSampleForAnalysis(sample, runRoot, progress);
+            string analysisInputPath = string.IsNullOrWhiteSpace(preprocess.analysisPath) ? sample.storagePath : preprocess.analysisPath;
 
             Dictionary<string, object> ghidraReport = null;
             string engineStatus = "not-run";
@@ -536,7 +538,7 @@ namespace DataProtectorWebBridge.Services
             else
             {
                 progress?.Invoke("ghidra", "启动 Ghidra headless", 15, "Ghidra=" + headless);
-                ProcessResult process = RunGhidraHeadless(headless, sample.storagePath, runRoot, ghidraReportPath, config, ghidraStdoutPath, ghidraStderrPath, progress);
+                ProcessResult process = RunGhidraHeadless(headless, analysisInputPath, runRoot, ghidraReportPath, config, ghidraStdoutPath, ghidraStderrPath, progress);
                 exitCode = process.exitCode;
                 engineStatus = process.exitCode == 0 && File.Exists(ghidraReportPath) ? "completed" : "failed";
                 engineMessage = process.exitCode == 0 ? "Ghidra source-derived analyzer completed." : Truncate(process.stderr + "\n" + process.stdout, 8000);
@@ -564,6 +566,7 @@ namespace DataProtectorWebBridge.Services
                 }
                 AttachGhidraDiagnostics(ghidraReport, diagnostics);
             }
+            AttachPreprocessingReport(ghidraReport, preprocess);
 
             progress?.Invoke("scoring", "执行静态规则评分", 80, "规则数=" + (rules == null ? 0 : rules.Length).ToString(CultureInfo.InvariantCulture));
             StaticAnalysisRuleScore ruleScore = EvaluateRules(ghidraReport, rules);
@@ -585,6 +588,9 @@ namespace DataProtectorWebBridge.Services
                         { "stdoutPath", ghidraStdoutPath },
                         { "stderrPath", ghidraStderrPath },
                         { "reportPath", ghidraReportPath },
+                        { "analysisInputPath", analysisInputPath },
+                        { "usedUnpackedSample", preprocess.unpackSucceeded },
+                        { "preprocessing", BuildPreprocessingReport(preprocess) },
                         { "diagnostics", GetValue(ghidraReport, "diagnostics") },
                         { "coverage", GetValue(ghidraReport, "coverage") }
                     }
@@ -605,6 +611,131 @@ namespace DataProtectorWebBridge.Services
                 verdict = finalVerdict,
                 severity = finalSeverity
             };
+        }
+
+        private PackedSamplePreprocessResult PreparePackedSampleForAnalysis(
+            StaticAnalysisSampleState sample,
+            string runRoot,
+            Action<string, string, int, string> progress)
+        {
+            PackedSamplePreprocessResult result = new PackedSamplePreprocessResult
+            {
+                enabled = true,
+                originalPath = sample == null ? string.Empty : sample.storagePath,
+                analysisPath = sample == null ? string.Empty : sample.storagePath,
+                detected = false,
+                packer = string.Empty,
+                status = "not-packed",
+                message = "No known packer signature was detected.",
+                toolPath = string.Empty,
+                unpackedPath = string.Empty,
+                exitCode = 0,
+                stdout = string.Empty,
+                stderr = string.Empty
+            };
+
+            if (sample == null || string.IsNullOrWhiteSpace(sample.storagePath) || !File.Exists(sample.storagePath))
+            {
+                result.status = "skipped";
+                result.message = "Sample file is missing before packer preprocessing.";
+                return result;
+            }
+
+            string packer = DetectPackedSample(sample.storagePath);
+            if (string.IsNullOrWhiteSpace(packer))
+            {
+                progress?.Invoke("preflight", "压缩壳预检完成", 10, "未检测到 UPX 等已知压缩壳。");
+                return result;
+            }
+
+            result.detected = true;
+            result.packer = packer;
+            progress?.Invoke("preflight", "检测到压缩壳", 10, "packer=" + packer + "; sample=" + sample.fileName);
+
+            if (!string.Equals(packer, "UPX", StringComparison.OrdinalIgnoreCase))
+            {
+                result.status = "unsupported";
+                result.message = "Packed sample detected, but automatic unpacking is not implemented for " + packer + ".";
+                progress?.Invoke("preflight", "压缩壳暂不支持自动解包", 11, result.message);
+                return result;
+            }
+
+            string upxPath = ResolveUpxPath();
+            result.toolPath = upxPath;
+            if (string.IsNullOrWhiteSpace(upxPath))
+            {
+                result.status = "tool-missing";
+                result.message = "UPX-packed sample detected, but upx.exe was not found. Put upx.exe under server\\static-analyzer\\tools or set DATAPROTECTOR_UPX_PATH.";
+                progress?.Invoke("preflight", "UPX 解包工具缺失", 12, result.message);
+                return result;
+            }
+
+            string unpackRoot = Path.Combine(runRoot, "unpacked");
+            Directory.CreateDirectory(unpackRoot);
+            string unpackedPath = Path.Combine(unpackRoot, Path.GetFileNameWithoutExtension(sample.storagePath) + ".unpacked.exe");
+            TryDeleteFile(unpackedPath);
+            File.Copy(sample.storagePath, unpackedPath, true);
+            progress?.Invoke("preflight", "开始 UPX 自动解包", 12, "tool=" + upxPath + "; output=" + unpackedPath);
+
+            ProcessResult unpack = RunUpxUnpack(upxPath, unpackedPath);
+            result.exitCode = unpack.exitCode;
+            result.stdout = Truncate(unpack.stdout, 6000);
+            result.stderr = Truncate(unpack.stderr, 6000);
+            result.unpackedPath = unpackedPath;
+            if (unpack.exitCode == 0 && File.Exists(unpackedPath) && new FileInfo(unpackedPath).Length > 0)
+            {
+                result.status = "unpacked";
+                result.unpackSucceeded = true;
+                result.analysisPath = unpackedPath;
+                result.message = "UPX unpack succeeded. Ghidra will analyze the unpacked file.";
+                progress?.Invoke("preflight", "UPX 自动解包完成", 14, "output=" + unpackedPath + "; size=" + new FileInfo(unpackedPath).Length.ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                result.status = "failed";
+                result.unpackSucceeded = false;
+                result.analysisPath = sample.storagePath;
+                result.message = "UPX unpack failed; falling back to the original packed sample.";
+                progress?.Invoke("preflight", "UPX 自动解包失败，回退原始样本", 14, "exitCode=" + unpack.exitCode.ToString(CultureInfo.InvariantCulture) + "; stderr=" + Truncate(unpack.stderr, 800));
+                TryDeleteFile(unpackedPath);
+            }
+
+            return result;
+        }
+
+        private ProcessResult RunUpxUnpack(string upxPath, string targetPath)
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo
+            {
+                FileName = upxPath,
+                Arguments = "-d -f " + Quote(targetPath),
+                WorkingDirectory = Path.GetDirectoryName(targetPath),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using (Process process = new Process())
+            {
+                process.StartInfo = startInfo;
+                StringBuilder stdout = new StringBuilder();
+                StringBuilder stderr = new StringBuilder();
+                process.OutputDataReceived += (sender, args) => { if (args.Data != null) stdout.AppendLine(args.Data); };
+                process.ErrorDataReceived += (sender, args) => { if (args.Data != null) stderr.AppendLine(args.Data); };
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                bool exited = process.WaitForExit(120000);
+                if (!exited)
+                {
+                    TryKill(process);
+                    return new ProcessResult { exitCode = 124, stdout = stdout.ToString(), stderr = stderr + "UPX unpack timed out." };
+                }
+
+                process.WaitForExit();
+                return new ProcessResult { exitCode = process.ExitCode, stdout = stdout.ToString(), stderr = stderr.ToString() };
+            }
         }
 
         private ProcessResult RunGhidraHeadless(
@@ -798,6 +929,53 @@ namespace DataProtectorWebBridge.Services
                 }
                 features["hits"] = hits.Take(900).ToArray();
             }
+        }
+
+        private void AttachPreprocessingReport(Dictionary<string, object> ghidraReport, PackedSamplePreprocessResult preprocess)
+        {
+            if (ghidraReport == null || preprocess == null)
+            {
+                return;
+            }
+
+            ghidraReport["preprocessing"] = BuildPreprocessingReport(preprocess);
+            Dictionary<string, object> features = GetValue(ghidraReport, "features") as Dictionary<string, object>;
+            if (features == null)
+            {
+                return;
+            }
+
+            List<object> hits = EnumerateObjects(GetValue(features, "hits")).ToList();
+            if (preprocess.detected)
+            {
+                hits.Add("packed-sample:" + preprocess.packer + ":" + preprocess.status);
+            }
+            if (preprocess.unpackSucceeded)
+            {
+                hits.Add("packed-sample-unpacked:" + preprocess.packer);
+            }
+            features["hits"] = hits.Take(900).ToArray();
+        }
+
+        private Dictionary<string, object> BuildPreprocessingReport(PackedSamplePreprocessResult preprocess)
+        {
+            PackedSamplePreprocessResult item = preprocess ?? new PackedSamplePreprocessResult();
+            return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "enabled", item.enabled },
+                { "detected", item.detected },
+                { "packer", item.packer ?? string.Empty },
+                { "status", item.status ?? string.Empty },
+                { "message", item.message ?? string.Empty },
+                { "originalPath", item.originalPath ?? string.Empty },
+                { "analysisPath", item.analysisPath ?? string.Empty },
+                { "unpackedPath", item.unpackedPath ?? string.Empty },
+                { "unpackSucceeded", item.unpackSucceeded },
+                { "toolPath", item.toolPath ?? string.Empty },
+                { "exitCode", item.exitCode },
+                { "stdout", item.stdout ?? string.Empty },
+                { "stderr", item.stderr ?? string.Empty }
+            };
         }
 
         private StaticAnalysisRuleScore EvaluateRules(Dictionary<string, object> ghidraReport, StaticAnalysisRuleDto[] rules)
@@ -1082,6 +1260,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             summary["program"] = GetValue(report, "program");
+            summary["preprocessing"] = GetValue(report, "preprocessing");
             summary["diagnostics"] = GetValue(report, "diagnostics");
             summary["coverage"] = GetValue(report, "coverage");
             summary["features"] = GetValue(report, "features");
@@ -1120,6 +1299,7 @@ namespace DataProtectorWebBridge.Services
 
             List<Dictionary<string, object>> functions = EnumerateDictionaries(GetValue(report, "functions")).ToList();
             List<Dictionary<string, object>> edges = EnumerateDictionaries(GetValue(report, "callGraph")).ToList();
+            route["preprocessing"] = GetValue(report, "preprocessing");
             route["coverage"] = GetValue(report, "coverage");
             route["diagnostics"] = GetValue(report, "diagnostics");
             route["entryFunctions"] = functions
@@ -2208,6 +2388,69 @@ namespace DataProtectorWebBridge.Services
             return markers.Any(marker => text.Contains(marker));
         }
 
+        private static string DetectPackedSample(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                byte[] bytes = File.ReadAllBytes(path);
+                string ascii = Encoding.ASCII.GetString(bytes.Take(Math.Min(bytes.Length, 2 * 1024 * 1024)).ToArray()).ToUpperInvariant();
+                if (ascii.Contains("UPX0") || ascii.Contains("UPX1") || ascii.Contains("UPX2") || ascii.Contains("UPX!"))
+                {
+                    return "UPX";
+                }
+            }
+            catch
+            {
+            }
+
+            return string.Empty;
+        }
+
+        private static string ResolveUpxPath()
+        {
+            string configured = Environment.GetEnvironmentVariable("DATAPROTECTOR_UPX_PATH");
+            string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            List<string> candidates = new List<string>
+            {
+                configured,
+                Path.Combine(baseDirectory, "static-analyzer", "tools", "upx.exe"),
+                Path.Combine(baseDirectory, "tools", "upx.exe"),
+                Path.Combine(Directory.GetCurrentDirectory(), "DataProtectorStaticAnalyzer", "tools", "upx.exe"),
+                Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "DataProtectorStaticAnalyzer", "tools", "upx.exe"))
+            };
+
+            foreach (string candidate in candidates)
+            {
+                if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                {
+                    return Path.GetFullPath(candidate);
+                }
+            }
+
+            string path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            foreach (string directory in path.Split(new[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                try
+                {
+                    string candidate = Path.Combine(directory.Trim(), "upx.exe");
+                    if (File.Exists(candidate))
+                    {
+                        return Path.GetFullPath(candidate);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return string.Empty;
+        }
+
         private static bool IsExecutableImage(byte[] bytes)
         {
             return bytes != null && bytes.Length > 0x40 && bytes[0] == 'M' && bytes[1] == 'Z';
@@ -2623,6 +2866,23 @@ namespace DataProtectorWebBridge.Services
             public string firstDiagnostic { get; set; }
             public string[] errors { get; set; }
             public string[] warnings { get; set; }
+        }
+
+        private sealed class PackedSamplePreprocessResult
+        {
+            public bool enabled { get; set; }
+            public bool detected { get; set; }
+            public string packer { get; set; }
+            public string status { get; set; }
+            public string message { get; set; }
+            public string originalPath { get; set; }
+            public string analysisPath { get; set; }
+            public string unpackedPath { get; set; }
+            public bool unpackSucceeded { get; set; }
+            public string toolPath { get; set; }
+            public int exitCode { get; set; }
+            public string stdout { get; set; }
+            public string stderr { get; set; }
         }
 
         private sealed class AiHttpResult
