@@ -221,6 +221,17 @@ namespace DataProtectorWebBridge.Services
                 return "blocked";
             }
 
+            // Static-scan detections are threats: a malicious verdict is a block,
+            // a suspicious verdict is flagged for review.
+            if (action.StartsWith("static-scan.", StringComparison.OrdinalIgnoreCase))
+            {
+                if (message.IndexOf("malicious", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "blocked";
+                }
+                return "suspicious";
+            }
+
             if (record != null && !record.Succeeded)
             {
                 return "failed";
@@ -959,15 +970,15 @@ namespace DataProtectorWebBridge.Services
             if (string.Equals(value, "blocked", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(value, "observed", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(value, "completed", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(value, "failed", StringComparison.OrdinalIgnoreCase))
+                string.Equals(value, "failed", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "suspicious", StringComparison.OrdinalIgnoreCase))
             {
                 return value.ToLowerInvariant();
             }
 
-            if (string.Equals(value, "malicious", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(value, "suspicious", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(value, "malicious", StringComparison.OrdinalIgnoreCase))
             {
-                return "observed";
+                return "blocked";
             }
 
             return string.IsNullOrWhiteSpace(value) ? "completed" : value;

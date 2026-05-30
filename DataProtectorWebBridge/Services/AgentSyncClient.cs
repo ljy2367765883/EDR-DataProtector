@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -38,6 +39,8 @@ namespace DataProtectorWebBridge.Services
         private readonly HashSet<string> pendingSandboxExecutablePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly List<FileSystemWatcher> sandboxExecutableWatchers = new List<FileSystemWatcher>();
         private readonly object sandboxExecutableLock = new object();
+        private readonly List<AuditLog.AuditRecord> localScanAuditRecords = new List<AuditLog.AuditRecord>();
+        private readonly object localScanAuditLock = new object();
         private readonly string usbCryptPolicyPath;
         private string deviceId;
         private long appliedPolicyVersion;
@@ -404,6 +407,7 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
             AuditLog.AuditRecord[] userHookRecords = DrainAuditSource("userhook", () => policyService.DrainUserHookDefenseAuditRecords(currentUserHookDefensePolicy));
             AuditLog.AuditRecord[] dlpRecords = DrainAuditSource("dlp", dlpProtectionService.DrainAuditRecords);
+            AuditLog.AuditRecord[] staticScanRecords = DrainAuditSource("staticscan", DrainLocalScanAuditRecords);
             if (fileHunterRecords.Length > 0)
             {
                 foreach (AuditLog.AuditRecord record in fileHunterRecords.Take(5))
@@ -444,7 +448,7 @@ namespace DataProtectorWebBridge.Services
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit source counts: smtp=" + smtpRecords.Length + ", webshell=" + webShellRecords.Length + ", filehunter=" + fileHunterRecords.Length + ", hashprotect=" + hashProtectRecords.Length + ", lateral=" + lateralRecords.Length + ", userhook=" + userHookRecords.Length + ", dlp=" + dlpRecords.Length + ".");
             }
 
-            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + fileHunterRecords.Length + hashProtectRecords.Length + lateralRecords.Length + userHookRecords.Length + dlpRecords.Length);
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>(smtpRecords.Length + webShellRecords.Length + fileHunterRecords.Length + hashProtectRecords.Length + lateralRecords.Length + userHookRecords.Length + dlpRecords.Length + staticScanRecords.Length);
             records.AddRange(smtpRecords);
             records.AddRange(webShellRecords);
             records.AddRange(fileHunterRecords);
@@ -452,6 +456,7 @@ namespace DataProtectorWebBridge.Services
             records.AddRange(lateralRecords);
             records.AddRange(userHookRecords);
             records.AddRange(dlpRecords);
+            records.AddRange(staticScanRecords);
             return records.ToArray();
         }
 
@@ -483,9 +488,9 @@ namespace DataProtectorWebBridge.Services
         {
             try
             {
-                List<CentralPolicyStore.SandboxSampleSubmission> submissions = new List<CentralPolicyStore.SandboxSampleSubmission>();
                 HashSet<string> batchHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                while (submissions.Count < SandboxMaxUploadsPerHeartbeat)
+                int scanned = 0;
+                while (scanned < SandboxMaxUploadsPerHeartbeat)
                 {
                     SandboxExecutableEvent executableEvent = DequeueSandboxExecutableEvent();
                     if (executableEvent == null)
@@ -507,24 +512,211 @@ namespace DataProtectorWebBridge.Services
                         continue;
                     }
 
-                    CentralPolicyStore.SandboxSampleSubmission submission = TryBuildSandboxSubmission(executableEvent);
-                    if (submission != null && batchHashes.Add(submission.sha256))
-                    {
-                        submissions.Add(submission);
-                    }
+                    // Local scan instead of upload. The watched-directory exe is
+                    // analyzed on this endpoint by the signed scan-engine
+                    // pipeline (YARA + heuristics + hash reputation); nothing is
+                    // sent to the central server for sandbox detonation.
+                    ScanWatchedExecutableLocally(executableEvent, batchHashes);
+                    scanned++;
                 }
-
-                if (submissions.Count > 0)
-                {
-                    Console.WriteLine(DateTime.Now.ToString("s") + " Sandbox sample upload prepared " + submissions.Count + " new or renamed executable event(s).");
-                }
-
-                return submissions.ToArray();
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine(DateTime.Now.ToString("s") + " sandbox executable event collection failed: " + ex.Message);
-                return new CentralPolicyStore.SandboxSampleSubmission[0];
+            }
+
+            // The sandbox upload channel is retired in favor of local scanning;
+            // always return an empty submission set so nothing is uploaded.
+            return new CentralPolicyStore.SandboxSampleSubmission[0];
+        }
+
+        private void ScanWatchedExecutableLocally(SandboxExecutableEvent executableEvent, HashSet<string> batchHashes)
+        {
+            string path = executableEvent.Path;
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            try
+            {
+                string hash = ComputeSha256Hex(path);
+                if (!string.IsNullOrEmpty(hash) && !batchHashes.Add(hash))
+                {
+                    return;
+                }
+
+                LocalScanResult result = staticScanService.ScanFile(path);
+
+                bool flagged = result.Verdict >= StaticScanService.VerdictSuspicious;
+                bool malicious = result.Verdict >= StaticScanService.VerdictMalicious;
+                string verdictText = result.VerdictText ?? "clean";
+                string eventReason = string.Equals(executableEvent.EventKind, "renamed", StringComparison.OrdinalIgnoreCase)
+                    ? "renamed-to-exe"
+                    : "created";
+
+                string matchedRulesText = (result.MatchedRules != null && result.MatchedRules.Length > 0)
+                    ? string.Join(", ", result.MatchedRules)
+                    : string.Empty;
+
+                Console.WriteLine(DateTime.Now.ToString("s") +
+                    " Local executable scan verdict=" + verdictText +
+                    " score=" + result.Score.ToString(CultureInfo.InvariantCulture) +
+                    (matchedRulesText.Length > 0 ? (" rules=[" + matchedRulesText + "]") : string.Empty) +
+                    " path=" + path);
+
+                // Identify who dropped the file (the process that owns the
+                // watched directory event) for the attack-flow view. The
+                // FileSystemWatcher does not carry the writer PID, so we record
+                // the agent host/user context and the file lineage we know.
+                string fileName = Path.GetFileName(path);
+                string directory = string.Empty;
+                try { directory = Path.GetDirectoryName(path) ?? string.Empty; } catch { }
+
+                string detailJson = BuildStaticScanEvidence(result, executableEvent, eventReason, matchedRulesText, directory);
+
+                AuditLog.AuditRecord record = new AuditLog.AuditRecord
+                {
+                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    Host = Environment.MachineName,
+                    Actor = "static-scan",
+                    Action = "static-scan.detection",
+                    Target = path,
+                    Extension = SafeExtensionForAudit(path),
+                    Succeeded = false,
+                    Status = malicious ? "0xC0000022" : "0x00000001",
+                    Disposition = malicious ? "blocked" : "suspicious",
+                    Severity = malicious ? "critical" : "high",
+                    Message = "Malicious file detected by local static scan (" + eventReason + "): verdict=" + verdictText +
+                              ", score=" + result.Score.ToString(CultureInfo.InvariantCulture) +
+                              (matchedRulesText.Length > 0 ? (", rules=" + matchedRulesText) : (", reasons=" + (result.ReasonText ?? string.Empty))) +
+                              ", sha256=" + (result.Sha256 ?? string.Empty),
+                    SourceHost = Environment.MachineName,
+                    SourceUser = Environment.UserName,
+                    SourceProcess = fileName,
+                    TargetHost = Environment.MachineName,
+                    TargetProcess = fileName,
+                    ObjectType = "executable",
+                    ObjectName = path,
+                    ObjectFormat = result.Sha256 ?? string.Empty,
+                    PolicyName = "static-scan",
+                    EventDetails = detailJson
+                };
+
+                // Forward both detections and (for visibility) clean executable
+                // scans? No - only flagged results go to the console to avoid
+                // flooding; clean scans are logged locally.
+                if (flagged)
+                {
+                    lock (localScanAuditLock)
+                    {
+                        localScanAuditRecords.Add(record);
+                    }
+                }
+
+                MarkSandboxHashProcessed(hash);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " local executable scan failed for " + path + ": " + ex.Message);
+            }
+        }
+
+        private static string SafeExtensionForAudit(string path)
+        {
+            try
+            {
+                string ext = Path.GetExtension(path);
+                return string.IsNullOrEmpty(ext) ? string.Empty : ext.ToLowerInvariant();
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        // Build a structured evidence payload (JSON) for the console's detail /
+        // attack-flow view: where the file came from, who/what landed it, the
+        // matched rules, hash, and verdict.
+        private string BuildStaticScanEvidence(
+            LocalScanResult result,
+            SandboxExecutableEvent executableEvent,
+            string eventReason,
+            string matchedRulesText,
+            string directory)
+        {
+            try
+            {
+                Dictionary<string, object> evidence = new Dictionary<string, object>
+                {
+                    { "kind", "static-scan" },
+                    { "verdict", result.VerdictText ?? string.Empty },
+                    { "score", result.Score },
+                    { "sha256", result.Sha256 ?? string.Empty },
+                    { "filePath", result.Path ?? string.Empty },
+                    { "fileName", Path.GetFileName(result.Path ?? string.Empty) },
+                    { "directory", directory },
+                    { "landingReason", eventReason },
+                    { "previousPath", executableEvent.PreviousPath ?? string.Empty },
+                    { "fileSize", result.FileSize },
+                    { "matchedRules", result.MatchedRules ?? new string[0] },
+                    { "matchedRuleCount", result.MatchedRules == null ? 0 : result.MatchedRules.Length },
+                    { "reasons", result.ReasonText ?? string.Empty },
+                    { "engines", result.EngineStatus ?? new string[0] },
+                    { "detectedHost", Environment.MachineName },
+                    { "detectedUser", Environment.UserName },
+                    { "detectedUtc", DateTime.UtcNow.ToString("o") }
+                };
+
+                return serializer.Serialize(evidence);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private void MarkSandboxHashProcessed(string hash)
+        {
+            if (string.IsNullOrEmpty(hash))
+            {
+                return;
+            }
+
+            lock (sandboxExecutableLock)
+            {
+                if (sandboxUploadedHashes.Add(hash))
+                {
+                    while (sandboxUploadedHashes.Count > SandboxMaxKnownHashes)
+                    {
+                        using (HashSet<string>.Enumerator e = sandboxUploadedHashes.GetEnumerator())
+                        {
+                            if (e.MoveNext())
+                            {
+                                sandboxUploadedHashes.Remove(e.Current);
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private AuditLog.AuditRecord[] DrainLocalScanAuditRecords()
+        {
+            lock (localScanAuditLock)
+            {
+                if (localScanAuditRecords.Count == 0)
+                {
+                    return new AuditLog.AuditRecord[0];
+                }
+
+                AuditLog.AuditRecord[] drained = localScanAuditRecords.ToArray();
+                localScanAuditRecords.Clear();
+                return drained;
             }
         }
 

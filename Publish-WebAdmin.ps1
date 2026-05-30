@@ -297,6 +297,33 @@ try {
         Copy-Item -LiteralPath $driverCertificate -Destination $agentDriverPublish -Force
     }
 
+    # Deploy the bundled YARA rule sets used by the user-mode static scan
+    # engine. The agent loads rules from its 'yara-rules' folder at runtime;
+    # the server copy lets the central console serve / manage them.
+    $yaraRulesSource = Join-Path $root "third_party\yara-rules"
+    if (Test-Path -LiteralPath $yaraRulesSource) {
+        $agentYaraPublish = Join-Path $agentPublish "yara-rules"
+        $serverYaraPublish = Join-Path $serverPublish "yara-rules"
+        New-Item -ItemType Directory -Force -Path $agentYaraPublish, $serverYaraPublish | Out-Null
+        Copy-Item -Path (Join-Path $yaraRulesSource "*") -Destination $agentYaraPublish -Recurse -Force
+        Copy-Item -Path (Join-Path $yaraRulesSource "*") -Destination $serverYaraPublish -Recurse -Force
+        $yaraRuleCount = (Get-ChildItem -LiteralPath $yaraRulesSource -Recurse -Include *.yar,*.yara -ErrorAction SilentlyContinue | Measure-Object).Count
+        Write-Host ("Deployed {0} YARA rule file(s) to agent and server packages." -f $yaraRuleCount)
+    }
+
+    # Deploy the native libyara.dll (built in-house from VirusTotal/YARA source)
+    # beside the agent and server executables so the static scan engine's YARA
+    # provider activates instead of degrading to heuristics only.
+    $libYaraSource = Join-Path $root "third_party\yara-bin\x64\libyara.dll"
+    if (Test-Path -LiteralPath $libYaraSource) {
+        Copy-Item -LiteralPath $libYaraSource -Destination $agentPublish -Force
+        Copy-Item -LiteralPath $libYaraSource -Destination $serverPublish -Force
+        Write-Host "Deployed libyara.dll to agent and server packages."
+    }
+    else {
+        Write-Warning "libyara.dll was not found at $libYaraSource; the agent YARA engine will report unavailable until it is deployed."
+    }
+
     $runtimeStaging = Join-Path $env:TEMP ("DataProtectorUsbRuntime-" + [guid]::NewGuid().ToString("N"))
     try {
         $runtimeDriverStaging = Join-Path $runtimeStaging "driver"

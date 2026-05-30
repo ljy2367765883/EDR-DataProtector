@@ -60,3 +60,9 @@ Thumbs.db
 Desktop.ini
 *.swp
 *.swo
+
+# Malware test samples - never commit live samples to the repo
+Shellcode.x64.EXE
+*.malware
+test-samples/
+samples/

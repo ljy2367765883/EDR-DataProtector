@@ -62,9 +62,31 @@ namespace DataProtectorWebBridge.Services
             // Register engines. Order is informational; all engines run and the
             // strongest result wins. New engines (ML, cloud reputation) plug in
             // here without touching the kernel or the request/verdict transport.
-            engines.Add(new YaraScanEngine(Path.Combine(scanRoot, "rules")));
+            //
+            // YARA loads rules from the runtime-updatable ProgramData directory
+            // (synced from the central server) AND the 'yara-rules' folder that
+            // ships beside the agent executable (the bundled baseline sets).
+            string runtimeRulesDir = Path.Combine(scanRoot, "rules");
+            string bundledRulesDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory ?? ".", "yara-rules");
+            YaraScanEngine yara = new YaraScanEngine(runtimeRulesDir, bundledRulesDir);
+            engines.Add(yara);
             engines.Add(new HeuristicPeScanEngine());
             engines.Add(new HashReputationScanEngine(Path.Combine(scanRoot, "hash-reputation")));
+
+            // Compile YARA rules off the request path so the first executable
+            // scan is not blocked by a multi-thousand-file compile and the
+            // memory footprint settles before steady-state work begins.
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    yara.Warmup();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(DateTime.Now.ToString("s") + " YARA warmup failed: " + ex.Message);
+                }
+            });
         }
 
         public string[] EngineStatus()
@@ -167,13 +189,53 @@ namespace DataProtectorWebBridge.Services
 
         private ScanResultFusion ScanOne(PolicyBridgeService.StaticScanRequestDto request)
         {
+            return ScanPathCore(request.path, request.fileSize);
+        }
+
+        /// <summary>
+        /// Scan an arbitrary local file on demand (used by the agent's
+        /// file-watch flow so executables are analyzed locally instead of being
+        /// uploaded). Returns a public result with verdict, score, and reasons.
+        /// </summary>
+        public LocalScanResult ScanFile(string path)
+        {
+            ulong size = 0;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                {
+                    size = (ulong)new FileInfo(path).Length;
+                }
+            }
+            catch
+            {
+            }
+
+            ScanResultFusion fusion = ScanPathCore(path, size);
+            return new LocalScanResult
+            {
+                Path = path ?? string.Empty,
+                FileSize = size,
+                Verdict = fusion.Verdict,
+                VerdictText = VerdictText(fusion.Verdict),
+                Score = fusion.Score,
+                ReasonFlags = fusion.ReasonFlags,
+                ReasonText = fusion.ReasonText,
+                EngineStatus = EngineStatus(),
+                MatchedRules = fusion.MatchedRules,
+                Sha256 = fusion.Sha256
+            };
+        }
+
+        private ScanResultFusion ScanPathCore(string path, ulong fileSize)
+        {
             ScanResultFusion fusion = new ScanResultFusion();
 
-            byte[] content = TryReadFile(request.path, out string readError);
+            byte[] content = TryReadFile(path, out string readError);
             ScanContext context = new ScanContext
             {
-                Path = request.path ?? string.Empty,
-                FileSize = request.fileSize,
+                Path = path ?? string.Empty,
+                FileSize = fileSize,
                 Content = content
             };
 
@@ -190,6 +252,19 @@ namespace DataProtectorWebBridge.Services
             int aggregateScore = 0;
             uint reasonFlags = 0;
             List<string> reasons = new List<string>();
+            List<string> matchedRules = new List<string>();
+
+            // Content hash (used for reputation correlation and as evidence).
+            try
+            {
+                using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    fusion.Sha256 = BitConverter.ToString(sha.ComputeHash(content)).Replace("-", string.Empty);
+                }
+            }
+            catch
+            {
+            }
 
             IScanEngine[] snapshot;
             lock (syncRoot)
@@ -229,7 +304,20 @@ namespace DataProtectorWebBridge.Services
                 {
                     reasons.Add(engine.Name + ": " + result.Reason);
                 }
+
+                if (result.MatchedRules != null)
+                {
+                    foreach (string rule in result.MatchedRules)
+                    {
+                        if (!string.IsNullOrWhiteSpace(rule) && !matchedRules.Contains(rule))
+                        {
+                            matchedRules.Add(rule);
+                        }
+                    }
+                }
             }
+
+            fusion.MatchedRules = matchedRules.ToArray();
 
             if (aggregateScore > 100)
             {
@@ -336,7 +424,26 @@ namespace DataProtectorWebBridge.Services
             public int Score;
             public uint ReasonFlags;
             public string ReasonText = string.Empty;
+            public string[] MatchedRules;
+            public string Sha256;
         }
+    }
+
+    /// <summary>
+    /// Public result of an on-demand local file scan.
+    /// </summary>
+    internal sealed class LocalScanResult
+    {
+        public string Path { get; set; }
+        public ulong FileSize { get; set; }
+        public uint Verdict { get; set; }
+        public string VerdictText { get; set; }
+        public int Score { get; set; }
+        public uint ReasonFlags { get; set; }
+        public string ReasonText { get; set; }
+        public string[] EngineStatus { get; set; }
+        public string[] MatchedRules { get; set; }
+        public string Sha256 { get; set; }
     }
 
     /// <summary>
@@ -360,6 +467,9 @@ namespace DataProtectorWebBridge.Services
 
         /// <summary>Short human-readable explanation.</summary>
         public string Reason { get; set; }
+
+        /// <summary>Matched detection names (e.g. YARA rule identifiers).</summary>
+        public string[] MatchedRules { get; set; }
     }
 
     /// <summary>

@@ -19,27 +19,76 @@ namespace DataProtectorWebBridge.Services
     /// </summary>
     internal sealed class YaraScanEngine : IScanEngine
     {
-        private readonly string ruleDirectory;
+        // Standard external variables real-world rule sets reference. Defined on
+        // every compiler so the rules compile, and set per scan so they
+        // evaluate against the actual file.
+        private static readonly string[] StringExternals =
+        {
+            "filename", "filepath", "extension", "filetype", "owner"
+        };
+
+        private readonly string[] ruleDirectories;
         private readonly object syncRoot = new object();
         private YaraNative native;
-        private IntPtr compiledRules = IntPtr.Zero;
+        private readonly List<IntPtr> compiledRuleSets = new List<IntPtr>();
         private DateTime rulesStamp = DateTime.MinValue;
+        private int compiledFileCount;
         private bool initialized;
         private bool available;
 
-        public YaraScanEngine(string ruleDirectory)
+        public YaraScanEngine(params string[] ruleDirectories)
         {
-            this.ruleDirectory = ruleDirectory;
-            try
+            List<string> dirs = new List<string>();
+            if (ruleDirectories != null)
             {
-                Directory.CreateDirectory(ruleDirectory);
+                foreach (string dir in ruleDirectories)
+                {
+                    if (!string.IsNullOrWhiteSpace(dir))
+                    {
+                        dirs.Add(dir);
+                    }
+                }
             }
-            catch
+
+            this.ruleDirectories = dirs.ToArray();
+
+            // Ensure the primary (first) directory exists so rules can be synced
+            // into it at runtime.
+            if (this.ruleDirectories.Length > 0)
             {
+                try
+                {
+                    Directory.CreateDirectory(this.ruleDirectories[0]);
+                }
+                catch
+                {
+                }
             }
         }
 
         public string Name { get { return "yara"; } }
+
+        public int CompiledFileCount { get { return compiledFileCount; } }
+
+        /// <summary>
+        /// Compile the rule set ahead of the first scan so the (potentially
+        /// multi-second) compile does not block a scan request and so the memory
+        /// footprint settles before the agent starts its steady-state work.
+        /// Safe to call repeatedly; no-op when libyara is unavailable.
+        /// </summary>
+        public void Warmup()
+        {
+            EnsureInitialized();
+            if (!available || native == null)
+            {
+                return;
+            }
+
+            lock (syncRoot)
+            {
+                RefreshRulesLocked();
+            }
+        }
 
         public bool IsAvailable
         {
@@ -105,7 +154,7 @@ namespace DataProtectorWebBridge.Services
                     return null;
                 }
 
-                if (compiledRules == IntPtr.Zero)
+                if (compiledRuleSets.Count == 0)
                 {
                     return null;
                 }
@@ -125,9 +174,19 @@ namespace DataProtectorWebBridge.Services
                             string identifier = identifierPtr != IntPtr.Zero
                                 ? Marshal.PtrToStringAnsi(identifierPtr)
                                 : null;
-                            if (!string.IsNullOrEmpty(identifier) && state.FirstRule == null)
+                            if (!string.IsNullOrEmpty(identifier))
                             {
-                                state.FirstRule = identifier;
+                                if (state.FirstRule == null)
+                                {
+                                    state.FirstRule = identifier;
+                                }
+                                // Collect a bounded list of matched rule names so
+                                // the console can show exactly which rules fired.
+                                if (state.MatchedRules.Count < 64 &&
+                                    !state.MatchedRules.Contains(identifier))
+                                {
+                                    state.MatchedRules.Add(identifier);
+                                }
                             }
                         }
                         catch
@@ -135,25 +194,34 @@ namespace DataProtectorWebBridge.Services
                         }
                     }
 
-                    // CALLBACK_CONTINUE == 0
+                    // CALLBACK_CONTINUE == 0 (keep scanning so every matching rule
+                    // is reported, not just the first).
                     return 0;
                 };
+
+                string fileName = SafeFileName(context.Path);
+                string extension = SafeExtension(context.Path);
 
                 GCHandle pinned = GCHandle.Alloc(context.Content, GCHandleType.Pinned);
                 try
                 {
-                    int scanResult = native.YrRulesScanMem(
-                        compiledRules,
-                        pinned.AddrOfPinnedObject(),
-                        (UIntPtr)context.Content.Length,
-                        0,
-                        callback,
-                        IntPtr.Zero,
-                        0);
-
-                    if (scanResult != 0 || state.MatchCount == 0)
+                    foreach (IntPtr rules in compiledRuleSets)
                     {
-                        return null;
+                        // Bind external variables to this file before each scan.
+                        native.DefineRulesString(rules, "filename", fileName);
+                        native.DefineRulesString(rules, "filepath", context.Path ?? string.Empty);
+                        native.DefineRulesString(rules, "extension", extension);
+                        native.DefineRulesString(rules, "filetype", string.Empty);
+                        native.DefineRulesString(rules, "owner", string.Empty);
+
+                        native.YrRulesScanMem(
+                            rules,
+                            pinned.AddrOfPinnedObject(),
+                            (UIntPtr)context.Content.Length,
+                            0,
+                            callback,
+                            IntPtr.Zero,
+                            10);
                     }
                 }
                 finally
@@ -162,41 +230,116 @@ namespace DataProtectorWebBridge.Services
                     GC.KeepAlive(callback);
                 }
 
+                if (state.MatchCount == 0)
+                {
+                    return null;
+                }
+
                 // A YARA rule match is high-confidence. Score scales mildly with
                 // the number of matching rules but a single match already lands
                 // in the malicious band.
                 int score = 80 + Math.Min(20, (state.MatchCount - 1) * 5);
-                string reason = state.FirstRule == null
-                    ? ("matched " + state.MatchCount + " rule(s)")
-                    : ("matched rule '" + state.FirstRule + "'" + (state.MatchCount > 1 ? (" +" + (state.MatchCount - 1)) : string.Empty));
+
+                // Build a reason that names the matched rules (capped) so the
+                // console shows which rules fired, not just a count.
+                string ruleList = string.Join(", ", state.MatchedRules);
+                string reason;
+                if (state.MatchedRules.Count == 0)
+                {
+                    reason = "matched " + state.MatchCount + " rule(s)";
+                }
+                else if (state.MatchCount > state.MatchedRules.Count)
+                {
+                    reason = "matched " + state.MatchCount + " rule(s): " + ruleList +
+                             " (+" + (state.MatchCount - state.MatchedRules.Count) + " more)";
+                }
+                else
+                {
+                    reason = "matched " + state.MatchCount + " rule(s): " + ruleList;
+                }
 
                 return new ScanEngineResult
                 {
                     Score = score,
                     ReasonFlags = ScanReasonFlags.YaraMatch,
-                    Reason = reason
+                    Reason = reason,
+                    MatchedRules = state.MatchedRules.ToArray()
                 };
             }
         }
 
-        // Caller holds syncRoot.
+        private static string SafeFileName(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                return Path.GetFileName(path);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string SafeExtension(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                string ext = Path.GetExtension(path);
+                return ext ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private void DestroyRuleSetsLocked()
+        {
+            foreach (IntPtr rules in compiledRuleSets)
+            {
+                if (rules != IntPtr.Zero)
+                {
+                    native.YrRulesDestroy(rules);
+                }
+            }
+            compiledRuleSets.Clear();
+            compiledFileCount = 0;
+        }
+
+        // Caller holds syncRoot. Compiles every clean rule file into a SINGLE
+        // shared YR_RULES object (libyara is built to hold thousands of rules in
+        // one object). A throwaway test-compiler validates each file first so a
+        // malformed file is skipped without poisoning the shared compiler. Each
+        // file is added under a unique namespace to avoid duplicate-identifier
+        // collisions across rule sets. This keeps memory bounded (one arena
+        // instead of thousands) and scanning fast (one pass instead of N).
         private bool RefreshRulesLocked()
         {
             try
             {
-                string[] ruleFiles = Directory.Exists(ruleDirectory)
-                    ? Directory.GetFiles(ruleDirectory, "*.yar*", SearchOption.AllDirectories)
-                    : new string[0];
+                List<string> ruleFileList = new List<string>();
+                foreach (string dir in ruleDirectories)
+                {
+                    if (Directory.Exists(dir))
+                    {
+                        ruleFileList.AddRange(Directory.GetFiles(dir, "*.yar*", SearchOption.AllDirectories));
+                    }
+                }
+                string[] ruleFiles = ruleFileList.ToArray();
 
                 if (ruleFiles.Length == 0)
                 {
-                    // No rules deployed: nothing to do, but engine stays "available"
-                    // so it picks up rules as soon as the central server syncs them.
-                    if (compiledRules != IntPtr.Zero)
-                    {
-                        native.YrRulesDestroy(compiledRules);
-                        compiledRules = IntPtr.Zero;
-                    }
+                    DestroyRuleSetsLocked();
                     return false;
                 }
 
@@ -210,19 +353,25 @@ namespace DataProtectorWebBridge.Services
                     }
                 }
 
-                if (compiledRules != IntPtr.Zero && newest == rulesStamp)
+                if (compiledRuleSets.Count > 0 && newest == rulesStamp)
                 {
                     return true;
                 }
 
-                IntPtr compiler;
-                if (native.YrCompilerCreate(out compiler) != 0 || compiler == IntPtr.Zero)
+                IntPtr sharedCompiler;
+                if (native.YrCompilerCreate(out sharedCompiler) != 0 || sharedCompiler == IntPtr.Zero)
                 {
-                    return false;
+                    return compiledRuleSets.Count > 0;
                 }
+
+                int compiledFiles = 0;
+                int skippedFiles = 0;
 
                 try
                 {
+                    DefineCompilerExternals(sharedCompiler);
+
+                    int namespaceIndex = 0;
                     foreach (string file in ruleFiles)
                     {
                         string ruleText;
@@ -232,36 +381,95 @@ namespace DataProtectorWebBridge.Services
                         }
                         catch
                         {
+                            skippedFiles++;
                             continue;
                         }
 
-                        // YrCompilerAddString returns the number of errors.
-                        native.YrCompilerAddString(compiler, ruleText, null);
+                        // Validate the file in isolation first. yr_compiler_add_string
+                        // returns the number of errors; a poisoned compiler cannot
+                        // produce rules, so we never add a bad file to the shared one.
+                        if (!FileCompilesCleanly(ruleText))
+                        {
+                            skippedFiles++;
+                            continue;
+                        }
+
+                        string ns = "dp_ns_" + namespaceIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        int errors = native.YrCompilerAddString(sharedCompiler, ruleText, ns);
+                        if (errors != 0)
+                        {
+                            // Should not happen after the clean pre-test, but guard.
+                            skippedFiles++;
+                            continue;
+                        }
+
+                        namespaceIndex++;
+                        compiledFiles++;
                     }
 
-                    IntPtr newRules;
-                    if (native.YrCompilerGetRules(compiler, out newRules) != 0 || newRules == IntPtr.Zero)
+                    if (compiledFiles == 0)
                     {
-                        return compiledRules != IntPtr.Zero;
+                        return compiledRuleSets.Count > 0;
                     }
 
-                    if (compiledRules != IntPtr.Zero)
+                    IntPtr rules;
+                    if (native.YrCompilerGetRules(sharedCompiler, out rules) != 0 || rules == IntPtr.Zero)
                     {
-                        native.YrRulesDestroy(compiledRules);
+                        return compiledRuleSets.Count > 0;
                     }
 
-                    compiledRules = newRules;
+                    DestroyRuleSetsLocked();
+                    compiledRuleSets.Add(rules);
+                    compiledFileCount = compiledFiles;
                     rulesStamp = newest;
+
+                    Console.WriteLine(DateTime.Now.ToString("s") + " YARA compiled " + compiledFiles +
+                        " rule file(s) into 1 rule set (" + skippedFiles + " skipped, " +
+                        ruleFiles.Length + " total).");
                     return true;
                 }
                 finally
                 {
-                    native.YrCompilerDestroy(compiler);
+                    native.YrCompilerDestroy(sharedCompiler);
                 }
             }
             catch
             {
-                return compiledRules != IntPtr.Zero;
+                return compiledRuleSets.Count > 0;
+            }
+        }
+
+        private void DefineCompilerExternals(IntPtr compiler)
+        {
+            foreach (string ext in StringExternals)
+            {
+                native.DefineCompilerString(compiler, ext, string.Empty);
+            }
+        }
+
+        // Compile a single rule file in a disposable compiler to decide whether
+        // it is safe to add to the shared compiler.
+        private bool FileCompilesCleanly(string ruleText)
+        {
+            IntPtr testCompiler;
+            if (native.YrCompilerCreate(out testCompiler) != 0 || testCompiler == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            try
+            {
+                DefineCompilerExternals(testCompiler);
+                int errors = native.YrCompilerAddString(testCompiler, ruleText, null);
+                return errors == 0;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                native.YrCompilerDestroy(testCompiler);
             }
         }
 
@@ -269,6 +477,7 @@ namespace DataProtectorWebBridge.Services
         {
             public int MatchCount;
             public string FirstRule;
+            public readonly List<string> MatchedRules = new List<string>();
         }
     }
 
@@ -293,6 +502,24 @@ namespace DataProtectorWebBridge.Services
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         public delegate int YaraCompilerAddStringDelegate(IntPtr compiler, string ruleString, string ns);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate int YaraCompilerDefineStringDelegate(IntPtr compiler, string identifier, string value);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate int YaraCompilerDefineIntegerDelegate(IntPtr compiler, string identifier, long value);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate int YaraCompilerDefineBooleanDelegate(IntPtr compiler, string identifier, int value);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate int YaraRulesDefineStringDelegate(IntPtr rules, string identifier, string value);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate int YaraRulesDefineIntegerDelegate(IntPtr rules, string identifier, long value);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate int YaraRulesDefineBooleanDelegate(IntPtr rules, string identifier, int value);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         public delegate int YaraCompilerGetRulesDelegate(IntPtr compiler, out IntPtr rules);
@@ -323,6 +550,12 @@ namespace DataProtectorWebBridge.Services
         private YaraCompilerDestroyDelegate compilerDestroyFn;
         private YaraRulesDestroyDelegate rulesDestroyFn;
         private YaraRulesScanMemDelegate rulesScanMemFn;
+        private YaraCompilerDefineStringDelegate compilerDefineStringFn;
+        private YaraCompilerDefineIntegerDelegate compilerDefineIntegerFn;
+        private YaraCompilerDefineBooleanDelegate compilerDefineBooleanFn;
+        private YaraRulesDefineStringDelegate rulesDefineStringFn;
+        private YaraRulesDefineIntegerDelegate rulesDefineIntegerFn;
+        private YaraRulesDefineBooleanDelegate rulesDefineBooleanFn;
 
         public static YaraNative TryLoad()
         {
@@ -365,6 +598,16 @@ namespace DataProtectorWebBridge.Services
                     return null;
                 }
 
+                // External-variable definition entry points are optional: when
+                // present they let real-world rules that reference filename /
+                // filepath / extension / filetype / owner compile and evaluate.
+                native.compilerDefineStringFn = GetDelegate<YaraCompilerDefineStringDelegate>(module, "yr_compiler_define_string_variable");
+                native.compilerDefineIntegerFn = GetDelegate<YaraCompilerDefineIntegerDelegate>(module, "yr_compiler_define_integer_variable");
+                native.compilerDefineBooleanFn = GetDelegate<YaraCompilerDefineBooleanDelegate>(module, "yr_compiler_define_boolean_variable");
+                native.rulesDefineStringFn = GetDelegate<YaraRulesDefineStringDelegate>(module, "yr_rules_define_string_variable");
+                native.rulesDefineIntegerFn = GetDelegate<YaraRulesDefineIntegerDelegate>(module, "yr_rules_define_integer_variable");
+                native.rulesDefineBooleanFn = GetDelegate<YaraRulesDefineBooleanDelegate>(module, "yr_rules_define_boolean_variable");
+
                 return native;
             }
             catch
@@ -390,6 +633,36 @@ namespace DataProtectorWebBridge.Services
         public int YrCompilerGetRules(IntPtr compiler, out IntPtr rules) { return compilerGetRulesFn(compiler, out rules); }
         public void YrCompilerDestroy(IntPtr compiler) { compilerDestroyFn(compiler); }
         public void YrRulesDestroy(IntPtr rules) { rulesDestroyFn(rules); }
+
+        public void DefineCompilerString(IntPtr compiler, string identifier, string value)
+        {
+            if (compilerDefineStringFn != null) { compilerDefineStringFn(compiler, identifier, value); }
+        }
+
+        public void DefineCompilerInteger(IntPtr compiler, string identifier, long value)
+        {
+            if (compilerDefineIntegerFn != null) { compilerDefineIntegerFn(compiler, identifier, value); }
+        }
+
+        public void DefineCompilerBoolean(IntPtr compiler, string identifier, bool value)
+        {
+            if (compilerDefineBooleanFn != null) { compilerDefineBooleanFn(compiler, identifier, value ? 1 : 0); }
+        }
+
+        public void DefineRulesString(IntPtr rules, string identifier, string value)
+        {
+            if (rulesDefineStringFn != null) { rulesDefineStringFn(rules, identifier, value); }
+        }
+
+        public void DefineRulesInteger(IntPtr rules, string identifier, long value)
+        {
+            if (rulesDefineIntegerFn != null) { rulesDefineIntegerFn(rules, identifier, value); }
+        }
+
+        public void DefineRulesBoolean(IntPtr rules, string identifier, bool value)
+        {
+            if (rulesDefineBooleanFn != null) { rulesDefineBooleanFn(rules, identifier, value ? 1 : 0); }
+        }
 
         public int YrRulesScanMem(IntPtr rules, IntPtr buffer, UIntPtr bufferLength, int flags, YaraCallback callback, IntPtr userData, int timeout)
         {
@@ -428,7 +701,37 @@ namespace DataProtectorWebBridge.Services
 
             if (isPe)
             {
-                score += ScorePe(data, context.FileSize, ref flags, notes, entropy);
+                bool validPe;
+                score += ScorePe(data, context.FileSize, ref flags, notes, entropy, out validPe);
+
+                if (!validPe)
+                {
+                    // MZ magic but no valid PE header. A file with an executable
+                    // extension that begins with 'MZ' yet has no real PE
+                    // structure is almost always raw shellcode, a stomped
+                    // header, or a corrupt/packed dropper - treat it as a strong
+                    // signal rather than ignoring it.
+                    score += 45;
+                    notes.Add("MZ-without-PE");
+
+                    // Small MZ stubs (a few KB) with no PE header are the classic
+                    // "MZ + shellcode" stager shape.
+                    if (context.FileSize != 0 && context.FileSize < 64 * 1024)
+                    {
+                        score += 15;
+                        flags |= ScanReasonFlags.TinyImage;
+                        notes.Add("tiny-mz-stub");
+                    }
+
+                    if (entropy >= EntropyHigh)
+                    {
+                        score += 10;
+                        flags |= ScanReasonFlags.HighEntropy;
+                        notes.Add("high-entropy");
+                    }
+
+                    score += ScoreSuspiciousStrings(data, ref flags, notes);
+                }
             }
             else
             {
@@ -449,9 +752,15 @@ namespace DataProtectorWebBridge.Services
                 return null;
             }
 
-            if (score > 60)
+            // Heuristics normally cap below the YARA/hash engines so they rarely
+            // block on their own. The "MZ-without-PE" shellcode-stub shape is an
+            // exception: it is high-confidence on its own, so allow it into the
+            // malicious band.
+            bool strongMalformedPe = notes.Contains("MZ-without-PE");
+            int cap = strongMalformedPe ? 85 : 60;
+            if (score > cap)
             {
-                score = 60; // heuristic caps below YARA/hash so it rarely blocks alone
+                score = cap;
             }
 
             return new ScanEngineResult
@@ -462,10 +771,10 @@ namespace DataProtectorWebBridge.Services
             };
         }
 
-        private int ScorePe(byte[] data, ulong fileSize, ref uint flags, List<string> notes, int entropy)
+        private int ScorePe(byte[] data, ulong fileSize, ref uint flags, List<string> notes, int entropy, out bool validPe)
         {
             int score = 0;
-            flags |= ScanReasonFlags.ValidPe;
+            validPe = false;
 
             if (data.Length < 0x40)
             {
@@ -483,6 +792,10 @@ namespace DataProtectorWebBridge.Services
             {
                 return score;
             }
+
+            // Confirmed PE structure.
+            validPe = true;
+            flags |= ScanReasonFlags.ValidPe;
 
             ushort numberOfSections = BitConverter.ToUInt16(data, peOffset + 6);
             ushort sizeOfOptionalHeader = BitConverter.ToUInt16(data, peOffset + 20);
