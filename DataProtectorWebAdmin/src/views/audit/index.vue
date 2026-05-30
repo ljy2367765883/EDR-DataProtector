@@ -674,6 +674,20 @@ function auditRecordSummary(record: Api.DataProtector.AuditRecord) {
     );
   }
 
+  if ((record.Action || '').startsWith('static-scan.')) {
+    const target = resolveTargetInfo(record);
+    const detail = parseStaticScanDetail(record);
+    const rulesText = detail.matchedRules.length > 0
+      ? detail.matchedRules.join(', ')
+      : (detail.reasons || '-');
+    const verdict = detail.verdict || '-';
+    const score = detail.score != null ? String(detail.score) : '-';
+    return textByLocale(
+      `恶意文件检测（${verdict}，评分 ${score}）。命中规则：${rulesText}。对象：${target.primary || '-'}`,
+      `Malware detected (${verdict}, score ${score}). Matched rules: ${rulesText}. Object: ${target.primary || '-'}`
+    );
+  }
+
   const source = resolveSourceInfo(record);
   const target = resolveTargetInfo(record);
   const action = auditActionLabel(record);
@@ -682,6 +696,43 @@ function auditRecordSummary(record: Api.DataProtector.AuditRecord) {
     `${action}，处置：${disposition}。来源：${source.primary || '-'}。对象：${target.primary || '-'}`,
     `${action}. Disposition: ${disposition}. Source: ${source.primary || '-'}. Object: ${target.primary || '-'}`
   );
+}
+
+// Parse the structured static-scan evidence (EventDetails JSON) with a fallback
+// to extracting "rules=..." from the raw message.
+function parseStaticScanDetail(record: Api.DataProtector.AuditRecord) {
+  const result: { verdict: string; score: number | null; matchedRules: string[]; reasons: string; sha256: string } = {
+    verdict: '',
+    score: null,
+    matchedRules: [],
+    reasons: '',
+    sha256: ''
+  };
+
+  const raw = record.EventDetails || '';
+  if (raw.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw);
+      result.verdict = parsed.verdict || '';
+      result.score = typeof parsed.score === 'number' ? parsed.score : null;
+      result.sha256 = parsed.sha256 || '';
+      result.reasons = parsed.reasons || '';
+      if (Array.isArray(parsed.matchedRules)) {
+        result.matchedRules = parsed.matchedRules.filter((r: unknown) => typeof r === 'string');
+      }
+    } catch {
+      // fall through to message parsing
+    }
+  }
+
+  if (result.matchedRules.length === 0 && record.Message) {
+    const m = record.Message.match(/rules=([^,]+(?:,\s*[^,]+)*)/i);
+    if (m && m[1]) {
+      result.matchedRules = m[1].split(',').map(s => s.trim()).filter(Boolean);
+    }
+  }
+
+  return result;
 }
 
 function timelineActionLabel(event: AuditTimelineItem) {
@@ -730,11 +781,65 @@ function buildAuditEvidenceRows(record: Api.DataProtector.AuditRecord): AuditEvi
     { label: textByLocale('目标细节', 'Target detail'), value: target.secondary || '-' },
     { label: textByLocale('处置结果', 'Disposition'), value: dispositionLabel(resolveDisposition(record)) },
     { label: textByLocale('风险级别', 'Severity'), value: severityLabel(resolveSeverity(record)) },
-    { label: textByLocale('策略模块', 'Policy module'), value: policyDisplayName(record.PolicyName || '') || '-' },
-    { label: textByLocale('原始动作', 'Raw action'), value: record.Action || '-', muted: true },
-    { label: textByLocale('状态码', 'Status'), value: record.Status || '-', muted: true },
-    { label: textByLocale('原始消息', 'Raw message'), value: record.Message || record.EventDetails || '-', muted: true }
+    { label: textByLocale('策略模块', 'Policy module'), value: policyDisplayName(record.PolicyName || '') || '-' }
   ];
+
+  // Static-scan detections: surface the matched YARA rules and file evidence.
+  if ((record.Action || '').startsWith('static-scan.')) {
+    const detail = parseStaticScanDetail(record);
+    let evidence: any = {};
+    if ((record.EventDetails || '').trim().startsWith('{')) {
+      try {
+        evidence = JSON.parse(record.EventDetails as string);
+      } catch {
+        evidence = {};
+      }
+    }
+
+    if (detail.verdict) {
+      rows.push({ label: textByLocale('扫描判定', 'Scan verdict'), value: detail.verdict });
+    }
+    if (detail.score != null) {
+      rows.push({ label: textByLocale('风险评分', 'Risk score'), value: String(detail.score) });
+    }
+    if (detail.matchedRules.length > 0) {
+      rows.push({ label: textByLocale('命中规则', 'Matched rules'), value: detail.matchedRules.join(', ') });
+    } else if (detail.reasons) {
+      rows.push({ label: textByLocale('检测原因', 'Detection reasons'), value: detail.reasons });
+    }
+    if (evidence.landingReason) {
+      const reasonText = evidence.landingReason === 'renamed-to-exe'
+        ? textByLocale('重命名为可执行文件', 'Renamed to executable')
+        : textByLocale('新建文件落地', 'New file created');
+      rows.push({ label: textByLocale('落地方式', 'Landing'), value: reasonText });
+    }
+    if (evidence.previousPath) {
+      rows.push({ label: textByLocale('原始路径', 'Original path'), value: String(evidence.previousPath) });
+    }
+    if (evidence.directory) {
+      rows.push({ label: textByLocale('所在目录', 'Directory'), value: String(evidence.directory) });
+    }
+    if (evidence.fileSize != null) {
+      rows.push({ label: textByLocale('文件大小', 'File size'), value: `${evidence.fileSize} bytes` });
+    }
+    if (detail.sha256) {
+      rows.push({ label: 'SHA-256', value: detail.sha256, muted: true });
+    }
+    if (Array.isArray(evidence.engines) && evidence.engines.length > 0) {
+      rows.push({ label: textByLocale('扫描引擎', 'Scan engines'), value: evidence.engines.join(', '), muted: true });
+    }
+    if (evidence.detectedHost || evidence.detectedUser) {
+      rows.push({
+        label: textByLocale('检测来源', 'Detected on'),
+        value: `${evidence.detectedHost || '-'} / ${evidence.detectedUser || '-'}`,
+        muted: true
+      });
+    }
+  }
+
+  rows.push({ label: textByLocale('原始动作', 'Raw action'), value: record.Action || '-', muted: true });
+  rows.push({ label: textByLocale('状态码', 'Status'), value: record.Status || '-', muted: true });
+  rows.push({ label: textByLocale('原始消息', 'Raw message'), value: record.Message || record.EventDetails || '-', muted: true });
 
   return rows.filter(row => row.value && row.value !== '-');
 }
@@ -748,12 +853,107 @@ function buildTimelineEvidenceRows(event: AuditTimelineItem): AuditEvidenceRow[]
     { label: textByLocale('对象', 'Object'), value: event.target || event.object || '-' },
     { label: textByLocale('远端', 'Remote'), value: event.remote || '-' },
     { label: textByLocale('处置结果', 'Disposition'), value: timelineDispositionLabel(event.disposition) },
-    { label: textByLocale('风险级别', 'Severity'), value: attackSeverityLabel(event.severity) },
-    { label: textByLocale('原始动作', 'Raw action'), value: event.action || '-', muted: true },
-    { label: textByLocale('原始证据', 'Raw evidence'), value: event.raw || event.detail || '-', muted: true }
+    { label: textByLocale('风险级别', 'Severity'), value: attackSeverityLabel(event.severity) }
   ];
 
+  // Static-scan detections: surface matched YARA rules + file evidence parsed
+  // from the structured evidence payload (event.detail / event.raw).
+  if ((event.action || '').startsWith('static-scan.')) {
+    appendStaticScanEvidenceRows(rows, event.detail, event.raw);
+  }
+
+  rows.push({ label: textByLocale('原始动作', 'Raw action'), value: event.action || '-', muted: true });
+  rows.push({ label: textByLocale('原始证据', 'Raw evidence'), value: event.raw || event.detail || '-', muted: true });
+
   return rows.filter(row => row.value && row.value !== '-');
+}
+
+// Parse static-scan evidence (JSON in detail or raw) and append rich rows:
+// verdict, score, matched rules, landing reason, paths, hash, engines.
+function appendStaticScanEvidenceRows(rows: AuditEvidenceRow[], detail?: string, raw?: string) {
+  const detailObj = parseStaticScanEvidence(detail) || parseStaticScanEvidence(raw) || {};
+  const fromRaw = parseStaticScanFromMessage(raw) || parseStaticScanFromMessage(detail) || {};
+
+  const verdict = detailObj.verdict || fromRaw.verdict || '';
+  const score = detailObj.score != null ? detailObj.score : fromRaw.score;
+  const matchedRules: string[] = (Array.isArray(detailObj.matchedRules) && detailObj.matchedRules.length > 0)
+    ? detailObj.matchedRules
+    : (fromRaw.matchedRules || []);
+  const reasons = detailObj.reasons || fromRaw.reasons || '';
+
+  if (verdict) {
+    rows.push({ label: textByLocale('扫描判定', 'Scan verdict'), value: verdict });
+  }
+  if (score != null) {
+    rows.push({ label: textByLocale('风险评分', 'Risk score'), value: String(score) });
+  }
+  if (matchedRules.length > 0) {
+    // One row per rule keeps long lists readable instead of one truncated line.
+    matchedRules.forEach((rule, i) => {
+      rows.push({ label: i === 0 ? textByLocale('命中规则', 'Matched rules') : '', value: rule });
+    });
+  } else if (reasons) {
+    rows.push({ label: textByLocale('检测原因', 'Detection reasons'), value: reasons });
+  }
+  if (detailObj.landingReason) {
+    const reasonText = detailObj.landingReason === 'renamed-to-exe'
+      ? textByLocale('重命名为可执行文件', 'Renamed to executable')
+      : textByLocale('新建文件落地', 'New file created');
+    rows.push({ label: textByLocale('落地方式', 'Landing'), value: reasonText });
+  }
+  if (detailObj.previousPath) {
+    rows.push({ label: textByLocale('原始路径', 'Original path'), value: String(detailObj.previousPath) });
+  }
+  if (detailObj.directory) {
+    rows.push({ label: textByLocale('所在目录', 'Directory'), value: String(detailObj.directory) });
+  }
+  if (detailObj.fileSize != null) {
+    rows.push({ label: textByLocale('文件大小', 'File size'), value: `${detailObj.fileSize} bytes` });
+  }
+  const sha = detailObj.sha256 || fromRaw.sha256;
+  if (sha) {
+    rows.push({ label: 'SHA-256', value: sha, muted: true });
+  }
+  if (Array.isArray(detailObj.engines) && detailObj.engines.length > 0) {
+    rows.push({ label: textByLocale('扫描引擎', 'Scan engines'), value: detailObj.engines.join(', '), muted: true });
+  }
+  if (detailObj.detectedHost || detailObj.detectedUser) {
+    rows.push({
+      label: textByLocale('检测来源', 'Detected on'),
+      value: `${detailObj.detectedHost || '-'} / ${detailObj.detectedUser || '-'}`,
+      muted: true
+    });
+  }
+}
+
+function parseStaticScanEvidence(text?: string): any | null {
+  if (!text || !text.trim().startsWith('{')) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function parseStaticScanFromMessage(text?: string): any | null {
+  if (!text) {
+    return null;
+  }
+  const result: any = { matchedRules: [] };
+  const verdictMatch = text.match(/verdict=([a-z-]+)/i);
+  if (verdictMatch) result.verdict = verdictMatch[1];
+  const scoreMatch = text.match(/score=(\d+)/i);
+  if (scoreMatch) result.score = Number(scoreMatch[1]);
+  const shaMatch = text.match(/sha256=([0-9a-f]{64})/i);
+  if (shaMatch) result.sha256 = shaMatch[1];
+  // "rules=A, B [tag], C" up to ", sha256=" or end
+  const rulesMatch = text.match(/rules=(.+?)(?:,\s*sha256=|$)/i);
+  if (rulesMatch && rulesMatch[1]) {
+    result.matchedRules = rulesMatch[1].split(',').map((s: string) => s.trim()).filter(Boolean);
+  }
+  return result;
 }
 
 function policyDisplayName(value: string) {

@@ -168,24 +168,32 @@ namespace DataProtectorWebBridge.Services
                         state.MatchCount++;
                         try
                         {
-                            // The first field of YR_RULE is the identifier pointer in
-                            // the ABI we target; guard against nulls.
-                            IntPtr identifierPtr = Marshal.ReadIntPtr(messageData);
-                            string identifier = identifierPtr != IntPtr.Zero
-                                ? Marshal.PtrToStringAnsi(identifierPtr)
-                                : null;
+                            // messageData points at a YR_RULE. Its layout (YARA 4.x):
+                            //   int32 flags; int32 num_atoms; uint32 required_strings;
+                            //   uint32 unused;                       -> 16 bytes
+                            //   DECLARE_REFERENCE(const char*, identifier) (8-aligned)
+                            // so the identifier pointer is at offset 16. Also read
+                            // the tags pointer (offset 24) to surface rule tags such
+                            // as the malware family.
+                            string identifier = ReadRuleString(messageData, RuleIdentifierOffset);
+                            string tags = ReadRuleTags(messageData, RuleTagsOffset);
+
                             if (!string.IsNullOrEmpty(identifier))
                             {
+                                string label = string.IsNullOrEmpty(tags)
+                                    ? identifier
+                                    : (identifier + " [" + tags + "]");
+
                                 if (state.FirstRule == null)
                                 {
-                                    state.FirstRule = identifier;
+                                    state.FirstRule = label;
                                 }
                                 // Collect a bounded list of matched rule names so
                                 // the console can show exactly which rules fired.
                                 if (state.MatchedRules.Count < 64 &&
-                                    !state.MatchedRules.Contains(identifier))
+                                    !state.MatchedRules.Contains(label))
                                 {
-                                    state.MatchedRules.Add(identifier);
+                                    state.MatchedRules.Add(label);
                                 }
                             }
                         }
@@ -265,6 +273,60 @@ namespace DataProtectorWebBridge.Services
                     Reason = reason,
                     MatchedRules = state.MatchedRules.ToArray()
                 };
+            }
+        }
+
+        // YR_RULE field offsets (YARA 4.x, 64-bit). 16 bytes of int32 fields
+        // (flags, num_atoms, required_strings, unused) precede the 8-aligned
+        // identifier reference; tags follow it.
+        private const int RuleIdentifierOffset = 16;
+        private const int RuleTagsOffset = 24;
+
+        // Read a char* reference field (DECLARE_REFERENCE union: first member is
+        // the pointer) at the given byte offset within a YR_RULE.
+        private static string ReadRuleString(IntPtr rulePtr, int offset)
+        {
+            try
+            {
+                IntPtr strPtr = Marshal.ReadIntPtr(rulePtr, offset);
+                return strPtr != IntPtr.Zero ? Marshal.PtrToStringAnsi(strPtr) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Tags are stored as consecutive null-terminated ASCII strings ending
+        // with an empty string (double null). Join them with '+'.
+        private static string ReadRuleTags(IntPtr rulePtr, int offset)
+        {
+            try
+            {
+                IntPtr tagsPtr = Marshal.ReadIntPtr(rulePtr, offset);
+                if (tagsPtr == IntPtr.Zero)
+                {
+                    return null;
+                }
+
+                List<string> tags = new List<string>();
+                int cursor = 0;
+                while (tags.Count < 16)
+                {
+                    string tag = Marshal.PtrToStringAnsi(IntPtr.Add(tagsPtr, cursor));
+                    if (string.IsNullOrEmpty(tag))
+                    {
+                        break;
+                    }
+                    tags.Add(tag);
+                    cursor += tag.Length + 1;
+                }
+
+                return tags.Count > 0 ? string.Join("+", tags) : null;
+            }
+            catch
+            {
+                return null;
             }
         }
 
