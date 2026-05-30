@@ -1145,6 +1145,73 @@ DpInspectWebShellOnCleanup(
     return status;
 }
 
+//
+// Static executable scan detector on cleanup. When a handle that modified the
+// file is closing and the target is an executable image (or script dropper),
+// capture its metadata and enqueue a scan REQUEST for the signed user-mode
+// service. The kernel performs NO classification and NO file read here; user
+// mode drains the request, scans with YARA / updatable engines, and submits a
+// verdict that the kernel enforces asynchronously.
+//
+static
+VOID
+DpInspectStaticScanOnCleanup(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _Inout_opt_ PDP_HANDLE_CONTEXT HandleContext
+    )
+{
+    NTSTATUS status;
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+    BOOLEAN modified;
+
+    if (Data == NULL ||
+        FltObjects == NULL ||
+        FltObjects->FileObject == NULL ||
+        FlagOn(FltObjects->FileObject->Flags, FO_VOLUME_OPEN)) {
+
+        return;
+    }
+
+    if (HandleContext != NULL && HandleContext->StaticScanReported) {
+        return;
+    }
+
+    //
+    // Only notify when this handle actually wrote/created the file.
+    //
+    modified = (HandleContext != NULL && HandleContext->StaticScanNewFile) ||
+               FlagOn(FltObjects->FileObject->Flags, FO_FILE_MODIFIED | FO_FILE_SIZE_CHANGED);
+
+    if (!modified) {
+        return;
+    }
+
+    status = FltGetFileNameInformation(Data,
+                                       FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
+                                       &nameInfo);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    if (!DpStaticScanIsExecutableName(&nameInfo->Name)) {
+        FltReleaseFileNameInformation(nameInfo);
+        return;
+    }
+
+    DpStaticScanEnqueueRequest(Data,
+                               FltObjects,
+                               &nameInfo->Name,
+                               FltGetRequestorProcessIdEx(Data),
+                               DpStaticScanOperationCleanup);
+
+    if (HandleContext != NULL) {
+        HandleContext->StaticScanReported = TRUE;
+    }
+
+    FltReleaseFileNameInformation(nameInfo);
+}
+
 static
 NTSTATUS
 DpInspectWebShellRenameSource(
@@ -2776,6 +2843,7 @@ DpPreCleanup(
     status = DpGetHandleContext(FltObjects, &handleContext);
     if (NT_SUCCESS(status) && handleContext != NULL) {
         (VOID)DpInspectWebShellOnCleanup(Data, FltObjects, handleContext);
+        (VOID)DpInspectStaticScanOnCleanup(Data, FltObjects, handleContext);
 
         DP_TRACE_PPTX_DATA("PreCleanupHandle",
                            Data,
@@ -2805,6 +2873,7 @@ DpPreCleanup(
         DpReleaseHandleContext(handleContext);
     } else {
         (VOID)DpInspectWebShellOnCleanup(Data, FltObjects, NULL);
+        (VOID)DpInspectStaticScanOnCleanup(Data, FltObjects, NULL);
     }
 
     return FLT_PREOP_SUCCESS_NO_CALLBACK;

@@ -60,6 +60,8 @@
     <Compile Include="Services\PolicyBridgeService.cs" />
     <Compile Include="Services\RemovableDeviceInventory.cs" />
     <Compile Include="Services\RemoteTaskExecutor.cs" />
+    <Compile Include="Services\StaticScanEngine.cs" />
+    <Compile Include="Services\YaraScanEngine.cs" />
     <Compile Include="Services\StaticWebContent.cs" />
     <Compile Include="Services\UsbCryptInitializer.cs" />
     <Compile Include="Services\VirtualSandboxRunner.cs" />

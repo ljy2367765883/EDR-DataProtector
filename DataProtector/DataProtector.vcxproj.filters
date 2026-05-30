@@ -63,6 +63,9 @@
     <ClCompile Include="DpShadow.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DpStaticScan.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DpThreatEngine.c">
       <Filter>Source Files</Filter>
     </ClCompile>

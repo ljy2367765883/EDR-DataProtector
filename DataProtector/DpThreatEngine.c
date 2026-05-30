@@ -108,6 +108,33 @@ typedef struct _DP_THREAT_RESPONSE_SLOT {
 } DP_THREAT_RESPONSE_SLOT, *PDP_THREAT_RESPONSE_SLOT;
 
 //
+// Attack storyline. One record per process lineage root. It accumulates a
+// time-ordered ring of behavioral steps so the console can reconstruct the
+// full attack flow once the lineage trips the incident threshold.
+//
+typedef struct _DP_THREAT_STORYLINE {
+    LIST_ENTRY Link;
+    HANDLE LineageRootPid;
+    HANDLE OriginProcessId;     // process that first crossed the incident bar
+    ULONGLONG IncidentId;       // assigned when the lineage becomes an incident
+    ULONGLONG FirstSeen;
+    ULONGLONG LastActivity;
+    ULONG PeakScore;
+    ULONG Severity;
+    ULONG TacticMask;
+    ULONG StrongestResponse;
+    ULONG StepCount;            // valid entries in Steps (capped)
+    ULONG TotalStepsObserved;
+    ULONG NextStep;             // ring write cursor
+    BOOLEAN IsIncident;
+    ULONG RootImageLengthBytes;
+    ULONG OriginImageLengthBytes;
+    WCHAR RootImage[DP_THREAT_PROCESS_CHARS];
+    WCHAR OriginImage[DP_THREAT_PROCESS_CHARS];
+    DP_THREAT_STORY_STEP Steps[DP_THREAT_STORY_MAX_STEPS];
+} DP_THREAT_STORYLINE, *PDP_THREAT_STORYLINE;
+
+//
 // Signal metadata: default weight, mapped tactic, ATT&CK technique number.
 //
 typedef struct _DP_THREAT_SIGNAL_INFO {
@@ -115,6 +142,11 @@ typedef struct _DP_THREAT_SIGNAL_INFO {
     DP_THREAT_TACTIC Tactic;
     ULONG TechniqueId;
 } DP_THREAT_SIGNAL_INFO, *PDP_THREAT_SIGNAL_INFO;
+
+//
+// The lineage score at which a storyline is promoted to a tracked incident.
+//
+#define DP_THREAT_INCIDENT_THRESHOLD DP_THREAT_SCORE_THRESHOLD_HIGH
 
 //
 // Process table.
@@ -132,6 +164,15 @@ static KSPIN_LOCK gThreatEventLock;
 static ULONG gThreatEventCount = 0;
 static ULONGLONG gThreatEventSequence = 0;
 static ULONGLONG gThreatDroppedEvents = 0;
+
+//
+// Attack storyline table, keyed by lineage root.
+//
+static LIST_ENTRY gThreatStorylines;
+static KSPIN_LOCK gThreatStoryLock;
+static ULONG gThreatStorylineCount = 0;
+static ULONGLONG gThreatIncidentSequence = 0;
+static ULONGLONG gThreatDroppedStorylines = 0;
 
 //
 // Policy.
@@ -245,6 +286,10 @@ DpThreatLookupSignal(
     static const DP_THREAT_SIGNAL_INFO SensitiveDataHarvest = { 22, DpThreatTacticCollection, 1005 };
     static const DP_THREAT_SIGNAL_INFO RemovableMediaStaging = { 24, DpThreatTacticCollection, 1052 };
 
+    static const DP_THREAT_SIGNAL_INFO MaliciousExecutableWrite = { 55, DpThreatTacticExecution, 1204 };
+    static const DP_THREAT_SIGNAL_INFO SuspiciousExecutableWrite = { 30, DpThreatTacticExecution, 1204 };
+    static const DP_THREAT_SIGNAL_INFO PackedExecutableWrite = { 34, DpThreatTacticDefenseEvasion, 1027 };
+
     switch (Signal) {
     case DpThreatSignalProcessCreated: return &ProcessCreated;
     case DpThreatSignalSuspiciousParentChild: return &SuspiciousParentChild;
@@ -279,6 +324,10 @@ DpThreatLookupSignal(
     case DpThreatSignalRansomwareMassFileAccess: return &RansomwareMassFileAccess;
     case DpThreatSignalSensitiveDataHarvest: return &SensitiveDataHarvest;
     case DpThreatSignalRemovableMediaStaging: return &RemovableMediaStaging;
+
+    case DpThreatSignalMaliciousExecutableWrite: return &MaliciousExecutableWrite;
+    case DpThreatSignalSuspiciousExecutableWrite: return &SuspiciousExecutableWrite;
+    case DpThreatSignalPackedExecutableWrite: return &PackedExecutableWrite;
 
     default:
         return &Unknown;
@@ -720,6 +769,189 @@ DpThreatQueueEvent(
                     CumulativeScore,
                     (ULONG)Severity,
                     (ULONG)Action);
+}
+
+//
+// Must be called with gThreatStoryLock held. Find or create the storyline for
+// a lineage root, evicting the lowest-value record when at capacity.
+//
+static
+PDP_THREAT_STORYLINE
+DpThreatFindOrCreateStorylineLocked(
+    _In_ HANDLE LineageRootPid,
+    _In_ ULONGLONG Now
+    )
+{
+    PLIST_ENTRY link;
+    PDP_THREAT_STORYLINE story;
+    PDP_THREAT_STORYLINE weakest = NULL;
+
+    for (link = gThreatStorylines.Flink; link != &gThreatStorylines; link = link->Flink) {
+        story = CONTAINING_RECORD(link, DP_THREAT_STORYLINE, Link);
+        if (story->LineageRootPid == LineageRootPid) {
+            return story;
+        }
+
+        if (weakest == NULL ||
+            story->PeakScore < weakest->PeakScore ||
+            (story->PeakScore == weakest->PeakScore &&
+             story->LastActivity < weakest->LastActivity)) {
+
+            weakest = story;
+        }
+    }
+
+    if (gThreatStorylineCount >= DP_THREAT_MAX_STORYLINES) {
+        //
+        // At capacity: never evict a confirmed incident in favor of a fresh,
+        // unscored lineage. If the weakest is an incident, skip recording.
+        //
+        if (weakest == NULL || weakest->IsIncident) {
+            return NULL;
+        }
+
+        RemoveEntryList(&weakest->Link);
+        gThreatStorylineCount--;
+        gThreatDroppedStorylines++;
+        ExFreePoolWithTag(weakest, DP_TAG_THREAT_STORY);
+    }
+
+    story = ExAllocatePoolWithTag(NonPagedPoolNx,
+                                  sizeof(DP_THREAT_STORYLINE),
+                                  DP_TAG_THREAT_STORY);
+    if (story == NULL) {
+        return NULL;
+    }
+
+    RtlZeroMemory(story, sizeof(DP_THREAT_STORYLINE));
+    story->LineageRootPid = LineageRootPid;
+    story->FirstSeen = Now;
+    story->LastActivity = Now;
+    InsertTailList(&gThreatStorylines, &story->Link);
+    gThreatStorylineCount++;
+    return story;
+}
+
+//
+// Append one ordered step to a lineage storyline and promote it to a tracked
+// incident once the lineage score crosses the incident threshold. Runs under
+// its own lock so it never nests inside the process-table lock.
+//
+static
+VOID
+DpThreatRecordStoryStep(
+    _In_ HANDLE LineageRootPid,
+    _In_ HANDLE ProcessId,
+    _In_ HANDLE ParentProcessId,
+    _In_ DP_THREAT_SIGNAL Signal,
+    _In_ const DP_THREAT_SIGNAL_INFO *Info,
+    _In_ ULONG ScoreDelta,
+    _In_ ULONG CumulativeScore,
+    _In_ DP_THREAT_SEVERITY Severity,
+    _In_ DP_THREAT_RESPONSE_ACTION Action,
+    _In_reads_(ImageChars) const WCHAR *Image,
+    _In_ ULONG ImageChars,
+    _In_opt_ PCUNICODE_STRING Detail
+    )
+{
+    PDP_THREAT_STORYLINE story;
+    PDP_THREAT_STORY_STEP step;
+    KIRQL oldIrql;
+    ULONGLONG now;
+    ULONG slot;
+    ULONG tacticBit;
+
+    if (!gThreatInitialized || LineageRootPid == NULL) {
+        return;
+    }
+
+    now = DpThreatNow();
+
+    KeAcquireSpinLock(&gThreatStoryLock, &oldIrql);
+
+    story = DpThreatFindOrCreateStorylineLocked(LineageRootPid, now);
+    if (story == NULL) {
+        KeReleaseSpinLock(&gThreatStoryLock, oldIrql);
+        return;
+    }
+
+    story->LastActivity = now;
+    story->TotalStepsObserved++;
+
+    tacticBit = ((ULONG)Info->Tactic < 32) ? (1u << (ULONG)Info->Tactic) : 0;
+    story->TacticMask |= tacticBit;
+
+    if (CumulativeScore > story->PeakScore) {
+        story->PeakScore = CumulativeScore;
+        story->Severity = (ULONG)Severity;
+    }
+
+    if ((ULONG)Action > story->StrongestResponse) {
+        story->StrongestResponse = (ULONG)Action;
+    }
+
+    //
+    // Capture the lineage root image once (the first step whose process is the
+    // root supplies it; otherwise we keep the most recent root-side image).
+    //
+    if (story->RootImageLengthBytes == 0 && ProcessId == LineageRootPid &&
+        Image != NULL && ImageChars != 0) {
+
+        ULONG copyChars = min(ImageChars, (ULONG)DP_THREAT_PROCESS_CHARS - 1);
+        RtlCopyMemory(story->RootImage, Image, copyChars * sizeof(WCHAR));
+        story->RootImage[copyChars] = L'\0';
+        story->RootImageLengthBytes = copyChars * sizeof(WCHAR);
+    }
+
+    //
+    // Ring-buffer the step. When full, advance the window but keep counting so
+    // the console can show "N of M steps".
+    //
+    if (story->StepCount < DP_THREAT_STORY_MAX_STEPS) {
+        slot = story->StepCount;
+        story->StepCount++;
+    } else {
+        slot = story->NextStep;
+        story->NextStep = (story->NextStep + 1) % DP_THREAT_STORY_MAX_STEPS;
+    }
+
+    step = &story->Steps[slot];
+    RtlZeroMemory(step, sizeof(*step));
+    step->TimeStamp = now;
+    step->ProcessId = (ULONGLONG)(ULONG_PTR)ProcessId;
+    step->ParentProcessId = (ULONGLONG)(ULONG_PTR)ParentProcessId;
+    step->Signal = (ULONG)Signal;
+    step->Tactic = (ULONG)Info->Tactic;
+    step->TechniqueId = Info->TechniqueId;
+    step->ScoreDelta = ScoreDelta;
+    step->CumulativeScore = CumulativeScore;
+    step->ResponseAction = (ULONG)Action;
+
+    if (Detail != NULL && Detail->Buffer != NULL && Detail->Length > 0) {
+        ULONG copyBytes = min((ULONG)Detail->Length,
+                              (ULONG)((DP_THREAT_STORY_DETAIL_CHARS - 1) * sizeof(WCHAR)));
+        RtlCopyMemory(step->Detail, Detail->Buffer, copyBytes);
+        step->Detail[copyBytes / sizeof(WCHAR)] = L'\0';
+        step->DetailLengthBytes = copyBytes;
+    }
+
+    //
+    // Promote to a tracked incident the first time the lineage crosses the
+    // incident threshold, recording the originating process and image.
+    //
+    if (!story->IsIncident && CumulativeScore >= DP_THREAT_INCIDENT_THRESHOLD) {
+        story->IsIncident = TRUE;
+        story->IncidentId = ++gThreatIncidentSequence;
+        story->OriginProcessId = ProcessId;
+        if (Image != NULL && ImageChars != 0) {
+            ULONG copyChars = min(ImageChars, (ULONG)DP_THREAT_PROCESS_CHARS - 1);
+            RtlCopyMemory(story->OriginImage, Image, copyChars * sizeof(WCHAR));
+            story->OriginImage[copyChars] = L'\0';
+            story->OriginImageLengthBytes = copyChars * sizeof(WCHAR);
+        }
+    }
+
+    KeReleaseSpinLock(&gThreatStoryLock, oldIrql);
 }
 
 //
@@ -1201,6 +1433,23 @@ DpThreatEngineReportSignal(
                        imageChars,
                        Detail);
 
+    //
+    // Record the step into the lineage attack storyline so the complete attack
+    // flow is preserved for incident review.
+    //
+    DpThreatRecordStoryStep(lineageRoot,
+                            ProcessId,
+                            parentPid,
+                            Signal,
+                            info,
+                            delta,
+                            cumulativeScore,
+                            severity,
+                            action,
+                            imageSnapshot,
+                            imageChars,
+                            Detail);
+
     return action;
 }
 
@@ -1461,6 +1710,132 @@ DpThreatEngineQueryProcesses(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+DpThreatEngineQueryStorylines(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    )
+{
+    PDP_THREAT_STORY_QUERY_HEADER header;
+    PUCHAR cursor;
+    ULONG bytesRequired = sizeof(DP_THREAT_STORY_QUERY_HEADER);
+    ULONG bytesReturned = sizeof(DP_THREAT_STORY_QUERY_HEADER);
+    ULONG storyCount = 0;
+    ULONG returnedCount = 0;
+    PLIST_ENTRY link;
+    KIRQL oldIrql;
+
+    if (ReturnOutputBufferLength == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ReturnOutputBufferLength = 0;
+
+    if (OutputBuffer == NULL || OutputBufferLength < sizeof(DP_THREAT_STORY_QUERY_HEADER)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    header = (PDP_THREAT_STORY_QUERY_HEADER)OutputBuffer;
+    RtlZeroMemory(header, sizeof(DP_THREAT_STORY_QUERY_HEADER));
+    cursor = (PUCHAR)OutputBuffer + sizeof(DP_THREAT_STORY_QUERY_HEADER);
+
+    header->Version = DP_THREAT_STORY_QUERY_VERSION;
+    header->BytesReturned = sizeof(DP_THREAT_STORY_QUERY_HEADER);
+
+    if (!gThreatInitialized) {
+        header->BytesRequired = sizeof(DP_THREAT_STORY_QUERY_HEADER);
+        *ReturnOutputBufferLength = sizeof(DP_THREAT_STORY_QUERY_HEADER);
+        return STATUS_SUCCESS;
+    }
+
+    KeAcquireSpinLock(&gThreatStoryLock, &oldIrql);
+
+    header->DroppedStorylines = gThreatDroppedStorylines;
+
+    for (link = gThreatStorylines.Flink; link != &gThreatStorylines; link = link->Flink) {
+        PDP_THREAT_STORYLINE story = CONTAINING_RECORD(link, DP_THREAT_STORYLINE, Link);
+
+        //
+        // Only surface confirmed incidents; in-progress low-score lineages are
+        // not yet a storyline worth presenting.
+        //
+        if (!story->IsIncident) {
+            continue;
+        }
+
+        bytesRequired += sizeof(DP_THREAT_STORY_QUERY_ENTRY);
+        storyCount++;
+
+        if (bytesReturned <= OutputBufferLength &&
+            sizeof(DP_THREAT_STORY_QUERY_ENTRY) <= OutputBufferLength - bytesReturned) {
+
+            PDP_THREAT_STORY_QUERY_ENTRY entry = (PDP_THREAT_STORY_QUERY_ENTRY)cursor;
+            ULONG i;
+            ULONG ordered;
+
+            RtlZeroMemory(entry, sizeof(DP_THREAT_STORY_QUERY_ENTRY));
+            entry->IncidentId = story->IncidentId;
+            entry->LineageRootPid = (ULONGLONG)(ULONG_PTR)story->LineageRootPid;
+            entry->OriginProcessId = (ULONGLONG)(ULONG_PTR)story->OriginProcessId;
+            entry->FirstSeen = story->FirstSeen;
+            entry->LastActivity = story->LastActivity;
+            entry->PeakScore = story->PeakScore;
+            entry->Severity = story->Severity;
+            entry->TacticMask = story->TacticMask;
+            entry->StrongestResponse = story->StrongestResponse;
+            entry->StepCount = story->StepCount;
+            entry->TotalStepsObserved = story->TotalStepsObserved;
+
+            if (story->RootImageLengthBytes != 0) {
+                ULONG copyBytes = min(story->RootImageLengthBytes,
+                                      (ULONG)((RTL_NUMBER_OF(entry->RootImage) - 1) * sizeof(WCHAR)));
+                RtlCopyMemory(entry->RootImage, story->RootImage, copyBytes);
+                entry->RootImage[copyBytes / sizeof(WCHAR)] = L'\0';
+                entry->RootImageLengthBytes = copyBytes;
+            }
+
+            if (story->OriginImageLengthBytes != 0) {
+                ULONG copyBytes = min(story->OriginImageLengthBytes,
+                                      (ULONG)((RTL_NUMBER_OF(entry->OriginImage) - 1) * sizeof(WCHAR)));
+                RtlCopyMemory(entry->OriginImage, story->OriginImage, copyBytes);
+                entry->OriginImage[copyBytes / sizeof(WCHAR)] = L'\0';
+                entry->OriginImageLengthBytes = copyBytes;
+            }
+
+            //
+            // Emit steps in chronological order. When the ring has wrapped,
+            // NextStep points at the oldest entry.
+            //
+            for (i = 0; i < story->StepCount; i++) {
+                if (story->StepCount < DP_THREAT_STORY_MAX_STEPS) {
+                    ordered = i;
+                } else {
+                    ordered = (story->NextStep + i) % DP_THREAT_STORY_MAX_STEPS;
+                }
+                entry->Steps[i] = story->Steps[ordered];
+            }
+
+            cursor += sizeof(DP_THREAT_STORY_QUERY_ENTRY);
+            bytesReturned += sizeof(DP_THREAT_STORY_QUERY_ENTRY);
+            returnedCount++;
+        }
+    }
+
+    KeReleaseSpinLock(&gThreatStoryLock, oldIrql);
+
+    header->StorylineCount = storyCount;
+    header->BytesRequired = bytesRequired;
+    header->BytesReturned = bytesReturned;
+    *ReturnOutputBufferLength = bytesReturned;
+
+    if (returnedCount != storyCount) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 VOID
 DpThreatEngineClearEvents(
     VOID
@@ -1650,8 +2025,10 @@ DpThreatEngineInitialize(
 
     InitializeListHead(&gThreatProcessOrder);
     InitializeListHead(&gThreatEvents);
+    InitializeListHead(&gThreatStorylines);
     KeInitializeSpinLock(&gThreatProcessLock);
     KeInitializeSpinLock(&gThreatEventLock);
+    KeInitializeSpinLock(&gThreatStoryLock);
     KeInitializeSpinLock(&gThreatResponseLock);
     KeInitializeSemaphore(&gThreatResponseSemaphore, 0, MAXLONG);
 
@@ -1659,6 +2036,9 @@ DpThreatEngineInitialize(
     gThreatEventCount = 0;
     gThreatEventSequence = 0;
     gThreatDroppedEvents = 0;
+    gThreatStorylineCount = 0;
+    gThreatIncidentSequence = 0;
+    gThreatDroppedStorylines = 0;
     gThreatResponseHead = 0;
     gThreatResponseTail = 0;
     gThreatResponseCount = 0;
@@ -1745,6 +2125,22 @@ DpThreatEngineUninitialize(
         KeAcquireSpinLock(&gThreatEventLock, &oldIrql);
     }
     KeReleaseSpinLock(&gThreatEventLock, oldIrql);
+
+    //
+    // Drain storylines.
+    //
+    KeAcquireSpinLock(&gThreatStoryLock, &oldIrql);
+    while (!IsListEmpty(&gThreatStorylines)) {
+        PLIST_ENTRY link = RemoveHeadList(&gThreatStorylines);
+        PDP_THREAT_STORYLINE story = CONTAINING_RECORD(link,
+                                                       DP_THREAT_STORYLINE,
+                                                       Link);
+        gThreatStorylineCount--;
+        KeReleaseSpinLock(&gThreatStoryLock, oldIrql);
+        ExFreePoolWithTag(story, DP_TAG_THREAT_STORY);
+        KeAcquireSpinLock(&gThreatStoryLock, &oldIrql);
+    }
+    KeReleaseSpinLock(&gThreatStoryLock, oldIrql);
 
     //
     // Drain the process table.

@@ -51,6 +51,9 @@ Abstract:
 #define DP_TAG_THREAT_PROCESS  'pTpD'
 #define DP_TAG_THREAT_EVENT    'eTpD'
 #define DP_TAG_THREAT_RESPONSE 'rTpD'
+#define DP_TAG_THREAT_STORY    'yTpD'
+#define DP_TAG_STATIC_SCAN     'sSpD'
+#define DP_TAG_STATIC_BUFFER   'bSsD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
@@ -93,6 +96,15 @@ Abstract:
 #define DP_THREAT_DETAIL_CHARS 384
 #define DP_THREAT_HASH_BUCKETS 1024
 #define DP_THREAT_MAX_TECHNIQUES_PER_PROC 24
+#define DP_THREAT_MAX_STORYLINES 128
+#define DP_THREAT_STORY_MAX_STEPS 48
+#define DP_THREAT_STORY_DETAIL_CHARS 200
+#define DP_STATIC_SCAN_MAX_EVENTS 512
+#define DP_STATIC_SCAN_PATH_CHARS 512
+#define DP_STATIC_SCAN_PROCESS_CHARS 64
+#define DP_STATIC_SCAN_REASON_CHARS 256
+#define DP_STATIC_SCAN_SAMPLE_BYTES 4096
+#define DP_STATIC_SCAN_MAX_REQUESTS 1024
 #define DP_USB_METADATA_BYTES 512
 #define DP_USB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
 #define DP_USB_METADATA_DEFAULT_OFFSET_BYTES (1024ull * 1024ull)
@@ -167,7 +179,11 @@ Abstract:
 // escalation, and automated response decisions when enabled.
 //
 #define DP_ENABLE_THREAT_ENGINE_TRACE 0
-
+//
+// Executable static scanner diagnostics. Prints PE classification verdicts and
+// block decisions when enabled.
+//
+#define DP_ENABLE_STATIC_SCAN_TRACE 0
 //
 // Cached transparent encryption keeps plaintext in the system file cache.
 // Manual unload is therefore unsafe unless a separate safe-stop path flushes
@@ -267,6 +283,8 @@ typedef struct _DP_HANDLE_CONTEXT {
     UNICODE_STRING PendingName;
     BOOLEAN WebShellNewFile;
     BOOLEAN WebShellReported;
+    BOOLEAN StaticScanNewFile;
+    BOOLEAN StaticScanReported;
 } DP_HANDLE_CONTEXT, *PDP_HANDLE_CONTEXT;
 
 typedef struct _DP_CREATE_CONTEXT {
@@ -337,6 +355,13 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryThreatPolicy = 143,
     DpPolicyCommandClearThreatEvents = 144,
     DpPolicyCommandRespondThreatProcess = 145,
+    DpPolicyCommandQueryThreatStorylines = 146,
+    DpPolicyCommandQueryStaticScanEvents = 160,
+    DpPolicyCommandSetStaticScanPolicy = 161,
+    DpPolicyCommandQueryStaticScanPolicy = 162,
+    DpPolicyCommandClearStaticScanEvents = 163,
+    DpPolicyCommandQueryStaticScanRequests = 164,
+    DpPolicyCommandSubmitStaticScanVerdict = 165,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -897,6 +922,11 @@ typedef enum _DP_THREAT_SIGNAL {
     DpThreatSignalSensitiveDataHarvest = 52,
     DpThreatSignalRemovableMediaStaging = 53,
 
+    // Malicious payload on disk (TA0002 / TA0005) - static scanner verdicts
+    DpThreatSignalMaliciousExecutableWrite = 60,
+    DpThreatSignalSuspiciousExecutableWrite = 61,
+    DpThreatSignalPackedExecutableWrite = 62,
+
     DpThreatSignalMax
 } DP_THREAT_SIGNAL;
 
@@ -1082,6 +1112,211 @@ typedef struct _DP_THREAT_RESPONSE_REQUEST {
 } DP_THREAT_RESPONSE_REQUEST, *PDP_THREAT_RESPONSE_REQUEST;
 
 #define DP_THREAT_RESPONSE_REQUEST_VERSION 1
+
+//
+// Attack storyline. When a process lineage crosses the incident threshold the
+// engine snapshots its complete, time-ordered chain of behavioral steps so the
+// console can render the full attack flow (CrowdStrike-style process tree /
+// incident graph). One storyline summarizes one lineage root.
+//
+typedef struct _DP_THREAT_STORY_STEP {
+    ULONGLONG TimeStamp;       // 100ns
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONG Signal;              // DP_THREAT_SIGNAL
+    ULONG Tactic;              // DP_THREAT_TACTIC
+    ULONG TechniqueId;         // numeric ATT&CK technique
+    ULONG ScoreDelta;
+    ULONG CumulativeScore;     // lineage score after this step
+    ULONG ResponseAction;      // DP_THREAT_RESPONSE_ACTION at this step
+    ULONG DetailLengthBytes;
+    WCHAR Detail[DP_THREAT_STORY_DETAIL_CHARS];
+} DP_THREAT_STORY_STEP, *PDP_THREAT_STORY_STEP;
+
+typedef struct _DP_THREAT_STORY_QUERY_ENTRY {
+    ULONGLONG IncidentId;
+    ULONGLONG LineageRootPid;
+    ULONGLONG OriginProcessId; // process that tripped the incident threshold
+    ULONGLONG FirstSeen;
+    ULONGLONG LastActivity;
+    ULONG PeakScore;
+    ULONG Severity;            // DP_THREAT_SEVERITY at peak
+    ULONG TacticMask;          // union of tactics across the lineage
+    ULONG StrongestResponse;   // DP_THREAT_RESPONSE_ACTION
+    ULONG StepCount;           // valid entries in Steps
+    ULONG TotalStepsObserved;  // including steps dropped past the cap
+    ULONG RootImageLengthBytes;
+    ULONG OriginImageLengthBytes;
+    WCHAR RootImage[DP_THREAT_PROCESS_CHARS];
+    WCHAR OriginImage[DP_THREAT_PROCESS_CHARS];
+    DP_THREAT_STORY_STEP Steps[DP_THREAT_STORY_MAX_STEPS];
+} DP_THREAT_STORY_QUERY_ENTRY, *PDP_THREAT_STORY_QUERY_ENTRY;
+
+typedef struct _DP_THREAT_STORY_QUERY_HEADER {
+    ULONG Version;
+    ULONG StorylineCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedStorylines;
+} DP_THREAT_STORY_QUERY_HEADER, *PDP_THREAT_STORY_QUERY_HEADER;
+
+#define DP_THREAT_STORY_QUERY_VERSION 1
+
+//
+// ---------------------------------------------------------------------------
+// Executable static scanner (kernel = thin detector/notifier).
+//
+// CORE RULE: the kernel does NOT classify. On exe create / rename-to-exe /
+// write-cleanup it captures metadata {seq, pid, op, size, path, image} into a
+// scan-REQUEST ring. A signed user-mode service drains the requests over the
+// policy port, scans with updatable engines (YARA, hash reputation, heuristics,
+// ML/cloud), and submits a VERDICT back. The kernel records the verdict event,
+// reports it to the threat engine, and enforces quarantine (truncation) when
+// policy requires blocking. Detection content stays fully in user mode so it is
+// updatable without reloading a signed driver.
+// ---------------------------------------------------------------------------
+//
+
+typedef enum _DP_STATIC_SCAN_VERDICT {
+    DpStaticScanVerdictClean = 0,
+    DpStaticScanVerdictLowRisk = 1,
+    DpStaticScanVerdictSuspicious = 2,
+    DpStaticScanVerdictMalicious = 3
+} DP_STATIC_SCAN_VERDICT;
+
+typedef enum _DP_STATIC_SCAN_OPERATION {
+    DpStaticScanOperationCreate = 1,
+    DpStaticScanOperationWrite = 2,
+    DpStaticScanOperationRename = 3,
+    DpStaticScanOperationCleanup = 4
+} DP_STATIC_SCAN_OPERATION;
+
+//
+// Verdict reason bit flags. Produced by the user-mode engine and surfaced with
+// each recorded event. The kernel treats these as opaque pass-through bits.
+//
+#define DP_STATIC_SCAN_REASON_VALID_PE          0x00000001u
+#define DP_STATIC_SCAN_REASON_HIGH_ENTROPY      0x00000002u
+#define DP_STATIC_SCAN_REASON_PACKER_SECTION    0x00000004u
+#define DP_STATIC_SCAN_REASON_SUSPICIOUS_IMPORT 0x00000008u
+#define DP_STATIC_SCAN_REASON_SUSPICIOUS_STRING 0x00000010u
+#define DP_STATIC_SCAN_REASON_NO_IMPORTS        0x00000020u
+#define DP_STATIC_SCAN_REASON_WX_SECTION        0x00000040u
+#define DP_STATIC_SCAN_REASON_TINY_IMAGE        0x00000080u
+#define DP_STATIC_SCAN_REASON_SCRIPT_DROPPER    0x00000100u
+#define DP_STATIC_SCAN_REASON_DOTNET_PACKED     0x00000200u
+#define DP_STATIC_SCAN_REASON_OVERLAY           0x00000400u
+#define DP_STATIC_SCAN_REASON_YARA_MATCH        0x00000800u
+#define DP_STATIC_SCAN_REASON_HASH_REPUTATION   0x00001000u
+
+#define DP_STATIC_SCAN_POLICY_VERSION 1
+#define DP_STATIC_SCAN_FLAG_ENABLED          0x00000001u
+#define DP_STATIC_SCAN_FLAG_SCAN_PE          0x00000002u
+#define DP_STATIC_SCAN_FLAG_SCAN_SCRIPTS     0x00000004u
+#define DP_STATIC_SCAN_FLAG_BLOCK_MALICIOUS  0x00000008u
+#define DP_STATIC_SCAN_FLAG_BLOCK_SUSPICIOUS 0x00000010u
+#define DP_STATIC_SCAN_FLAG_AUDIT_ONLY       0x00000020u
+
+#define DP_STATIC_SCAN_DEFAULT_FLAGS \
+    (DP_STATIC_SCAN_FLAG_ENABLED | \
+     DP_STATIC_SCAN_FLAG_SCAN_PE | \
+     DP_STATIC_SCAN_FLAG_SCAN_SCRIPTS | \
+     DP_STATIC_SCAN_FLAG_BLOCK_MALICIOUS)
+
+#define DP_STATIC_SCAN_ALLOWED_FLAGS \
+    (DP_STATIC_SCAN_FLAG_ENABLED | \
+     DP_STATIC_SCAN_FLAG_SCAN_PE | \
+     DP_STATIC_SCAN_FLAG_SCAN_SCRIPTS | \
+     DP_STATIC_SCAN_FLAG_BLOCK_MALICIOUS | \
+     DP_STATIC_SCAN_FLAG_BLOCK_SUSPICIOUS | \
+     DP_STATIC_SCAN_FLAG_AUDIT_ONLY)
+
+typedef struct _DP_STATIC_SCAN_POLICY {
+    ULONG Version;
+    ULONG Flags;
+    ULONG MaliciousThreshold; // advisory; user mode owns scoring (0 = default)
+    ULONG SuspiciousThreshold;// advisory; user mode owns scoring (0 = default)
+} DP_STATIC_SCAN_POLICY, *PDP_STATIC_SCAN_POLICY;
+
+//
+// Scan REQUEST: kernel -> user mode. The kernel enqueues one per detected
+// executable write and the user-mode service drains them. No file content is
+// captured in the kernel; the service opens and reads the file itself.
+//
+typedef struct _DP_STATIC_SCAN_REQUEST_QUERY_HEADER {
+    ULONG Version;
+    ULONG RequestCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedRequests;
+} DP_STATIC_SCAN_REQUEST_QUERY_HEADER, *PDP_STATIC_SCAN_REQUEST_QUERY_HEADER;
+
+typedef struct _DP_STATIC_SCAN_REQUEST_QUERY_ENTRY {
+    ULONGLONG RequestId;       // monotonic; echoed back in the verdict
+    ULONGLONG TimeStamp;
+    ULONGLONG ProcessId;
+    ULONGLONG FileSize;
+    ULONG Operation;           // DP_STATIC_SCAN_OPERATION
+    ULONG PathLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    ULONG Reserved;
+    WCHAR Path[DP_STATIC_SCAN_PATH_CHARS];
+    WCHAR ProcessImage[DP_STATIC_SCAN_PROCESS_CHARS];
+} DP_STATIC_SCAN_REQUEST_QUERY_ENTRY, *PDP_STATIC_SCAN_REQUEST_QUERY_ENTRY;
+
+#define DP_STATIC_SCAN_REQUEST_QUERY_VERSION 1
+
+//
+// Scan VERDICT: user mode -> kernel. The service submits the engine result for
+// a given RequestId. The kernel records the event, reports to the threat
+// engine, and (if policy says block and the file still resolves) quarantines.
+//
+typedef struct _DP_STATIC_SCAN_VERDICT_MESSAGE {
+    ULONG Version;
+    ULONG Verdict;             // DP_STATIC_SCAN_VERDICT
+    ULONG Score;               // 0..100, engine-assigned
+    ULONG ReasonFlags;
+    ULONGLONG RequestId;       // correlates to the drained request
+    ULONGLONG ProcessId;
+    ULONGLONG FileSize;
+    ULONG Operation;           // DP_STATIC_SCAN_OPERATION
+    ULONG PathLengthBytes;
+    ULONG ReasonTextLengthBytes;
+    ULONG Reserved;
+    WCHAR Path[DP_STATIC_SCAN_PATH_CHARS];
+    WCHAR ReasonText[DP_STATIC_SCAN_REASON_CHARS];
+} DP_STATIC_SCAN_VERDICT_MESSAGE, *PDP_STATIC_SCAN_VERDICT_MESSAGE;
+
+#define DP_STATIC_SCAN_VERDICT_MESSAGE_VERSION 1
+
+typedef struct _DP_STATIC_SCAN_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_STATIC_SCAN_EVENT_QUERY_HEADER, *PDP_STATIC_SCAN_EVENT_QUERY_HEADER;
+
+typedef struct _DP_STATIC_SCAN_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG TimeStamp;
+    ULONGLONG ProcessId;
+    ULONGLONG FileSize;
+    ULONG Verdict;             // DP_STATIC_SCAN_VERDICT
+    ULONG Operation;           // DP_STATIC_SCAN_OPERATION
+    ULONG Score;
+    ULONG ReasonFlags;
+    ULONG Status;              // NTSTATUS of resulting action (block/allow)
+    ULONG Blocked;
+    ULONG PathLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    ULONG ReasonTextLengthBytes;
+    WCHAR Path[DP_STATIC_SCAN_PATH_CHARS];
+    WCHAR ProcessImage[DP_STATIC_SCAN_PROCESS_CHARS];
+    WCHAR ReasonText[DP_STATIC_SCAN_REASON_CHARS];
+} DP_STATIC_SCAN_EVENT_QUERY_ENTRY, *PDP_STATIC_SCAN_EVENT_QUERY_ENTRY;
+
+#define DP_STATIC_SCAN_EVENT_QUERY_VERSION 1
 
 EXTERN_C_START
 
@@ -2080,6 +2315,97 @@ DpThreatEngineQueryPolicy(
 NTSTATUS
 DpThreatEngineRespond(
     _In_ const DP_THREAT_RESPONSE_REQUEST *Request
+    );
+
+NTSTATUS
+DpThreatEngineQueryStorylines(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+//
+// ---------------------------------------------------------------------------
+// Executable static scanner entry points.
+// ---------------------------------------------------------------------------
+//
+
+NTSTATUS
+DpStaticScanInitialize(
+    VOID
+    );
+
+VOID
+DpStaticScanUninitialize(
+    VOID
+    );
+
+//
+// Returns TRUE if the given name is an executable image the scanner cares
+// about (PE extension or known script dropper extension).
+//
+BOOLEAN
+DpStaticScanIsExecutableName(
+    _In_ PCUNICODE_STRING Name
+    );
+
+//
+// Detector entry point. Called from the cleanup path when a handle that
+// created/wrote/renamed an executable is closing. Captures metadata and
+// enqueues a scan REQUEST for user mode. Does NOT read or classify the file.
+//
+VOID
+DpStaticScanEnqueueRequest(
+    _In_ PFLT_CALLBACK_DATA Data,
+    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+    _In_ PCUNICODE_STRING Name,
+    _In_ HANDLE ProcessId,
+    _In_ DP_STATIC_SCAN_OPERATION Operation
+    );
+
+//
+// Drain pending scan requests (kernel -> user mode). Two-pass sizing like the
+// other event queues.
+//
+NTSTATUS
+DpStaticScanQueryRequests(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+//
+// Submit a user-mode verdict for a previously drained request. Records the
+// event, reports to the threat engine, and quarantines (truncates) when the
+// verdict is blocking under policy.
+//
+NTSTATUS
+DpStaticScanSubmitVerdict(
+    _In_ const DP_STATIC_SCAN_VERDICT_MESSAGE *Verdict
+    );
+
+NTSTATUS
+DpStaticScanQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpStaticScanSetPolicy(
+    _In_ const DP_STATIC_SCAN_POLICY *Policy
+    );
+
+NTSTATUS
+DpStaticScanQueryPolicy(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+VOID
+DpStaticScanClearEvents(
+    VOID
     );
 
 EXTERN_C_END

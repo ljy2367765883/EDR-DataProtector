@@ -224,6 +224,61 @@ DpControlMessageNotify(
         return DpThreatEngineRespond(request);
     }
 
+    if (message->Command == DpPolicyCommandQueryThreatStorylines) {
+        return DpThreatEngineQueryStorylines(OutputBuffer,
+                                             OutputBufferLength,
+                                             ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryStaticScanEvents) {
+        return DpStaticScanQueryEvents(OutputBuffer,
+                                       OutputBufferLength,
+                                       ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryStaticScanRequests) {
+        return DpStaticScanQueryRequests(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandSubmitStaticScanVerdict) {
+        PDP_STATIC_SCAN_VERDICT_MESSAGE verdict;
+
+        if (message->ValueLengthBytes != sizeof(DP_STATIC_SCAN_VERDICT_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_STATIC_SCAN_VERDICT_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        verdict = (PDP_STATIC_SCAN_VERDICT_MESSAGE)message->Data;
+        return DpStaticScanSubmitVerdict(verdict);
+    }
+
+    if (message->Command == DpPolicyCommandQueryStaticScanPolicy) {
+        return DpStaticScanQueryPolicy(OutputBuffer,
+                                       OutputBufferLength,
+                                       ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandClearStaticScanEvents) {
+        DpStaticScanClearEvents();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandSetStaticScanPolicy) {
+        PDP_STATIC_SCAN_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_STATIC_SCAN_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_STATIC_SCAN_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_STATIC_SCAN_POLICY)message->Data;
+        return DpStaticScanSetPolicy(policy);
+    }
+
     if (message->Command == DpPolicyCommandWriteUsbMetadata) {
         PDP_USB_METADATA_WRITE_MESSAGE request;
 

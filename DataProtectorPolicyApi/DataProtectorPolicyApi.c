@@ -36,6 +36,11 @@
 #define DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS 512u
 #define DP_THREAT_PROCESS_CHARS 320u
 #define DP_THREAT_DETAIL_CHARS 384u
+#define DP_THREAT_STORY_MAX_STEPS 48u
+#define DP_THREAT_STORY_DETAIL_CHARS 200u
+#define DP_STATIC_SCAN_PATH_CHARS 512u
+#define DP_STATIC_SCAN_PROCESS_CHARS 64u
+#define DP_STATIC_SCAN_REASON_CHARS 256u
 #define DP_USB_METADATA_BYTES 512u
 #define DP_USB_METADATA_PATH_CHARS 128u
 #define DP_USB_METADATA_MESSAGE_VERSION 1u
@@ -62,6 +67,9 @@
 #define DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS (DP_USER_HOOK_DEFENSE_TARGET_CHARS + DP_USER_HOOK_DEFENSE_PROCESS_CHARS + 2u)
 #define DP_THREAT_EVENT_STRING_CHARS (DP_THREAT_PROCESS_CHARS + DP_THREAT_DETAIL_CHARS + 2u)
 #define DP_THREAT_PROCESS_STRING_CHARS (DP_THREAT_PROCESS_CHARS + 1u)
+#define DP_THREAT_STORY_STRING_CHARS (DP_THREAT_PROCESS_CHARS + DP_THREAT_PROCESS_CHARS + 2u)
+#define DP_STATIC_SCAN_EVENT_STRING_CHARS (DP_STATIC_SCAN_PATH_CHARS + DP_STATIC_SCAN_PROCESS_CHARS + DP_STATIC_SCAN_REASON_CHARS + 3u)
+#define DP_STATIC_SCAN_REQUEST_STRING_CHARS (DP_STATIC_SCAN_PATH_CHARS + DP_STATIC_SCAN_PROCESS_CHARS + 2u)
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_API_ENABLE_FILE_TRACE 1
 #define DP_POLICY_API_TRACE_PATH L"C:\\ProgramData\\DataProtector\\PolicyApiTrace.log"
@@ -110,6 +118,13 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandQueryThreatPolicy = 143,
     DpPolicyCommandClearThreatEvents = 144,
     DpPolicyCommandRespondThreatProcess = 145,
+    DpPolicyCommandQueryThreatStorylines = 146,
+    DpPolicyCommandQueryStaticScanEvents = 160,
+    DpPolicyCommandSetStaticScanPolicy = 161,
+    DpPolicyCommandQueryStaticScanPolicy = 162,
+    DpPolicyCommandClearStaticScanEvents = 163,
+    DpPolicyCommandQueryStaticScanRequests = 164,
+    DpPolicyCommandSubmitStaticScanVerdict = 165,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -498,6 +513,118 @@ typedef struct _DP_THREAT_RESPONSE_REQUEST_MESSAGE {
     ULONGLONG ProcessId;
 } DP_THREAT_RESPONSE_REQUEST_MESSAGE, *PDP_THREAT_RESPONSE_REQUEST_MESSAGE;
 
+typedef struct _DP_THREAT_STORY_STEP {
+    ULONGLONG TimeStamp;
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONG Signal;
+    ULONG Tactic;
+    ULONG TechniqueId;
+    ULONG ScoreDelta;
+    ULONG CumulativeScore;
+    ULONG ResponseAction;
+    ULONG DetailLengthBytes;
+    WCHAR Detail[DP_THREAT_STORY_DETAIL_CHARS];
+} DP_THREAT_STORY_STEP, *PDP_THREAT_STORY_STEP;
+
+typedef struct _DP_THREAT_STORY_QUERY_HEADER {
+    ULONG Version;
+    ULONG StorylineCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedStorylines;
+} DP_THREAT_STORY_QUERY_HEADER, *PDP_THREAT_STORY_QUERY_HEADER;
+
+typedef struct _DP_THREAT_STORY_QUERY_ENTRY {
+    ULONGLONG IncidentId;
+    ULONGLONG LineageRootPid;
+    ULONGLONG OriginProcessId;
+    ULONGLONG FirstSeen;
+    ULONGLONG LastActivity;
+    ULONG PeakScore;
+    ULONG Severity;
+    ULONG TacticMask;
+    ULONG StrongestResponse;
+    ULONG StepCount;
+    ULONG TotalStepsObserved;
+    ULONG RootImageLengthBytes;
+    ULONG OriginImageLengthBytes;
+    WCHAR RootImage[DP_THREAT_PROCESS_CHARS];
+    WCHAR OriginImage[DP_THREAT_PROCESS_CHARS];
+    DP_THREAT_STORY_STEP Steps[DP_THREAT_STORY_MAX_STEPS];
+} DP_THREAT_STORY_QUERY_ENTRY, *PDP_THREAT_STORY_QUERY_ENTRY;
+
+typedef struct _DP_STATIC_SCAN_POLICY_MESSAGE {
+    ULONG Version;
+    ULONG Flags;
+    ULONG MaliciousThreshold;
+    ULONG SuspiciousThreshold;
+} DP_STATIC_SCAN_POLICY_MESSAGE, *PDP_STATIC_SCAN_POLICY_MESSAGE;
+
+typedef struct _DP_STATIC_SCAN_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_STATIC_SCAN_EVENT_QUERY_HEADER, *PDP_STATIC_SCAN_EVENT_QUERY_HEADER;
+
+typedef struct _DP_STATIC_SCAN_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG TimeStamp;
+    ULONGLONG ProcessId;
+    ULONGLONG FileSize;
+    ULONG Verdict;
+    ULONG Operation;
+    ULONG Score;
+    ULONG ReasonFlags;
+    ULONG Status;
+    ULONG Blocked;
+    ULONG PathLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    ULONG ReasonTextLengthBytes;
+    WCHAR Path[DP_STATIC_SCAN_PATH_CHARS];
+    WCHAR ProcessImage[DP_STATIC_SCAN_PROCESS_CHARS];
+    WCHAR ReasonText[DP_STATIC_SCAN_REASON_CHARS];
+} DP_STATIC_SCAN_EVENT_QUERY_ENTRY, *PDP_STATIC_SCAN_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_STATIC_SCAN_REQUEST_QUERY_HEADER {
+    ULONG Version;
+    ULONG RequestCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedRequests;
+} DP_STATIC_SCAN_REQUEST_QUERY_HEADER, *PDP_STATIC_SCAN_REQUEST_QUERY_HEADER;
+
+typedef struct _DP_STATIC_SCAN_REQUEST_QUERY_ENTRY {
+    ULONGLONG RequestId;
+    ULONGLONG TimeStamp;
+    ULONGLONG ProcessId;
+    ULONGLONG FileSize;
+    ULONG Operation;
+    ULONG PathLengthBytes;
+    ULONG ProcessImageLengthBytes;
+    ULONG Reserved;
+    WCHAR Path[DP_STATIC_SCAN_PATH_CHARS];
+    WCHAR ProcessImage[DP_STATIC_SCAN_PROCESS_CHARS];
+} DP_STATIC_SCAN_REQUEST_QUERY_ENTRY, *PDP_STATIC_SCAN_REQUEST_QUERY_ENTRY;
+
+typedef struct _DP_STATIC_SCAN_VERDICT_MESSAGE {
+    ULONG Version;
+    ULONG Verdict;
+    ULONG Score;
+    ULONG ReasonFlags;
+    ULONGLONG RequestId;
+    ULONGLONG ProcessId;
+    ULONGLONG FileSize;
+    ULONG Operation;
+    ULONG PathLengthBytes;
+    ULONG ReasonTextLengthBytes;
+    ULONG Reserved;
+    WCHAR Path[DP_STATIC_SCAN_PATH_CHARS];
+    WCHAR ReasonText[DP_STATIC_SCAN_REASON_CHARS];
+} DP_STATIC_SCAN_VERDICT_MESSAGE, *PDP_STATIC_SCAN_VERDICT_MESSAGE;
+
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
@@ -545,8 +672,20 @@ typedef struct _DP_THREAT_RESPONSE_REQUEST_MESSAGE {
 #define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
 #define DP_THREAT_EVENT_QUERY_VERSION 1u
 #define DP_THREAT_PROCESS_QUERY_VERSION 1u
+#define DP_THREAT_STORY_QUERY_VERSION 1u
 #define DP_THREAT_ENGINE_POLICY_VERSION 1u
 #define DP_THREAT_RESPONSE_REQUEST_VERSION 1u
+#define DP_STATIC_SCAN_EVENT_QUERY_VERSION 1u
+#define DP_STATIC_SCAN_POLICY_VERSION 1u
+#define DP_STATIC_SCAN_REQUEST_QUERY_VERSION 1u
+#define DP_STATIC_SCAN_VERDICT_MESSAGE_VERSION 1u
+#define DP_STATIC_SCAN_ALLOWED_FLAGS \
+    (DP_POLICY_API_STATIC_SCAN_FLAG_ENABLED | \
+     DP_POLICY_API_STATIC_SCAN_FLAG_SCAN_PE | \
+     DP_POLICY_API_STATIC_SCAN_FLAG_SCAN_SCRIPTS | \
+     DP_POLICY_API_STATIC_SCAN_FLAG_BLOCK_MALICIOUS | \
+     DP_POLICY_API_STATIC_SCAN_FLAG_BLOCK_SUSPICIOUS | \
+     DP_POLICY_API_STATIC_SCAN_FLAG_AUDIT_ONLY)
 #define DP_THREAT_ENGINE_ALLOWED_FLAGS \
     (DP_POLICY_API_THREAT_FLAG_ENABLED | \
      DP_POLICY_API_THREAT_FLAG_CORRELATION | \
@@ -4121,6 +4260,759 @@ DpPolicyRespondThreatProcess(
     message.ProcessId = processId;
 
     return DpPolicySendRawPolicyMessage(DpPolicyCommandRespondThreatProcess,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryThreatStorylines(
+    _Out_writes_opt_(StorylineCapacity) DP_POLICY_API_THREAT_STORYLINE *Storylines,
+    _In_ DWORD StorylineCapacity,
+    _Out_opt_ DWORD *StorylineCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_THREAT_STORY_QUERY_HEADER header;
+    DP_THREAT_STORY_QUERY_HEADER sizingHeader;
+    PDP_THREAT_STORY_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedCount = 0;
+    BOOL sizingOnly = StorylineCapacity == 0 && StringBufferChars == 0;
+
+    if (StorylineCount != NULL) {
+        *StorylineCount = 0;
+    }
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((StorylineCapacity != 0 && Storylines == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryThreatStorylines,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_THREAT_STORY_QUERY_HEADER) ||
+        sizingHeader.Version != DP_THREAT_STORY_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_THREAT_STORY_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid threat storyline header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (StorylineCount != NULL) {
+            *StorylineCount = sizingHeader.StorylineCount;
+        }
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.StorylineCount > MAXDWORD / DP_THREAT_STORY_STRING_CHARS) {
+                DpPolicySetLastErrorMessage(L"Threat storyline snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+            *StringBufferCharsRequired = sizingHeader.StorylineCount * DP_THREAT_STORY_STRING_CHARS;
+        }
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (StorylineCount != NULL) {
+        *StorylineCount = sizingHeader.StorylineCount;
+    }
+
+    if (sizingHeader.StorylineCount > MAXDWORD / DP_THREAT_STORY_STRING_CHARS) {
+        DpPolicySetLastErrorMessage(L"Threat storyline snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = sizingHeader.StorylineCount * DP_THREAT_STORY_STRING_CHARS;
+    }
+
+    if (StorylineCapacity < sizingHeader.StorylineCount ||
+        StringBufferChars < sizingHeader.StorylineCount * DP_THREAT_STORY_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryThreatStorylines,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_THREAT_STORY_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid threat storyline snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_THREAT_STORY_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_THREAT_STORY_QUERY_VERSION ||
+        (header->StorylineCount > (MAXDWORD - sizeof(DP_THREAT_STORY_QUERY_HEADER)) / sizeof(DP_THREAT_STORY_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_THREAT_STORY_QUERY_HEADER) +
+            header->StorylineCount * sizeof(DP_THREAT_STORY_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported threat storyline snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedCount = header->StorylineCount;
+    if (StorylineCount != NULL) {
+        *StorylineCount = returnedCount;
+    }
+
+    entry = (PDP_THREAT_STORY_QUERY_ENTRY)(queryBuffer + sizeof(DP_THREAT_STORY_QUERY_HEADER));
+
+    for (index = 0; index < returnedCount; index++) {
+        DWORD rootChars;
+        DWORD originChars;
+        DWORD stepIndex;
+
+        if (entry[index].RootImageLengthBytes > sizeof(entry[index].RootImage) ||
+            entry[index].OriginImageLengthBytes > sizeof(entry[index].OriginImage) ||
+            entry[index].StepCount > DP_THREAT_STORY_MAX_STEPS) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid threat storyline entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        rootChars = entry[index].RootImageLengthBytes / sizeof(WCHAR);
+        originChars = entry[index].OriginImageLengthBytes / sizeof(WCHAR);
+        requiredStringChars += rootChars + 1 + originChars + 1;
+
+        if (index < StorylineCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + rootChars + 1 + originChars + 1 <= StringBufferChars) {
+
+            Storylines[index].incidentId = entry[index].IncidentId;
+            Storylines[index].lineageRootPid = entry[index].LineageRootPid;
+            Storylines[index].originProcessId = entry[index].OriginProcessId;
+            Storylines[index].firstSeen = entry[index].FirstSeen;
+            Storylines[index].lastActivity = entry[index].LastActivity;
+            Storylines[index].peakScore = entry[index].PeakScore;
+            Storylines[index].severity = entry[index].Severity;
+            Storylines[index].tacticMask = entry[index].TacticMask;
+            Storylines[index].strongestResponse = entry[index].StrongestResponse;
+            Storylines[index].stepCount = entry[index].StepCount;
+            Storylines[index].totalStepsObserved = entry[index].TotalStepsObserved;
+
+            Storylines[index].rootImage = StringBuffer + copiedStringChars;
+            if (rootChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].RootImage, entry[index].RootImageLengthBytes);
+                copiedStringChars += rootChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Storylines[index].originImage = StringBuffer + copiedStringChars;
+            if (originChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].OriginImage, entry[index].OriginImageLengthBytes);
+                copiedStringChars += originChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            for (stepIndex = 0;
+                 stepIndex < entry[index].StepCount && stepIndex < DP_THREAT_STORY_MAX_STEPS;
+                 stepIndex++) {
+
+                DP_POLICY_API_THREAT_STORY_STEP *outStep = &Storylines[index].steps[stepIndex];
+                PDP_THREAT_STORY_STEP inStep = &entry[index].Steps[stepIndex];
+
+                outStep->timeStamp = inStep->TimeStamp;
+                outStep->processId = inStep->ProcessId;
+                outStep->parentProcessId = inStep->ParentProcessId;
+                outStep->signal = inStep->Signal;
+                outStep->tactic = inStep->Tactic;
+                outStep->techniqueId = inStep->TechniqueId;
+                outStep->scoreDelta = inStep->ScoreDelta;
+                outStep->cumulativeScore = inStep->CumulativeScore;
+                outStep->responseAction = inStep->ResponseAction;
+                ZeroMemory(outStep->detail, sizeof(outStep->detail));
+                if (inStep->DetailLengthBytes != 0 &&
+                    inStep->DetailLengthBytes <= sizeof(inStep->Detail)) {
+
+                    DWORD detailChars = inStep->DetailLengthBytes / sizeof(WCHAR);
+                    if (detailChars >= DP_THREAT_STORY_DETAIL_CHARS) {
+                        detailChars = DP_THREAT_STORY_DETAIL_CHARS - 1;
+                    }
+                    CopyMemory(outStep->detail, inStep->Detail, detailChars * sizeof(WCHAR));
+                }
+            }
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (StorylineCapacity < returnedCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryStaticScanEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_STATIC_SCAN_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_STATIC_SCAN_EVENT_QUERY_HEADER header;
+    DP_STATIC_SCAN_EVENT_QUERY_HEADER sizingHeader;
+    PDP_STATIC_SCAN_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryStaticScanEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_STATIC_SCAN_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_STATIC_SCAN_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_STATIC_SCAN_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid static scan event header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount > MAXDWORD / DP_STATIC_SCAN_EVENT_STRING_CHARS) {
+                DpPolicySetLastErrorMessage(L"Static scan event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+            *StringBufferCharsRequired = sizingHeader.EventCount * DP_STATIC_SCAN_EVENT_STRING_CHARS;
+        }
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = sizingHeader.EventCount;
+    }
+
+    if (sizingHeader.EventCount > MAXDWORD / DP_STATIC_SCAN_EVENT_STRING_CHARS) {
+        DpPolicySetLastErrorMessage(L"Static scan event snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = sizingHeader.EventCount * DP_STATIC_SCAN_EVENT_STRING_CHARS;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        StringBufferChars < sizingHeader.EventCount * DP_STATIC_SCAN_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryStaticScanEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_STATIC_SCAN_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid static scan event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_STATIC_SCAN_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_STATIC_SCAN_EVENT_QUERY_VERSION ||
+        (header->EventCount > (MAXDWORD - sizeof(DP_STATIC_SCAN_EVENT_QUERY_HEADER)) / sizeof(DP_STATIC_SCAN_EVENT_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_STATIC_SCAN_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_STATIC_SCAN_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported static scan event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedEventCount = header->EventCount;
+    if (EventCount != NULL) {
+        *EventCount = returnedEventCount;
+    }
+
+    entry = (PDP_STATIC_SCAN_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_STATIC_SCAN_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < returnedEventCount; index++) {
+        DWORD pathChars;
+        DWORD imageChars;
+        DWORD reasonChars;
+
+        if (entry[index].PathLengthBytes > sizeof(entry[index].Path) ||
+            entry[index].ProcessImageLengthBytes > sizeof(entry[index].ProcessImage) ||
+            entry[index].ReasonTextLengthBytes > sizeof(entry[index].ReasonText)) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid static scan event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        pathChars = entry[index].PathLengthBytes / sizeof(WCHAR);
+        imageChars = entry[index].ProcessImageLengthBytes / sizeof(WCHAR);
+        reasonChars = entry[index].ReasonTextLengthBytes / sizeof(WCHAR);
+        requiredStringChars += pathChars + 1 + imageChars + 1 + reasonChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + pathChars + 1 + imageChars + 1 + reasonChars + 1 <= StringBufferChars) {
+
+            Events[index].sequence = entry[index].Sequence;
+            Events[index].timeStamp = entry[index].TimeStamp;
+            Events[index].processId = entry[index].ProcessId;
+            Events[index].fileSize = entry[index].FileSize;
+            Events[index].verdict = entry[index].Verdict;
+            Events[index].operation = entry[index].Operation;
+            Events[index].score = entry[index].Score;
+            Events[index].reasonFlags = entry[index].ReasonFlags;
+            Events[index].status = entry[index].Status;
+            Events[index].blocked = entry[index].Blocked;
+
+            Events[index].path = StringBuffer + copiedStringChars;
+            if (pathChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].Path, entry[index].PathLengthBytes);
+                copiedStringChars += pathChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].processImage = StringBuffer + copiedStringChars;
+            if (imageChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].ProcessImage, entry[index].ProcessImageLengthBytes);
+                copiedStringChars += imageChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].reasonText = StringBuffer + copiedStringChars;
+            if (reasonChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].ReasonText, entry[index].ReasonTextLengthBytes);
+                copiedStringChars += reasonChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyClearStaticScanEvents(void)
+{
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandClearStaticScanEvents,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicySetStaticScanPolicy(
+    _In_ const DP_POLICY_API_STATIC_SCAN_POLICY *Policy
+    )
+{
+    DP_STATIC_SCAN_POLICY_MESSAGE message;
+
+    if (Policy == NULL ||
+        (Policy->Flags & ~DP_STATIC_SCAN_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Static scan policy is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_STATIC_SCAN_POLICY_VERSION;
+    message.Flags = Policy->Flags;
+    message.MaliciousThreshold = Policy->MaliciousThreshold;
+    message.SuspiciousThreshold = Policy->SuspiciousThreshold;
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandSetStaticScanPolicy,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryStaticScanPolicy(
+    _Out_ DP_POLICY_API_STATIC_SCAN_POLICY *Policy
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    DP_STATIC_SCAN_POLICY_MESSAGE message;
+
+    if (Policy == NULL) {
+        DpPolicySetLastErrorMessage(L"Static scan policy output is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(Policy, sizeof(*Policy));
+    ZeroMemory(&message, sizeof(message));
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryStaticScanPolicy,
+                                          NULL,
+                                          0,
+                                          &message,
+                                          sizeof(message),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(message) ||
+        message.Version != DP_STATIC_SCAN_POLICY_VERSION) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid static scan policy.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    Policy->Flags = message.Flags;
+    Policy->MaliciousThreshold = message.MaliciousThreshold;
+    Policy->SuspiciousThreshold = message.SuspiciousThreshold;
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryStaticScanRequests(
+    _Out_writes_opt_(RequestCapacity) DP_POLICY_API_STATIC_SCAN_REQUEST *Requests,
+    _In_ DWORD RequestCapacity,
+    _Out_opt_ DWORD *RequestCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_STATIC_SCAN_REQUEST_QUERY_HEADER header;
+    DP_STATIC_SCAN_REQUEST_QUERY_HEADER sizingHeader;
+    PDP_STATIC_SCAN_REQUEST_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedCount = 0;
+    BOOL sizingOnly = RequestCapacity == 0 && StringBufferChars == 0;
+
+    if (RequestCount != NULL) {
+        *RequestCount = 0;
+    }
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((RequestCapacity != 0 && Requests == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryStaticScanRequests,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_STATIC_SCAN_REQUEST_QUERY_HEADER) ||
+        sizingHeader.Version != DP_STATIC_SCAN_REQUEST_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_STATIC_SCAN_REQUEST_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid static scan request header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (RequestCount != NULL) {
+            *RequestCount = sizingHeader.RequestCount;
+        }
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.RequestCount > MAXDWORD / DP_STATIC_SCAN_REQUEST_STRING_CHARS) {
+                DpPolicySetLastErrorMessage(L"Static scan request snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+            *StringBufferCharsRequired = sizingHeader.RequestCount * DP_STATIC_SCAN_REQUEST_STRING_CHARS;
+        }
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (sizingHeader.RequestCount > MAXDWORD / DP_STATIC_SCAN_REQUEST_STRING_CHARS) {
+        DpPolicySetLastErrorMessage(L"Static scan request snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = sizingHeader.RequestCount * DP_STATIC_SCAN_REQUEST_STRING_CHARS;
+    }
+
+    if (RequestCapacity < sizingHeader.RequestCount ||
+        StringBufferChars < sizingHeader.RequestCount * DP_STATIC_SCAN_REQUEST_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryStaticScanRequests,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_STATIC_SCAN_REQUEST_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid static scan request snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_STATIC_SCAN_REQUEST_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_STATIC_SCAN_REQUEST_QUERY_VERSION ||
+        (header->RequestCount > (MAXDWORD - sizeof(DP_STATIC_SCAN_REQUEST_QUERY_HEADER)) / sizeof(DP_STATIC_SCAN_REQUEST_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_STATIC_SCAN_REQUEST_QUERY_HEADER) +
+            header->RequestCount * sizeof(DP_STATIC_SCAN_REQUEST_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported static scan request snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedCount = header->RequestCount;
+    if (RequestCount != NULL) {
+        *RequestCount = returnedCount;
+    }
+
+    entry = (PDP_STATIC_SCAN_REQUEST_QUERY_ENTRY)(queryBuffer + sizeof(DP_STATIC_SCAN_REQUEST_QUERY_HEADER));
+
+    for (index = 0; index < returnedCount; index++) {
+        DWORD pathChars;
+        DWORD imageChars;
+
+        if (entry[index].PathLengthBytes > sizeof(entry[index].Path) ||
+            entry[index].ProcessImageLengthBytes > sizeof(entry[index].ProcessImage)) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid static scan request entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        pathChars = entry[index].PathLengthBytes / sizeof(WCHAR);
+        imageChars = entry[index].ProcessImageLengthBytes / sizeof(WCHAR);
+        requiredStringChars += pathChars + 1 + imageChars + 1;
+
+        if (index < RequestCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + pathChars + 1 + imageChars + 1 <= StringBufferChars) {
+
+            Requests[index].requestId = entry[index].RequestId;
+            Requests[index].timeStamp = entry[index].TimeStamp;
+            Requests[index].processId = entry[index].ProcessId;
+            Requests[index].fileSize = entry[index].FileSize;
+            Requests[index].operation = entry[index].Operation;
+
+            Requests[index].path = StringBuffer + copiedStringChars;
+            if (pathChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].Path, entry[index].PathLengthBytes);
+                copiedStringChars += pathChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Requests[index].processImage = StringBuffer + copiedStringChars;
+            if (imageChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].ProcessImage, entry[index].ProcessImageLengthBytes);
+                copiedStringChars += imageChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (RequestCapacity < returnedCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicySubmitStaticScanVerdict(
+    _In_ const DP_POLICY_API_STATIC_SCAN_VERDICT *Verdict
+    )
+{
+    DP_STATIC_SCAN_VERDICT_MESSAGE message;
+    size_t pathChars;
+    size_t reasonChars;
+
+    if (Verdict == NULL) {
+        DpPolicySetLastErrorMessage(L"Static scan verdict is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_STATIC_SCAN_VERDICT_MESSAGE_VERSION;
+    message.Verdict = Verdict->verdict;
+    message.Score = Verdict->score;
+    message.ReasonFlags = Verdict->reasonFlags;
+    message.RequestId = Verdict->requestId;
+    message.ProcessId = Verdict->processId;
+    message.FileSize = Verdict->fileSize;
+    message.Operation = Verdict->operation;
+
+    pathChars = 0;
+    if (Verdict->path != NULL) {
+        if (FAILED(StringCchLengthW(Verdict->path, DP_STATIC_SCAN_PATH_CHARS, &pathChars))) {
+            pathChars = DP_STATIC_SCAN_PATH_CHARS - 1;
+        }
+        if (pathChars != 0) {
+            CopyMemory(message.Path, Verdict->path, pathChars * sizeof(WCHAR));
+        }
+    }
+    message.Path[pathChars] = L'\0';
+    message.PathLengthBytes = (ULONG)(pathChars * sizeof(WCHAR));
+
+    reasonChars = 0;
+    if (Verdict->reasonText != NULL) {
+        if (FAILED(StringCchLengthW(Verdict->reasonText, DP_STATIC_SCAN_REASON_CHARS, &reasonChars))) {
+            reasonChars = DP_STATIC_SCAN_REASON_CHARS - 1;
+        }
+        if (reasonChars != 0) {
+            CopyMemory(message.ReasonText, Verdict->reasonText, reasonChars * sizeof(WCHAR));
+        }
+    }
+    message.ReasonText[reasonChars] = L'\0';
+    message.ReasonTextLengthBytes = (ULONG)(reasonChars * sizeof(WCHAR));
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandSubmitStaticScanVerdict,
                                         &message,
                                         sizeof(message),
                                         NULL,

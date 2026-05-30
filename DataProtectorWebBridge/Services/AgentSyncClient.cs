@@ -26,6 +26,7 @@ namespace DataProtectorWebBridge.Services
         private readonly TimeSpan interval;
         private readonly PolicyBridgeService policyService;
         private readonly DlpProtectionService dlpProtectionService;
+        private readonly StaticScanService staticScanService;
         private readonly string statePath;
         private readonly string sandboxUploadStatePath;
         private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
@@ -55,6 +56,8 @@ namespace DataProtectorWebBridge.Services
             this.interval = interval <= TimeSpan.Zero ? TimeSpan.FromSeconds(15) : interval;
             this.policyService = policyService ?? throw new ArgumentNullException("policyService");
             dlpProtectionService = new DlpProtectionService();
+            staticScanService = new StaticScanService(this.policyService,
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector"));
             serverSyncUri = BuildSyncUri(serverBaseUrl);
             taskExecutor = new RemoteTaskExecutor(BuildServerBaseUri(serverBaseUrl));
 
@@ -102,6 +105,25 @@ namespace DataProtectorWebBridge.Services
             PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
             CentralPolicyStore.RemovableDeviceObservation[] removableDevices = removableDeviceInventory.Snapshot();
             CentralPolicyStore.SandboxSampleSubmission[] sandboxSamples = CollectSandboxExecutableEvents();
+
+            //
+            // Drain kernel executable-scan requests and submit verdicts. The
+            // signed user-mode engine pipeline (YARA + heuristics + hash
+            // reputation) classifies; the kernel only enforces the verdict.
+            //
+            try
+            {
+                int scanned = staticScanService.ProcessPendingRequests();
+                if (scanned > 0)
+                {
+                    Console.WriteLine(DateTime.Now.ToString("s") + " Static scan processed " + scanned + " executable request(s).");
+                }
+            }
+            catch (Exception scanEx)
+            {
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " static scan cycle failed: " + scanEx.Message);
+            }
+
             if (auditRecords.Length > 0)
             {
                 Console.WriteLine(DateTime.Now.ToString("s") + " Security audit drained " + auditRecords.Length + " event(s).");

@@ -55,3 +55,10 @@ EXPORTS
     DpPolicySetThreatPolicy
     DpPolicyQueryThreatPolicy
     DpPolicyRespondThreatProcess
+    DpPolicyQueryThreatStorylines
+    DpPolicyQueryStaticScanEvents
+    DpPolicyClearStaticScanEvents
+    DpPolicySetStaticScanPolicy
+    DpPolicyQueryStaticScanPolicy
+    DpPolicyQueryStaticScanRequests
+    DpPolicySubmitStaticScanVerdict

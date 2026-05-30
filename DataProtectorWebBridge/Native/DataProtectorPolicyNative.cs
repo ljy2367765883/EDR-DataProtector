@@ -207,6 +207,45 @@ namespace DataProtectorWebBridge.Native
         internal static extern uint DpPolicyRespondThreatProcess(ulong processId, uint action);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryThreatStorylines(
+            [Out] NativeThreatStoryline[] storylines,
+            uint storylineCapacity,
+            out uint storylineCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryStaticScanEvents(
+            [Out] NativeStaticScanEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyClearStaticScanEvents();
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicySetStaticScanPolicy(ref NativeStaticScanPolicy policy);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryStaticScanPolicy(out NativeStaticScanPolicy policy);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryStaticScanRequests(
+            [Out] NativeStaticScanRequest[] requests,
+            uint requestCapacity,
+            out uint requestCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicySubmitStaticScanVerdict(ref NativeStaticScanVerdict verdict);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyConvertDosPathToNtPath(
             string dosPath,
             StringBuilder ntPath,
@@ -457,6 +496,96 @@ namespace DataProtectorWebBridge.Native
             public uint BlockThreshold;
             public uint IsolateThreshold;
             public uint TerminateThreshold;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeThreatStoryStep
+        {
+            public ulong TimeStamp;
+            public ulong ProcessId;
+            public ulong ParentProcessId;
+            public uint Signal;
+            public uint Tactic;
+            public uint TechniqueId;
+            public uint ScoreDelta;
+            public uint CumulativeScore;
+            public uint ResponseAction;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 200)]
+            public string Detail;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeThreatStoryline
+        {
+            public ulong IncidentId;
+            public ulong LineageRootPid;
+            public ulong OriginProcessId;
+            public ulong FirstSeen;
+            public ulong LastActivity;
+            public uint PeakScore;
+            public uint Severity;
+            public uint TacticMask;
+            public uint StrongestResponse;
+            public uint StepCount;
+            public uint TotalStepsObserved;
+            public IntPtr RootImage;
+            public IntPtr OriginImage;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 48)]
+            public NativeThreatStoryStep[] Steps;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeStaticScanEvent
+        {
+            public ulong Sequence;
+            public ulong TimeStamp;
+            public ulong ProcessId;
+            public ulong FileSize;
+            public uint Verdict;
+            public uint Operation;
+            public uint Score;
+            public uint ReasonFlags;
+            public uint Status;
+            public uint Blocked;
+            public IntPtr Path;
+            public IntPtr ProcessImage;
+            public IntPtr ReasonText;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct NativeStaticScanPolicy
+        {
+            public uint Flags;
+            public uint MaliciousThreshold;
+            public uint SuspiciousThreshold;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeStaticScanRequest
+        {
+            public ulong RequestId;
+            public ulong TimeStamp;
+            public ulong ProcessId;
+            public ulong FileSize;
+            public uint Operation;
+            public IntPtr Path;
+            public IntPtr ProcessImage;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeStaticScanVerdict
+        {
+            public uint Verdict;
+            public uint Score;
+            public uint ReasonFlags;
+            public uint Operation;
+            public ulong RequestId;
+            public ulong ProcessId;
+            public ulong FileSize;
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string Path;
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string ReasonText;
         }
 
         [StructLayout(LayoutKind.Sequential)]

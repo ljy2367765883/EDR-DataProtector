@@ -12,6 +12,7 @@ namespace DataProtectorWebBridge.Services
         private readonly AuditLog auditLog;
         private readonly StaticWebContent staticWebContent;
         private readonly DlpProtectionService dlpProtectionService = new DlpProtectionService();
+        private readonly StaticScanService staticScanService;
         private bool disposed;
 
         public HttpBridgeServer(string prefix, PolicyBridgeService policyService, AuditLog auditLog, string webRoot)
@@ -24,6 +25,8 @@ namespace DataProtectorWebBridge.Services
             this.policyService = policyService ?? throw new ArgumentNullException("policyService");
             this.auditLog = auditLog ?? throw new ArgumentNullException("auditLog");
             staticWebContent = new StaticWebContent(webRoot);
+            staticScanService = new StaticScanService(this.policyService,
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector"));
             listener.Prefixes.Add(prefix);
             Prefix = prefix;
         }
@@ -242,6 +245,57 @@ namespace DataProtectorWebBridge.Services
                 {
                     PolicyBridgeService.OperationResult result = policyService.ClearThreatEvents();
                     JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/threat/storylines")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatStorylines());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/staticscan/events")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryStaticScanEvents());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/staticscan/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryStaticScanPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/staticscan/policy")
+                {
+                    PolicyBridgeService.StaticScanPolicyDto request =
+                        JsonResponse.Read<PolicyBridgeService.StaticScanPolicyDto>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetStaticScanPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/staticscan/clear")
+                {
+                    PolicyBridgeService.OperationResult result = policyService.ClearStaticScanEvents();
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/staticscan/requests")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryStaticScanRequests());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/staticscan/scan-now")
+                {
+                    int processed = staticScanService.ProcessPendingRequests();
+                    JsonResponse.Write(context.Response, "0000", "Success.", new
+                    {
+                        processed = processed,
+                        engines = staticScanService.EngineStatus()
+                    });
                     return;
                 }
 

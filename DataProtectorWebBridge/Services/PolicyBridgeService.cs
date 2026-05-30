@@ -17,6 +17,7 @@ namespace DataProtectorWebBridge.Services
     {
         private const uint SuccessStatus = 0;
         private const uint BufferTooSmallStatus = 0xE0010005;
+        private const uint InvalidArgumentStatus = 0xE0010001;
         private const uint PathBufferChars = 2048;
         private const uint RuleTypeProcessName = 1;
         private const uint RuleTypeProcessDirectory = 2;
@@ -1601,6 +1602,280 @@ namespace DataProtectorWebBridge.Services
             return Invoke(() => DataProtectorPolicyNative.DpPolicyRespondThreatProcess(processId, action));
         }
 
+        public ThreatStorylineDto[] QueryThreatStorylines()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint storyCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryThreatStorylines(
+                    new DataProtectorPolicyNative.NativeThreatStoryline[0],
+                    0,
+                    out storyCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeThreatStoryline[] nativeStories =
+                    new DataProtectorPolicyNative.NativeThreatStoryline[checked((int)storyCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryThreatStorylines(
+                        nativeStories,
+                        (uint)nativeStories.Length,
+                        out storyCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)storyCount);
+                        List<ThreatStorylineDto> stories = new List<ThreatStorylineDto>();
+                        for (int index = 0; index < returned && index < nativeStories.Length; index++)
+                        {
+                            stories.Add(ConvertThreatStoryline(nativeStories[index]));
+                        }
+
+                        return stories.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver threat storyline table changed while querying. Please retry.");
+        }
+
+        public StaticScanEventDto[] QueryStaticScanEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryStaticScanEvents(
+                    new DataProtectorPolicyNative.NativeStaticScanEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeStaticScanEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeStaticScanEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryStaticScanEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<StaticScanEventDto> events = new List<StaticScanEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertStaticScanEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver static scan event queue changed while querying. Please retry.");
+        }
+
+        public StaticScanPolicyDto QueryStaticScanPolicy()
+        {
+            DataProtectorPolicyNative.NativeStaticScanPolicy nativePolicy;
+            uint status = DataProtectorPolicyNative.DpPolicyQueryStaticScanPolicy(out nativePolicy);
+            if (status != SuccessStatus)
+            {
+                throw new BridgeException(status, ReadLastErrorMessage());
+            }
+
+            return FromStaticScanPolicy(nativePolicy);
+        }
+
+        public OperationResult SetStaticScanPolicy(StaticScanPolicyDto request)
+        {
+            StaticScanPolicyDto normalized = request ?? new StaticScanPolicyDto
+            {
+                enabled = true,
+                scanPe = true,
+                scanScripts = true,
+                blockMalicious = true
+            };
+
+            return Invoke(() =>
+            {
+                DataProtectorPolicyNative.NativeStaticScanPolicy nativePolicy = new DataProtectorPolicyNative.NativeStaticScanPolicy
+                {
+                    Flags = ToStaticScanFlags(normalized),
+                    MaliciousThreshold = normalized.maliciousThreshold,
+                    SuspiciousThreshold = normalized.suspiciousThreshold
+                };
+
+                return DataProtectorPolicyNative.DpPolicySetStaticScanPolicy(ref nativePolicy);
+            });
+        }
+
+        public OperationResult ClearStaticScanEvents()
+        {
+            return Invoke(() => DataProtectorPolicyNative.DpPolicyClearStaticScanEvents());
+        }
+
+        public StaticScanRequestDto[] QueryStaticScanRequests()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint requestCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryStaticScanRequests(
+                    new DataProtectorPolicyNative.NativeStaticScanRequest[0],
+                    0,
+                    out requestCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeStaticScanRequest[] nativeRequests =
+                    new DataProtectorPolicyNative.NativeStaticScanRequest[checked((int)requestCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryStaticScanRequests(
+                        nativeRequests,
+                        (uint)nativeRequests.Length,
+                        out requestCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)requestCount);
+                        List<StaticScanRequestDto> requests = new List<StaticScanRequestDto>();
+                        for (int index = 0; index < returned && index < nativeRequests.Length; index++)
+                        {
+                            requests.Add(ConvertStaticScanRequest(nativeRequests[index]));
+                        }
+
+                        return requests.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver static scan request queue changed while draining. Please retry.");
+        }
+
+        public OperationResult SubmitStaticScanVerdict(StaticScanVerdictRequest request)
+        {
+            if (request == null)
+            {
+                throw new BridgeException(InvalidArgumentStatus, "Static scan verdict is required.");
+            }
+
+            return Invoke(() =>
+            {
+                DataProtectorPolicyNative.NativeStaticScanVerdict nativeVerdict =
+                    new DataProtectorPolicyNative.NativeStaticScanVerdict
+                    {
+                        Verdict = request.verdict,
+                        Score = request.score,
+                        ReasonFlags = request.reasonFlags,
+                        Operation = request.operation,
+                        RequestId = request.requestId,
+                        ProcessId = request.processId,
+                        FileSize = request.fileSize,
+                        Path = request.path ?? string.Empty,
+                        ReasonText = request.reasonText ?? string.Empty
+                    };
+
+                return DataProtectorPolicyNative.DpPolicySubmitStaticScanVerdict(ref nativeVerdict);
+            });
+        }
+
         public AuditLog.AuditRecord[] DrainSmtpAuditRecords()
         {
             SmtpEventDto[] events = QuerySmtpEvents();
@@ -2875,6 +3150,165 @@ namespace DataProtectorWebBridge.Services
             }
 
             return request;
+        }
+
+        private const uint StaticScanFlagEnabled = 0x00000001u;
+        private const uint StaticScanFlagScanPe = 0x00000002u;
+        private const uint StaticScanFlagScanScripts = 0x00000004u;
+        private const uint StaticScanFlagBlockMalicious = 0x00000008u;
+        private const uint StaticScanFlagBlockSuspicious = 0x00000010u;
+        private const uint StaticScanFlagAuditOnly = 0x00000020u;
+        private const uint StaticScanAllowedFlags =
+            StaticScanFlagEnabled | StaticScanFlagScanPe | StaticScanFlagScanScripts |
+            StaticScanFlagBlockMalicious | StaticScanFlagBlockSuspicious | StaticScanFlagAuditOnly;
+
+        private static string StaticScanVerdictText(uint verdict)
+        {
+            switch (verdict)
+            {
+                case 0: return "Clean";
+                case 1: return "Low Risk";
+                case 2: return "Suspicious";
+                case 3: return "Malicious";
+                default: return "Unknown";
+            }
+        }
+
+        private static string StaticScanOperationText(uint operation)
+        {
+            switch (operation)
+            {
+                case 1: return "create";
+                case 2: return "write";
+                case 3: return "rename";
+                case 4: return "cleanup";
+                default: return "unknown";
+            }
+        }
+
+        private static ThreatStoryStepDto ConvertThreatStoryStep(DataProtectorPolicyNative.NativeThreatStoryStep step)
+        {
+            return new ThreatStoryStepDto
+            {
+                timeStamp = step.TimeStamp,
+                processId = step.ProcessId,
+                parentProcessId = step.ParentProcessId,
+                signal = step.Signal,
+                signalText = ThreatSignalText(step.Signal),
+                tactic = step.Tactic,
+                tacticText = ThreatTacticText(step.Tactic),
+                techniqueId = step.TechniqueId,
+                techniqueText = step.TechniqueId != 0
+                    ? "T" + step.TechniqueId.ToString(CultureInfo.InvariantCulture)
+                    : string.Empty,
+                scoreDelta = step.ScoreDelta,
+                cumulativeScore = step.CumulativeScore,
+                responseAction = step.ResponseAction,
+                responseActionText = ThreatResponseText(step.ResponseAction),
+                detail = step.Detail ?? string.Empty
+            };
+        }
+
+        private static ThreatStorylineDto ConvertThreatStoryline(DataProtectorPolicyNative.NativeThreatStoryline story)
+        {
+            int stepCount = (int)Math.Min(story.StepCount, (uint)(story.Steps != null ? story.Steps.Length : 0));
+            List<ThreatStoryStepDto> steps = new List<ThreatStoryStepDto>();
+            for (int i = 0; i < stepCount; i++)
+            {
+                steps.Add(ConvertThreatStoryStep(story.Steps[i]));
+            }
+
+            return new ThreatStorylineDto
+            {
+                incidentId = story.IncidentId,
+                lineageRootPid = story.LineageRootPid,
+                originProcessId = story.OriginProcessId,
+                firstSeen = story.FirstSeen,
+                lastActivity = story.LastActivity,
+                peakScore = story.PeakScore,
+                severity = story.Severity,
+                severityText = ThreatSeverityText(story.Severity),
+                tacticMask = story.TacticMask,
+                tactics = ThreatTacticsFromMask(story.TacticMask),
+                strongestResponse = story.StrongestResponse,
+                strongestResponseText = ThreatResponseText(story.StrongestResponse),
+                stepCount = story.StepCount,
+                totalStepsObserved = story.TotalStepsObserved,
+                rootImage = NormalizeDevicePath(Marshal.PtrToStringUni(story.RootImage) ?? string.Empty),
+                originImage = NormalizeDevicePath(Marshal.PtrToStringUni(story.OriginImage) ?? string.Empty),
+                steps = steps.ToArray()
+            };
+        }
+
+        private static StaticScanEventDto ConvertStaticScanEvent(DataProtectorPolicyNative.NativeStaticScanEvent nativeEvent)
+        {
+            return new StaticScanEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                timeStamp = nativeEvent.TimeStamp,
+                processId = nativeEvent.ProcessId,
+                fileSize = nativeEvent.FileSize,
+                verdict = nativeEvent.Verdict,
+                verdictText = StaticScanVerdictText(nativeEvent.Verdict),
+                operation = nativeEvent.Operation,
+                operationText = StaticScanOperationText(nativeEvent.Operation),
+                score = nativeEvent.Score,
+                reasonFlags = nativeEvent.ReasonFlags,
+                status = "0x" + nativeEvent.Status.ToString("X8", CultureInfo.InvariantCulture),
+                blocked = nativeEvent.Blocked != 0,
+                path = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Path) ?? string.Empty),
+                processImage = Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty,
+                reasonText = Marshal.PtrToStringUni(nativeEvent.ReasonText) ?? string.Empty
+            };
+        }
+
+        private static StaticScanRequestDto ConvertStaticScanRequest(DataProtectorPolicyNative.NativeStaticScanRequest nativeRequest)
+        {
+            return new StaticScanRequestDto
+            {
+                requestId = nativeRequest.RequestId,
+                timeStamp = nativeRequest.TimeStamp,
+                processId = nativeRequest.ProcessId,
+                fileSize = nativeRequest.FileSize,
+                operation = nativeRequest.Operation,
+                operationText = StaticScanOperationText(nativeRequest.Operation),
+                path = NormalizeDevicePath(Marshal.PtrToStringUni(nativeRequest.Path) ?? string.Empty),
+                processImage = Marshal.PtrToStringUni(nativeRequest.ProcessImage) ?? string.Empty
+            };
+        }
+
+        private static StaticScanPolicyDto FromStaticScanPolicy(DataProtectorPolicyNative.NativeStaticScanPolicy nativePolicy)
+        {
+            uint flags = nativePolicy.Flags & StaticScanAllowedFlags;
+            return new StaticScanPolicyDto
+            {
+                flags = flags,
+                enabled = (flags & StaticScanFlagEnabled) != 0,
+                scanPe = (flags & StaticScanFlagScanPe) != 0,
+                scanScripts = (flags & StaticScanFlagScanScripts) != 0,
+                blockMalicious = (flags & StaticScanFlagBlockMalicious) != 0,
+                blockSuspicious = (flags & StaticScanFlagBlockSuspicious) != 0,
+                auditOnly = (flags & StaticScanFlagAuditOnly) != 0,
+                maliciousThreshold = nativePolicy.MaliciousThreshold,
+                suspiciousThreshold = nativePolicy.SuspiciousThreshold
+            };
+        }
+
+        private static uint ToStaticScanFlags(StaticScanPolicyDto policy)
+        {
+            if (policy == null)
+            {
+                return StaticScanFlagEnabled;
+            }
+
+            uint flags = 0;
+            if (policy.enabled) flags |= StaticScanFlagEnabled;
+            if (policy.scanPe) flags |= StaticScanFlagScanPe;
+            if (policy.scanScripts) flags |= StaticScanFlagScanScripts;
+            if (policy.blockMalicious) flags |= StaticScanFlagBlockMalicious;
+            if (policy.blockSuspicious) flags |= StaticScanFlagBlockSuspicious;
+            if (policy.auditOnly) flags |= StaticScanFlagAuditOnly;
+            return flags & StaticScanAllowedFlags;
         }
 
         private static HashProtectPolicyDto FromHashProtectFlags(uint flags)
@@ -5299,6 +5733,102 @@ namespace DataProtectorWebBridge.Services
         {
             public ulong processId { get; set; }
             public uint action { get; set; }
+        }
+
+        public sealed class ThreatStoryStepDto
+        {
+            public ulong timeStamp { get; set; }
+            public ulong processId { get; set; }
+            public ulong parentProcessId { get; set; }
+            public uint signal { get; set; }
+            public string signalText { get; set; }
+            public uint tactic { get; set; }
+            public string tacticText { get; set; }
+            public uint techniqueId { get; set; }
+            public string techniqueText { get; set; }
+            public uint scoreDelta { get; set; }
+            public uint cumulativeScore { get; set; }
+            public uint responseAction { get; set; }
+            public string responseActionText { get; set; }
+            public string detail { get; set; }
+        }
+
+        public sealed class ThreatStorylineDto
+        {
+            public ulong incidentId { get; set; }
+            public ulong lineageRootPid { get; set; }
+            public ulong originProcessId { get; set; }
+            public ulong firstSeen { get; set; }
+            public ulong lastActivity { get; set; }
+            public uint peakScore { get; set; }
+            public uint severity { get; set; }
+            public string severityText { get; set; }
+            public uint tacticMask { get; set; }
+            public string[] tactics { get; set; }
+            public uint strongestResponse { get; set; }
+            public string strongestResponseText { get; set; }
+            public uint stepCount { get; set; }
+            public uint totalStepsObserved { get; set; }
+            public string rootImage { get; set; }
+            public string originImage { get; set; }
+            public ThreatStoryStepDto[] steps { get; set; }
+        }
+
+        public sealed class StaticScanEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong timeStamp { get; set; }
+            public ulong processId { get; set; }
+            public ulong fileSize { get; set; }
+            public uint verdict { get; set; }
+            public string verdictText { get; set; }
+            public uint operation { get; set; }
+            public string operationText { get; set; }
+            public uint score { get; set; }
+            public uint reasonFlags { get; set; }
+            public string status { get; set; }
+            public bool blocked { get; set; }
+            public string path { get; set; }
+            public string processImage { get; set; }
+            public string reasonText { get; set; }
+        }
+
+        public sealed class StaticScanPolicyDto
+        {
+            public uint flags { get; set; }
+            public bool enabled { get; set; }
+            public bool scanPe { get; set; }
+            public bool scanScripts { get; set; }
+            public bool blockMalicious { get; set; }
+            public bool blockSuspicious { get; set; }
+            public bool auditOnly { get; set; }
+            public uint maliciousThreshold { get; set; }
+            public uint suspiciousThreshold { get; set; }
+        }
+
+        public sealed class StaticScanRequestDto
+        {
+            public ulong requestId { get; set; }
+            public ulong timeStamp { get; set; }
+            public ulong processId { get; set; }
+            public ulong fileSize { get; set; }
+            public uint operation { get; set; }
+            public string operationText { get; set; }
+            public string path { get; set; }
+            public string processImage { get; set; }
+        }
+
+        public sealed class StaticScanVerdictRequest
+        {
+            public uint verdict { get; set; }
+            public uint score { get; set; }
+            public uint reasonFlags { get; set; }
+            public uint operation { get; set; }
+            public ulong requestId { get; set; }
+            public ulong processId { get; set; }
+            public ulong fileSize { get; set; }
+            public string path { get; set; }
+            public string reasonText { get; set; }
         }
 
         private sealed class UserHookRuntimeEvent

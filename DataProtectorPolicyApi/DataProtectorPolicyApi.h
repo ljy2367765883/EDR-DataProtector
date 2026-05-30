@@ -321,6 +321,102 @@ typedef struct _DP_POLICY_API_THREAT_POLICY {
     DWORD TerminateThreshold;
 } DP_POLICY_API_THREAT_POLICY, *PDP_POLICY_API_THREAT_POLICY;
 
+#define DP_POLICY_API_THREAT_STORY_MAX_STEPS 48u
+#define DP_POLICY_API_THREAT_STORY_DETAIL_CHARS 200u
+
+typedef struct _DP_POLICY_API_THREAT_STORY_STEP {
+    ULONGLONG timeStamp;
+    ULONGLONG processId;
+    ULONGLONG parentProcessId;
+    DWORD signal;
+    DWORD tactic;
+    DWORD techniqueId;
+    DWORD scoreDelta;
+    DWORD cumulativeScore;
+    DWORD responseAction;
+    WCHAR detail[DP_POLICY_API_THREAT_STORY_DETAIL_CHARS];
+} DP_POLICY_API_THREAT_STORY_STEP, *PDP_POLICY_API_THREAT_STORY_STEP;
+
+typedef struct _DP_POLICY_API_THREAT_STORYLINE {
+    ULONGLONG incidentId;
+    ULONGLONG lineageRootPid;
+    ULONGLONG originProcessId;
+    ULONGLONG firstSeen;
+    ULONGLONG lastActivity;
+    DWORD peakScore;
+    DWORD severity;
+    DWORD tacticMask;
+    DWORD strongestResponse;
+    DWORD stepCount;
+    DWORD totalStepsObserved;
+    LPCWSTR rootImage;
+    LPCWSTR originImage;
+    DP_POLICY_API_THREAT_STORY_STEP steps[DP_POLICY_API_THREAT_STORY_MAX_STEPS];
+} DP_POLICY_API_THREAT_STORYLINE, *PDP_POLICY_API_THREAT_STORYLINE;
+
+#define DP_POLICY_API_STATIC_SCAN_VERDICT_CLEAN      0u
+#define DP_POLICY_API_STATIC_SCAN_VERDICT_LOW_RISK   1u
+#define DP_POLICY_API_STATIC_SCAN_VERDICT_SUSPICIOUS 2u
+#define DP_POLICY_API_STATIC_SCAN_VERDICT_MALICIOUS  3u
+
+#define DP_POLICY_API_STATIC_SCAN_FLAG_ENABLED          0x00000001u
+#define DP_POLICY_API_STATIC_SCAN_FLAG_SCAN_PE          0x00000002u
+#define DP_POLICY_API_STATIC_SCAN_FLAG_SCAN_SCRIPTS     0x00000004u
+#define DP_POLICY_API_STATIC_SCAN_FLAG_BLOCK_MALICIOUS  0x00000008u
+#define DP_POLICY_API_STATIC_SCAN_FLAG_BLOCK_SUSPICIOUS 0x00000010u
+#define DP_POLICY_API_STATIC_SCAN_FLAG_AUDIT_ONLY       0x00000020u
+
+typedef struct _DP_POLICY_API_STATIC_SCAN_EVENT {
+    ULONGLONG sequence;
+    ULONGLONG timeStamp;
+    ULONGLONG processId;
+    ULONGLONG fileSize;
+    DWORD verdict;
+    DWORD operation;
+    DWORD score;
+    DWORD reasonFlags;
+    DWORD status;
+    DWORD blocked;
+    LPCWSTR path;
+    LPCWSTR processImage;
+    LPCWSTR reasonText;
+} DP_POLICY_API_STATIC_SCAN_EVENT, *PDP_POLICY_API_STATIC_SCAN_EVENT;
+
+typedef struct _DP_POLICY_API_STATIC_SCAN_POLICY {
+    DWORD Flags;
+    DWORD MaliciousThreshold;
+    DWORD SuspiciousThreshold;
+} DP_POLICY_API_STATIC_SCAN_POLICY, *PDP_POLICY_API_STATIC_SCAN_POLICY;
+
+//
+// Scan request drained from the kernel (one per detected executable write).
+// The user-mode service opens and scans the file, then submits a verdict.
+//
+typedef struct _DP_POLICY_API_STATIC_SCAN_REQUEST {
+    ULONGLONG requestId;
+    ULONGLONG timeStamp;
+    ULONGLONG processId;
+    ULONGLONG fileSize;
+    DWORD operation;
+    LPCWSTR path;
+    LPCWSTR processImage;
+} DP_POLICY_API_STATIC_SCAN_REQUEST, *PDP_POLICY_API_STATIC_SCAN_REQUEST;
+
+//
+// Verdict submitted back to the kernel for a drained request.
+//
+typedef struct _DP_POLICY_API_STATIC_SCAN_VERDICT {
+    DWORD verdict;        // DP_POLICY_API_STATIC_SCAN_VERDICT_*
+    DWORD score;          // 0..100
+    DWORD reasonFlags;
+    DWORD operation;
+    ULONGLONG requestId;
+    ULONGLONG processId;
+    ULONGLONG fileSize;
+    LPCWSTR path;
+    LPCWSTR reasonText;
+} DP_POLICY_API_STATIC_SCAN_VERDICT, *PDP_POLICY_API_STATIC_SCAN_VERDICT;
+
 DP_POLICY_API
 DWORD
 DpPolicyCheckConnection(void);
@@ -718,6 +814,61 @@ DWORD
 DpPolicyRespondThreatProcess(
     _In_ ULONGLONG processId,
     _In_ DWORD action
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryThreatStorylines(
+    _Out_writes_opt_(storylineCapacity) DP_POLICY_API_THREAT_STORYLINE *storylines,
+    _In_ DWORD storylineCapacity,
+    _Out_opt_ DWORD *storylineCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryStaticScanEvents(
+    _Out_writes_opt_(eventCapacity) DP_POLICY_API_STATIC_SCAN_EVENT *events,
+    _In_ DWORD eventCapacity,
+    _Out_opt_ DWORD *eventCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyClearStaticScanEvents(void);
+
+DP_POLICY_API
+DWORD
+DpPolicySetStaticScanPolicy(
+    _In_ const DP_POLICY_API_STATIC_SCAN_POLICY *policy
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryStaticScanPolicy(
+    _Out_ DP_POLICY_API_STATIC_SCAN_POLICY *policy
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryStaticScanRequests(
+    _Out_writes_opt_(requestCapacity) DP_POLICY_API_STATIC_SCAN_REQUEST *requests,
+    _In_ DWORD requestCapacity,
+    _Out_opt_ DWORD *requestCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicySubmitStaticScanVerdict(
+    _In_ const DP_POLICY_API_STATIC_SCAN_VERDICT *verdict
     );
 
 #ifdef __cplusplus

@@ -49,6 +49,7 @@
     <ClCompile Include="DpPolicy.c" />
     <ClCompile Include="DpProcessPolicy.c" />
     <ClCompile Include="DpShadow.c" />
+    <ClCompile Include="DpStaticScan.c" />
     <ClCompile Include="DpThreatEngine.c" />
     <ClCompile Include="DpTrace.c" />
     <ClCompile Include="DpUsbMetadata.c" />
