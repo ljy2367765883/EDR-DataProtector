@@ -34,6 +34,8 @@
 #define DP_USER_HOOK_DEFENSE_PROCESS_CHARS 512u
 #define DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS 2048u
 #define DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS 512u
+#define DP_THREAT_PROCESS_CHARS 320u
+#define DP_THREAT_DETAIL_CHARS 384u
 #define DP_USB_METADATA_BYTES 512u
 #define DP_USB_METADATA_PATH_CHARS 128u
 #define DP_USB_METADATA_MESSAGE_VERSION 1u
@@ -58,6 +60,8 @@
 #define DP_HASH_PROTECT_EVENT_STRING_CHARS (DP_HASH_PROTECT_TARGET_CHARS + DP_HASH_PROTECT_PROCESS_CHARS + 2u)
 #define DP_LATERAL_DEFENSE_EVENT_STRING_CHARS (DP_LATERAL_DEFENSE_TARGET_CHARS + DP_LATERAL_DEFENSE_PROCESS_CHARS + 2u)
 #define DP_USER_HOOK_DEFENSE_EVENT_STRING_CHARS (DP_USER_HOOK_DEFENSE_TARGET_CHARS + DP_USER_HOOK_DEFENSE_PROCESS_CHARS + 2u)
+#define DP_THREAT_EVENT_STRING_CHARS (DP_THREAT_PROCESS_CHARS + DP_THREAT_DETAIL_CHARS + 2u)
+#define DP_THREAT_PROCESS_STRING_CHARS (DP_THREAT_PROCESS_CHARS + 1u)
 #define DP_POLICY_DEFAULT_EXTENSION L".dpf"
 #define DP_POLICY_API_ENABLE_FILE_TRACE 1
 #define DP_POLICY_API_TRACE_PATH L"C:\\ProgramData\\DataProtector\\PolicyApiTrace.log"
@@ -100,6 +104,12 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandClearFileHunterRules = 122,
     DpPolicyCommandQueryFileHunterRules = 123,
     DpPolicyCommandQueryFileHunterEvents = 124,
+    DpPolicyCommandQueryThreatEvents = 140,
+    DpPolicyCommandQueryThreatProcesses = 141,
+    DpPolicyCommandSetThreatPolicy = 142,
+    DpPolicyCommandQueryThreatPolicy = 143,
+    DpPolicyCommandClearThreatEvents = 144,
+    DpPolicyCommandRespondThreatProcess = 145,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -422,6 +432,72 @@ typedef struct _DP_USER_HOOK_DEFENSE_POLICY_MESSAGE {
     WCHAR RuntimeDllPath[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
 } DP_USER_HOOK_DEFENSE_POLICY_MESSAGE, *PDP_USER_HOOK_DEFENSE_POLICY_MESSAGE;
 
+typedef struct _DP_THREAT_ENGINE_POLICY_MESSAGE {
+    ULONG Version;
+    ULONG Flags;
+    ULONG BlockThreshold;
+    ULONG IsolateThreshold;
+    ULONG TerminateThreshold;
+    ULONG Reserved;
+} DP_THREAT_ENGINE_POLICY_MESSAGE, *PDP_THREAT_ENGINE_POLICY_MESSAGE;
+
+typedef struct _DP_THREAT_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_THREAT_EVENT_QUERY_HEADER, *PDP_THREAT_EVENT_QUERY_HEADER;
+
+typedef struct _DP_THREAT_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG TimeStamp;
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONGLONG LineageRootPid;
+    ULONG Signal;
+    ULONG Tactic;
+    ULONG TechniqueId;
+    ULONG ScoreDelta;
+    ULONG CumulativeScore;
+    ULONG Severity;
+    ULONG ResponseAction;
+    ULONG ResponseStatus;
+    ULONG ProcessImageLengthBytes;
+    ULONG DetailLengthBytes;
+    WCHAR ProcessImage[DP_THREAT_PROCESS_CHARS];
+    WCHAR Detail[DP_THREAT_DETAIL_CHARS];
+} DP_THREAT_EVENT_QUERY_ENTRY, *PDP_THREAT_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_THREAT_PROCESS_QUERY_HEADER {
+    ULONG Version;
+    ULONG ProcessCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_THREAT_PROCESS_QUERY_HEADER, *PDP_THREAT_PROCESS_QUERY_HEADER;
+
+typedef struct _DP_THREAT_PROCESS_QUERY_ENTRY {
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONGLONG LineageRootPid;
+    ULONGLONG FirstSeen;
+    ULONGLONG LastActivity;
+    ULONG CumulativeScore;
+    ULONG Severity;
+    ULONG SignalCount;
+    ULONG DistinctTacticMask;
+    ULONG StrongestResponse;
+    ULONG Flags;
+    ULONG ProcessImageLengthBytes;
+    WCHAR ProcessImage[DP_THREAT_PROCESS_CHARS];
+} DP_THREAT_PROCESS_QUERY_ENTRY, *PDP_THREAT_PROCESS_QUERY_ENTRY;
+
+typedef struct _DP_THREAT_RESPONSE_REQUEST_MESSAGE {
+    ULONG Version;
+    ULONG Action;
+    ULONGLONG ProcessId;
+} DP_THREAT_RESPONSE_REQUEST_MESSAGE, *PDP_THREAT_RESPONSE_REQUEST_MESSAGE;
+
 #define DP_NETWORK_RULE_MESSAGE_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_VERSION 1u
 #define DP_NETWORK_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_NETWORK_RULE_QUERY_ENTRY, Domain)
@@ -467,6 +543,18 @@ typedef struct _DP_USER_HOOK_DEFENSE_POLICY_MESSAGE {
 #define DP_DEVICE_RULE_MESSAGE_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_VERSION 1u
 #define DP_DEVICE_RULE_QUERY_ENTRY_HEADER_SIZE FIELD_OFFSET(DP_DEVICE_RULE_QUERY_ENTRY, DeviceId)
+#define DP_THREAT_EVENT_QUERY_VERSION 1u
+#define DP_THREAT_PROCESS_QUERY_VERSION 1u
+#define DP_THREAT_ENGINE_POLICY_VERSION 1u
+#define DP_THREAT_RESPONSE_REQUEST_VERSION 1u
+#define DP_THREAT_ENGINE_ALLOWED_FLAGS \
+    (DP_POLICY_API_THREAT_FLAG_ENABLED | \
+     DP_POLICY_API_THREAT_FLAG_CORRELATION | \
+     DP_POLICY_API_THREAT_FLAG_ANCESTRY_PROPAGATION | \
+     DP_POLICY_API_THREAT_FLAG_AUTO_BLOCK | \
+     DP_POLICY_API_THREAT_FLAG_AUTO_ISOLATE | \
+     DP_POLICY_API_THREAT_FLAG_AUTO_TERMINATE | \
+     DP_POLICY_API_THREAT_FLAG_AUDIT_ONLY)
 
 C_ASSERT(sizeof(DP_WEBSHELL_EVENT_QUERY_ENTRY) == 1232);
 
@@ -3539,6 +3627,505 @@ DpPolicyQueryHashProtectPolicy(
     Policy->Flags = message.Flags;
     DpPolicySetLastErrorMessage(L"Success.");
     return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryThreatEvents(
+    _Out_writes_opt_(EventCapacity) DP_POLICY_API_THREAT_EVENT *Events,
+    _In_ DWORD EventCapacity,
+    _Out_opt_ DWORD *EventCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_THREAT_EVENT_QUERY_HEADER header;
+    DP_THREAT_EVENT_QUERY_HEADER sizingHeader;
+    PDP_THREAT_EVENT_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedEventCount = 0;
+    BOOL sizingOnly = EventCapacity == 0 && StringBufferChars == 0;
+
+    if (EventCount != NULL) {
+        *EventCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((EventCapacity != 0 && Events == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryThreatEvents,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_THREAT_EVENT_QUERY_HEADER) ||
+        sizingHeader.Version != DP_THREAT_EVENT_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_THREAT_EVENT_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid threat event snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (EventCount != NULL) {
+            *EventCount = sizingHeader.EventCount;
+        }
+
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.EventCount > MAXDWORD / DP_THREAT_EVENT_STRING_CHARS) {
+                DpPolicySetLastErrorMessage(L"Threat event snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+            *StringBufferCharsRequired = sizingHeader.EventCount * DP_THREAT_EVENT_STRING_CHARS;
+        }
+
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (EventCount != NULL) {
+        *EventCount = sizingHeader.EventCount;
+    }
+
+    if (sizingHeader.EventCount > MAXDWORD / DP_THREAT_EVENT_STRING_CHARS) {
+        DpPolicySetLastErrorMessage(L"Threat event snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = sizingHeader.EventCount * DP_THREAT_EVENT_STRING_CHARS;
+    }
+
+    if (EventCapacity < sizingHeader.EventCount ||
+        StringBufferChars < sizingHeader.EventCount * DP_THREAT_EVENT_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryThreatEvents,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_THREAT_EVENT_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid threat event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_THREAT_EVENT_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_THREAT_EVENT_QUERY_VERSION ||
+        (header->EventCount > (MAXDWORD - sizeof(DP_THREAT_EVENT_QUERY_HEADER)) / sizeof(DP_THREAT_EVENT_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_THREAT_EVENT_QUERY_HEADER) +
+            header->EventCount * sizeof(DP_THREAT_EVENT_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported threat event snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedEventCount = header->EventCount;
+    if (EventCount != NULL) {
+        *EventCount = returnedEventCount;
+    }
+
+    entry = (PDP_THREAT_EVENT_QUERY_ENTRY)(queryBuffer + sizeof(DP_THREAT_EVENT_QUERY_HEADER));
+
+    for (index = 0; index < returnedEventCount; index++) {
+        DWORD imageChars;
+        DWORD detailChars;
+
+        if (entry[index].ProcessImageLengthBytes > sizeof(entry[index].ProcessImage) ||
+            entry[index].DetailLengthBytes > sizeof(entry[index].Detail) ||
+            entry[index].ProcessImageLengthBytes % sizeof(WCHAR) != 0 ||
+            entry[index].DetailLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid threat event entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        imageChars = entry[index].ProcessImageLengthBytes / sizeof(WCHAR);
+        detailChars = entry[index].DetailLengthBytes / sizeof(WCHAR);
+        requiredStringChars += imageChars + 1 + detailChars + 1;
+
+        if (index < EventCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + imageChars + 1 + detailChars + 1 <= StringBufferChars) {
+
+            Events[index].Sequence = entry[index].Sequence;
+            Events[index].TimeStamp = entry[index].TimeStamp;
+            Events[index].ProcessId = entry[index].ProcessId;
+            Events[index].ParentProcessId = entry[index].ParentProcessId;
+            Events[index].LineageRootPid = entry[index].LineageRootPid;
+            Events[index].Signal = entry[index].Signal;
+            Events[index].Tactic = entry[index].Tactic;
+            Events[index].TechniqueId = entry[index].TechniqueId;
+            Events[index].ScoreDelta = entry[index].ScoreDelta;
+            Events[index].CumulativeScore = entry[index].CumulativeScore;
+            Events[index].Severity = entry[index].Severity;
+            Events[index].ResponseAction = entry[index].ResponseAction;
+            Events[index].ResponseStatus = entry[index].ResponseStatus;
+
+            Events[index].ProcessImage = StringBuffer + copiedStringChars;
+            if (imageChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].ProcessImage, entry[index].ProcessImageLengthBytes);
+                copiedStringChars += imageChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+
+            Events[index].Detail = StringBuffer + copiedStringChars;
+            if (detailChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].Detail, entry[index].DetailLengthBytes);
+                copiedStringChars += detailChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (EventCapacity < returnedEventCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyQueryThreatProcesses(
+    _Out_writes_opt_(ProcessCapacity) DP_POLICY_API_THREAT_PROCESS *Processes,
+    _In_ DWORD ProcessCapacity,
+    _Out_opt_ DWORD *ProcessCount,
+    _Out_writes_opt_(StringBufferChars) LPWSTR StringBuffer,
+    _In_ DWORD StringBufferChars,
+    _Out_opt_ DWORD *StringBufferCharsRequired
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    ULONG bytesRequired;
+    PBYTE queryBuffer = NULL;
+    PDP_THREAT_PROCESS_QUERY_HEADER header;
+    DP_THREAT_PROCESS_QUERY_HEADER sizingHeader;
+    PDP_THREAT_PROCESS_QUERY_ENTRY entry;
+    DWORD index;
+    DWORD requiredStringChars = 0;
+    DWORD copiedStringChars = 0;
+    DWORD returnedCount = 0;
+    BOOL sizingOnly = ProcessCapacity == 0 && StringBufferChars == 0;
+
+    if (ProcessCount != NULL) {
+        *ProcessCount = 0;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = 0;
+    }
+
+    if ((ProcessCapacity != 0 && Processes == NULL) ||
+        (StringBufferChars != 0 && StringBuffer == NULL)) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&sizingHeader, sizeof(sizingHeader));
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryThreatProcesses,
+                                          NULL,
+                                          0,
+                                          &sizingHeader,
+                                          sizeof(sizingHeader),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_THREAT_PROCESS_QUERY_HEADER) ||
+        sizingHeader.Version != DP_THREAT_PROCESS_QUERY_VERSION ||
+        sizingHeader.BytesRequired < sizeof(DP_THREAT_PROCESS_QUERY_HEADER)) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid threat process snapshot header.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (sizingOnly) {
+        if (ProcessCount != NULL) {
+            *ProcessCount = sizingHeader.ProcessCount;
+        }
+        if (StringBufferCharsRequired != NULL) {
+            if (sizingHeader.ProcessCount > MAXDWORD / DP_THREAT_PROCESS_STRING_CHARS) {
+                DpPolicySetLastErrorMessage(L"Threat process snapshot is too large.");
+                return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+            }
+            *StringBufferCharsRequired = sizingHeader.ProcessCount * DP_THREAT_PROCESS_STRING_CHARS;
+        }
+        DpPolicySetLastErrorMessage(L"Success.");
+        return DP_POLICY_API_SUCCESS;
+    }
+
+    if (ProcessCount != NULL) {
+        *ProcessCount = sizingHeader.ProcessCount;
+    }
+
+    if (sizingHeader.ProcessCount > MAXDWORD / DP_THREAT_PROCESS_STRING_CHARS) {
+        DpPolicySetLastErrorMessage(L"Threat process snapshot is too large.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = sizingHeader.ProcessCount * DP_THREAT_PROCESS_STRING_CHARS;
+    }
+
+    if (ProcessCapacity < sizingHeader.ProcessCount ||
+        StringBufferChars < sizingHeader.ProcessCount * DP_THREAT_PROCESS_STRING_CHARS) {
+
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    bytesRequired = sizingHeader.BytesRequired;
+    queryBuffer = (PBYTE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (queryBuffer == NULL) {
+        DpPolicySetLastErrorMessage(L"Out of memory.");
+        return DP_POLICY_API_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryThreatProcesses,
+                                          NULL,
+                                          0,
+                                          queryBuffer,
+                                          bytesRequired,
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        return result;
+    }
+
+    if (bytesReturned < sizeof(DP_THREAT_PROCESS_QUERY_HEADER)) {
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid threat process snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    header = (PDP_THREAT_PROCESS_QUERY_HEADER)queryBuffer;
+    if (header->Version != DP_THREAT_PROCESS_QUERY_VERSION ||
+        (header->ProcessCount > (MAXDWORD - sizeof(DP_THREAT_PROCESS_QUERY_HEADER)) / sizeof(DP_THREAT_PROCESS_QUERY_ENTRY)) ||
+        bytesReturned < sizeof(DP_THREAT_PROCESS_QUERY_HEADER) +
+            header->ProcessCount * sizeof(DP_THREAT_PROCESS_QUERY_ENTRY)) {
+
+        HeapFree(GetProcessHeap(), 0, queryBuffer);
+        DpPolicySetLastErrorMessage(L"Driver returned an unsupported threat process snapshot.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    returnedCount = header->ProcessCount;
+    if (ProcessCount != NULL) {
+        *ProcessCount = returnedCount;
+    }
+
+    entry = (PDP_THREAT_PROCESS_QUERY_ENTRY)(queryBuffer + sizeof(DP_THREAT_PROCESS_QUERY_HEADER));
+
+    for (index = 0; index < returnedCount; index++) {
+        DWORD imageChars;
+
+        if (entry[index].ProcessImageLengthBytes > sizeof(entry[index].ProcessImage) ||
+            entry[index].ProcessImageLengthBytes % sizeof(WCHAR) != 0) {
+
+            HeapFree(GetProcessHeap(), 0, queryBuffer);
+            DpPolicySetLastErrorMessage(L"Driver returned an invalid threat process entry.");
+            return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+        }
+
+        imageChars = entry[index].ProcessImageLengthBytes / sizeof(WCHAR);
+        requiredStringChars += imageChars + 1;
+
+        if (index < ProcessCapacity &&
+            StringBuffer != NULL &&
+            copiedStringChars + imageChars + 1 <= StringBufferChars) {
+
+            Processes[index].ProcessId = entry[index].ProcessId;
+            Processes[index].ParentProcessId = entry[index].ParentProcessId;
+            Processes[index].LineageRootPid = entry[index].LineageRootPid;
+            Processes[index].FirstSeen = entry[index].FirstSeen;
+            Processes[index].LastActivity = entry[index].LastActivity;
+            Processes[index].CumulativeScore = entry[index].CumulativeScore;
+            Processes[index].Severity = entry[index].Severity;
+            Processes[index].SignalCount = entry[index].SignalCount;
+            Processes[index].DistinctTacticMask = entry[index].DistinctTacticMask;
+            Processes[index].StrongestResponse = entry[index].StrongestResponse;
+            Processes[index].Flags = entry[index].Flags;
+
+            Processes[index].ProcessImage = StringBuffer + copiedStringChars;
+            if (imageChars != 0) {
+                CopyMemory(StringBuffer + copiedStringChars, entry[index].ProcessImage, entry[index].ProcessImageLengthBytes);
+                copiedStringChars += imageChars;
+            }
+            StringBuffer[copiedStringChars++] = L'\0';
+        }
+    }
+
+    if (StringBufferCharsRequired != NULL) {
+        *StringBufferCharsRequired = requiredStringChars;
+    }
+
+    HeapFree(GetProcessHeap(), 0, queryBuffer);
+
+    if (ProcessCapacity < returnedCount || StringBufferChars < requiredStringChars) {
+        DpPolicySetLastErrorMessage(L"Output buffer is too small.");
+        return DP_POLICY_API_ERROR_BUFFER_TOO_SMALL;
+    }
+
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyClearThreatEvents(void)
+{
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandClearThreatEvents,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicySetThreatPolicy(
+    _In_ const DP_POLICY_API_THREAT_POLICY *Policy
+    )
+{
+    DP_THREAT_ENGINE_POLICY_MESSAGE message;
+
+    if (Policy == NULL ||
+        (Policy->Flags & ~DP_THREAT_ENGINE_ALLOWED_FLAGS) != 0) {
+
+        DpPolicySetLastErrorMessage(L"Threat engine policy is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_THREAT_ENGINE_POLICY_VERSION;
+    message.Flags = Policy->Flags;
+    message.BlockThreshold = Policy->BlockThreshold;
+    message.IsolateThreshold = Policy->IsolateThreshold;
+    message.TerminateThreshold = Policy->TerminateThreshold;
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandSetThreatPolicy,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
+}
+
+DWORD
+DpPolicyQueryThreatPolicy(
+    _Out_ DP_POLICY_API_THREAT_POLICY *Policy
+    )
+{
+    DWORD result;
+    ULONG bytesReturned = 0;
+    DP_THREAT_ENGINE_POLICY_MESSAGE message;
+
+    if (Policy == NULL) {
+        DpPolicySetLastErrorMessage(L"Threat engine policy output is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(Policy, sizeof(*Policy));
+    ZeroMemory(&message, sizeof(message));
+
+    result = DpPolicySendRawPolicyMessage(DpPolicyCommandQueryThreatPolicy,
+                                          NULL,
+                                          0,
+                                          &message,
+                                          sizeof(message),
+                                          &bytesReturned);
+    if (result != DP_POLICY_API_SUCCESS) {
+        return result;
+    }
+
+    if (bytesReturned < sizeof(message) ||
+        message.Version != DP_THREAT_ENGINE_POLICY_VERSION) {
+
+        DpPolicySetLastErrorMessage(L"Driver returned an invalid threat engine policy.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    Policy->Flags = message.Flags;
+    Policy->BlockThreshold = message.BlockThreshold;
+    Policy->IsolateThreshold = message.IsolateThreshold;
+    Policy->TerminateThreshold = message.TerminateThreshold;
+    DpPolicySetLastErrorMessage(L"Success.");
+    return DP_POLICY_API_SUCCESS;
+}
+
+DWORD
+DpPolicyRespondThreatProcess(
+    _In_ ULONGLONG processId,
+    _In_ DWORD action
+    )
+{
+    DP_THREAT_RESPONSE_REQUEST_MESSAGE message;
+
+    if (processId == 0) {
+        DpPolicySetLastErrorMessage(L"Threat response target is invalid.");
+        return DP_POLICY_API_ERROR_INVALID_ARGUMENT;
+    }
+
+    ZeroMemory(&message, sizeof(message));
+    message.Version = DP_THREAT_RESPONSE_REQUEST_VERSION;
+    message.Action = action;
+    message.ProcessId = processId;
+
+    return DpPolicySendRawPolicyMessage(DpPolicyCommandRespondThreatProcess,
+                                        &message,
+                                        sizeof(message),
+                                        NULL,
+                                        0,
+                                        NULL);
 }
 
 DWORD

@@ -215,8 +215,15 @@ DriverEntry(
 
     DpShadowInitialize();
 
+    status = DpThreatEngineInitialize();
+    if (!NT_SUCCESS(status)) {
+        DpShadowUninitialize();
+        return status;
+    }
+
     status = DpProcessPolicyInitialize(RegistryPath);
     if (!NT_SUCCESS(status)) {
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -224,6 +231,7 @@ DriverEntry(
     status = DpCryptoInitialize(RegistryPath);
     if (!NT_SUCCESS(status)) {
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -232,6 +240,7 @@ DriverEntry(
     if (!NT_SUCCESS(status)) {
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -241,6 +250,7 @@ DriverEntry(
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -251,6 +261,7 @@ DriverEntry(
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -262,6 +273,7 @@ DriverEntry(
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -274,6 +286,7 @@ DriverEntry(
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -287,6 +300,7 @@ DriverEntry(
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
         return status;
     }
@@ -331,6 +345,7 @@ DriverEntry(
         DpWebShellUninitialize();
         DpCryptoUninitialize();
         DpProcessPolicyUninitialize();
+        DpThreatEngineUninitialize();
         DpShadowUninitialize();
     }
 
@@ -369,6 +384,7 @@ DataProtectorUnload(
 
     DpCryptoUninitialize();
     DpProcessPolicyUninitialize();
+    DpThreatEngineUninitialize();
     DpShadowUninitialize();
 
     return STATUS_SUCCESS;

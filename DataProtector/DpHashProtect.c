@@ -765,6 +765,13 @@ DpHashProtectQueueEvent(
     ULONG targetHash;
     ULONG processHash;
     ULONGLONG suppressedCount;
+    WCHAR threatTargetSnapshot[DP_HASH_PROTECT_TARGET_CHARS];
+    UNICODE_STRING threatTarget;
+
+    threatTargetSnapshot[0] = L'\0';
+    threatTarget.Buffer = threatTargetSnapshot;
+    threatTarget.Length = 0;
+    threatTarget.MaximumLength = (USHORT)sizeof(threatTargetSnapshot);
 
     if (!gDpHashProtectInitialized) {
         DP_HASH_TRACE("queue skipped uninitialized pid=%p op=%lu status=0x%08X\n",
@@ -813,6 +820,14 @@ DpHashProtectQueueEvent(
     processText.Buffer = entry->Event.ProcessImage;
     processText.Length = (USHORT)entry->Event.ProcessImageLengthBytes;
     processText.MaximumLength = (USHORT)sizeof(entry->Event.ProcessImage);
+
+    if (entry->Event.TargetLengthBytes > 0) {
+        ULONG snapBytes = min(entry->Event.TargetLengthBytes,
+                              (ULONG)(sizeof(threatTargetSnapshot) - sizeof(WCHAR)));
+        RtlCopyMemory(threatTargetSnapshot, entry->Event.Target, snapBytes);
+        threatTargetSnapshot[snapBytes / sizeof(WCHAR)] = L'\0';
+        threatTarget.Length = (USHORT)snapBytes;
+    }
 
     DP_HASH_TRACE("queue event pid=%p op=%lu status=0x%08X access=0x%08X target=%wZ image=%wZ\n",
                   ProcessId,
@@ -865,6 +880,32 @@ DpHashProtectQueueEvent(
     eventCount = gDpHashProtectEventCount;
     droppedEvents = gDpHashProtectDroppedEvents;
     KeReleaseSpinLock(&gDpHashProtectEventLock, oldIrql);
+
+    {
+        DP_THREAT_SIGNAL threatSignal;
+
+        switch (Operation) {
+        case DpHashProtectOperationLsassHandle:
+            threatSignal = DpThreatSignalLsassHandleAccess;
+            break;
+        case DpHashProtectOperationCredentialFile:
+            threatSignal = DpThreatSignalCredentialFileAccess;
+            break;
+        case DpHashProtectOperationRegistryHive:
+            threatSignal = DpThreatSignalRegistryHiveAccess;
+            break;
+        case DpHashProtectOperationRawExtent:
+            threatSignal = DpThreatSignalRawDiskAccess;
+            break;
+        default:
+            threatSignal = DpThreatSignalNone;
+            break;
+        }
+
+        if (threatSignal != DpThreatSignalNone) {
+            (VOID)DpThreatEngineReportSignal(ProcessId, threatSignal, 0, &threatTarget);
+        }
+    }
 
     DP_HASH_TRACE("queued seq=%I64u count=%lu dropped=%I64u pid=%p op=%lu status=0x%08X access=0x%08X\n",
                   sequence,

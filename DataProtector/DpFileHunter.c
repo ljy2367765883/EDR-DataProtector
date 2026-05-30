@@ -1151,6 +1151,25 @@ DpFileHunterReportReadSuccess(
 
     KeReleaseSpinLock(&gDpFileHunterEventLock, oldIrql);
 
+    {
+        UNICODE_STRING harvestPath;
+
+        harvestPath.Buffer = ReadContext->Path;
+        harvestPath.Length = (USHORT)min(ReadContext->PathLengthBytes,
+                                         (ULONG)(sizeof(ReadContext->Path) - sizeof(WCHAR)));
+        harvestPath.MaximumLength = (USHORT)sizeof(ReadContext->Path);
+
+        //
+        // Sensitive-folder reads are individually low risk but accumulate into
+        // a collection/staging storyline when one process touches many. The
+        // engine's decay keeps benign indexers from escalating.
+        //
+        (VOID)DpThreatEngineReportSignal(ReadContext->ProcessId,
+                                         DpThreatSignalSensitiveDataHarvest,
+                                         0,
+                                         &harvestPath);
+    }
+
     if (DpFileHunterCanTraceText()) {
         DP_FILE_HUNTER_TRACE("queued seq=%I64u count=%lu dropped=%I64u pid=%I64u bytes=%I64u status=0x%08X path=%ws process=%ws\n",
                              queuedSequence,

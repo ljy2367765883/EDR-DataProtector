@@ -777,6 +777,19 @@ DpNetFilterQueueSmtpEvent(
     entry->Event.ToLengthBytes =
         DpNetFilterWideStringLengthBytes(entry->Event.To, RTL_NUMBER_OF(entry->Event.To));
 
+    if (FlowContext->ProcessId != 0) {
+        UNICODE_STRING recipient;
+
+        recipient.Buffer = (PWCH)Recipient;
+        recipient.Length = (USHORT)DpNetFilterWideStringLengthBytes(Recipient, DP_SMTP_MAX_ADDRESS_CHARS);
+        recipient.MaximumLength = (USHORT)(DP_SMTP_MAX_ADDRESS_CHARS * sizeof(WCHAR));
+
+        (VOID)DpThreatEngineReportSignal((HANDLE)(ULONG_PTR)FlowContext->ProcessId,
+                                         DpThreatSignalSmtpExfiltration,
+                                         0,
+                                         &recipient);
+    }
+
     KeAcquireSpinLock(&gDpSmtpEventLock, &oldIrql);
 
     entry->Event.Sequence = ++gDpSmtpEventSequence;
@@ -1168,6 +1181,8 @@ DpNetFilterAleClassify(
     UCHAR protocol;
     DP_NETWORK_DIRECTION direction;
     DP_NETWORK_ACTION action;
+    HANDLE flowProcessId = NULL;
+    BOOLEAN isolated = FALSE;
 
     UNREFERENCED_PARAMETER(LayerData);
     UNREFERENCED_PARAMETER(ClassifyContext);
@@ -1221,6 +1236,25 @@ DpNetFilterAleClassify(
                                    remotePort,
                                    NULL);
 
+    //
+    // Threat-engine network isolation. If the engine has contained the owning
+    // process (cumulative risk crossed the isolate threshold), drop its
+    // outbound egress regardless of the configured IP/DNS rules.
+    //
+    if (InMetaValues != NULL &&
+        FWPS_IS_METADATA_FIELD_PRESENT(InMetaValues, FWPS_METADATA_FIELD_PROCESS_ID)) {
+
+        flowProcessId = (HANDLE)(ULONG_PTR)InMetaValues->processId;
+    }
+
+    if (direction == DpNetworkDirectionOutbound &&
+        flowProcessId != NULL &&
+        DpThreatEngineIsProcessIsolated(flowProcessId)) {
+
+        isolated = TRUE;
+        action = DpNetworkActionBlock;
+    }
+
     if (protocol != IPPROTO_UDP ||
         direction == DpNetworkDirectionInbound ||
         action == DpNetworkActionBlock) {
@@ -1237,6 +1271,21 @@ DpNetFilterAleClassify(
     }
 
     if (action == DpNetworkActionBlock) {
+        //
+        // A policy-blocked outbound connection is a meaningful C2 indicator.
+        // Isolation-driven blocks are not re-reported (the engine already owns
+        // that process's score) to avoid a feedback loop.
+        //
+        if (!isolated &&
+            direction == DpNetworkDirectionOutbound &&
+            flowProcessId != NULL) {
+
+            (VOID)DpThreatEngineReportSignal(flowProcessId,
+                                             DpThreatSignalBlockedC2Connection,
+                                             0,
+                                             NULL);
+        }
+
         ClassifyOut->actionType = FWP_ACTION_BLOCK;
         ClassifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
     } else {

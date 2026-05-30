@@ -48,6 +48,9 @@ Abstract:
 #define DP_TAG_LATERAL_DEFENSE 'lLpD'
 #define DP_TAG_USER_HOOK_DEFENSE 'hUpD'
 #define DP_TAG_USB_METADATA    'mUpD'
+#define DP_TAG_THREAT_PROCESS  'pTpD'
+#define DP_TAG_THREAT_EVENT    'eTpD'
+#define DP_TAG_THREAT_RESPONSE 'rTpD'
 
 #define DP_POLICY_MAX_RULE_BYTES (1024 * sizeof(WCHAR))
 #define DP_POLICY_MAX_EXTENSION_BYTES (64 * sizeof(WCHAR))
@@ -84,6 +87,12 @@ Abstract:
 #define DP_USER_HOOK_DEFENSE_PROCESS_CHARS 512
 #define DP_USER_HOOK_DEFENSE_POLICY_TEXT_CHARS 2048
 #define DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS 512
+#define DP_THREAT_MAX_PROCESSES 4096
+#define DP_THREAT_MAX_EVENTS 1024
+#define DP_THREAT_PROCESS_CHARS 320
+#define DP_THREAT_DETAIL_CHARS 384
+#define DP_THREAT_HASH_BUCKETS 1024
+#define DP_THREAT_MAX_TECHNIQUES_PER_PROC 24
 #define DP_USB_METADATA_BYTES 512
 #define DP_USB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
 #define DP_USB_METADATA_DEFAULT_OFFSET_BYTES (1024ull * 1024ull)
@@ -152,6 +161,12 @@ Abstract:
 // policy updates, callback registration failures, and queued protection events.
 //
 #define DP_ENABLE_USER_HOOK_DEFENSE_TRACE 0
+
+//
+// Threat engine diagnostics. The module prints only signal ingestion, score
+// escalation, and automated response decisions when enabled.
+//
+#define DP_ENABLE_THREAT_ENGINE_TRACE 0
 
 //
 // Cached transparent encryption keeps plaintext in the system file cache.
@@ -316,6 +331,12 @@ typedef enum _DP_POLICY_COMMAND {
     DpPolicyCommandClearFileHunterRules = 122,
     DpPolicyCommandQueryFileHunterRules = 123,
     DpPolicyCommandQueryFileHunterEvents = 124,
+    DpPolicyCommandQueryThreatEvents = 140,
+    DpPolicyCommandQueryThreatProcesses = 141,
+    DpPolicyCommandSetThreatPolicy = 142,
+    DpPolicyCommandQueryThreatPolicy = 143,
+    DpPolicyCommandClearThreatEvents = 144,
+    DpPolicyCommandRespondThreatProcess = 145,
     DpPolicyCommandWriteUsbMetadata = 100
 } DP_POLICY_COMMAND;
 
@@ -812,6 +833,255 @@ typedef struct _DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY {
 } DP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY, *PDP_USER_HOOK_DEFENSE_EVENT_QUERY_ENTRY;
 
 #define DP_USER_HOOK_DEFENSE_EVENT_QUERY_VERSION 1
+
+//
+// ---------------------------------------------------------------------------
+// DataProtector Threat Engine
+//
+// The threat engine is the cross-module correlation and graduated-response
+// brain of the EDR. The individual sensors (process policy, user-hook defense,
+// credential-hash protection, lateral-movement defense, network filter,
+// web-shell hardening, and file hunter) report normalized behavioral signals.
+// The engine maintains a per-process risk model with ancestry-aware score
+// propagation, maps each signal to a MITRE ATT&CK technique, applies time
+// decay, and orchestrates a graduated automated response as the cumulative
+// score crosses configured thresholds.
+// ---------------------------------------------------------------------------
+//
+
+//
+// Normalized behavioral signal identifiers. Each maps to a default weight and
+// MITRE ATT&CK technique inside the engine. Sensors stay decoupled from scoring
+// policy: they report what they observed, the engine decides what it means.
+//
+typedef enum _DP_THREAT_SIGNAL {
+    DpThreatSignalNone = 0,
+
+    // Execution / process lineage (TA0002, TA0004)
+    DpThreatSignalProcessCreated = 1,
+    DpThreatSignalSuspiciousParentChild = 2,
+    DpThreatSignalLolbinExecuted = 3,
+    DpThreatSignalScriptInterpreterSpawned = 4,
+    DpThreatSignalOfficeSpawnedChild = 5,
+
+    // Credential access (TA0006)
+    DpThreatSignalLsassHandleAccess = 10,
+    DpThreatSignalCredentialFileAccess = 11,
+    DpThreatSignalRegistryHiveAccess = 12,
+    DpThreatSignalRawDiskAccess = 13,
+
+    // Defense evasion / injection / tampering (TA0005)
+    DpThreatSignalRemoteThreadInjection = 20,
+    DpThreatSignalProcessHandleManipulation = 21,
+    DpThreatSignalSuspiciousImageLoad = 22,
+    DpThreatSignalEtwTamper = 23,
+    DpThreatSignalUnsignedRuntimeRejected = 24,
+    DpThreatSignalSecurityToolTamper = 25,
+
+    // Lateral movement (TA0008)
+    DpThreatSignalRemoteServiceTool = 30,
+    DpThreatSignalRemoteScheduledTask = 31,
+    DpThreatSignalRemoteWmiExecution = 32,
+    DpThreatSignalRemotePowerShell = 33,
+    DpThreatSignalSmbExecutableStaging = 34,
+    DpThreatSignalRemoteIpcControl = 35,
+
+    // Command and control / exfiltration (TA0011, TA0010)
+    DpThreatSignalBlockedC2Connection = 40,
+    DpThreatSignalSuspiciousDnsBeacon = 41,
+    DpThreatSignalSmtpExfiltration = 42,
+
+    // Impact / persistence (TA0040, TA0003)
+    DpThreatSignalWebShellDropped = 50,
+    DpThreatSignalRansomwareMassFileAccess = 51,
+    DpThreatSignalSensitiveDataHarvest = 52,
+    DpThreatSignalRemovableMediaStaging = 53,
+
+    DpThreatSignalMax
+} DP_THREAT_SIGNAL;
+
+//
+// MITRE ATT&CK tactic identifiers surfaced with each event so the console can
+// render an attack storyline.
+//
+typedef enum _DP_THREAT_TACTIC {
+    DpThreatTacticUnknown = 0,
+    DpThreatTacticExecution = 1,          // TA0002
+    DpThreatTacticPersistence = 2,        // TA0003
+    DpThreatTacticPrivilegeEscalation = 3,// TA0004
+    DpThreatTacticDefenseEvasion = 4,     // TA0005
+    DpThreatTacticCredentialAccess = 5,   // TA0006
+    DpThreatTacticDiscovery = 6,          // TA0007
+    DpThreatTacticLateralMovement = 7,    // TA0008
+    DpThreatTacticCollection = 8,         // TA0009
+    DpThreatTacticExfiltration = 9,       // TA0010
+    DpThreatTacticCommandAndControl = 10, // TA0011
+    DpThreatTacticImpact = 11             // TA0040
+} DP_THREAT_TACTIC;
+
+//
+// Threat severity bands derived from cumulative process score.
+//
+typedef enum _DP_THREAT_SEVERITY {
+    DpThreatSeverityInformational = 0,
+    DpThreatSeverityLow = 1,
+    DpThreatSeverityMedium = 2,
+    DpThreatSeverityHigh = 3,
+    DpThreatSeverityCritical = 4
+} DP_THREAT_SEVERITY;
+
+//
+// Graduated automated response actions. The engine selects the strongest
+// action permitted by policy once a score threshold is crossed.
+//
+typedef enum _DP_THREAT_RESPONSE_ACTION {
+    DpThreatResponseNone = 0,
+    DpThreatResponseAudit = 1,        // record only
+    DpThreatResponseAlert = 2,        // raise a high-visibility alert
+    DpThreatResponseBlock = 3,        // deny the offending operation
+    DpThreatResponseIsolateNetwork = 4, // cut the process/host network egress
+    DpThreatResponseTerminate = 5     // terminate the offending process tree
+} DP_THREAT_RESPONSE_ACTION;
+
+//
+// Default per-signal score thresholds that drive graduated response. Scores are
+// fixed-point integers (1 point == 1 unit). These are conservative defaults so
+// a single benign signal never escalates on its own; correlation across
+// signals and ancestry is what produces a high score.
+//
+#define DP_THREAT_SCORE_THRESHOLD_LOW       30
+#define DP_THREAT_SCORE_THRESHOLD_MEDIUM    60
+#define DP_THREAT_SCORE_THRESHOLD_HIGH      90
+#define DP_THREAT_SCORE_THRESHOLD_CRITICAL  130
+#define DP_THREAT_SCORE_MAX                 1000
+
+//
+// Score decay: a process loses this many points per decay interval of quiet so
+// long-lived benign processes do not accumulate score indefinitely.
+//
+#define DP_THREAT_DECAY_INTERVAL_100NS  (60ll * 1000ll * 1000ll * 10ll) // 60s
+#define DP_THREAT_DECAY_POINTS          5
+
+//
+// Fraction (percent) of a child's earned signal score contributed back to its
+// parent, so an attack storyline accumulates on the lineage root.
+//
+#define DP_THREAT_ANCESTRY_PROPAGATION_PCT  50
+#define DP_THREAT_ANCESTRY_MAX_DEPTH        8
+
+//
+// Engine policy flags.
+//
+#define DP_THREAT_ENGINE_FLAG_ENABLED              0x00000001
+#define DP_THREAT_ENGINE_FLAG_CORRELATION          0x00000002
+#define DP_THREAT_ENGINE_FLAG_ANCESTRY_PROPAGATION 0x00000004
+#define DP_THREAT_ENGINE_FLAG_AUTO_BLOCK           0x00000008
+#define DP_THREAT_ENGINE_FLAG_AUTO_ISOLATE         0x00000010
+#define DP_THREAT_ENGINE_FLAG_AUTO_TERMINATE       0x00000020
+#define DP_THREAT_ENGINE_FLAG_AUDIT_ONLY           0x00000040
+
+#define DP_THREAT_ENGINE_DEFAULT_FLAGS \
+    (DP_THREAT_ENGINE_FLAG_ENABLED | \
+     DP_THREAT_ENGINE_FLAG_CORRELATION | \
+     DP_THREAT_ENGINE_FLAG_ANCESTRY_PROPAGATION | \
+     DP_THREAT_ENGINE_FLAG_AUTO_BLOCK | \
+     DP_THREAT_ENGINE_FLAG_AUTO_ISOLATE)
+
+#define DP_THREAT_ENGINE_ALLOWED_FLAGS \
+    (DP_THREAT_ENGINE_FLAG_ENABLED | \
+     DP_THREAT_ENGINE_FLAG_CORRELATION | \
+     DP_THREAT_ENGINE_FLAG_ANCESTRY_PROPAGATION | \
+     DP_THREAT_ENGINE_FLAG_AUTO_BLOCK | \
+     DP_THREAT_ENGINE_FLAG_AUTO_ISOLATE | \
+     DP_THREAT_ENGINE_FLAG_AUTO_TERMINATE | \
+     DP_THREAT_ENGINE_FLAG_AUDIT_ONLY)
+
+#define DP_THREAT_ENGINE_POLICY_VERSION 1
+
+typedef struct _DP_THREAT_ENGINE_POLICY {
+    ULONG Version;
+    ULONG Flags;
+    ULONG BlockThreshold;     // score that arms block response (0 = default)
+    ULONG IsolateThreshold;   // score that arms network isolation (0 = default)
+    ULONG TerminateThreshold; // score that arms termination (0 = default)
+    ULONG Reserved;
+} DP_THREAT_ENGINE_POLICY, *PDP_THREAT_ENGINE_POLICY;
+
+//
+// A single behavioral detection event, queued for the console. Each carries
+// the originating process, its lineage root, the normalized signal, mapped
+// ATT&CK tactic, the score delta and resulting cumulative score, the chosen
+// response, and a human-readable detail string.
+//
+typedef struct _DP_THREAT_EVENT_QUERY_ENTRY {
+    ULONGLONG Sequence;
+    ULONGLONG TimeStamp;       // KeQuerySystemTime 100ns
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONGLONG LineageRootPid;
+    ULONG Signal;              // DP_THREAT_SIGNAL
+    ULONG Tactic;              // DP_THREAT_TACTIC
+    ULONG TechniqueId;         // numeric ATT&CK technique (e.g. 1003 for T1003)
+    ULONG ScoreDelta;
+    ULONG CumulativeScore;
+    ULONG Severity;            // DP_THREAT_SEVERITY
+    ULONG ResponseAction;      // DP_THREAT_RESPONSE_ACTION
+    ULONG ResponseStatus;      // NTSTATUS of the response attempt
+    ULONG ProcessImageLengthBytes;
+    ULONG DetailLengthBytes;
+    WCHAR ProcessImage[DP_THREAT_PROCESS_CHARS];
+    WCHAR Detail[DP_THREAT_DETAIL_CHARS];
+} DP_THREAT_EVENT_QUERY_ENTRY, *PDP_THREAT_EVENT_QUERY_ENTRY;
+
+typedef struct _DP_THREAT_EVENT_QUERY_HEADER {
+    ULONG Version;
+    ULONG EventCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+    ULONGLONG DroppedEvents;
+} DP_THREAT_EVENT_QUERY_HEADER, *PDP_THREAT_EVENT_QUERY_HEADER;
+
+#define DP_THREAT_EVENT_QUERY_VERSION 1
+
+//
+// A per-process risk summary, used by the console to render the live
+// "processes at risk" board.
+//
+typedef struct _DP_THREAT_PROCESS_QUERY_ENTRY {
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONGLONG LineageRootPid;
+    ULONGLONG FirstSeen;
+    ULONGLONG LastActivity;
+    ULONG CumulativeScore;
+    ULONG Severity;            // DP_THREAT_SEVERITY
+    ULONG SignalCount;
+    ULONG DistinctTacticMask;  // bitmask of observed DP_THREAT_TACTIC values
+    ULONG StrongestResponse;   // DP_THREAT_RESPONSE_ACTION applied so far
+    ULONG Flags;
+    ULONG ProcessImageLengthBytes;
+    WCHAR ProcessImage[DP_THREAT_PROCESS_CHARS];
+} DP_THREAT_PROCESS_QUERY_ENTRY, *PDP_THREAT_PROCESS_QUERY_ENTRY;
+
+typedef struct _DP_THREAT_PROCESS_QUERY_HEADER {
+    ULONG Version;
+    ULONG ProcessCount;
+    ULONG BytesRequired;
+    ULONG BytesReturned;
+} DP_THREAT_PROCESS_QUERY_HEADER, *PDP_THREAT_PROCESS_QUERY_HEADER;
+
+#define DP_THREAT_PROCESS_QUERY_VERSION 1
+
+//
+// Manual response request issued from the console for a chosen process.
+//
+typedef struct _DP_THREAT_RESPONSE_REQUEST {
+    ULONG Version;
+    ULONG Action;              // DP_THREAT_RESPONSE_ACTION
+    ULONGLONG ProcessId;
+} DP_THREAT_RESPONSE_REQUEST, *PDP_THREAT_RESPONSE_REQUEST;
+
+#define DP_THREAT_RESPONSE_REQUEST_VERSION 1
 
 EXTERN_C_START
 
@@ -1709,5 +1979,107 @@ DpTracePptxCallbackData(
 #define DP_TRACE_PPTX_DATA(_operation, _data, _fltObjects, _status, _detail1, _detail2, _detail3, _detail4) ((void)0)
 
 #endif
+
+//
+// ---------------------------------------------------------------------------
+// Threat Engine entry points.
+// ---------------------------------------------------------------------------
+//
+
+NTSTATUS
+DpThreatEngineInitialize(
+    VOID
+    );
+
+VOID
+DpThreatEngineUninitialize(
+    VOID
+    );
+
+//
+// Lifecycle hooks driven from the single process-notify funnel.
+//
+VOID
+DpThreatEngineOnProcessCreate(
+    _In_ HANDLE ProcessId,
+    _In_opt_ HANDLE ParentProcessId,
+    _In_opt_ PCUNICODE_STRING ImageFileName,
+    _In_opt_ PCUNICODE_STRING CommandLine
+    );
+
+VOID
+DpThreatEngineOnProcessExit(
+    _In_ HANDLE ProcessId
+    );
+
+//
+// Primary signal ingestion point used by every sensor. ScoreDeltaOverride of 0
+// uses the engine's default weight for the signal. Returns the response action
+// the engine selected so the caller may enforce it (e.g. deny an operation).
+//
+DP_THREAT_RESPONSE_ACTION
+DpThreatEngineReportSignal(
+    _In_ HANDLE ProcessId,
+    _In_ DP_THREAT_SIGNAL Signal,
+    _In_ ULONG ScoreDeltaOverride,
+    _In_opt_ PCUNICODE_STRING Detail
+    );
+
+//
+// Convenience ingestion when the caller only has an ANSI image name (kernel
+// callbacks frequently expose PsGetProcessImageFileName output).
+//
+DP_THREAT_RESPONSE_ACTION
+DpThreatEngineReportSignalAnsi(
+    _In_ HANDLE ProcessId,
+    _In_ DP_THREAT_SIGNAL Signal,
+    _In_ ULONG ScoreDeltaOverride,
+    _In_opt_z_ const CHAR *Detail
+    );
+
+//
+// Returns TRUE if the engine has placed the given process under network
+// isolation. Consulted by the network filter classify path.
+//
+BOOLEAN
+DpThreatEngineIsProcessIsolated(
+    _In_ HANDLE ProcessId
+    );
+
+NTSTATUS
+DpThreatEngineQueryEvents(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpThreatEngineQueryProcesses(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+VOID
+DpThreatEngineClearEvents(
+    VOID
+    );
+
+NTSTATUS
+DpThreatEngineSetPolicy(
+    _In_ const DP_THREAT_ENGINE_POLICY *Policy
+    );
+
+NTSTATUS
+DpThreatEngineQueryPolicy(
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    );
+
+NTSTATUS
+DpThreatEngineRespond(
+    _In_ const DP_THREAT_RESPONSE_REQUEST *Request
+    );
 
 EXTERN_C_END

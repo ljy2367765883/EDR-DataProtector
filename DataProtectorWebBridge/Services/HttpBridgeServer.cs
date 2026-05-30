@@ -201,6 +201,50 @@ namespace DataProtectorWebBridge.Services
                     return;
                 }
 
+                if (method == "GET" && path == "/api/threat/events")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatEvents());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/threat/processes")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatProcesses());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/threat/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/threat/policy")
+                {
+                    PolicyBridgeService.ThreatPolicyDto request =
+                        JsonResponse.Read<PolicyBridgeService.ThreatPolicyDto>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetThreatPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/threat/respond")
+                {
+                    PolicyBridgeService.ThreatResponseRequest request =
+                        JsonResponse.Read<PolicyBridgeService.ThreatResponseRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result =
+                        policyService.RespondThreatProcess(request.processId, request.action);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/threat/clear")
+                {
+                    PolicyBridgeService.OperationResult result = policyService.ClearThreatEvents();
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
                 if (method == "GET" && path == "/api/dlp/policy")
                 {
                     JsonResponse.Write(context.Response, "0000", "Success.", dlpProtectionService.QueryPolicy());

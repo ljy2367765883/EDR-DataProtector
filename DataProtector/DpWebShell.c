@@ -712,6 +712,15 @@ DpWebShellClassifyAndReport(
                          severity,
                          Operation);
 
+    //
+    // Feed the correlation engine. A confirmed one-liner web shell is a strong
+    // persistence signal; lower-confidence script writes contribute less.
+    //
+    (VOID)DpThreatEngineReportSignal(ProcessId,
+                                     DpThreatSignalWebShellDropped,
+                                     (severity == DpWebShellSeverityDanger) ? 0 : 18,
+                                     Path);
+
     DP_WEBSHELL_TRACE("classify return pid=%p op=%lu severity=%lu status=0x%08X path=%wZ\n",
                       ProcessId,
                       (ULONG)Operation,

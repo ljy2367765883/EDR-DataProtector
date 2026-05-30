@@ -175,6 +175,55 @@ DpControlMessageNotify(
                                             ReturnOutputBufferLength);
     }
 
+    if (message->Command == DpPolicyCommandQueryThreatEvents) {
+        return DpThreatEngineQueryEvents(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryThreatProcesses) {
+        return DpThreatEngineQueryProcesses(OutputBuffer,
+                                            OutputBufferLength,
+                                            ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryThreatPolicy) {
+        return DpThreatEngineQueryPolicy(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandClearThreatEvents) {
+        DpThreatEngineClearEvents();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandSetThreatPolicy) {
+        PDP_THREAT_ENGINE_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_THREAT_ENGINE_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_THREAT_ENGINE_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_THREAT_ENGINE_POLICY)message->Data;
+        return DpThreatEngineSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandRespondThreatProcess) {
+        PDP_THREAT_RESPONSE_REQUEST request;
+
+        if (message->ValueLengthBytes != sizeof(DP_THREAT_RESPONSE_REQUEST) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_THREAT_RESPONSE_REQUEST)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        request = (PDP_THREAT_RESPONSE_REQUEST)message->Data;
+        return DpThreatEngineRespond(request);
+    }
+
     if (message->Command == DpPolicyCommandWriteUsbMetadata) {
         PDP_USB_METADATA_WRITE_MESSAGE request;
 

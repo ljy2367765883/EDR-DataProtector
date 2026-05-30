@@ -260,6 +260,67 @@ typedef struct _DP_POLICY_API_USB_LAYOUT_RESULT {
     ULONGLONG PublicPartitionBytes;
 } DP_POLICY_API_USB_LAYOUT_RESULT, *PDP_POLICY_API_USB_LAYOUT_RESULT;
 
+#define DP_POLICY_API_THREAT_FLAG_ENABLED              0x00000001u
+#define DP_POLICY_API_THREAT_FLAG_CORRELATION          0x00000002u
+#define DP_POLICY_API_THREAT_FLAG_ANCESTRY_PROPAGATION 0x00000004u
+#define DP_POLICY_API_THREAT_FLAG_AUTO_BLOCK           0x00000008u
+#define DP_POLICY_API_THREAT_FLAG_AUTO_ISOLATE         0x00000010u
+#define DP_POLICY_API_THREAT_FLAG_AUTO_TERMINATE       0x00000020u
+#define DP_POLICY_API_THREAT_FLAG_AUDIT_ONLY           0x00000040u
+
+#define DP_POLICY_API_THREAT_SEVERITY_INFORMATIONAL 0u
+#define DP_POLICY_API_THREAT_SEVERITY_LOW           1u
+#define DP_POLICY_API_THREAT_SEVERITY_MEDIUM        2u
+#define DP_POLICY_API_THREAT_SEVERITY_HIGH          3u
+#define DP_POLICY_API_THREAT_SEVERITY_CRITICAL      4u
+
+#define DP_POLICY_API_THREAT_RESPONSE_NONE            0u
+#define DP_POLICY_API_THREAT_RESPONSE_AUDIT           1u
+#define DP_POLICY_API_THREAT_RESPONSE_ALERT           2u
+#define DP_POLICY_API_THREAT_RESPONSE_BLOCK           3u
+#define DP_POLICY_API_THREAT_RESPONSE_ISOLATE_NETWORK 4u
+#define DP_POLICY_API_THREAT_RESPONSE_TERMINATE       5u
+
+typedef struct _DP_POLICY_API_THREAT_EVENT {
+    ULONGLONG Sequence;
+    ULONGLONG TimeStamp;
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONGLONG LineageRootPid;
+    DWORD Signal;
+    DWORD Tactic;
+    DWORD TechniqueId;
+    DWORD ScoreDelta;
+    DWORD CumulativeScore;
+    DWORD Severity;
+    DWORD ResponseAction;
+    DWORD ResponseStatus;
+    LPCWSTR ProcessImage;
+    LPCWSTR Detail;
+} DP_POLICY_API_THREAT_EVENT, *PDP_POLICY_API_THREAT_EVENT;
+
+typedef struct _DP_POLICY_API_THREAT_PROCESS {
+    ULONGLONG ProcessId;
+    ULONGLONG ParentProcessId;
+    ULONGLONG LineageRootPid;
+    ULONGLONG FirstSeen;
+    ULONGLONG LastActivity;
+    DWORD CumulativeScore;
+    DWORD Severity;
+    DWORD SignalCount;
+    DWORD DistinctTacticMask;
+    DWORD StrongestResponse;
+    DWORD Flags;
+    LPCWSTR ProcessImage;
+} DP_POLICY_API_THREAT_PROCESS, *PDP_POLICY_API_THREAT_PROCESS;
+
+typedef struct _DP_POLICY_API_THREAT_POLICY {
+    DWORD Flags;
+    DWORD BlockThreshold;
+    DWORD IsolateThreshold;
+    DWORD TerminateThreshold;
+} DP_POLICY_API_THREAT_POLICY, *PDP_POLICY_API_THREAT_POLICY;
+
 DP_POLICY_API
 DWORD
 DpPolicyCheckConnection(void);
@@ -612,6 +673,51 @@ DWORD
 DpPolicyGetLastErrorMessage(
     _Out_writes_(bufferChars) LPWSTR buffer,
     _In_ DWORD bufferChars
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryThreatEvents(
+    _Out_writes_opt_(eventCapacity) DP_POLICY_API_THREAT_EVENT *events,
+    _In_ DWORD eventCapacity,
+    _Out_opt_ DWORD *eventCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryThreatProcesses(
+    _Out_writes_opt_(processCapacity) DP_POLICY_API_THREAT_PROCESS *processes,
+    _In_ DWORD processCapacity,
+    _Out_opt_ DWORD *processCount,
+    _Out_writes_opt_(stringBufferChars) LPWSTR stringBuffer,
+    _In_ DWORD stringBufferChars,
+    _Out_opt_ DWORD *stringBufferCharsRequired
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyClearThreatEvents(void);
+
+DP_POLICY_API
+DWORD
+DpPolicySetThreatPolicy(
+    _In_ const DP_POLICY_API_THREAT_POLICY *policy
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyQueryThreatPolicy(
+    _Out_ DP_POLICY_API_THREAT_POLICY *policy
+    );
+
+DP_POLICY_API
+DWORD
+DpPolicyRespondThreatProcess(
+    _In_ ULONGLONG processId,
+    _In_ DWORD action
     );
 
 #ifdef __cplusplus

@@ -49,3 +49,9 @@ EXPORTS
     DpPolicyInitializeUsbLayout
     DpPolicyConvertDosPathToNtPath
     DpPolicyGetLastErrorMessage
+    DpPolicyQueryThreatEvents
+    DpPolicyQueryThreatProcesses
+    DpPolicyClearThreatEvents
+    DpPolicySetThreatPolicy
+    DpPolicyQueryThreatPolicy
+    DpPolicyRespondThreatProcess

@@ -1422,6 +1422,185 @@ namespace DataProtectorWebBridge.Services
             throw new BridgeException(BufferTooSmallStatus, "The driver user hook defense event queue changed while querying. Please retry.");
         }
 
+        public ThreatEventDto[] QueryThreatEvents()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint eventCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryThreatEvents(
+                    new DataProtectorPolicyNative.NativeThreatEvent[0],
+                    0,
+                    out eventCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeThreatEvent[] nativeEvents =
+                    new DataProtectorPolicyNative.NativeThreatEvent[checked((int)eventCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryThreatEvents(
+                        nativeEvents,
+                        (uint)nativeEvents.Length,
+                        out eventCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)eventCount);
+                        List<ThreatEventDto> events = new List<ThreatEventDto>();
+                        for (int index = 0; index < returned && index < nativeEvents.Length; index++)
+                        {
+                            events.Add(ConvertThreatEvent(nativeEvents[index]));
+                        }
+
+                        return events.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver threat event queue changed while querying. Please retry.");
+        }
+
+        public ThreatProcessDto[] QueryThreatProcesses()
+        {
+            uint status = SuccessStatus;
+
+            for (int attempt = 0; attempt < MaxQueryAttempts; attempt++)
+            {
+                uint processCount;
+                uint stringCharsRequired;
+                status = DataProtectorPolicyNative.DpPolicyQueryThreatProcesses(
+                    new DataProtectorPolicyNative.NativeThreatProcess[0],
+                    0,
+                    out processCount,
+                    IntPtr.Zero,
+                    0,
+                    out stringCharsRequired);
+
+                if (status != SuccessStatus && status != BufferTooSmallStatus)
+                {
+                    throw new BridgeException(status, ReadLastErrorMessage());
+                }
+
+                DataProtectorPolicyNative.NativeThreatProcess[] nativeProcesses =
+                    new DataProtectorPolicyNative.NativeThreatProcess[checked((int)processCount)];
+                uint stringBufferChars = Math.Max(1u, stringCharsRequired);
+                IntPtr stringBuffer = IntPtr.Zero;
+
+                try
+                {
+                    int byteCount = checked((int)stringBufferChars * sizeof(char));
+                    stringBuffer = Marshal.AllocHGlobal(byteCount);
+                    ZeroMemory(stringBuffer, byteCount);
+
+                    status = DataProtectorPolicyNative.DpPolicyQueryThreatProcesses(
+                        nativeProcesses,
+                        (uint)nativeProcesses.Length,
+                        out processCount,
+                        stringBuffer,
+                        stringBufferChars,
+                        out stringCharsRequired);
+
+                    if (status == SuccessStatus)
+                    {
+                        int returned = checked((int)processCount);
+                        List<ThreatProcessDto> processes = new List<ThreatProcessDto>();
+                        for (int index = 0; index < returned && index < nativeProcesses.Length; index++)
+                        {
+                            processes.Add(ConvertThreatProcess(nativeProcesses[index]));
+                        }
+
+                        return processes.ToArray();
+                    }
+
+                    if (status != BufferTooSmallStatus)
+                    {
+                        throw new BridgeException(status, ReadLastErrorMessage());
+                    }
+                }
+                finally
+                {
+                    if (stringBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(stringBuffer);
+                    }
+                }
+            }
+
+            throw new BridgeException(BufferTooSmallStatus, "The driver threat process table changed while querying. Please retry.");
+        }
+
+        public ThreatPolicyDto QueryThreatPolicy()
+        {
+            DataProtectorPolicyNative.NativeThreatPolicy nativePolicy;
+            uint status = DataProtectorPolicyNative.DpPolicyQueryThreatPolicy(out nativePolicy);
+            if (status != SuccessStatus)
+            {
+                throw new BridgeException(status, ReadLastErrorMessage());
+            }
+
+            return FromThreatPolicy(nativePolicy);
+        }
+
+        public OperationResult SetThreatPolicy(ThreatPolicyDto request)
+        {
+            ThreatPolicyDto normalized = NormalizeThreatPolicy(request);
+            OperationResult result = Invoke(() =>
+            {
+                DataProtectorPolicyNative.NativeThreatPolicy nativePolicy = new DataProtectorPolicyNative.NativeThreatPolicy
+                {
+                    Flags = ToThreatFlags(normalized),
+                    BlockThreshold = normalized.blockThreshold,
+                    IsolateThreshold = normalized.isolateThreshold,
+                    TerminateThreshold = normalized.terminateThreshold
+                };
+
+                return DataProtectorPolicyNative.DpPolicySetThreatPolicy(ref nativePolicy);
+            });
+
+            return result;
+        }
+
+        public OperationResult ClearThreatEvents()
+        {
+            return Invoke(() => DataProtectorPolicyNative.DpPolicyClearThreatEvents());
+        }
+
+        public OperationResult RespondThreatProcess(ulong processId, uint action)
+        {
+            return Invoke(() => DataProtectorPolicyNative.DpPolicyRespondThreatProcess(processId, action));
+        }
+
         public AuditLog.AuditRecord[] DrainSmtpAuditRecords()
         {
             SmtpEventDto[] events = QuerySmtpEvents();
@@ -2480,6 +2659,222 @@ namespace DataProtectorWebBridge.Services
                 target = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Target) ?? string.Empty),
                 processImage = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty)
             };
+        }
+
+        private const uint ThreatFlagEnabled = 0x00000001u;
+        private const uint ThreatFlagCorrelation = 0x00000002u;
+        private const uint ThreatFlagAncestryPropagation = 0x00000004u;
+        private const uint ThreatFlagAutoBlock = 0x00000008u;
+        private const uint ThreatFlagAutoIsolate = 0x00000010u;
+        private const uint ThreatFlagAutoTerminate = 0x00000020u;
+        private const uint ThreatFlagAuditOnly = 0x00000040u;
+        private const uint ThreatAllowedFlags =
+            ThreatFlagEnabled | ThreatFlagCorrelation | ThreatFlagAncestryPropagation |
+            ThreatFlagAutoBlock | ThreatFlagAutoIsolate | ThreatFlagAutoTerminate | ThreatFlagAuditOnly;
+        private const uint ThreatProcFlagIsolated = 0x00000001u;
+        private const uint ThreatProcFlagTerminated = 0x00000002u;
+
+        private static string ThreatSignalText(uint signal)
+        {
+            switch (signal)
+            {
+                case 1: return "Process Created";
+                case 2: return "Suspicious Parent/Child";
+                case 3: return "LOLBin Executed";
+                case 4: return "Script Interpreter Spawned";
+                case 5: return "Office Spawned Child Process";
+                case 10: return "LSASS Handle Access";
+                case 11: return "Credential File Access";
+                case 12: return "Registry Hive Access";
+                case 13: return "Raw Disk Access";
+                case 20: return "Remote Thread Injection";
+                case 21: return "Process Handle Manipulation";
+                case 22: return "Suspicious Image Load";
+                case 23: return "ETW Tampering";
+                case 24: return "Unsigned Runtime Rejected";
+                case 25: return "Security Tool Tampering";
+                case 30: return "Remote Service Tool";
+                case 31: return "Remote Scheduled Task";
+                case 32: return "Remote WMI Execution";
+                case 33: return "Remote PowerShell";
+                case 34: return "SMB Executable Staging";
+                case 35: return "Remote IPC Control";
+                case 40: return "Blocked C2 Connection";
+                case 41: return "Suspicious DNS Beacon";
+                case 42: return "SMTP Exfiltration";
+                case 50: return "Web Shell Dropped";
+                case 51: return "Ransomware Mass File Access";
+                case 52: return "Sensitive Data Harvest";
+                case 53: return "Removable Media Staging";
+                default: return "Signal " + signal.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        private static string ThreatTacticText(uint tactic)
+        {
+            switch (tactic)
+            {
+                case 1: return "Execution (TA0002)";
+                case 2: return "Persistence (TA0003)";
+                case 3: return "Privilege Escalation (TA0004)";
+                case 4: return "Defense Evasion (TA0005)";
+                case 5: return "Credential Access (TA0006)";
+                case 6: return "Discovery (TA0007)";
+                case 7: return "Lateral Movement (TA0008)";
+                case 8: return "Collection (TA0009)";
+                case 9: return "Exfiltration (TA0010)";
+                case 10: return "Command and Control (TA0011)";
+                case 11: return "Impact (TA0040)";
+                default: return "Unknown";
+            }
+        }
+
+        private static string[] ThreatTacticsFromMask(uint mask)
+        {
+            List<string> tactics = new List<string>();
+            for (uint bit = 1; bit <= 11; bit++)
+            {
+                if ((mask & (1u << (int)bit)) != 0)
+                {
+                    tactics.Add(ThreatTacticText(bit));
+                }
+            }
+
+            return tactics.ToArray();
+        }
+
+        private static string ThreatSeverityText(uint severity)
+        {
+            switch (severity)
+            {
+                case 0: return "Informational";
+                case 1: return "Low";
+                case 2: return "Medium";
+                case 3: return "High";
+                case 4: return "Critical";
+                default: return "Unknown";
+            }
+        }
+
+        private static string ThreatResponseText(uint action)
+        {
+            switch (action)
+            {
+                case 0: return "None";
+                case 1: return "Audit";
+                case 2: return "Alert";
+                case 3: return "Block";
+                case 4: return "Network Isolation";
+                case 5: return "Terminate";
+                default: return "Unknown";
+            }
+        }
+
+        private static ThreatEventDto ConvertThreatEvent(DataProtectorPolicyNative.NativeThreatEvent nativeEvent)
+        {
+            return new ThreatEventDto
+            {
+                sequence = nativeEvent.Sequence,
+                timeStamp = nativeEvent.TimeStamp,
+                processId = nativeEvent.ProcessId,
+                parentProcessId = nativeEvent.ParentProcessId,
+                lineageRootPid = nativeEvent.LineageRootPid,
+                signal = nativeEvent.Signal,
+                signalText = ThreatSignalText(nativeEvent.Signal),
+                tactic = nativeEvent.Tactic,
+                tacticText = ThreatTacticText(nativeEvent.Tactic),
+                techniqueId = nativeEvent.TechniqueId,
+                techniqueText = nativeEvent.TechniqueId != 0
+                    ? "T" + nativeEvent.TechniqueId.ToString(CultureInfo.InvariantCulture)
+                    : string.Empty,
+                scoreDelta = nativeEvent.ScoreDelta,
+                cumulativeScore = nativeEvent.CumulativeScore,
+                severity = nativeEvent.Severity,
+                severityText = ThreatSeverityText(nativeEvent.Severity),
+                responseAction = nativeEvent.ResponseAction,
+                responseActionText = ThreatResponseText(nativeEvent.ResponseAction),
+                responseStatus = nativeEvent.ResponseStatus,
+                processImage = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.ProcessImage) ?? string.Empty),
+                detail = NormalizeDevicePath(Marshal.PtrToStringUni(nativeEvent.Detail) ?? string.Empty)
+            };
+        }
+
+        private static ThreatProcessDto ConvertThreatProcess(DataProtectorPolicyNative.NativeThreatProcess nativeProcess)
+        {
+            return new ThreatProcessDto
+            {
+                processId = nativeProcess.ProcessId,
+                parentProcessId = nativeProcess.ParentProcessId,
+                lineageRootPid = nativeProcess.LineageRootPid,
+                firstSeen = nativeProcess.FirstSeen,
+                lastActivity = nativeProcess.LastActivity,
+                cumulativeScore = nativeProcess.CumulativeScore,
+                severity = nativeProcess.Severity,
+                severityText = ThreatSeverityText(nativeProcess.Severity),
+                signalCount = nativeProcess.SignalCount,
+                distinctTacticMask = nativeProcess.DistinctTacticMask,
+                tactics = ThreatTacticsFromMask(nativeProcess.DistinctTacticMask),
+                strongestResponse = nativeProcess.StrongestResponse,
+                strongestResponseText = ThreatResponseText(nativeProcess.StrongestResponse),
+                flags = nativeProcess.Flags,
+                isolated = (nativeProcess.Flags & ThreatProcFlagIsolated) != 0,
+                terminated = (nativeProcess.Flags & ThreatProcFlagTerminated) != 0,
+                processImage = NormalizeDevicePath(Marshal.PtrToStringUni(nativeProcess.ProcessImage) ?? string.Empty)
+            };
+        }
+
+        private static ThreatPolicyDto FromThreatPolicy(DataProtectorPolicyNative.NativeThreatPolicy nativePolicy)
+        {
+            uint flags = nativePolicy.Flags & ThreatAllowedFlags;
+            return new ThreatPolicyDto
+            {
+                flags = flags,
+                enabled = (flags & ThreatFlagEnabled) != 0,
+                correlation = (flags & ThreatFlagCorrelation) != 0,
+                ancestryPropagation = (flags & ThreatFlagAncestryPropagation) != 0,
+                autoBlock = (flags & ThreatFlagAutoBlock) != 0,
+                autoIsolate = (flags & ThreatFlagAutoIsolate) != 0,
+                autoTerminate = (flags & ThreatFlagAutoTerminate) != 0,
+                auditOnly = (flags & ThreatFlagAuditOnly) != 0,
+                blockThreshold = nativePolicy.BlockThreshold,
+                isolateThreshold = nativePolicy.IsolateThreshold,
+                terminateThreshold = nativePolicy.TerminateThreshold
+            };
+        }
+
+        private static uint ToThreatFlags(ThreatPolicyDto policy)
+        {
+            if (policy == null)
+            {
+                return ThreatFlagEnabled;
+            }
+
+            uint flags = 0;
+            if (policy.enabled) flags |= ThreatFlagEnabled;
+            if (policy.correlation) flags |= ThreatFlagCorrelation;
+            if (policy.ancestryPropagation) flags |= ThreatFlagAncestryPropagation;
+            if (policy.autoBlock) flags |= ThreatFlagAutoBlock;
+            if (policy.autoIsolate) flags |= ThreatFlagAutoIsolate;
+            if (policy.autoTerminate) flags |= ThreatFlagAutoTerminate;
+            if (policy.auditOnly) flags |= ThreatFlagAuditOnly;
+            return flags & ThreatAllowedFlags;
+        }
+
+        private static ThreatPolicyDto NormalizeThreatPolicy(ThreatPolicyDto request)
+        {
+            if (request == null)
+            {
+                return new ThreatPolicyDto
+                {
+                    enabled = true,
+                    correlation = true,
+                    ancestryPropagation = true,
+                    autoBlock = true,
+                    autoIsolate = true
+                };
+            }
+
+            return request;
         }
 
         private static HashProtectPolicyDto FromHashProtectFlags(uint flags)
@@ -4838,6 +5233,72 @@ namespace DataProtectorWebBridge.Services
             public uint flags { get; set; }
             public string target { get; set; }
             public string processImage { get; set; }
+        }
+
+        public sealed class ThreatEventDto
+        {
+            public ulong sequence { get; set; }
+            public ulong timeStamp { get; set; }
+            public ulong processId { get; set; }
+            public ulong parentProcessId { get; set; }
+            public ulong lineageRootPid { get; set; }
+            public uint signal { get; set; }
+            public string signalText { get; set; }
+            public uint tactic { get; set; }
+            public string tacticText { get; set; }
+            public uint techniqueId { get; set; }
+            public string techniqueText { get; set; }
+            public uint scoreDelta { get; set; }
+            public uint cumulativeScore { get; set; }
+            public uint severity { get; set; }
+            public string severityText { get; set; }
+            public uint responseAction { get; set; }
+            public string responseActionText { get; set; }
+            public uint responseStatus { get; set; }
+            public string processImage { get; set; }
+            public string detail { get; set; }
+        }
+
+        public sealed class ThreatProcessDto
+        {
+            public ulong processId { get; set; }
+            public ulong parentProcessId { get; set; }
+            public ulong lineageRootPid { get; set; }
+            public ulong firstSeen { get; set; }
+            public ulong lastActivity { get; set; }
+            public uint cumulativeScore { get; set; }
+            public uint severity { get; set; }
+            public string severityText { get; set; }
+            public uint signalCount { get; set; }
+            public uint distinctTacticMask { get; set; }
+            public string[] tactics { get; set; }
+            public uint strongestResponse { get; set; }
+            public string strongestResponseText { get; set; }
+            public uint flags { get; set; }
+            public bool isolated { get; set; }
+            public bool terminated { get; set; }
+            public string processImage { get; set; }
+        }
+
+        public sealed class ThreatPolicyDto
+        {
+            public uint flags { get; set; }
+            public bool enabled { get; set; }
+            public bool correlation { get; set; }
+            public bool ancestryPropagation { get; set; }
+            public bool autoBlock { get; set; }
+            public bool autoIsolate { get; set; }
+            public bool autoTerminate { get; set; }
+            public bool auditOnly { get; set; }
+            public uint blockThreshold { get; set; }
+            public uint isolateThreshold { get; set; }
+            public uint terminateThreshold { get; set; }
+        }
+
+        public sealed class ThreatResponseRequest
+        {
+            public ulong processId { get; set; }
+            public uint action { get; set; }
         }
 
         private sealed class UserHookRuntimeEvent

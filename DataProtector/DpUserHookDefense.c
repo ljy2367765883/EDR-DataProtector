@@ -1373,6 +1373,13 @@ DpUserHookQueueEvent(
     ULONGLONG droppedEvents;
     UNICODE_STRING targetText;
     UNICODE_STRING processText;
+    WCHAR threatTargetSnapshot[256];
+    UNICODE_STRING threatTarget;
+
+    threatTargetSnapshot[0] = L'\0';
+    threatTarget.Buffer = threatTargetSnapshot;
+    threatTarget.Length = 0;
+    threatTarget.MaximumLength = (USHORT)sizeof(threatTargetSnapshot);
 
     if (!gDpUserHookInitialized) {
         return;
@@ -1412,6 +1419,14 @@ DpUserHookQueueEvent(
                                              entry->Event.TargetLengthBytes);
     KeQuerySystemTime(&currentTime);
 
+    if (entry->Event.TargetLengthBytes > 0) {
+        ULONG snapBytes = min(entry->Event.TargetLengthBytes,
+                              (ULONG)(sizeof(threatTargetSnapshot) - sizeof(WCHAR)));
+        RtlCopyMemory(threatTargetSnapshot, entry->Event.Target, snapBytes);
+        threatTargetSnapshot[snapBytes / sizeof(WCHAR)] = L'\0';
+        threatTarget.Length = (USHORT)snapBytes;
+    }
+
     KeAcquireSpinLock(&gDpUserHookEventLock, &oldIrql);
 
     if (DpUserHookSuppressDuplicateLocked(&entry->Event,
@@ -1444,6 +1459,35 @@ DpUserHookQueueEvent(
     eventCount = gDpUserHookEventCount;
     droppedEvents = gDpUserHookDroppedEvents;
     KeReleaseSpinLock(&gDpUserHookEventLock, oldIrql);
+
+    {
+        DP_THREAT_SIGNAL threatSignal;
+
+        switch (Operation) {
+        case DpUserHookDefenseOperationBehaviorRemoteThreadCreate:
+            threatSignal = DpThreatSignalRemoteThreadInjection;
+            break;
+        case DpUserHookDefenseOperationBehaviorProcessAccess:
+        case DpUserHookDefenseOperationBehaviorThreadAccess:
+            threatSignal = DpThreatSignalProcessHandleManipulation;
+            break;
+        case DpUserHookDefenseOperationSuspiciousHookAttempt:
+        case DpUserHookDefenseOperationSensitiveImageReload:
+        case DpUserHookDefenseOperationSensitiveImageAbnormalPath:
+            threatSignal = DpThreatSignalSuspiciousImageLoad;
+            break;
+        case DpUserHookDefenseOperationRuntimeRejected:
+            threatSignal = DpThreatSignalUnsignedRuntimeRejected;
+            break;
+        default:
+            threatSignal = DpThreatSignalNone;
+            break;
+        }
+
+        if (threatSignal != DpThreatSignalNone) {
+            (VOID)DpThreatEngineReportSignal(ProcessId, threatSignal, 0, &threatTarget);
+        }
+    }
 
     targetText.Buffer = entry->Event.Target;
     targetText.Length = (USHORT)entry->Event.TargetLengthBytes;

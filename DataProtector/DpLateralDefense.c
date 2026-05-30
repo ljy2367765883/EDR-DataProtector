@@ -822,6 +822,10 @@ DpLateralDefenseShouldBlockIpcCreate(
                             &nameInfo->Name,
                             (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()),
                             0);
+        (VOID)DpThreatEngineReportSignal(PsGetCurrentProcessId(),
+                                         DpThreatSignalRemoteIpcControl,
+                                         0,
+                                         &nameInfo->Name);
         shouldBlock = TRUE;
         DP_LATERAL_TRACE("blocked ipc pipe create pid=%p access=0x%08X path=%wZ image=%s\n",
                          PsGetCurrentProcessId(),
@@ -872,6 +876,10 @@ DpLateralDefenseShouldBlockCreate(
                             &nameInfo->Name,
                             (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()),
                             FltObjects->FileObject->Flags);
+        (VOID)DpThreatEngineReportSignal(PsGetCurrentProcessId(),
+                                         DpThreatSignalSmbExecutableStaging,
+                                         0,
+                                         &nameInfo->Name);
         shouldBlock = TRUE;
         DP_LATERAL_TRACE("blocked smb executable create pid=%p access=0x%08X path=%wZ flags=0x%08X image=%s\n",
                          PsGetCurrentProcessId(),
@@ -921,6 +929,10 @@ DpLateralDefenseShouldBlockWrite(
                             &nameInfo->Name,
                             (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()),
                             FltObjects->FileObject->Flags);
+        (VOID)DpThreatEngineReportSignal(PsGetCurrentProcessId(),
+                                         DpThreatSignalSmbExecutableStaging,
+                                         0,
+                                         &nameInfo->Name);
         shouldBlock = TRUE;
         DP_LATERAL_TRACE("blocked smb executable write pid=%p length=%lu path=%wZ flags=0x%08X image=%s\n",
                          PsGetCurrentProcessId(),
@@ -961,6 +973,11 @@ DpLateralDefenseShouldBlockRename(
                         TargetName,
                         (const CHAR *)PsGetProcessImageFileName(PsGetCurrentProcess()),
                         FltObjects->FileObject->Flags);
+
+    (VOID)DpThreatEngineReportSignal(PsGetCurrentProcessId(),
+                                     DpThreatSignalSmbExecutableStaging,
+                                     0,
+                                     TargetName);
 
     DP_LATERAL_TRACE("blocked smb executable rename pid=%p target=%wZ flags=0x%08X image=%s\n",
                      PsGetCurrentProcessId(),
@@ -1092,6 +1109,7 @@ DpLateralDefenseShouldBlockProcessCreate(
     const CHAR *processImage = NULL;
     DP_LATERAL_DEFENSE_OPERATION operation;
     ULONG featureFlag;
+    DP_THREAT_SIGNAL threatSignal;
 
     if (!gDpLateralInitialized ||
         CreateInfo == NULL ||
@@ -1108,15 +1126,19 @@ DpLateralDefenseShouldBlockProcessCreate(
 
         operation = DpLateralDefenseOperationRemoteScheduledTaskTool;
         featureFlag = DP_LATERAL_DEFENSE_FLAG_IPC_TASKS;
+        threatSignal = DpThreatSignalRemoteScheduledTask;
     } else if (DpLateralIsRemoteServiceCommand(imageFileName, commandLine)) {
         operation = DpLateralDefenseOperationRemoteServiceTool;
         featureFlag = DP_LATERAL_DEFENSE_FLAG_IPC_SERVICES;
+        threatSignal = DpThreatSignalRemoteServiceTool;
     } else if (DpLateralIsRemoteWmiCommand(imageFileName, commandLine)) {
         operation = DpLateralDefenseOperationWmiProcessCreate;
         featureFlag = DP_LATERAL_DEFENSE_FLAG_IPC_SERVICES;
+        threatSignal = DpThreatSignalRemoteWmiExecution;
     } else if (DpLateralIsPowerShellLateralCommand(imageFileName, commandLine)) {
         operation = DpLateralDefenseOperationPowerShellRemoteTask;
         featureFlag = DP_LATERAL_DEFENSE_FLAG_IPC_TASKS;
+        threatSignal = DpThreatSignalRemotePowerShell;
     } else {
         return FALSE;
     }
@@ -1136,6 +1158,11 @@ DpLateralDefenseShouldBlockProcessCreate(
                         commandLine,
                         processImage,
                         0);
+
+    (VOID)DpThreatEngineReportSignal(ProcessId,
+                                     threatSignal,
+                                     0,
+                                     commandLine);
 
     DP_LATERAL_TRACE("blocked process create pid=%p op=%lu image=%wZ command=%wZ\n",
                      ProcessId,

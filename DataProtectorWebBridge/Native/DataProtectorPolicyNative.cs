@@ -177,6 +177,36 @@ namespace DataProtectorWebBridge.Native
         internal static extern uint DpPolicyQueryUserHookDefensePolicy(out NativeUserHookDefensePolicy policy);
 
         [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryThreatEvents(
+            [Out] NativeThreatEvent[] events,
+            uint eventCapacity,
+            out uint eventCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryThreatProcesses(
+            [Out] NativeThreatProcess[] processes,
+            uint processCapacity,
+            out uint processCount,
+            IntPtr stringBuffer,
+            uint stringBufferChars,
+            out uint stringBufferCharsRequired);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyClearThreatEvents();
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicySetThreatPolicy(ref NativeThreatPolicy policy);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyQueryThreatPolicy(out NativeThreatPolicy policy);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern uint DpPolicyRespondThreatProcess(ulong processId, uint action);
+
+        [DllImport(DllName, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern uint DpPolicyConvertDosPathToNtPath(
             string dosPath,
             StringBuilder ntPath,
@@ -381,6 +411,52 @@ namespace DataProtectorWebBridge.Native
             public IntPtr ExcludedProcessPaths;
             public IntPtr TrustedSignerSubjects;
             public IntPtr RuntimeDllPath;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeThreatEvent
+        {
+            public ulong Sequence;
+            public ulong TimeStamp;
+            public ulong ProcessId;
+            public ulong ParentProcessId;
+            public ulong LineageRootPid;
+            public uint Signal;
+            public uint Tactic;
+            public uint TechniqueId;
+            public uint ScoreDelta;
+            public uint CumulativeScore;
+            public uint Severity;
+            public uint ResponseAction;
+            public uint ResponseStatus;
+            public IntPtr ProcessImage;
+            public IntPtr Detail;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct NativeThreatProcess
+        {
+            public ulong ProcessId;
+            public ulong ParentProcessId;
+            public ulong LineageRootPid;
+            public ulong FirstSeen;
+            public ulong LastActivity;
+            public uint CumulativeScore;
+            public uint Severity;
+            public uint SignalCount;
+            public uint DistinctTacticMask;
+            public uint StrongestResponse;
+            public uint Flags;
+            public IntPtr ProcessImage;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct NativeThreatPolicy
+        {
+            public uint Flags;
+            public uint BlockThreshold;
+            public uint IsolateThreshold;
+            public uint TerminateThreshold;
         }
 
         [StructLayout(LayoutKind.Sequential)]

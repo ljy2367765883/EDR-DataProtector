@@ -727,9 +727,15 @@ DpProcessPolicyCreateProcessNotify(
     PDP_PROCESS_ENTRY entry;
 
     if (CreateInfo == NULL) {
+        DpThreatEngineOnProcessExit(ProcessId);
         DpProcessPolicyRemoveProcessEntry(ProcessId);
         return;
     }
+
+    DpThreatEngineOnProcessCreate(ProcessId,
+                                  CreateInfo->ParentProcessId,
+                                  CreateInfo->ImageFileName,
+                                  CreateInfo->CommandLine);
 
     if (DpLateralDefenseShouldBlockProcessCreate(Process, ProcessId, CreateInfo)) {
         return;
