@@ -1461,8 +1461,8 @@ function buildAuditDetailGraph(): AuditGraph {
   const nodes: AuditGraphNode[] = [];
   const edges: AuditGraphEdge[] = [];
   const laneX = 24;
-  const laneLabelWidth = 154;
-  const eventStartX = 238;
+  const laneLabelWidth = 238;
+  const eventStartX = 350;
   const eventGap = 338;
   const cardWidth = 292;
   const cardHeight = 142;
@@ -1522,14 +1522,14 @@ function buildAuditDetailGraph(): AuditGraph {
     x: laneX + 8,
     y: firstY + 34,
     width: laneLabelWidth,
-    height: 86,
+    height: 126,
     index: 0,
     timeLabel: formatAttackTime(events[0]?.timeUtc),
     stageLabel: textByLocale('调查入口', 'Investigation entry'),
     titleLines: [graphSourceLabel(events[0]) || textByLocale('未知来源', 'Unknown source')],
     sourceLine: textByLocale('起点', 'Start'),
-    targetLine: stageLabel(events[0]?.stage || ''),
-    verb: textByLocale('关联开始', 'Start chain'),
+    targetLine: truncateGraphText(stageLabel(events[0]?.stage || ''), 20),
+    verb: textByLocale('开始', 'Start'),
     targetType: '',
     severity: events[0]?.severity || 'info',
     disposition: events[0]?.disposition || 'observed',
@@ -1553,8 +1553,8 @@ function buildAuditDetailGraph(): AuditGraph {
       timeLabel: formatAttackTime(event.timeUtc),
       stageLabel: stageLabel(event.stage),
       titleLines: wrapGraphText(graphEventTitle(event, index), 24, 2),
-      sourceLine: truncateGraphText(graphSourceLabel(event), 34),
-      targetLine: truncateGraphText(graphTargetLabel(event), 34),
+      sourceLine: truncateGraphText(graphSourceLabel(event), 31),
+      targetLine: truncateGraphText(graphTargetLabel(event), 31),
       verb: graphEventVerb(event),
       targetType: graphTargetType(event),
       severity: event.severity || 'info',
