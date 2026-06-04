@@ -533,9 +533,26 @@ function auditActionLabel(record: Api.DataProtector.AuditRecord) {
   const labels = localizedActionLabels();
   if (labels[token]) return labels[token];
   if (action.startsWith('behavior.chain.')) return firstText(record.ObjectName, record.PolicyName, textByLocale('行为链命中', 'Behavior chain matched'));
+  if (action.startsWith('static-scan.')) return staticScanEventLabel(record);
   if (action.startsWith('webshell.')) return textByLocale('WebShell 写入拦截', 'WebShell write blocked');
   if (action.startsWith('policy.') || action.startsWith('central.policy.')) return textByLocale('策略变更', 'Policy change');
   return action || '-';
+}
+
+function staticScanEventLabel(record: Api.DataProtector.AuditRecord) {
+  const detail = parseStaticScanDetail(record);
+  const source = basename(firstText(record.SourceProcess, record.Extension));
+  const target = basename(firstText(record.ObjectName, record.TargetProcess, record.Target));
+  const verdict = (detail.verdict || '').toLowerCase();
+  if (verdict === 'malicious') {
+    return textByLocale(`高危可执行文件落地：${target || '-'}`, `High-risk executable landed: ${target || '-'}`);
+  }
+
+  if (source && target && source.toLowerCase() !== target.toLowerCase()) {
+    return textByLocale(`${source} 释放可执行文件 ${target}`, `${source} dropped executable ${target}`);
+  }
+
+  return textByLocale(`可执行文件落地：${target || source || '-'}`, `Executable landed: ${target || source || '-'}`);
 }
 
 function localizedActionLabels(): Record<string, string> {
@@ -837,7 +854,9 @@ function buildAuditEvidenceRows(record: Api.DataProtector.AuditRecord): AuditEvi
     }
   }
 
-  rows.push({ label: textByLocale('原始动作', 'Raw action'), value: record.Action || '-', muted: true });
+  if (!(record.Action || '').startsWith('static-scan.')) {
+    rows.push({ label: textByLocale('原始动作', 'Raw action'), value: record.Action || '-', muted: true });
+  }
   rows.push({ label: textByLocale('状态码', 'Status'), value: record.Status || '-', muted: true });
   rows.push({ label: textByLocale('原始消息', 'Raw message'), value: record.Message || record.EventDetails || '-', muted: true });
 
@@ -862,7 +881,9 @@ function buildTimelineEvidenceRows(event: AuditTimelineItem): AuditEvidenceRow[]
     appendStaticScanEvidenceRows(rows, event.detail, event.raw);
   }
 
-  rows.push({ label: textByLocale('原始动作', 'Raw action'), value: event.action || '-', muted: true });
+  if (!(event.action || '').startsWith('static-scan.')) {
+    rows.push({ label: textByLocale('原始动作', 'Raw action'), value: event.action || '-', muted: true });
+  }
   rows.push({ label: textByLocale('原始证据', 'Raw evidence'), value: event.raw || event.detail || '-', muted: true });
 
   return rows.filter(row => row.value && row.value !== '-');
@@ -1237,6 +1258,14 @@ function firstText(...values: Array<string | undefined>) {
   return values.find(value => value && value.trim())?.trim() || '';
 }
 
+function basename(value?: string) {
+  const text = (value || '').trim().replace(/^"|"$/g, '');
+  if (!text) return '';
+  const normalized = text.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  return parts[parts.length - 1] || text;
+}
+
 function resolveSeverity(record: Api.DataProtector.AuditRecord): Exclude<AuditSeverity, 'all'> {
   if (record.Severity && ['critical', 'warning', 'info', 'operational'].includes(record.Severity)) {
     return record.Severity as Exclude<AuditSeverity, 'all'>;
@@ -1425,135 +1454,210 @@ function buildStoryFlowData(): FlowGraphData {
 }
 
 function buildAuditDetailGraph(): AuditGraph {
-  const events = attackStoryEvents.value.slice(0, 24);
+  const events = attackStoryEvents.value.slice(0, 32);
   const nodes: NonNullable<FlowGraphData['nodes']> = [];
   const edges: NonNullable<FlowGraphData['edges']> = [];
   const miniPoints: AuditGraphPoint[] = [];
-  const mainX = 118;
-  const topY = 62;
-  const rowGap = 76;
+  const startX = 116;
+  const laneLabelX = 86;
+  const eventStartX = 320;
+  const eventGap = 286;
+  const stageKeys = visibleAttackGraphStages(events);
+  const laneGap = stageKeys.length > 5 ? 94 : 112;
+  const topY = 122;
+  const stageY = new Map(stageKeys.map((stage, index) => [stage, topY + index * laneGap]));
+  const graphWidth = eventStartX + Math.max(1, events.length) * eventGap + 180;
+  const graphHeight = Math.min(620, Math.max(460, topY + Math.max(1, stageKeys.length - 1) * laneGap + 136));
 
   if (!events.length) {
     const emptyId = 'audit-detail-empty';
     nodes.push({
       id: emptyId,
       type: 'rect',
-      x: mainX,
-      y: topY,
+      x: startX,
+      y: 188,
       text: {
-        x: mainX,
-        y: topY,
-        value: '-',
-        ...graphTextStyle(28, 14, '#64748b', 12)
+        x: startX,
+        y: 188,
+        value: textByLocale('暂无攻击链', 'No attack chain'),
+        ...graphTextStyle(128, 16, '#64748b', 12)
       },
       properties: {
-        width: 52,
-        height: 52,
+        width: 168,
+        height: 58,
         radius: 6,
         style: { fill: '#ffffff', stroke: '#cbd5e1', strokeWidth: 1 }
       }
     });
     miniPoints.push({ id: emptyId, x: 50, y: 50, severity: 'info' });
-    return { flow: { nodes, edges }, miniPoints, height: 360 };
+    return { flow: { nodes, edges }, miniPoints, height: 460 };
   }
 
+  stageKeys.forEach((stage, index) => {
+    const y = stageY.get(stage) || topY;
+    nodes.push({
+      id: `audit-lane-${stage || index}`,
+      type: 'rect',
+      x: laneLabelX,
+      y,
+      text: {
+        x: laneLabelX,
+        y,
+        value: stageLabel(stage),
+        ...graphTextStyle(112, 14, '#475569', 11)
+      },
+      properties: {
+        width: 144,
+        height: 34,
+        radius: 17,
+        style: {
+          fill: index === 0 ? '#eef6ff' : '#f8fafc',
+          stroke: '#d8e1ed',
+          strokeWidth: 1
+        },
+        textStyle: { fontWeight: 800 }
+      }
+    });
+  });
+
   const startId = 'audit-detail-start';
+  const firstY = stageY.get(events[0]?.stage || 'behavior') || topY;
   nodes.push({
     id: startId,
     type: 'rect',
-    x: mainX,
-    y: topY,
-      text: {
-        x: mainX,
-        y: topY,
-        value: '开始',
-        ...graphTextStyle(58, 14, '#334155', 11)
-      },
+    x: startX,
+    y: firstY,
+    text: {
+      x: startX,
+      y: firstY,
+      value: textByLocale('入口', 'Entry'),
+      ...graphTextStyle(72, 14, '#334155', 11)
+    },
     properties: {
-      width: 74,
-      height: 34,
-      radius: 4,
+      width: 84,
+      height: 54,
+      radius: 27,
       style: { fill: '#ffffff', stroke: '#94a3b8', strokeWidth: 1.4 },
       textStyle: { fontWeight: 700 }
     }
   });
 
-  let previousId = startId;
   events.forEach((event, index) => {
-    const y = topY + (index + 1) * rowGap;
-    const nodeId = `audit-event-${event.id || index}`;
+    const id = graphEventNodeId(event.id, index);
+    const x = eventStartX + index * eventGap;
+    const y = stageY.get(event.stage || 'behavior') || topY;
+    const sourceLabel = graphSourceLabel(event);
+    const targetLabel = graphTargetLabel(event);
+    const targetType = graphTargetType(event);
+    const title = graphEventTitle(event, index);
+    const entityLine = [sourceLabel, targetLabel].filter(item => item && item !== '-').join(' -> ');
     const active = event.severity !== 'info' && event.severity !== 'operational';
 
     nodes.push({
-      id: `audit-event-time-${index}`,
-      type: 'text',
-      x: mainX - 72,
+      id,
+      type: 'rect',
+      x,
       y,
       text: {
-        x: mainX - 72,
-        y,
-        value: formatTimelineTime(event.timeUtc),
-        ...graphTextStyle(62, 12, '#94a3b8', 10)
+        x,
+        y: y - 2,
+        value: `${index + 1}. ${formatAttackTime(event.timeUtc)}  ${stageLabel(event.stage)}\n${title}\n${entityLine || targetType}`,
+        ...graphTextStyle(214, 16, '#1f2937', 12)
       },
       properties: {
-        textStyle: { textAnchor: 'end' }
+        eventId: event.id,
+        width: 236,
+        height: 96,
+        radius: 8,
+        style: {
+          fill: active ? '#fff7ed' : '#ffffff',
+          stroke: graphSeverityColor(event.severity),
+          strokeWidth: active ? 2 : 1.2
+        },
+        textStyle: { fontWeight: active ? 800 : 700 }
       }
     });
 
     nodes.push({
-      id: nodeId,
-      type: 'circle',
-      x: mainX,
-      y,
+      id: `${id}-type`,
+      type: 'text',
+      x,
+      y: y + 64,
       text: {
-        x: mainX,
-        y,
-        value: String(index + 1),
-        ...graphTextStyle(24, 13, '#ffffff', 10)
+        x,
+        y: y + 64,
+        value: `${graphEventVerb(event)} / ${targetType}`,
+        ...graphTextStyle(198, 13, graphSeverityColor(event.severity), 11)
       },
       properties: {
-        r: active ? 15 : 12,
-        style: {
-          fill: graphNodeFill(event.severity, true),
-          stroke: '#ffffff',
-          strokeWidth: 2.5,
-          filter: active ? 'drop-shadow(0 5px 14px rgba(15, 23, 42, 0.22))' : undefined
-        },
-        textStyle: {
-          fontWeight: 800
-        }
+        textStyle: { fontWeight: 700 }
       }
     });
 
-    edges.push(createGraphEdge(`audit-event-edge-${index}`, previousId, nodeId, active ? '#94a3b8' : '#cbd5e1', false));
-    previousId = nodeId;
-  });
-
-  const graphHeight = Math.max(360, topY + (events.length + 1) * rowGap + 54);
-  nodes.unshift({
-    id: 'audit-detail-axis',
-    type: 'rect',
-    x: mainX,
-    y: graphHeight / 2,
-    text: '',
-    properties: {
-      width: 2,
-      height: graphHeight - 96,
-      style: { fill: '#dbe4ee', stroke: '#dbe4ee', strokeWidth: 0 }
-    }
-  });
-
-  events.forEach((event, index) => {
-    const y = topY + (index + 1) * rowGap;
+    edges.push(
+      createGraphEdge(
+        `audit-sequence-edge-${index}`,
+        index === 0 ? startId : graphEventNodeId(events[index - 1].id, index - 1),
+        id,
+        index === 0 ? '#94a3b8' : graphSeverityColor(event.severity),
+        false
+      )
+    );
     miniPoints.push({
       id: event.id,
-      x: 50,
+      x: Math.min(94, Math.max(8, (x / graphWidth) * 100)),
       y: Math.min(94, Math.max(8, (y / graphHeight) * 100)),
       severity: event.severity
     });
   });
 
   return { flow: { nodes, edges }, miniPoints, height: graphHeight };
+}
+
+function visibleAttackGraphStages(events: AuditTimelineItem[]) {
+  const order = ['delivery', 'execution', 'behavior', 'credential', 'lateral', 'network', 'persistence', 'impact', 'health'];
+  const seen = new Set(events.map(event => event.stage || 'behavior'));
+  const ordered = order.filter(stage => seen.has(stage));
+  for (const stage of seen) {
+    if (!ordered.includes(stage)) ordered.push(stage);
+  }
+  return ordered.length ? ordered : ['behavior'];
+}
+
+function graphEventNodeId(eventId?: string, index = 0) {
+  const raw = eventId || String(index);
+  return `audit-event-${String(raw).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+}
+
+function graphSourceLabel(event: AuditTimelineItem) {
+  return basename(firstText(event.source, event.category, textByLocale('未知进程', 'Unknown process'))) || '-';
+}
+
+function graphTargetLabel(event: AuditTimelineItem) {
+  return basename(firstText(event.remote, event.target, event.object, event.title, '-')) || '-';
+}
+
+function graphTargetType(event: AuditTimelineItem) {
+  if (event.remote) return textByLocale('域名/IP', 'Domain/IP');
+  if ((event.object || '').includes('executable') || (event.action || '').startsWith('static-scan.')) return textByLocale('进程文件', 'Process file');
+  if ((event.object || '').includes('credential')) return textByLocale('凭据对象', 'Credential');
+  return textByLocale('对象', 'Object');
+}
+
+function graphEventVerb(event: AuditTimelineItem) {
+  const action = event.action || '';
+  if (action.startsWith('static-scan.')) return textByLocale('释放/检测', 'Drop / detect');
+  if (action.startsWith('network.')) return textByLocale('连接', 'Connect');
+  if (action.includes('process-create')) return textByLocale('创建进程', 'Create process');
+  if (action.startsWith('behavior.chain.') || action.startsWith('userhook.')) return textByLocale('高危行为', 'Risk behavior');
+  if (action.startsWith('dlp.')) return textByLocale('访问/外传', 'Access / leak');
+  return textByLocale('关联', 'Related');
+}
+
+function graphEventTitle(event: AuditTimelineItem, index: number) {
+  const fallback = `${stageLabel(event.stage)} ${index + 1}`;
+  const text = firstText(event.title, timelineActionLabel(event), fallback).replace(/\s+/g, ' ').trim();
+  return text.length > 58 ? `${text.slice(0, 55)}...` : text;
 }
 
 function createGraphEdge(id: string, sourceNodeId: string, targetNodeId: string, stroke: string, subtle: boolean) {
@@ -1643,7 +1747,7 @@ function createLogicFlow(container: HTMLElement) {
     hideAnchors: true
   });
   lf.on('node:click', ({ data }) => {
-    const id = String(data?.id || '').replace(/^audit-event-/, '');
+    const id = String(data?.properties?.eventId || '');
     if (id && attackStoryEvents.value.some(item => item.id === id)) {
       selectedDetailEventId.value = id;
     }
@@ -1656,8 +1760,8 @@ function renderLogicFlow(lf: LogicFlow, data: FlowGraphData) {
   lf.render(data);
   nextTick(() => {
     window.setTimeout(() => {
-      lf.resetZoom();
-      lf.translateCenter();
+      lf.fitView(32, 32);
+      highlightAuditDetailGraphNode(selectedDetailEventId.value, false);
     }, 0);
   });
 }
@@ -1674,6 +1778,28 @@ function renderAttackFlows() {
 
 function zoomAuditDetailFlow(zoomIn: boolean) {
   attackDetailFlow?.zoom(zoomIn);
+}
+
+function resetAuditDetailFlowView() {
+  attackDetailFlow?.fitView(32, 32);
+  highlightAuditDetailGraphNode(selectedDetailEventId.value, false);
+}
+
+function focusAuditDetailEvent(eventId: string) {
+  selectedDetailEventId.value = eventId;
+  highlightAuditDetailGraphNode(eventId, true);
+}
+
+function highlightAuditDetailGraphNode(eventId?: string, focus = false) {
+  if (!attackDetailFlow || !eventId) return;
+  const index = attackStoryEvents.value.findIndex(item => item.id === eventId);
+  if (index < 0) return;
+
+  const nodeId = graphEventNodeId(eventId, index);
+  attackDetailFlow.selectElementById(nodeId, false, true);
+  if (focus) {
+    attackDetailFlow.focusOn(nodeId);
+  }
 }
 
 function updateCharts() {
@@ -1821,6 +1947,9 @@ async function removeAuditEvent(record: Api.DataProtector.AuditRecord) {
 
 watch([auditResponse, () => appStore.locale], updateCharts, { deep: true });
 watch([attackFlow, selectedAuditRecord, () => appStore.locale], renderAttackFlows, { deep: true });
+watch(selectedDetailEventId, id => {
+  nextTick(() => highlightAuditDetailGraphNode(id, true));
+});
 
 onMounted(() => {
   refresh();
@@ -2034,38 +2163,54 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="attack-investigation-layout">
-              <div class="attack-graph-shell">
-                <div
-                  ref="attackDetailFlowRef"
-                  class="logic-flow-panel attack-graph-canvas"
-                  :style="{ height: `${auditDetailGraph.height}px` }"
-                ></div>
-                <div class="attack-graph-tools">
-                  <NButton quaternary circle size="small" @click="renderAttackFlows">
-                    <template #icon><SvgIcon icon="mdi:fit-to-page-outline" /></template>
-                  </NButton>
-                  <NButton quaternary circle size="small" @click="zoomAuditDetailFlow(true)">
-                    <template #icon><SvgIcon icon="mdi:magnify-plus-outline" /></template>
-                  </NButton>
-                  <NButton quaternary circle size="small" @click="zoomAuditDetailFlow(false)">
-                    <template #icon><SvgIcon icon="mdi:magnify-minus-outline" /></template>
-                  </NButton>
-                </div>
-                <div class="attack-mini-map">
-                  <div class="mini-map-title">{{ $t('dataprotector.audit.detail.navigation') }}</div>
-                  <div class="mini-map-body">
-                    <button
-                      v-for="point in auditDetailGraph.miniPoints"
-                      :key="point.id"
-                      type="button"
-                      class="mini-map-point"
-                      :class="{ active: selectedDetailEventId === point.id }"
-                      :style="{ left: `${point.x}%`, top: `${point.y}%`, background: graphSeverityColor(point.severity) }"
-                      @click="selectedDetailEventId = point.id"
-                    />
+              <section class="attack-graph-shell">
+                <div class="attack-graph-head">
+                  <div>
+                    <strong>{{ textByLocale('攻击流程图', 'Attack graph') }}</strong>
+                    <span>{{ textByLocale('按阶段泳道和时间顺序展示关联证据', 'Correlated evidence by stage and time') }}</span>
+                  </div>
+                  <div class="attack-graph-legend">
+                    <span class="legend-dot critical"></span>
+                    <span>{{ $t('dataprotector.audit.critical') }}</span>
+                    <span class="legend-dot warning"></span>
+                    <span>{{ $t('dataprotector.audit.warning') }}</span>
+                    <span class="legend-dot info"></span>
+                    <span>{{ $t('dataprotector.audit.info') }}</span>
                   </div>
                 </div>
-              </div>
+                <div class="attack-graph-viewport">
+                  <div
+                    ref="attackDetailFlowRef"
+                    class="logic-flow-panel attack-graph-canvas"
+                    :style="{ height: `${auditDetailGraph.height}px` }"
+                  ></div>
+                  <div class="attack-graph-tools">
+                    <NButton quaternary circle size="small" :title="textByLocale('适应窗口', 'Fit view')" @click="resetAuditDetailFlowView">
+                      <template #icon><SvgIcon icon="mdi:fit-to-page-outline" /></template>
+                    </NButton>
+                    <NButton quaternary circle size="small" :title="textByLocale('放大', 'Zoom in')" @click="zoomAuditDetailFlow(true)">
+                      <template #icon><SvgIcon icon="mdi:magnify-plus-outline" /></template>
+                    </NButton>
+                    <NButton quaternary circle size="small" :title="textByLocale('缩小', 'Zoom out')" @click="zoomAuditDetailFlow(false)">
+                      <template #icon><SvgIcon icon="mdi:magnify-minus-outline" /></template>
+                    </NButton>
+                  </div>
+                  <div class="attack-mini-map">
+                    <div class="mini-map-title">{{ $t('dataprotector.audit.detail.navigation') }}</div>
+                    <div class="mini-map-body">
+                      <button
+                        v-for="point in auditDetailGraph.miniPoints"
+                        :key="point.id"
+                        type="button"
+                        class="mini-map-point"
+                        :class="{ active: selectedDetailEventId === point.id }"
+                        :style="{ left: `${point.x}%`, top: `${point.y}%`, background: graphSeverityColor(point.severity) }"
+                        @click="focusAuditDetailEvent(point.id)"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </section>
 
               <div class="attack-event-timeline">
                 <div class="timeline-list-header">
@@ -2082,7 +2227,7 @@ onBeforeUnmount(() => {
                     type="button"
                     class="timeline-event-card"
                     :class="{ active: selectedDetailEventId === event.id }"
-                    @click="selectedDetailEventId = event.id"
+                    @click="focusAuditDetailEvent(event.id)"
                   >
                     <span class="event-step" :style="{ background: graphSeverityColor(event.severity) }">
                       {{ index + 1 }}
@@ -2196,7 +2341,11 @@ onBeforeUnmount(() => {
 }
 
 .audit-detail-modal {
-  width: min(1560px, calc(100vw - 48px));
+  width: min(1840px, calc(100vw - 24px));
+}
+
+.audit-detail-modal :deep(.n-card) {
+  max-height: calc(100vh - 24px);
 }
 
 .audit-detail-modal :deep(.n-card__content) {
@@ -2204,6 +2353,10 @@ onBeforeUnmount(() => {
 }
 
 .detail-investigation-panel {
+  display: flex;
+  max-height: calc(100vh - 118px);
+  min-height: min(760px, calc(100vh - 150px));
+  flex-direction: column;
   overflow: hidden;
   background: #f4f6f8;
   border: 1px solid rgb(226 232 240);
@@ -2267,27 +2420,103 @@ onBeforeUnmount(() => {
 
 .attack-investigation-layout {
   display: grid;
-  grid-template-columns: 260px minmax(460px, 1fr) 430px;
-  min-height: 620px;
+  flex: 1 1 auto;
+  grid-template-areas:
+    "graph detail"
+    "timeline detail";
+  grid-template-rows: minmax(430px, 1fr) minmax(210px, 0.58fr);
+  grid-template-columns: minmax(720px, 1fr) 410px;
+  min-height: 0;
 }
 
 .attack-graph-shell {
   position: relative;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  grid-area: graph;
   min-width: 0;
-  max-height: 760px;
-  min-height: 520px;
-  overflow: auto;
+  overflow: hidden;
   background:
     linear-gradient(90deg, rgb(226 232 240 / 22%) 1px, transparent 1px),
     linear-gradient(rgb(226 232 240 / 22%) 1px, transparent 1px),
     #f8fafc;
   background-size: 36px 36px;
   border-right: 1px solid rgb(226 232 240);
+  border-bottom: 1px solid rgb(226 232 240);
+}
+
+.attack-graph-head {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 12px;
+  background: rgb(255 255 255 / 92%);
+  border-bottom: 1px solid rgb(226 232 240);
+  backdrop-filter: blur(10px);
+}
+
+.attack-graph-head strong {
+  display: block;
+  color: #111827;
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.attack-graph-head span {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.attack-graph-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.attack-graph-legend span {
+  margin: 0;
+  line-height: 1;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.legend-dot.critical {
+  background: #ef4444;
+}
+
+.legend-dot.warning {
+  background: #f59e0b;
+}
+
+.legend-dot.info {
+  background: #64748b;
+}
+
+.attack-graph-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .attack-graph-canvas {
   width: 100%;
-  min-height: 520px;
+  min-height: 430px;
   border: 0;
   border-radius: 0;
 }
@@ -2295,9 +2524,9 @@ onBeforeUnmount(() => {
 .attack-graph-tools {
   position: absolute;
   top: 12px;
-  left: 12px;
+  right: 14px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 8px;
 }
 
@@ -2310,7 +2539,7 @@ onBeforeUnmount(() => {
 .attack-mini-map {
   position: absolute;
   bottom: 14px;
-  left: 14px;
+  right: 14px;
   width: 148px;
   padding: 8px;
   background: rgb(255 255 255 / 92%);
@@ -2357,9 +2586,9 @@ onBeforeUnmount(() => {
 }
 
 .attack-event-timeline {
+  grid-area: timeline;
   min-width: 0;
-  max-height: 760px;
-  min-height: 520px;
+  min-height: 0;
   overflow: auto;
   background: #ffffff;
   border-right: 1px solid rgb(226 232 240);
@@ -2494,9 +2723,9 @@ onBeforeUnmount(() => {
 }
 
 .attack-detail-panel {
+  grid-area: detail;
   min-width: 0;
-  max-height: 760px;
-  min-height: 520px;
+  min-height: 0;
   padding: 18px 22px;
   overflow: auto;
   background: #ffffff;
@@ -2635,15 +2864,38 @@ onBeforeUnmount(() => {
   }
 
   .attack-investigation-layout {
+    grid-template-areas:
+      "graph"
+      "timeline"
+      "detail";
+    grid-template-rows: auto auto auto;
     grid-template-columns: 1fr;
+    overflow: auto;
   }
 
   .attack-graph-shell,
   .attack-event-timeline,
   .attack-detail-panel {
-    max-height: none;
     min-height: 360px;
     border-right: 0;
+  }
+
+  .attack-graph-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .attack-graph-tools {
+    top: 10px;
+    right: 10px;
+  }
+
+  .attack-mini-map {
+    display: none;
+  }
+
+  .attack-event-timeline {
+    min-height: 300px;
   }
 
   .attack-detail-panel {
