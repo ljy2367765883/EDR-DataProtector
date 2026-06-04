@@ -1,7 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import LogicFlow from '@logicflow/core';
-import '@logicflow/core/dist/index.css';
+import { computed, h, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NTag, type DataTableColumns, type PaginationProps } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
 import { fetchAuditAttackFlow, fetchAuditEvents, fetchClearAuditEvents, fetchDevices, fetchRemoveAuditEvent } from '@/service/api';
@@ -63,20 +61,50 @@ interface AuditEvidenceRow {
   muted?: boolean;
 }
 
-interface AuditGraphPoint {
+interface AuditGraphLane {
+  key: string;
+  label: string;
+  y: number;
+  height: number;
+  count: number;
+}
+
+interface AuditGraphNode {
   id: string;
+  eventId?: string;
+  kind: 'entry' | 'event';
   x: number;
   y: number;
+  width: number;
+  height: number;
+  index: number;
+  timeLabel: string;
+  stageLabel: string;
+  titleLines: string[];
+  sourceLine: string;
+  targetLine: string;
+  verb: string;
+  targetType: string;
   severity: string;
+  disposition: string;
+  selected: boolean;
+  iconText: string;
+}
+
+interface AuditGraphEdge {
+  id: string;
+  d: string;
+  severity: string;
+  selected: boolean;
 }
 
 interface AuditGraph {
-  flow: FlowGraphData;
-  miniPoints: AuditGraphPoint[];
+  lanes: AuditGraphLane[];
+  nodes: AuditGraphNode[];
+  edges: AuditGraphEdge[];
+  width: number;
   height: number;
 }
-
-type FlowGraphData = Parameters<LogicFlow['render']>[0];
 
 const loading = ref(false);
 const appStore = useAppStore();
@@ -88,9 +116,9 @@ const timeRange = ref<[number, number] | null>(null);
 const selectedAuditRecord = ref<Api.DataProtector.AuditRecord | null>(null);
 const auditDetailVisible = ref(false);
 const auditDetailLoading = ref(false);
-const attackDetailFlowRef = ref<HTMLElement | null>(null);
+const attackGraphViewportRef = ref<HTMLElement | null>(null);
 const selectedDetailEventId = ref('');
-let attackDetailFlow: LogicFlow | null = null;
+const attackGraphScale = ref(1);
 
 const filters = reactive({
   host: 'all',
@@ -1166,8 +1194,6 @@ function buildDetailQuery(record: Api.DataProtector.AuditRecord): Api.DataProtec
 }
 
 async function openAuditDetail(record: Api.DataProtector.AuditRecord) {
-  attackDetailFlow?.destroy();
-  attackDetailFlow = null;
   selectedAuditRecord.value = record;
   selectedDetailEventId.value = '';
   auditDetailVisible.value = true;
@@ -1417,11 +1443,6 @@ function formatAttackTime(value?: string) {
   return value ? new Date(value).toLocaleString() : '-';
 }
 
-function formatTimelineTime(value?: string) {
-  if (!value) return '-';
-  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
 function graphSeverityColor(severity?: string) {
   const colors: Record<string, string> = {
     critical: '#ef4444',
@@ -1434,184 +1455,128 @@ function graphSeverityColor(severity?: string) {
   return colors[severity || 'info'] || colors.info;
 }
 
-function graphNodeFill(severity?: string, active = true) {
-  if (!active) return '#e5e7eb';
-  return graphSeverityColor(severity);
-}
-
-function graphTextStyle(textWidth = 120, lineHeight = 14, color = '#334155', fontSize = 11) {
-  return {
-    color,
-    fontSize,
-    textWidth,
-    overflowMode: 'ellipsis' as const,
-    lineHeight
-  };
-}
-
-function buildStoryFlowData(): FlowGraphData {
-  return auditDetailGraph.value.flow;
-}
-
 function buildAuditDetailGraph(): AuditGraph {
   const events = attackStoryEvents.value.slice(0, 32);
-  const nodes: NonNullable<FlowGraphData['nodes']> = [];
-  const edges: NonNullable<FlowGraphData['edges']> = [];
-  const miniPoints: AuditGraphPoint[] = [];
-  const startX = 116;
-  const laneLabelX = 86;
-  const eventStartX = 320;
-  const eventGap = 286;
+  const lanes: AuditGraphLane[] = [];
+  const nodes: AuditGraphNode[] = [];
+  const edges: AuditGraphEdge[] = [];
+  const laneX = 24;
+  const laneLabelWidth = 154;
+  const eventStartX = 238;
+  const eventGap = 338;
+  const cardWidth = 292;
+  const cardHeight = 142;
   const stageKeys = visibleAttackGraphStages(events);
-  const laneGap = stageKeys.length > 5 ? 94 : 112;
-  const topY = 122;
-  const stageY = new Map(stageKeys.map((stage, index) => [stage, topY + index * laneGap]));
-  const graphWidth = eventStartX + Math.max(1, events.length) * eventGap + 180;
-  const graphHeight = Math.min(620, Math.max(460, topY + Math.max(1, stageKeys.length - 1) * laneGap + 136));
+  const laneHeight = 184;
+  const topY = 34;
+  const graphWidth = Math.max(980, eventStartX + Math.max(1, events.length) * eventGap + cardWidth + 44);
+  const graphHeight = Math.max(330, topY + stageKeys.length * laneHeight + 30);
+  const stageY = new Map(stageKeys.map((stage, index) => [stage, topY + index * laneHeight]));
 
   if (!events.length) {
-    const emptyId = 'audit-detail-empty';
-    nodes.push({
-      id: emptyId,
-      type: 'rect',
-      x: startX,
-      y: 188,
-      text: {
-        x: startX,
-        y: 188,
-        value: textByLocale('暂无攻击链', 'No attack chain'),
-        ...graphTextStyle(128, 16, '#64748b', 12)
-      },
-      properties: {
-        width: 168,
-        height: 58,
-        radius: 6,
-        style: { fill: '#ffffff', stroke: '#cbd5e1', strokeWidth: 1 }
-      }
-    });
-    miniPoints.push({ id: emptyId, x: 50, y: 50, severity: 'info' });
-    return { flow: { nodes, edges }, miniPoints, height: 460 };
+    return {
+      lanes: [],
+      nodes: [
+        {
+          id: 'audit-graph-empty',
+          kind: 'entry',
+          x: 38,
+          y: 74,
+          width: 240,
+          height: 92,
+          index: 0,
+          timeLabel: '-',
+          stageLabel: textByLocale('暂无攻击链', 'No attack chain'),
+          titleLines: [textByLocale('暂无可关联证据', 'No correlated evidence')],
+          sourceLine: '',
+          targetLine: '',
+          verb: '',
+          targetType: '',
+          severity: 'info',
+          disposition: 'observed',
+          selected: false,
+          iconText: 'INFO'
+        }
+      ],
+      edges,
+      width: 980,
+      height: 300
+    };
   }
 
   stageKeys.forEach((stage, index) => {
     const y = stageY.get(stage) || topY;
-    nodes.push({
-      id: `audit-lane-${stage || index}`,
-      type: 'rect',
-      x: laneLabelX,
+    lanes.push({
+      key: stage || String(index),
+      label: stageLabel(stage),
       y,
-      text: {
-        x: laneLabelX,
-        y,
-        value: stageLabel(stage),
-        ...graphTextStyle(112, 14, '#475569', 11)
-      },
-      properties: {
-        width: 144,
-        height: 34,
-        radius: 17,
-        style: {
-          fill: index === 0 ? '#eef6ff' : '#f8fafc',
-          stroke: '#d8e1ed',
-          strokeWidth: 1
-        },
-        textStyle: { fontWeight: 800 }
-      }
+      height: laneHeight - 18,
+      count: events.filter(event => (event.stage || 'behavior') === stage).length
     });
   });
 
-  const startId = 'audit-detail-start';
   const firstY = stageY.get(events[0]?.stage || 'behavior') || topY;
-  nodes.push({
-    id: startId,
-    type: 'rect',
-    x: startX,
-    y: firstY,
-    text: {
-      x: startX,
-      y: firstY,
-      value: textByLocale('入口', 'Entry'),
-      ...graphTextStyle(72, 14, '#334155', 11)
-    },
-    properties: {
-      width: 84,
-      height: 54,
-      radius: 27,
-      style: { fill: '#ffffff', stroke: '#94a3b8', strokeWidth: 1.4 },
-      textStyle: { fontWeight: 700 }
-    }
-  });
+  const entryNode: AuditGraphNode = {
+    id: 'audit-graph-entry',
+    kind: 'entry',
+    x: laneX + 8,
+    y: firstY + 34,
+    width: laneLabelWidth,
+    height: 86,
+    index: 0,
+    timeLabel: formatAttackTime(events[0]?.timeUtc),
+    stageLabel: textByLocale('调查入口', 'Investigation entry'),
+    titleLines: [graphSourceLabel(events[0]) || textByLocale('未知来源', 'Unknown source')],
+    sourceLine: textByLocale('起点', 'Start'),
+    targetLine: stageLabel(events[0]?.stage || ''),
+    verb: textByLocale('关联开始', 'Start chain'),
+    targetType: '',
+    severity: events[0]?.severity || 'info',
+    disposition: events[0]?.disposition || 'observed',
+    selected: false,
+    iconText: 'START'
+  };
+  nodes.push(entryNode);
 
-  events.forEach((event, index) => {
-    const id = graphEventNodeId(event.id, index);
+  const eventNodes = events.map((event, index) => {
     const x = eventStartX + index * eventGap;
-    const y = stageY.get(event.stage || 'behavior') || topY;
-    const sourceLabel = graphSourceLabel(event);
-    const targetLabel = graphTargetLabel(event);
-    const targetType = graphTargetType(event);
-    const title = graphEventTitle(event, index);
-    const entityLine = [sourceLabel, targetLabel].filter(item => item && item !== '-').join(' -> ');
-    const active = event.severity !== 'info' && event.severity !== 'operational';
-
-    nodes.push({
-      id,
-      type: 'rect',
+    const y = (stageY.get(event.stage || 'behavior') || topY) + 20;
+    const node: AuditGraphNode = {
+      id: graphEventNodeId(event.id, index),
+      eventId: event.id,
+      kind: 'event',
       x,
       y,
-      text: {
-        x,
-        y: y - 2,
-        value: `${index + 1}. ${formatAttackTime(event.timeUtc)}  ${stageLabel(event.stage)}\n${title}\n${entityLine || targetType}`,
-        ...graphTextStyle(214, 16, '#1f2937', 12)
-      },
-      properties: {
-        eventId: event.id,
-        width: 236,
-        height: 96,
-        radius: 8,
-        style: {
-          fill: active ? '#fff7ed' : '#ffffff',
-          stroke: graphSeverityColor(event.severity),
-          strokeWidth: active ? 2 : 1.2
-        },
-        textStyle: { fontWeight: active ? 800 : 700 }
-      }
-    });
+      width: cardWidth,
+      height: cardHeight,
+      index: index + 1,
+      timeLabel: formatAttackTime(event.timeUtc),
+      stageLabel: stageLabel(event.stage),
+      titleLines: wrapGraphText(graphEventTitle(event, index), 24, 2),
+      sourceLine: truncateGraphText(graphSourceLabel(event), 34),
+      targetLine: truncateGraphText(graphTargetLabel(event), 34),
+      verb: graphEventVerb(event),
+      targetType: graphTargetType(event),
+      severity: event.severity || 'info',
+      disposition: event.disposition || 'observed',
+      selected: selectedDetailEventId.value === event.id,
+      iconText: graphIconText(event)
+    };
+    nodes.push(node);
+    return node;
+  });
 
-    nodes.push({
-      id: `${id}-type`,
-      type: 'text',
-      x,
-      y: y + 64,
-      text: {
-        x,
-        y: y + 64,
-        value: `${graphEventVerb(event)} / ${targetType}`,
-        ...graphTextStyle(198, 13, graphSeverityColor(event.severity), 11)
-      },
-      properties: {
-        textStyle: { fontWeight: 700 }
-      }
-    });
-
-    edges.push(
-      createGraphEdge(
-        `audit-sequence-edge-${index}`,
-        index === 0 ? startId : graphEventNodeId(events[index - 1].id, index - 1),
-        id,
-        index === 0 ? '#94a3b8' : graphSeverityColor(event.severity),
-        false
-      )
-    );
-    miniPoints.push({
-      id: event.id,
-      x: Math.min(94, Math.max(8, (x / graphWidth) * 100)),
-      y: Math.min(94, Math.max(8, (y / graphHeight) * 100)),
-      severity: event.severity
+  eventNodes.forEach((node, index) => {
+    const source = index === 0 ? entryNode : eventNodes[index - 1];
+    edges.push({
+      id: `audit-graph-edge-${index}`,
+      d: graphEdgePath(source, node),
+      severity: node.severity,
+      selected: node.selected || source.selected
     });
   });
 
-  return { flow: { nodes, edges }, miniPoints, height: graphHeight };
+  return { lanes, nodes, edges, width: graphWidth, height: graphHeight };
 }
 
 function visibleAttackGraphStages(events: AuditTimelineItem[]) {
@@ -1660,148 +1625,93 @@ function graphEventTitle(event: AuditTimelineItem, index: number) {
   return text.length > 58 ? `${text.slice(0, 55)}...` : text;
 }
 
-function createGraphEdge(id: string, sourceNodeId: string, targetNodeId: string, stroke: string, subtle: boolean) {
-  return {
-    id,
-    type: 'polyline',
-    sourceNodeId,
-    targetNodeId,
-    properties: {
-      style: {
-        stroke,
-        strokeWidth: subtle ? 1 : 1.4,
-        strokeDasharray: subtle ? '4 4' : undefined
-      }
-    }
-  };
+function graphEdgePath(source: AuditGraphNode, target: AuditGraphNode) {
+  const sx = source.x + source.width;
+  const sy = source.y + source.height / 2;
+  const tx = target.x;
+  const ty = target.y + target.height / 2;
+  const bend = Math.max(70, Math.min(170, Math.abs(tx - sx) / 2));
+  return `M ${sx} ${sy} C ${sx + bend} ${sy}, ${tx - bend} ${ty}, ${tx} ${ty}`;
 }
 
-function createLogicFlow(container: HTMLElement) {
-  const lf = new LogicFlow({
-    container,
-    grid: {
-      size: 24,
-      visible: true,
-      type: 'mesh',
-      config: {
-        color: '#eef2f7',
-        thickness: 1
-      }
-    },
-    isSilentMode: false,
-    stopScrollGraph: false,
-    stopZoomGraph: false,
-    stopMoveGraph: false,
-    adjustEdge: false,
-    textEdit: false,
-    nodeTextEdit: false,
-    edgeTextEdit: false,
-    allowRotate: false,
-    allowResize: false,
-    hoverOutline: false,
-    nodeSelectedOutline: true,
-    edgeSelectedOutline: false,
-    outline: false,
-    history: false,
-    keyboard: { enabled: false },
-    edgeType: 'polyline',
-    style: {
-      rect: { radius: 4 },
-      circle: { stroke: '#ffffff', strokeWidth: 2 },
-      nodeText: {
-        color: '#334155',
-        fontSize: 11,
-        lineHeight: 14,
-        overflowMode: 'ellipsis'
-      },
-      text: {
-        color: '#94a3b8',
-        fontSize: 10,
-        lineHeight: 12,
-        overflowMode: 'ellipsis'
-      },
-      polyline: {
-        stroke: '#93c5fd',
-        strokeWidth: 1.4,
-        fill: 'none'
-      },
-      arrow: {
-        offset: 4,
-        verticalLength: 2,
-        endArrowType: 'none'
-      },
-      outline: {
-        stroke: '#2563eb',
-        strokeWidth: 1.5,
-        strokeDasharray: '3 3'
-      }
-    }
-  });
-  lf.updateEditConfig({
-    adjustNodePosition: false,
-    textEdit: false,
-    nodeTextEdit: false,
-    edgeTextEdit: false,
-    nodeTextDraggable: false,
-    edgeTextDraggable: false,
-    hideAnchors: true
-  });
-  lf.on('node:click', ({ data }) => {
-    const id = String(data?.properties?.eventId || '');
-    if (id && attackStoryEvents.value.some(item => item.id === id)) {
-      selectedDetailEventId.value = id;
-    }
-  });
-
-  return lf;
+function graphIconText(event: AuditTimelineItem) {
+  const action = event.action || '';
+  if (action.startsWith('static-scan.')) return 'EXE';
+  if (action.startsWith('network.')) return 'NET';
+  if (action.startsWith('hashdump.') || (event.object || '').includes('credential')) return 'CRED';
+  if (action.startsWith('lateral.')) return 'LAT';
+  if (action.startsWith('dlp.')) return 'DLP';
+  if (action.startsWith('userhook.') || action.includes('process')) return 'PROC';
+  return 'EVT';
 }
 
-function renderLogicFlow(lf: LogicFlow, data: FlowGraphData) {
-  lf.render(data);
-  nextTick(() => {
-    window.setTimeout(() => {
-      lf.fitView(32, 32);
-      highlightAuditDetailGraphNode(selectedDetailEventId.value, false);
-    }, 0);
-  });
+function graphSeverityClass(severity?: string) {
+  if (severity === 'critical' || severity === 'high') return 'critical';
+  if (severity === 'warning' || severity === 'medium') return 'warning';
+  if (severity === 'info') return 'info';
+  return 'operational';
 }
 
 function renderAttackFlows() {
-  nextTick(() => {
-    if (attackDetailFlowRef.value) {
-      attackDetailFlow ??= createLogicFlow(attackDetailFlowRef.value);
-      renderLogicFlow(attackDetailFlow, buildStoryFlowData());
-      if (!selectedDetailEventId.value && attackStoryEvents.value[0]) selectedDetailEventId.value = attackStoryEvents.value[0].id;
-    }
-  });
-}
-
-function zoomAuditDetailFlow(zoomIn: boolean) {
-  attackDetailFlow?.zoom(zoomIn);
-}
-
-function resetAuditDetailFlowView() {
-  attackDetailFlow?.fitView(32, 32);
-  highlightAuditDetailGraphNode(selectedDetailEventId.value, false);
+  if (!selectedDetailEventId.value && attackStoryEvents.value[0]) {
+    selectedDetailEventId.value = attackStoryEvents.value[0].id;
+  }
 }
 
 function focusAuditDetailEvent(eventId: string) {
   selectedDetailEventId.value = eventId;
-  highlightAuditDetailGraphNode(eventId, true);
+  nextTick(() => {
+    const index = attackStoryEvents.value.findIndex(item => item.id === eventId);
+    if (index < 0) return;
+    const nodeId = graphEventNodeId(eventId, index);
+    const element = attackGraphViewportRef.value?.querySelector(`[data-node-id="${nodeId}"]`);
+    element?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+  });
 }
 
-function highlightAuditDetailGraphNode(eventId?: string, focus = false) {
-  if (!attackDetailFlow || !eventId) return;
-  const index = attackStoryEvents.value.findIndex(item => item.id === eventId);
-  if (index < 0) return;
+function resetAuditDetailGraphView() {
+  attackGraphScale.value = 1;
+  nextTick(() => {
+    if (attackGraphViewportRef.value) {
+      attackGraphViewportRef.value.scrollLeft = 0;
+      attackGraphViewportRef.value.scrollTop = 0;
+    }
+  });
+}
 
-  const nodeId = graphEventNodeId(eventId, index);
-  attackDetailFlow.selectElementById(nodeId, false, true);
-  if (focus) {
-    attackDetailFlow.focusOn(nodeId);
+function zoomAuditDetailGraph(zoomIn: boolean) {
+  const next = attackGraphScale.value + (zoomIn ? 0.12 : -0.12);
+  attackGraphScale.value = Math.min(1.5, Math.max(0.72, Number(next.toFixed(2))));
+}
+
+function wrapGraphText(value: string, maxChars: number, maxLines: number) {
+  const text = (value || '-').replace(/\s+/g, ' ').trim();
+  const lines: string[] = [];
+  let rest = text;
+  while (rest && lines.length < maxLines) {
+    if (rest.length <= maxChars) {
+      lines.push(rest);
+      rest = '';
+      break;
+    }
+
+    let cut = rest.lastIndexOf(' ', maxChars);
+    if (cut < Math.floor(maxChars * 0.55)) cut = maxChars;
+    lines.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
   }
+
+  if (rest && lines.length) {
+    lines[lines.length - 1] = truncateGraphText(lines[lines.length - 1], maxChars);
+  }
+
+  return lines.length ? lines : ['-'];
 }
 
+function truncateGraphText(value: string, maxChars: number) {
+  const text = (value || '-').replace(/\s+/g, ' ').trim();
+  return text.length > maxChars ? `${text.slice(0, Math.max(0, maxChars - 3))}...` : text;
+}
 function updateCharts() {
   updateTrendChart(opts => {
     const critical = $t('dataprotector.audit.critical');
@@ -1947,17 +1857,9 @@ async function removeAuditEvent(record: Api.DataProtector.AuditRecord) {
 
 watch([auditResponse, () => appStore.locale], updateCharts, { deep: true });
 watch([attackFlow, selectedAuditRecord, () => appStore.locale], renderAttackFlows, { deep: true });
-watch(selectedDetailEventId, id => {
-  nextTick(() => highlightAuditDetailGraphNode(id, true));
-});
 
 onMounted(() => {
   refresh();
-});
-
-onBeforeUnmount(() => {
-  attackDetailFlow?.destroy();
-  attackDetailFlow = null;
 });
 </script>
 
@@ -2178,36 +2080,120 @@ onBeforeUnmount(() => {
                     <span>{{ $t('dataprotector.audit.info') }}</span>
                   </div>
                 </div>
-                <div class="attack-graph-viewport">
+                <div ref="attackGraphViewportRef" class="attack-graph-viewport">
                   <div
-                    ref="attackDetailFlowRef"
-                    class="logic-flow-panel attack-graph-canvas"
-                    :style="{ height: `${auditDetailGraph.height}px` }"
-                  ></div>
+                    class="attack-graph-content"
+                    :style="{
+                      width: `${auditDetailGraph.width * attackGraphScale}px`,
+                      height: `${auditDetailGraph.height * attackGraphScale}px`
+                    }"
+                  >
+                    <svg
+                      class="attack-graph-svg"
+                      :viewBox="`0 0 ${auditDetailGraph.width} ${auditDetailGraph.height}`"
+                      :width="auditDetailGraph.width"
+                      :height="auditDetailGraph.height"
+                      :style="{ transform: `scale(${attackGraphScale})` }"
+                      role="img"
+                    >
+                      <defs>
+                        <marker id="audit-graph-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
+                          <path d="M0,0 L9,4.5 L0,9 z" fill="#94a3b8" />
+                        </marker>
+                        <filter id="audit-graph-card-shadow" x="-16%" y="-22%" width="132%" height="144%">
+                          <feDropShadow dx="0" dy="8" stdDeviation="9" flood-color="#0f172a" flood-opacity="0.11" />
+                        </filter>
+                      </defs>
+
+                      <g class="graph-lanes">
+                        <g v-for="lane in auditDetailGraph.lanes" :key="lane.key" class="graph-lane">
+                          <rect
+                            class="graph-lane-band"
+                            :x="16"
+                            :y="lane.y"
+                            :width="auditDetailGraph.width - 32"
+                            :height="lane.height"
+                            rx="10"
+                          />
+                          <text class="graph-lane-title" :x="34" :y="lane.y + 30">{{ lane.label }}</text>
+                          <text class="graph-lane-count" :x="34" :y="lane.y + 52">{{ lane.count }} {{ textByLocale('条证据', 'evidence') }}</text>
+                        </g>
+                      </g>
+
+                      <g class="graph-edges">
+                        <path
+                          v-for="edge in auditDetailGraph.edges"
+                          :key="edge.id"
+                          class="attack-graph-edge"
+                          :class="[graphSeverityClass(edge.severity), { selected: edge.selected }]"
+                          :d="edge.d"
+                          marker-end="url(#audit-graph-arrow)"
+                        />
+                      </g>
+
+                      <g class="graph-nodes">
+                        <g
+                          v-for="node in auditDetailGraph.nodes"
+                          :key="node.id"
+                          class="attack-graph-node"
+                          :class="[node.kind, graphSeverityClass(node.severity), { selected: node.selected }]"
+                          :data-node-id="node.id"
+                          @click="node.eventId && focusAuditDetailEvent(node.eventId)"
+                        >
+                          <rect
+                            class="graph-node-card"
+                            :x="node.x"
+                            :y="node.y"
+                            :width="node.width"
+                            :height="node.height"
+                            :rx="node.kind === 'entry' ? 12 : 8"
+                          />
+                          <rect
+                            class="graph-node-accent"
+                            :x="node.x"
+                            :y="node.y"
+                            :width="6"
+                            :height="node.height"
+                            :rx="node.kind === 'entry' ? 6 : 4"
+                          />
+                          <rect class="graph-node-icon" :x="node.x + 14" :y="node.y + 16" width="42" height="34" rx="7" />
+                          <text class="graph-node-icon-text" :x="node.x + 35" :y="node.y + 37">{{ node.iconText }}</text>
+                          <text class="graph-node-index" :x="node.x + node.width - 24" :y="node.y + 30">{{ node.index || '' }}</text>
+                          <text class="graph-node-kicker" :x="node.x + 66" :y="node.y + 25">{{ node.timeLabel }}</text>
+                          <text class="graph-node-stage" :x="node.x + 66" :y="node.y + 43">{{ node.stageLabel }}</text>
+                          <text class="graph-node-title" :x="node.x + 16" :y="node.y + 75">
+                            <tspan
+                              v-for="(line, lineIndex) in node.titleLines"
+                              :key="`${node.id}-title-${lineIndex}`"
+                              :x="node.x + 16"
+                              :dy="lineIndex === 0 ? 0 : 17"
+                            >
+                              {{ line }}
+                            </tspan>
+                          </text>
+                          <text v-if="node.sourceLine" class="graph-node-meta" :x="node.x + 16" :y="node.y + node.height - 32">
+                            {{ textByLocale('来源', 'Source') }}: {{ node.sourceLine }}
+                          </text>
+                          <text v-if="node.targetLine" class="graph-node-meta" :x="node.x + 16" :y="node.y + node.height - 14">
+                            {{ textByLocale('对象', 'Object') }}: {{ node.targetLine }}
+                          </text>
+                          <text v-if="node.verb" class="graph-node-verb" :x="node.x + node.width - 16" :y="node.y + node.height - 14">
+                            {{ node.verb }}
+                          </text>
+                        </g>
+                      </g>
+                    </svg>
+                  </div>
                   <div class="attack-graph-tools">
-                    <NButton quaternary circle size="small" :title="textByLocale('适应窗口', 'Fit view')" @click="resetAuditDetailFlowView">
+                    <NButton quaternary circle size="small" :title="textByLocale('适应窗口', 'Fit view')" @click="resetAuditDetailGraphView">
                       <template #icon><SvgIcon icon="mdi:fit-to-page-outline" /></template>
                     </NButton>
-                    <NButton quaternary circle size="small" :title="textByLocale('放大', 'Zoom in')" @click="zoomAuditDetailFlow(true)">
+                    <NButton quaternary circle size="small" :title="textByLocale('放大', 'Zoom in')" @click="zoomAuditDetailGraph(true)">
                       <template #icon><SvgIcon icon="mdi:magnify-plus-outline" /></template>
                     </NButton>
-                    <NButton quaternary circle size="small" :title="textByLocale('缩小', 'Zoom out')" @click="zoomAuditDetailFlow(false)">
+                    <NButton quaternary circle size="small" :title="textByLocale('缩小', 'Zoom out')" @click="zoomAuditDetailGraph(false)">
                       <template #icon><SvgIcon icon="mdi:magnify-minus-outline" /></template>
                     </NButton>
-                  </div>
-                  <div class="attack-mini-map">
-                    <div class="mini-map-title">{{ $t('dataprotector.audit.detail.navigation') }}</div>
-                    <div class="mini-map-body">
-                      <button
-                        v-for="point in auditDetailGraph.miniPoints"
-                        :key="point.id"
-                        type="button"
-                        class="mini-map-point"
-                        :class="{ active: selectedDetailEventId === point.id }"
-                        :style="{ left: `${point.x}%`, top: `${point.y}%`, background: graphSeverityColor(point.severity) }"
-                        @click="focusAuditDetailEvent(point.id)"
-                      />
-                    </div>
                   </div>
                 </div>
               </section>
@@ -2396,11 +2382,6 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-.logic-flow-panel {
-  overflow: hidden;
-  background: #f4f6f8;
-}
-
 .story-stage-summary {
   display: flex;
   flex-wrap: wrap;
@@ -2512,13 +2493,170 @@ onBeforeUnmount(() => {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: auto;
 }
 
-.attack-graph-canvas {
-  width: 100%;
-  min-height: 430px;
-  border: 0;
-  border-radius: 0;
+.attack-graph-content {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.attack-graph-svg {
+  display: block;
+  overflow: visible;
+  transform-origin: 0 0;
+}
+
+.graph-lane-band {
+  fill: rgb(255 255 255 / 70%);
+  stroke: rgb(226 232 240 / 92%);
+  stroke-width: 1;
+}
+
+.graph-lane-title {
+  fill: #334155;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.graph-lane-count {
+  fill: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.attack-graph-edge {
+  fill: none;
+  stroke: #94a3b8;
+  stroke-linecap: round;
+  stroke-width: 2;
+  opacity: 0.78;
+}
+
+.attack-graph-edge.critical {
+  stroke: #ef4444;
+}
+
+.attack-graph-edge.warning {
+  stroke: #f59e0b;
+}
+
+.attack-graph-edge.info {
+  stroke: #64748b;
+}
+
+.attack-graph-edge.selected {
+  stroke-width: 3;
+  opacity: 1;
+}
+
+.attack-graph-node {
+  cursor: pointer;
+}
+
+.attack-graph-node.entry {
+  cursor: default;
+}
+
+.graph-node-card {
+  fill: #ffffff;
+  stroke: #cbd5e1;
+  stroke-width: 1.2;
+  filter: url(#audit-graph-card-shadow);
+}
+
+.attack-graph-node.critical .graph-node-card {
+  fill: #fff7f7;
+  stroke: #ef4444;
+}
+
+.attack-graph-node.warning .graph-node-card {
+  fill: #fff7ed;
+  stroke: #f59e0b;
+}
+
+.attack-graph-node.selected .graph-node-card {
+  stroke: #2563eb;
+  stroke-width: 2.4;
+}
+
+.graph-node-accent {
+  fill: #94a3b8;
+}
+
+.attack-graph-node.critical .graph-node-accent {
+  fill: #ef4444;
+}
+
+.attack-graph-node.warning .graph-node-accent {
+  fill: #f59e0b;
+}
+
+.attack-graph-node.info .graph-node-accent {
+  fill: #64748b;
+}
+
+.graph-node-icon {
+  fill: #eef2f7;
+  stroke: #d8e1ed;
+}
+
+.attack-graph-node.critical .graph-node-icon {
+  fill: #fee2e2;
+  stroke: #fecaca;
+}
+
+.attack-graph-node.warning .graph-node-icon {
+  fill: #ffedd5;
+  stroke: #fed7aa;
+}
+
+.graph-node-icon-text {
+  dominant-baseline: middle;
+  fill: #334155;
+  font-size: 10px;
+  font-weight: 900;
+  text-anchor: middle;
+}
+
+.graph-node-index {
+  dominant-baseline: middle;
+  fill: #94a3b8;
+  font-size: 18px;
+  font-weight: 900;
+  text-anchor: middle;
+}
+
+.graph-node-kicker {
+  fill: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.graph-node-stage {
+  fill: #2563eb;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.graph-node-title {
+  fill: #172033;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.graph-node-meta {
+  fill: #475569;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.graph-node-verb {
+  fill: #64748b;
+  font-size: 11px;
+  font-weight: 900;
+  text-anchor: end;
 }
 
 .attack-graph-tools {
@@ -2534,55 +2672,6 @@ onBeforeUnmount(() => {
   background: rgb(255 255 255 / 92%);
   border: 1px solid rgb(226 232 240);
   box-shadow: 0 5px 14px rgb(15 23 42 / 10%);
-}
-
-.attack-mini-map {
-  position: absolute;
-  bottom: 14px;
-  right: 14px;
-  width: 148px;
-  padding: 8px;
-  background: rgb(255 255 255 / 92%);
-  border: 1px solid rgb(203 213 225);
-  border-radius: 4px;
-  box-shadow: 0 10px 28px rgb(15 23 42 / 12%);
-}
-
-.mini-map-title {
-  margin-bottom: 6px;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.mini-map-body {
-  position: relative;
-  height: 104px;
-  overflow: hidden;
-  background:
-    linear-gradient(90deg, rgb(226 232 240 / 72%) 1px, transparent 1px),
-    linear-gradient(rgb(226 232 240 / 72%) 1px, transparent 1px),
-    #f8fafc;
-  background-size: 18px 18px;
-  border: 1px solid rgb(226 232 240);
-}
-
-.mini-map-point {
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  padding: 0;
-  cursor: pointer;
-  border: 1px solid #ffffff;
-  border-radius: 999px;
-  box-shadow: 0 1px 4px rgb(15 23 42 / 18%);
-  transform: translate(-50%, -50%);
-}
-
-.mini-map-point.active {
-  width: 13px;
-  height: 13px;
-  outline: 2px solid rgb(96 165 250 / 48%);
 }
 
 .attack-event-timeline {
@@ -2890,8 +2979,8 @@ onBeforeUnmount(() => {
     right: 10px;
   }
 
-  .attack-mini-map {
-    display: none;
+  .attack-graph-viewport {
+    min-height: 360px;
   }
 
   .attack-event-timeline {
