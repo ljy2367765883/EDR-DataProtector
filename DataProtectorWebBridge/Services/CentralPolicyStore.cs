@@ -1815,6 +1815,12 @@ namespace DataProtectorWebBridge.Services
             string stage = ClassifyAttackStage(record);
             string severity = AuditLog.ResolveSeverity(record);
             string disposition = AuditLog.ResolveDisposition(record);
+
+            if (action.StartsWith("static-scan.", StringComparison.OrdinalIgnoreCase))
+            {
+                return BuildStaticScanAttackFlowEvent(record, stage, severity, disposition);
+            }
+
             string sourceProcess = FirstNonEmpty(record.SourceProcess, record.Extension);
             string targetProcess = FirstNonEmpty(record.TargetProcess, LooksLikeProcessPath(record.Target) ? record.Target : string.Empty);
             string objectType = FirstNonEmpty(record.ObjectType, InferAttackObjectType(action));
@@ -1844,6 +1850,53 @@ namespace DataProtectorWebBridge.Services
                 policyName = record.PolicyName ?? string.Empty,
                 remoteIdentity = IsRemoteStage(stage) ? FirstNonEmpty(record.TargetHost, record.Target, record.ObjectName) : string.Empty,
                 rawMessage = record.Message ?? string.Empty
+            };
+        }
+
+        private static AuditAttackFlowEvent BuildStaticScanAttackFlowEvent(AuditLog.AuditRecord record, string stage, string severity, string disposition)
+        {
+            Dictionary<string, object> evidence = ParseJsonObject(record.EventDetails);
+            string sourceProcess = FirstNonEmpty(record.SourceProcess, record.Extension, ReadJsonString(evidence, "sourceProcess"));
+            string sourcePid = FirstNonEmpty(record.SourcePid, ReadJsonString(evidence, "sourcePid"));
+            string objectName = FirstNonEmpty(ReadJsonString(evidence, "filePath"), record.ObjectName, record.Target, record.TargetProcess);
+            string fileName = FirstNonEmpty(ReadJsonString(evidence, "fileName"), SafeFileName(objectName), record.TargetProcess);
+            string verdict = FirstNonEmpty(ReadJsonString(evidence, "verdict"), "detected");
+            string score = ReadJsonString(evidence, "score");
+            string operation = FirstNonEmpty(ReadJsonString(evidence, "operation"), ReadJsonString(evidence, "landingReason"));
+            string quarantine = ReadJsonString(evidence, "quarantinePath");
+            string titlePrefix = string.Equals(verdict, "malicious", StringComparison.OrdinalIgnoreCase)
+                ? "High-risk executable landed"
+                : "Executable file landed";
+
+            return new AuditAttackFlowEvent
+            {
+                id = BuildStableId(record.TimestampUtc, record.Action, objectName, record.Message),
+                timeUtc = record.TimestampUtc ?? string.Empty,
+                host = FirstNonEmpty(record.SourceHost, record.Host, record.Actor),
+                user = FirstNonEmpty(record.SourceUser, record.Actor),
+                stage = stage,
+                category = "static-scan",
+                action = record.Action ?? string.Empty,
+                title = titlePrefix + ": " + fileName,
+                detail = JoinCompact(" / ",
+                    "source=" + FirstNonEmpty(sourceProcess, "unknown"),
+                    string.IsNullOrWhiteSpace(operation) ? string.Empty : "event=" + operation,
+                    string.IsNullOrWhiteSpace(verdict) ? string.Empty : "verdict=" + verdict,
+                    string.IsNullOrWhiteSpace(score) ? string.Empty : "score=" + score,
+                    string.IsNullOrWhiteSpace(quarantine) ? string.Empty : "quarantine=" + quarantine),
+                severity = severity,
+                disposition = disposition,
+                sourceProcess = sourceProcess,
+                sourcePid = sourcePid,
+                sourceUser = FirstNonEmpty(record.SourceUser, record.Actor),
+                targetProcess = fileName,
+                targetPid = record.TargetPid ?? string.Empty,
+                objectType = "executable-file",
+                objectName = objectName,
+                objectFormat = FirstNonEmpty(record.ObjectFormat, ReadJsonString(evidence, "sha256")),
+                policyName = FirstNonEmpty(record.PolicyName, "static-scan"),
+                remoteIdentity = string.Empty,
+                rawMessage = FirstNonEmpty(record.EventDetails, record.Message)
             };
         }
 
@@ -1892,6 +1945,7 @@ namespace DataProtectorWebBridge.Services
             }
 
             if (action.StartsWith("sandbox.sample", StringComparison.OrdinalIgnoreCase) ||
+                action.StartsWith("static-scan.", StringComparison.OrdinalIgnoreCase) ||
                 action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase) ||
                 objectType.IndexOf("file", StringComparison.OrdinalIgnoreCase) >= 0)
             {
@@ -2174,6 +2228,7 @@ namespace DataProtectorWebBridge.Services
         {
             if (string.IsNullOrWhiteSpace(action)) return "object";
             if (action.StartsWith("webshell.", StringComparison.OrdinalIgnoreCase)) return "file";
+            if (action.StartsWith("static-scan.", StringComparison.OrdinalIgnoreCase)) return "executable-file";
             if (action.StartsWith("hashdump.", StringComparison.OrdinalIgnoreCase)) return "credential";
             if (action.StartsWith("lateral.", StringComparison.OrdinalIgnoreCase)) return "remote-admin";
             if (action.StartsWith("network.", StringComparison.OrdinalIgnoreCase)) return "remote";
@@ -2362,6 +2417,41 @@ namespace DataProtectorWebBridge.Services
             }
 
             return string.Empty;
+        }
+
+        private static Dictionary<string, object> ParseJsonObject(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text) || !text.TrimStart().StartsWith("{", StringComparison.Ordinal))
+            {
+                return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            try
+            {
+                JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+                Dictionary<string, object> parsed = serializer.Deserialize<Dictionary<string, object>>(text);
+                return parsed ?? new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        private static string ReadJsonString(Dictionary<string, object> data, string key)
+        {
+            object value;
+            if (data == null || string.IsNullOrWhiteSpace(key) || !data.TryGetValue(key, out value) || value == null)
+            {
+                return string.Empty;
+            }
+
+            if (value is string)
+            {
+                return (string)value;
+            }
+
+            return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
         }
 
         private static string JoinCompact(string separator, params string[] values)

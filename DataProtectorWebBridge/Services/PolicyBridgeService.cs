@@ -4015,7 +4015,46 @@ namespace DataProtectorWebBridge.Services
                     "suspicious",
                     "Defense Evasion / Persistence",
                     "T1574 Hijack Execution Flow",
-                    "进程从用户可写目录加载 DLL，按 DLL 劫持/侧载可疑链处理。")
+                    "进程从用户可写目录加载 DLL，按 DLL 劫持/侧载可疑链处理。"),
+                NewBehaviorRule(
+                    "dp.behavior.section-map-injection",
+                    "Section 映射注入链",
+                    new[] { "userhook.observed.nt-map-view-of-section", "userhook.blocked.nt-map-view-of-section" },
+                    new[] { "userhook.observed.nt-unmap-view", "userhook.observed.nt-create-thread-ex", "userhook.observed.create-remote-thread", "userhook.behavior-remote-thread-create", "userhook.observed.nt-queue-apc-thread", "userhook.observed.set-thread-context", "userhook.observed.resume-thread" },
+                    90,
+                    2,
+                    100,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion / Execution",
+                    "T1055.001 Section-based process injection",
+                    "NtMapViewOfSection 将可执行节映射到远程进程，配合线程/APC 触发，是 Cobalt Strike/Havoc 等主流 C2 的首选注入路径。"),
+                NewBehaviorRule(
+                    "dp.behavior.native-apc-injection",
+                    "原生 APC 注入链",
+                    new[] { "userhook.observed.nt-queue-apc-thread", "userhook.blocked.nt-queue-apc-thread" },
+                    new[] { "userhook.observed.nt-allocate-executable-memory", "userhook.observed.nt-protect-executable-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.write-process-memory", "userhook.observed.nt-map-view-of-section" },
+                    90,
+                    2,
+                    100,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion / Execution",
+                    "T1055.004 Native APC injection",
+                    "直接调用 NtQueueApcThread 绕过 QueueUserAPC 钩子，配合内存写入或节映射形成完整注入链（Early-Bird APC、NtTestAlert 等变体）。"),
+                NewBehaviorRule(
+                    "dp.behavior.suspend-hollow-chain",
+                    "挂起进程空洞化链",
+                    new[] { "userhook.observed.nt-suspend-thread", "userhook.observed.nt-suspend-process", "userhook.blocked.nt-suspend-process" },
+                    new[] { "userhook.observed.nt-unmap-view", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.set-thread-context", "userhook.observed.resume-thread" },
+                    120,
+                    2,
+                    95,
+                    "critical",
+                    "malicious",
+                    "Defense Evasion",
+                    "T1055.012 Process Hollowing",
+                    "NtSuspendThread/NtSuspendProcess 挂起目标后写入载荷并修改执行流，NtUnmapViewOfSection 变体的前置步骤。")
             };
         }
 

@@ -814,12 +814,11 @@ namespace DataProtectorWebBridge.Services
                 return null;
             }
 
-            // Heuristics normally cap below the YARA/hash engines so they rarely
-            // block on their own. The "MZ-without-PE" shellcode-stub shape is an
-            // exception: it is high-confidence on its own, so allow it into the
-            // malicious band.
+            // Heuristics are intentionally advisory. YARA/hash reputation may
+            // block by themselves, but custom PE/string heuristics should not be
+            // enough to quarantine normal software without corroboration.
             bool strongMalformedPe = notes.Contains("MZ-without-PE");
-            int cap = strongMalformedPe ? 85 : 60;
+            int cap = strongMalformedPe ? 60 : 35;
             if (score > cap)
             {
                 score = cap;

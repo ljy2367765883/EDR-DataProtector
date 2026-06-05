@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onMounted, reactive, ref, watch } from 'vue';
+import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { NButton, NTag, type DataTableColumns, type PaginationProps } from 'naive-ui';
 import { useEcharts } from '@/hooks/common/echarts';
 import { fetchAuditAttackFlow, fetchAuditEvents, fetchClearAuditEvents, fetchDevices, fetchRemoveAuditEvent } from '@/service/api';
@@ -344,6 +344,8 @@ const columns = computed<DataTableColumns<Api.DataProtector.AuditRecord>>(() => 
     title: $t('dataprotector.audit.columns.time'),
     key: 'TimestampUtc',
     width: 190,
+    defaultSortOrder: 'descend',
+    sorter: (a, b) => new Date(a.TimestampUtc || 0).getTime() - new Date(b.TimestampUtc || 0).getTime(),
     render(row) {
       return row.TimestampUtc ? new Date(row.TimestampUtc).toLocaleString() : '-';
     }
@@ -1858,8 +1860,48 @@ async function removeAuditEvent(record: Api.DataProtector.AuditRecord) {
 watch([auditResponse, () => appStore.locale], updateCharts, { deep: true });
 watch([attackFlow, selectedAuditRecord, () => appStore.locale], renderAttackFlows, { deep: true });
 
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let lastKnownTotal = -1;
+
+async function pollForNewEvents() {
+  if (loading.value) return;
+  try {
+    const query = buildQuery();
+    const { error, data } = await fetchAuditEvents({ ...query, page: 1, pageSize: 1 });
+    if (error || data == null) return;
+    const newTotal = data.total ?? 0;
+    if (lastKnownTotal >= 0 && newTotal > lastKnownTotal) {
+      const count = newTotal - lastKnownTotal;
+      window.$notification?.warning({
+        title: isChineseLocale() ? '新威胁事件' : 'New Threat Events',
+        content: isChineseLocale()
+          ? `检测到 ${count} 条新事件，已自动刷新至最新。`
+          : `${count} new event(s) detected. The list has been refreshed.`,
+        duration: 6000
+      });
+      await refresh(true);
+      lastKnownTotal = auditResponse.value?.total ?? newTotal;
+    } else {
+      lastKnownTotal = newTotal;
+    }
+  } catch {
+    // poll failures are silent
+  }
+}
+
+watch(auditResponse, response => {
+  if (response != null && lastKnownTotal < 0) {
+    lastKnownTotal = response.total ?? 0;
+  }
+});
+
 onMounted(() => {
   refresh();
+  pollTimer = setInterval(pollForNewEvents, 15000);
+});
+
+onUnmounted(() => {
+  if (pollTimer !== null) clearInterval(pollTimer);
 });
 </script>
 

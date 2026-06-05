@@ -110,6 +110,12 @@ typedef ULONG (WINAPI *PFN_EventWriteTransfer)(REGHANDLE, PCEVENT_DESCRIPTOR, LP
 typedef ULONG (WINAPI *PFN_EventWriteString)(REGHANDLE, UCHAR, ULONGLONG, PCWSTR);
 typedef NTSTATUS (NTAPI *PFN_EtwEventWrite)(REGHANDLE, PCEVENT_DESCRIPTOR, ULONG, PEVENT_DATA_DESCRIPTOR);
 typedef NTSTATUS (NTAPI *PFN_EtwEventWriteTransfer)(REGHANDLE, PCEVENT_DESCRIPTOR, LPCGUID, LPCGUID, ULONG, PEVENT_DATA_DESCRIPTOR);
+typedef NTSTATUS (NTAPI *PFN_NtMapViewOfSection)(
+    HANDLE, HANDLE, PVOID *, ULONG_PTR, SIZE_T, PLARGE_INTEGER, PSIZE_T, DWORD, ULONG, ULONG);
+typedef NTSTATUS (NTAPI *PFN_NtQueueApcThread)(
+    HANDLE, PVOID, PVOID, PVOID, PVOID);
+typedef NTSTATUS (NTAPI *PFN_NtSuspendThread)(HANDLE, PULONG);
+typedef NTSTATUS (NTAPI *PFN_NtSuspendProcess)(HANDLE);
 
 static PFN_CreateRemoteThread gRealCreateRemoteThread;
 static PFN_CreateRemoteThreadEx gRealCreateRemoteThreadEx;
@@ -141,6 +147,10 @@ static PFN_EventWriteTransfer gRealEventWriteTransfer;
 static PFN_EventWriteString gRealEventWriteString;
 static PFN_EtwEventWrite gRealEtwEventWrite;
 static PFN_EtwEventWriteTransfer gRealEtwEventWriteTransfer;
+static PFN_NtMapViewOfSection gRealNtMapViewOfSection;
+static PFN_NtQueueApcThread gRealNtQueueApcThread;
+static PFN_NtSuspendThread gRealNtSuspendThread;
+static PFN_NtSuspendProcess gRealNtSuspendProcess;
 
 static INIT_ONCE gInitializeOnce = INIT_ONCE_STATIC_INIT;
 static SRWLOCK gEventLock = SRWLOCK_INIT;
@@ -2452,6 +2462,95 @@ DpHookNtUnmapViewOfSection(
     return gRealNtUnmapViewOfSection(processHandle, baseAddress);
 }
 
+// NtMapViewOfSection - section-based injection (Cobalt Strike, process hollowing
+// variant, PE injection without WriteProcessMemory). Hook reports remote mappings;
+// blocks cross-process executable mappings in enforce mode.
+static NTSTATUS NTAPI
+DpHookNtMapViewOfSection(
+    HANDLE sectionHandle,
+    HANDLE processHandle,
+    PVOID *baseAddress,
+    ULONG_PTR zeroBits,
+    SIZE_T commitSize,
+    PLARGE_INTEGER sectionOffset,
+    PSIZE_T viewSize,
+    DWORD inheritDisposition,
+    ULONG allocationType,
+    ULONG win32Protect
+    )
+{
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
+    BOOL isRemote = (processHandle != NULL &&
+                     processHandle != GetCurrentProcess() &&
+                     targetPid != gCurrentProcessId &&
+                     targetPid != 0);
+
+    if (isRemote && DpRuntimeIsExecutableProtection(win32Protect)) {
+        if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
+            DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-map-view-of-section", L"injection", L"NtMapViewOfSection", L"NtMapViewOfSection", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, 0, win32Protect, NULL);
+            return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
+        }
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-map-view-of-section", L"injection", L"NtMapViewOfSection", L"NtMapViewOfSection", ERROR_SUCCESS, FALSE, targetPid, 0, win32Protect, NULL);
+    }
+
+    return gRealNtMapViewOfSection(sectionHandle, processHandle, baseAddress, zeroBits,
+                                   commitSize, sectionOffset, viewSize,
+                                   inheritDisposition, allocationType, win32Protect);
+}
+
+// NtQueueApcThread - native APC injection bypassing the hooked QueueUserAPC.
+// Used by Cobalt Strike, Havoc C2, and common shellcode loaders (early-bird APC,
+// NtTestAlert trigger) because it operates directly on the thread handle without
+// going through the Win32 layer.
+static NTSTATUS NTAPI
+DpHookNtQueueApcThread(
+    HANDLE threadHandle,
+    PVOID apcRoutine,
+    PVOID apcArgument1,
+    PVOID apcArgument2,
+    PVOID apcArgument3
+    )
+{
+    DWORD targetPid = DpRuntimeGetTargetThreadProcessId(threadHandle);
+    if (DpRuntimeShouldBlockThreadPrimitive(threadHandle)) {
+        DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-queue-apc-thread", L"injection", L"NtQueueApcThread", L"NtQueueApcThread", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, 0, 0, NULL);
+        return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
+    }
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-queue-apc-thread", L"injection", L"NtQueueApcThread", L"NtQueueApcThread", ERROR_SUCCESS, FALSE, targetPid, 0, 0, NULL);
+    return gRealNtQueueApcThread(threadHandle, apcRoutine, apcArgument1, apcArgument2, apcArgument3);
+}
+
+// NtSuspendThread / NtSuspendProcess - used in freeze-and-hollow and thread
+// hijacking to stop a target before writing/redirecting its execution.
+static NTSTATUS NTAPI
+DpHookNtSuspendThread(
+    HANDLE threadHandle,
+    PULONG previousSuspendCount
+    )
+{
+    DWORD targetPid = DpRuntimeGetTargetThreadProcessId(threadHandle);
+    if (targetPid != 0 && targetPid != gCurrentProcessId) {
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-suspend-thread", L"injection", L"NtSuspendThread", L"NtSuspendThread", ERROR_SUCCESS, FALSE, targetPid, 0, 0, NULL);
+    }
+    return gRealNtSuspendThread(threadHandle, previousSuspendCount);
+}
+
+static NTSTATUS NTAPI
+DpHookNtSuspendProcess(
+    HANDLE processHandle
+    )
+{
+    DWORD targetPid = DpRuntimeGetTargetProcessId(processHandle);
+    if (targetPid != 0 && targetPid != gCurrentProcessId) {
+        if (DpRuntimeShouldBlockInjectionPrimitive(processHandle)) {
+            DpRuntimeWriteBehaviorEvent(L"userhook.blocked.nt-suspend-process", L"injection", L"NtSuspendProcess", L"NtSuspendProcess", DP_RUNTIME_STATUS_BLOCKED, TRUE, targetPid, 0, 0, NULL);
+            return (NTSTATUS)DP_RUNTIME_STATUS_BLOCKED;
+        }
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-suspend-process", L"injection", L"NtSuspendProcess", L"NtSuspendProcess", ERROR_SUCCESS, FALSE, targetPid, 0, 0, NULL);
+    }
+    return gRealNtSuspendProcess(processHandle);
+}
+
 static ULONG WINAPI
 DpHookEventRegister(
     LPCGUID providerId,
@@ -2549,10 +2648,7 @@ DpRuntimeHookApi(
     BOOL isNtdllSyscall;
 
     if (module == NULL) {
-        module = LoadLibraryW(ModuleName);
-    }
-
-    if (module == NULL) {
+        DpRuntimeWriteEvent(L"userhook.runtime.module-not-loaded", ModuleName, ERROR_SUCCESS, FALSE);
         return FALSE;
     }
 
@@ -2648,6 +2744,10 @@ DpRuntimeInitializeOnce(
         DpRuntimeHookApi(L"ntdll.dll", "NtAllocateVirtualMemory", DpHookNtAllocateVirtualMemory, (LPVOID *)&gRealNtAllocateVirtualMemory);
         DpRuntimeHookApi(L"ntdll.dll", "NtProtectVirtualMemory", DpHookNtProtectVirtualMemory, (LPVOID *)&gRealNtProtectVirtualMemory);
         DpRuntimeHookApi(L"ntdll.dll", "NtUnmapViewOfSection", DpHookNtUnmapViewOfSection, (LPVOID *)&gRealNtUnmapViewOfSection);
+        DpRuntimeHookApi(L"ntdll.dll", "NtMapViewOfSection", DpHookNtMapViewOfSection, (LPVOID *)&gRealNtMapViewOfSection);
+        DpRuntimeHookApi(L"ntdll.dll", "NtQueueApcThread", DpHookNtQueueApcThread, (LPVOID *)&gRealNtQueueApcThread);
+        DpRuntimeHookApi(L"ntdll.dll", "NtSuspendThread", DpHookNtSuspendThread, (LPVOID *)&gRealNtSuspendThread);
+        DpRuntimeHookApi(L"ntdll.dll", "NtSuspendProcess", DpHookNtSuspendProcess, (LPVOID *)&gRealNtSuspendProcess);
 
         if (gMonitorEtwTamper) {
             DpRuntimeHookApi(L"advapi32.dll", "EventRegister", DpHookEventRegister, (LPVOID *)&gRealEventRegister);

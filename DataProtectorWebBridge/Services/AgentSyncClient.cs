@@ -104,10 +104,6 @@ namespace DataProtectorWebBridge.Services
         private void SyncOnce()
         {
             object rawStatus = policyService.GetStatus();
-            AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
-            PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
-            CentralPolicyStore.RemovableDeviceObservation[] removableDevices = removableDeviceInventory.Snapshot();
-            CentralPolicyStore.SandboxSampleSubmission[] sandboxSamples = CollectSandboxExecutableEvents();
 
             //
             // Drain kernel executable-scan requests and submit verdicts. The
@@ -126,6 +122,11 @@ namespace DataProtectorWebBridge.Services
             {
                 Console.Error.WriteLine(DateTime.Now.ToString("s") + " static scan cycle failed: " + scanEx.Message);
             }
+
+            AuditLog.AuditRecord[] auditRecords = DrainLocalAuditRecords();
+            PolicyBridgeService.NetworkConnectionEventDto[] networkConnections = DrainNetworkConnectionsIfDue();
+            CentralPolicyStore.RemovableDeviceObservation[] removableDevices = removableDeviceInventory.Snapshot();
+            CentralPolicyStore.SandboxSampleSubmission[] sandboxSamples = CollectSandboxExecutableEvents();
 
             if (auditRecords.Length > 0)
             {
@@ -407,7 +408,7 @@ namespace DataProtectorWebBridge.Services
             AuditLog.AuditRecord[] lateralRecords = DrainAuditSource("lateral", policyService.DrainLateralDefenseAuditRecords);
             AuditLog.AuditRecord[] userHookRecords = DrainAuditSource("userhook", () => policyService.DrainUserHookDefenseAuditRecords(currentUserHookDefensePolicy));
             AuditLog.AuditRecord[] dlpRecords = DrainAuditSource("dlp", dlpProtectionService.DrainAuditRecords);
-            AuditLog.AuditRecord[] staticScanRecords = DrainAuditSource("staticscan", DrainLocalScanAuditRecords);
+            AuditLog.AuditRecord[] staticScanRecords = DrainAuditSource("staticscan", DrainStaticScanAuditRecords);
             if (fileHunterRecords.Length > 0)
             {
                 foreach (AuditLog.AuditRecord record in fileHunterRecords.Take(5))
@@ -457,6 +458,14 @@ namespace DataProtectorWebBridge.Services
             records.AddRange(userHookRecords);
             records.AddRange(dlpRecords);
             records.AddRange(staticScanRecords);
+            return records.ToArray();
+        }
+
+        private AuditLog.AuditRecord[] DrainStaticScanAuditRecords()
+        {
+            List<AuditLog.AuditRecord> records = new List<AuditLog.AuditRecord>();
+            records.AddRange(staticScanService.DrainAuditRecords());
+            records.AddRange(DrainLocalScanAuditRecords());
             return records.ToArray();
         }
 

@@ -2,7 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
 
 namespace DataProtectorWebBridge.Services
 {
@@ -27,8 +31,8 @@ namespace DataProtectorWebBridge.Services
         public const uint VerdictMalicious = 3;
 
         // Default fusion thresholds (0..100). Tunable via policy later.
-        private const int DefaultSuspiciousThreshold = 40;
-        private const int DefaultMaliciousThreshold = 70;
+        private const int DefaultSuspiciousThreshold = 60;
+        private const int DefaultMaliciousThreshold = 75;
 
         // Bound the read so a huge file cannot exhaust the agent.
         private const int MaxScanBytes = 16 * 1024 * 1024;
@@ -39,8 +43,14 @@ namespace DataProtectorWebBridge.Services
         private readonly PolicyBridgeService policyService;
         private readonly List<IScanEngine> engines = new List<IScanEngine>();
         private readonly object syncRoot = new object();
+        private readonly object auditRoot = new object();
+        private readonly List<AuditLog.AuditRecord> auditRecords = new List<AuditLog.AuditRecord>();
+        private readonly string quarantineRoot;
+        private readonly JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+        private readonly Timer requestPump;
         private int suspiciousThreshold = DefaultSuspiciousThreshold;
         private int maliciousThreshold = DefaultMaliciousThreshold;
+        private int processingRequests;
 
         public StaticScanService(PolicyBridgeService policyService, string ruleRoot)
         {
@@ -50,9 +60,11 @@ namespace DataProtectorWebBridge.Services
                 ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector")
                 : ruleRoot;
             string scanRoot = Path.Combine(baseRoot, "StaticScan");
+            quarantineRoot = Path.Combine(scanRoot, "quarantine");
             try
             {
                 Directory.CreateDirectory(scanRoot);
+                Directory.CreateDirectory(quarantineRoot);
             }
             catch
             {
@@ -87,6 +99,8 @@ namespace DataProtectorWebBridge.Services
                     Console.Error.WriteLine(DateTime.Now.ToString("s") + " YARA warmup failed: " + ex.Message);
                 }
             });
+
+            requestPump = new Timer(_ => ProcessPendingRequests(), null, TimeSpan.FromMilliseconds(500), TimeSpan.FromMilliseconds(500));
         }
 
         public string[] EngineStatus()
@@ -126,6 +140,11 @@ namespace DataProtectorWebBridge.Services
         /// </summary>
         public int ProcessPendingRequests()
         {
+            if (Interlocked.Exchange(ref processingRequests, 1) != 0)
+            {
+                return 0;
+            }
+
             PolicyBridgeService.StaticScanRequestDto[] requests;
             try
             {
@@ -134,57 +153,291 @@ namespace DataProtectorWebBridge.Services
             catch (Exception ex)
             {
                 Console.Error.WriteLine(DateTime.Now.ToString("s") + " static scan request drain failed: " + ex.Message);
+                Interlocked.Exchange(ref processingRequests, 0);
                 return 0;
             }
 
             if (requests == null || requests.Length == 0)
             {
+                Interlocked.Exchange(ref processingRequests, 0);
                 return 0;
             }
 
             int processed = 0;
-            foreach (PolicyBridgeService.StaticScanRequestDto request in requests)
+            try
             {
-                if (processed >= MaxRequestsPerCycle)
+                PolicyBridgeService.StaticScanPolicyDto policy = QueryPolicyOrDefault();
+
+                foreach (PolicyBridgeService.StaticScanRequestDto request in requests)
                 {
-                    break;
-                }
-
-                try
-                {
-                    ScanResultFusion fusion = ScanOne(request);
-                    PolicyBridgeService.StaticScanVerdictRequest verdict = new PolicyBridgeService.StaticScanVerdictRequest
+                    if (processed >= MaxRequestsPerCycle)
                     {
-                        requestId = request.requestId,
-                        processId = request.processId,
-                        fileSize = request.fileSize,
-                        operation = request.operation,
-                        path = request.path,
-                        verdict = fusion.Verdict,
-                        score = (uint)fusion.Score,
-                        reasonFlags = fusion.ReasonFlags,
-                        reasonText = fusion.ReasonText
-                    };
+                        break;
+                    }
 
-                    policyService.SubmitStaticScanVerdict(verdict);
-                    processed++;
-
-                    if (fusion.Verdict >= VerdictSuspicious)
+                    try
                     {
-                        Console.WriteLine(DateTime.Now.ToString("s") +
-                            " static scan verdict=" + VerdictText(fusion.Verdict) +
-                            " score=" + fusion.Score.ToString(CultureInfo.InvariantCulture) +
-                            " path=" + (request.path ?? string.Empty));
+                        ScanResultFusion fusion = ScanOne(request);
+                        string quarantinePath = string.Empty;
+                        string quarantineStatus = string.Empty;
+
+                        if (ShouldQuarantine(policy, fusion.Verdict))
+                        {
+                            quarantinePath = TryCopyToQuarantine(request, fusion, out quarantineStatus);
+                            if (!string.IsNullOrWhiteSpace(quarantinePath))
+                            {
+                                fusion.ReasonText = AppendReason(fusion.ReasonText, "quarantine=" + quarantinePath);
+                            }
+                            else if (!string.IsNullOrWhiteSpace(quarantineStatus))
+                            {
+                                fusion.ReasonText = AppendReason(fusion.ReasonText, "quarantine-error=" + quarantineStatus);
+                            }
+                        }
+
+                        PolicyBridgeService.StaticScanVerdictRequest verdict = new PolicyBridgeService.StaticScanVerdictRequest
+                        {
+                            requestId = request.requestId,
+                            processId = request.processId,
+                            fileSize = request.fileSize,
+                            operation = request.operation,
+                            path = request.path,
+                            verdict = fusion.Verdict,
+                            score = (uint)fusion.Score,
+                            reasonFlags = fusion.ReasonFlags,
+                            reasonText = fusion.ReasonText
+                        };
+
+                        policyService.SubmitStaticScanVerdict(verdict);
+                        processed++;
+
+                        if (fusion.Verdict >= VerdictSuspicious)
+                        {
+                            QueueAuditRecord(request, fusion, quarantinePath, quarantineStatus);
+                            Console.WriteLine(DateTime.Now.ToString("s") +
+                                " static scan verdict=" + VerdictText(fusion.Verdict) +
+                                " score=" + fusion.Score.ToString(CultureInfo.InvariantCulture) +
+                                " source=" + (request.processImage ?? string.Empty) +
+                                " path=" + (request.path ?? string.Empty));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine(DateTime.Now.ToString("s") + " static scan failed for request " +
+                            request.requestId.ToString(CultureInfo.InvariantCulture) + ": " + ex.Message);
                     }
                 }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine(DateTime.Now.ToString("s") + " static scan failed for request " +
-                        request.requestId.ToString(CultureInfo.InvariantCulture) + ": " + ex.Message);
-                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref processingRequests, 0);
             }
 
             return processed;
+        }
+
+        public AuditLog.AuditRecord[] DrainAuditRecords()
+        {
+            lock (auditRoot)
+            {
+                if (auditRecords.Count == 0)
+                {
+                    return new AuditLog.AuditRecord[0];
+                }
+
+                AuditLog.AuditRecord[] records = auditRecords.ToArray();
+                auditRecords.Clear();
+                return records;
+            }
+        }
+
+        private PolicyBridgeService.StaticScanPolicyDto QueryPolicyOrDefault()
+        {
+            try
+            {
+                return policyService.QueryStaticScanPolicy();
+            }
+            catch
+            {
+                return new PolicyBridgeService.StaticScanPolicyDto
+                {
+                    enabled = true,
+                    scanPe = true,
+                    scanScripts = true,
+                    blockMalicious = true,
+                    blockSuspicious = false,
+                    auditOnly = false
+                };
+            }
+        }
+
+        private static bool ShouldQuarantine(PolicyBridgeService.StaticScanPolicyDto policy, uint verdict)
+        {
+            if (policy == null || !policy.enabled || policy.auditOnly)
+            {
+                return false;
+            }
+
+            return (verdict >= VerdictMalicious && policy.blockMalicious) ||
+                   (verdict >= VerdictSuspicious && policy.blockSuspicious);
+        }
+
+        private static string AppendReason(string reason, string extra)
+        {
+            string value = string.IsNullOrWhiteSpace(reason) ? extra : reason + "; " + extra;
+            return value.Length > 250 ? value.Substring(0, 250) : value;
+        }
+
+        private string TryCopyToQuarantine(PolicyBridgeService.StaticScanRequestDto request, ScanResultFusion fusion, out string status)
+        {
+            status = string.Empty;
+            string path = request == null ? string.Empty : request.path;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                status = "source-missing";
+                return string.Empty;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(quarantineRoot);
+                string safeName = MakeSafeFileName(Path.GetFileName(path));
+                string hashPart = string.IsNullOrWhiteSpace(fusion.Sha256) ? "nohash" : fusion.Sha256.Substring(0, Math.Min(16, fusion.Sha256.Length));
+                string quarantinePath = Path.Combine(
+                    quarantineRoot,
+                    DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture) +
+                    "-" + request.requestId.ToString(CultureInfo.InvariantCulture) +
+                    "-" + hashPart +
+                    "-" + safeName +
+                    ".quarantine");
+
+                using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (FileStream output = new FileStream(quarantinePath, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                {
+                    byte[] buffer = new byte[1024 * 1024];
+                    int read;
+                    while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        output.Write(buffer, 0, read);
+                    }
+                }
+
+                WriteQuarantineMetadata(quarantinePath, request, fusion);
+                status = "copied";
+                return quarantinePath;
+            }
+            catch (Exception ex)
+            {
+                status = ex.Message;
+                return string.Empty;
+            }
+        }
+
+        private void WriteQuarantineMetadata(string quarantinePath, PolicyBridgeService.StaticScanRequestDto request, ScanResultFusion fusion)
+        {
+            try
+            {
+                Dictionary<string, object> metadata = new Dictionary<string, object>
+                {
+                    { "requestId", request.requestId },
+                    { "originalPath", request.path ?? string.Empty },
+                    { "sourceProcess", request.processImage ?? string.Empty },
+                    { "sourcePid", request.processId },
+                    { "operation", request.operationText ?? string.Empty },
+                    { "verdict", VerdictText(fusion.Verdict) },
+                    { "score", fusion.Score },
+                    { "sha256", fusion.Sha256 ?? string.Empty },
+                    { "reason", fusion.ReasonText ?? string.Empty },
+                    { "matchedRules", fusion.MatchedRules ?? new string[0] },
+                    { "quarantinedUtc", DateTime.UtcNow.ToString("o") }
+                };
+                File.WriteAllText(quarantinePath + ".json", serializer.Serialize(metadata), Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+
+        private static string MakeSafeFileName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return "sample";
+            }
+
+            char[] invalid = Path.GetInvalidFileNameChars();
+            StringBuilder builder = new StringBuilder(name.Length);
+            foreach (char ch in name)
+            {
+                builder.Append(Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
+            }
+
+            return builder.Length == 0 ? "sample" : builder.ToString();
+        }
+
+        private void QueueAuditRecord(PolicyBridgeService.StaticScanRequestDto request, ScanResultFusion fusion, string quarantinePath, string quarantineStatus)
+        {
+            string fileName = Path.GetFileName(request.path ?? string.Empty);
+            string rules = (fusion.MatchedRules != null && fusion.MatchedRules.Length > 0)
+                ? string.Join(", ", fusion.MatchedRules)
+                : string.Empty;
+            Dictionary<string, object> evidence = new Dictionary<string, object>
+            {
+                { "kind", "kernel-static-scan" },
+                { "requestId", request.requestId },
+                { "sourcePid", request.processId },
+                { "sourceProcess", request.processImage ?? string.Empty },
+                { "operation", request.operationText ?? string.Empty },
+                { "filePath", request.path ?? string.Empty },
+                { "fileName", fileName ?? string.Empty },
+                { "fileSize", request.fileSize },
+                { "verdict", VerdictText(fusion.Verdict) },
+                { "score", fusion.Score },
+                { "sha256", fusion.Sha256 ?? string.Empty },
+                { "matchedRules", fusion.MatchedRules ?? new string[0] },
+                { "reasons", fusion.ReasonText ?? string.Empty },
+                { "quarantinePath", quarantinePath ?? string.Empty },
+                { "quarantineStatus", quarantineStatus ?? string.Empty },
+                { "engines", EngineStatus() },
+                { "detectedHost", Environment.MachineName },
+                { "detectedUtc", DateTime.UtcNow.ToString("o") }
+            };
+
+            AuditLog.AuditRecord record = new AuditLog.AuditRecord
+            {
+                TimestampUtc = DateTime.UtcNow.ToString("o"),
+                Host = Environment.MachineName,
+                Actor = "static-scan",
+                Action = "static-scan.detection",
+                Target = request.path ?? string.Empty,
+                Extension = request.processImage ?? string.Empty,
+                SourcePid = request.processId.ToString(CultureInfo.InvariantCulture),
+                SourceHost = Environment.MachineName,
+                SourceUser = Environment.UserName,
+                SourceProcess = request.processImage ?? string.Empty,
+                TargetHost = Environment.MachineName,
+                TargetProcess = fileName ?? string.Empty,
+                ObjectType = "executable",
+                ObjectName = request.path ?? string.Empty,
+                ObjectFormat = fusion.Sha256 ?? string.Empty,
+                PolicyName = "static-scan",
+                Succeeded = false,
+                Status = fusion.Verdict >= VerdictMalicious ? "0xC0000022" : "0x00000001",
+                Disposition = fusion.Verdict >= VerdictMalicious ? "blocked" : "suspicious",
+                Severity = fusion.Verdict >= VerdictMalicious ? "critical" : "high",
+                Message = "Static scan detection: source=" + (request.processImage ?? string.Empty) +
+                          ", pid=" + request.processId.ToString(CultureInfo.InvariantCulture) +
+                          ", op=" + (request.operationText ?? string.Empty) +
+                          ", verdict=" + VerdictText(fusion.Verdict) +
+                          ", score=" + fusion.Score.ToString(CultureInfo.InvariantCulture) +
+                          (rules.Length > 0 ? (", rules=" + rules) : (", reasons=" + (fusion.ReasonText ?? string.Empty))) +
+                          (string.IsNullOrWhiteSpace(quarantinePath) ? string.Empty : (", quarantine=" + quarantinePath)),
+                EventDetails = serializer.Serialize(evidence)
+            };
+
+            lock (auditRoot)
+            {
+                auditRecords.Add(record);
+            }
         }
 
         private ScanResultFusion ScanOne(PolicyBridgeService.StaticScanRequestDto request)
@@ -230,6 +483,17 @@ namespace DataProtectorWebBridge.Services
         private ScanResultFusion ScanPathCore(string path, ulong fileSize)
         {
             ScanResultFusion fusion = new ScanResultFusion();
+
+            // Trust check: a valid Authenticode signature is conclusive.
+            // Set the flag and return clean immediately; no engine runs.
+            if (!string.IsNullOrWhiteSpace(path) && AuthenticodeVerifier.IsTrustedSigned(path))
+            {
+                fusion.Verdict = VerdictClean;
+                fusion.Score = 0;
+                fusion.ReasonFlags = ScanReasonFlags.TrustedSigner;
+                fusion.ReasonText = "trusted-signer";
+                return fusion;
+            }
 
             byte[] content = TryReadFile(path, out string readError);
             ScanContext context = new ScanContext
@@ -322,6 +586,10 @@ namespace DataProtectorWebBridge.Services
             if (aggregateScore > 100)
             {
                 aggregateScore = 100;
+            }
+            else if (aggregateScore < 0)
+            {
+                aggregateScore = 0;
             }
 
             int suspicious;
@@ -499,6 +767,90 @@ namespace DataProtectorWebBridge.Services
         public const uint Overlay = 0x00000400u;
         public const uint YaraMatch = 0x00000800u;
         public const uint HashReputation = 0x00001000u;
+        public const uint TrustedSigner = 0x00002000u;  // valid Authenticode; kernel skips quarantine
+    }
+
+    /// <summary>
+    /// Wraps WinVerifyTrust to check whether a file carries a valid Authenticode
+    /// signature. A valid signature means the file is trusted and must not be
+    /// quarantined regardless of heuristic score.
+    /// </summary>
+    internal static class AuthenticodeVerifier
+    {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustFileInfo
+        {
+            public uint cbStruct;
+            public string pcwszFilePath;
+            public IntPtr hFile;
+            public IntPtr pgKnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WinTrustData
+        {
+            public uint cbStruct;
+            public IntPtr pPolicyCallbackData;
+            public IntPtr pSIPClientData;
+            public uint dwUIChoice;        // 2 = WTD_UI_NONE
+            public uint fdwRevocationChecks; // 0 = WTD_REVOKE_NONE
+            public uint dwUnionChoice;     // 1 = WTD_CHOICE_FILE
+            public IntPtr pFile;
+            public uint dwStateAction;     // 0 = WTD_STATEACTION_IGNORE
+            public IntPtr hWVTStateData;
+            public IntPtr pwszURLReference;
+            public uint dwProvFlags;       // 0x00001010 = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE
+            public uint dwUIContext;
+        }
+
+        [DllImport("wintrust.dll", ExactSpelling = true, SetLastError = false)]
+        private static extern uint WinVerifyTrust(IntPtr hwnd, ref Guid pgActionID, ref WinTrustData pWVTData);
+
+        private static readonly Guid ActionGenericVerifyV2 = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
+        private const uint ErrorSuccess = 0;
+
+        public static bool IsTrustedSigned(string filePath)
+        {
+            try
+            {
+                WinTrustFileInfo fileInfo = new WinTrustFileInfo
+                {
+                    cbStruct = (uint)Marshal.SizeOf(typeof(WinTrustFileInfo)),
+                    pcwszFilePath = filePath,
+                    hFile = IntPtr.Zero,
+                    pgKnownSubject = IntPtr.Zero
+                };
+
+                IntPtr pFile = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WinTrustFileInfo)));
+                try
+                {
+                    Marshal.StructureToPtr(fileInfo, pFile, false);
+
+                    WinTrustData trustData = new WinTrustData
+                    {
+                        cbStruct = (uint)Marshal.SizeOf(typeof(WinTrustData)),
+                        dwUIChoice = 2,
+                        fdwRevocationChecks = 0,
+                        dwUnionChoice = 1,
+                        pFile = pFile,
+                        dwStateAction = 0,
+                        dwProvFlags = 0x00001010
+                    };
+
+                    Guid actionId = ActionGenericVerifyV2;
+                    uint result = WinVerifyTrust(IntPtr.Zero, ref actionId, ref trustData);
+                    return result == ErrorSuccess;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(pFile);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 
     /// <summary>
@@ -562,8 +914,12 @@ namespace DataProtectorWebBridge.Services
 
             if (allowHashes.Contains(hash))
             {
-                // Allow-listed: contribute nothing.
-                return null;
+                return new ScanEngineResult
+                {
+                    Score = -100,
+                    ReasonFlags = ScanReasonFlags.HashReputation,
+                    Reason = "known-good hash"
+                };
             }
 
             return null;

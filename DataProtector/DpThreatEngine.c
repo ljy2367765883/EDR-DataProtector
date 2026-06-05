@@ -58,6 +58,32 @@ extern POBJECT_TYPE *PsProcessType;
 #define DP_THREAT_PROC_FLAG_ISOLATED      0x00000001
 #define DP_THREAT_PROC_FLAG_TERMINATED    0x00000002
 #define DP_THREAT_PROC_FLAG_TERMINATE_REQ 0x00000004
+#define DP_THREAT_PROC_FLAG_EXITED        0x00000008  // process has exited; node kept for ancestry
+
+//
+// Per-signal cooldown window: suppress duplicate signals from the same process
+// within this interval, applying diminishing-return scoring instead of full
+// weight each time. 30 seconds expressed in 100-ns units.
+//
+#define DP_THREAT_SIGNAL_COOLDOWN_100NS (30LL * 1000LL * 1000LL * 10LL)
+
+//
+// Minimum score contribution from a repeated signal (floor after halving).
+//
+#define DP_THREAT_SIGNAL_REPEAT_MIN 1
+
+//
+// Correlation bonus per repeated technique hit (3rd+ hit signals sustained use).
+//
+#define DP_THREAT_REPETITION_BONUS  6
+#define DP_THREAT_REPETITION_THRESHOLD 3
+
+//
+// Faster decay constants to reduce noise from isolated low-weight signals.
+// Decay fires every 30 s (vs 60 s) and removes 8 pts (vs 5 pts) per interval.
+//
+#define DP_THREAT_DECAY_INTERVAL_FAST_100NS (30LL * 1000LL * 1000LL * 10LL)
+#define DP_THREAT_DECAY_POINTS_FAST  8
 
 //
 // Correlation bonus applied for each additional distinct ATT&CK tactic seen in
@@ -95,6 +121,12 @@ typedef struct _DP_THREAT_PROCESS_NODE {
     WCHAR Image[DP_THREAT_PROCESS_CHARS];
     ULONG TechniqueCount;
     DP_THREAT_TECHNIQUE_SLOT Techniques[DP_THREAT_MAX_TECHNIQUES_PER_PROC];
+    //
+    // Per-signal cooldown: timestamp of last observed instance and the
+    // diminishing-return divisor (doubles each time within the window).
+    //
+    ULONGLONG SignalLastSeen[DpThreatSignalMax];
+    ULONG SignalRepeatDivisor[DpThreatSignalMax];
 } DP_THREAT_PROCESS_NODE, *PDP_THREAT_PROCESS_NODE;
 
 typedef struct _DP_THREAT_EVENT_ENTRY {
@@ -531,15 +563,21 @@ DpThreatApplyDecayLocked(
     }
 
     elapsed = Now - Node->LastDecay;
-    intervals = elapsed / (ULONGLONG)DP_THREAT_DECAY_INTERVAL_100NS;
+
+    //
+    // Use the faster decay rate (30 s / 8 pts) to bleed transient noise faster.
+    // Processes accumulating score from correlated multi-tactic signals earn
+    // score faster than they decay, so genuine incidents still escalate.
+    //
+    intervals = elapsed / (ULONGLONG)DP_THREAT_DECAY_INTERVAL_FAST_100NS;
     if (intervals == 0) {
         return;
     }
 
-    if (intervals > (ULONGLONG)(Node->CumulativeScore / DP_THREAT_DECAY_POINTS) + 1) {
+    if (intervals > (ULONGLONG)(Node->CumulativeScore / DP_THREAT_DECAY_POINTS_FAST) + 1) {
         decay = Node->CumulativeScore;
     } else {
-        decay = (ULONG)(intervals * DP_THREAT_DECAY_POINTS);
+        decay = (ULONG)(intervals * DP_THREAT_DECAY_POINTS_FAST);
     }
 
     if (decay >= Node->CumulativeScore) {
@@ -548,7 +586,7 @@ DpThreatApplyDecayLocked(
         Node->CumulativeScore -= decay;
     }
 
-    Node->LastDecay += intervals * (ULONGLONG)DP_THREAT_DECAY_INTERVAL_100NS;
+    Node->LastDecay += intervals * (ULONGLONG)DP_THREAT_DECAY_INTERVAL_FAST_100NS;
 }
 
 //
@@ -937,9 +975,13 @@ DpThreatRecordStoryStep(
 
     //
     // Promote to a tracked incident the first time the lineage crosses the
-    // incident threshold, recording the originating process and image.
+    // incident threshold. Use the lineage PeakScore (updated on every
+    // propagation step) so a multi-process attack that keeps each individual
+    // process just below the bar still triggers an incident on the storyline.
     //
-    if (!story->IsIncident && CumulativeScore >= DP_THREAT_INCIDENT_THRESHOLD) {
+    if (!story->IsIncident &&
+        (CumulativeScore >= DP_THREAT_INCIDENT_THRESHOLD ||
+         story->PeakScore >= DP_THREAT_INCIDENT_THRESHOLD)) {
         story->IsIncident = TRUE;
         story->IncidentId = ++gThreatIncidentSequence;
         story->OriginProcessId = ProcessId;
@@ -1222,18 +1264,18 @@ DpThreatEngineOnProcessExit(
         return;
     }
 
+    //
+    // Mark the node as exited but leave it in the table. This preserves the
+    // ancestry chain so score propagation still reaches the lineage root even
+    // when intermediate processes have already terminated. The node will be
+    // evicted naturally by DpThreatEvictOldestLocked when the table fills.
+    //
     KeAcquireSpinLock(&gThreatProcessLock, &oldIrql);
     node = DpThreatFindNodeLocked(ProcessId);
     if (node != NULL) {
-        RemoveEntryList(&node->BucketLink);
-        RemoveEntryList(&node->OrderLink);
-        gThreatProcessCount--;
+        node->Flags |= DP_THREAT_PROC_FLAG_EXITED;
     }
     KeReleaseSpinLock(&gThreatProcessLock, oldIrql);
-
-    if (node != NULL) {
-        ExFreePoolWithTag(node, DP_TAG_THREAT_PROCESS);
-    }
 }
 
 DP_THREAT_RESPONSE_ACTION
@@ -1305,6 +1347,40 @@ DpThreatEngineReportSignal(
     delta = (ScoreDeltaOverride != 0) ? ScoreDeltaOverride : info->Weight;
 
     //
+    // Per-signal cooldown with diminishing returns. When the same signal fires
+    // again within the cooldown window, halve the delta each time (floored at
+    // DP_THREAT_SIGNAL_REPEAT_MIN). Reset the divisor once the window expires
+    // so a genuinely recurring threat can escalate again after quiet time.
+    //
+    if (ScoreDeltaOverride == 0 &&
+        (ULONG)Signal < (ULONG)DpThreatSignalMax) {
+
+        ULONGLONG lastSeen = node->SignalLastSeen[Signal];
+        BOOLEAN inWindow = (lastSeen != 0) &&
+                           (now >= lastSeen) &&
+                           ((now - lastSeen) <= (ULONGLONG)DP_THREAT_SIGNAL_COOLDOWN_100NS);
+
+        if (inWindow) {
+            ULONG divisor = node->SignalRepeatDivisor[Signal];
+            if (divisor == 0) {
+                divisor = 1;
+            }
+            divisor = divisor * 2;
+            if (divisor < 2) {
+                divisor = 2;
+            }
+            node->SignalRepeatDivisor[Signal] = divisor;
+            delta = delta / divisor;
+            if (delta < DP_THREAT_SIGNAL_REPEAT_MIN) {
+                delta = DP_THREAT_SIGNAL_REPEAT_MIN;
+            }
+        } else {
+            node->SignalRepeatDivisor[Signal] = 1;
+        }
+        node->SignalLastSeen[Signal] = now;
+    }
+
+    //
     // Correlation: reward kill-chain breadth. The more distinct tactics already
     // observed in this process, the more a new tactic matters.
     //
@@ -1312,6 +1388,23 @@ DpThreatEngineReportSignal(
         ULONG distinctTactics = DpThreatPopCount(node->DistinctTacticMask);
         if (distinctTactics > 1) {
             delta += DP_THREAT_CORRELATION_BONUS * (distinctTactics - 1);
+        }
+    }
+
+    //
+    // Repetition-depth bonus: sustained use of the same technique (3rd+ hit)
+    // is a stronger signal than a one-off, so reward it with a small bonus.
+    //
+    {
+        ULONG idx;
+        for (idx = 0; idx < node->TechniqueCount; idx++) {
+            if (node->Techniques[idx].TechniqueId == info->TechniqueId &&
+                node->Techniques[idx].Tactic == (ULONG)info->Tactic &&
+                node->Techniques[idx].Hits >= DP_THREAT_REPETITION_THRESHOLD) {
+
+                delta += DP_THREAT_REPETITION_BONUS;
+                break;
+            }
         }
     }
 
@@ -1655,8 +1748,12 @@ DpThreatEngineQueryProcesses(
 
         //
         // Only surface processes that actually carry risk so the board stays
-        // focused on what matters.
+        // focused on what matters. Include exited-but-scored nodes so the
+        // console can show a complete lineage picture.
         //
+        if (node->CumulativeScore == 0 && !FlagOn(node->Flags, DP_THREAT_PROC_FLAG_EXITED)) {
+            continue;
+        }
         if (node->CumulativeScore == 0) {
             continue;
         }

@@ -684,6 +684,15 @@ DpStaticScanSubmitVerdict(
     }
 
     //
+    // A valid Authenticode signature is conclusive: skip quarantine and threat
+    // engine reporting regardless of the heuristic score. The user-mode scanner
+    // sets DP_STATIC_SCAN_REASON_TRUSTED_SIGNER after verifying the chain.
+    //
+    if (FlagOn(Verdict->ReasonFlags, DP_STATIC_SCAN_REASON_TRUSTED_SIGNER)) {
+        verdictKind = DpStaticScanVerdictClean;
+    }
+
+    //
     // Enforce quarantine when policy says block. The original handle is long
     // gone, so we re-open by name and truncate.
     //
