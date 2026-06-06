@@ -69,8 +69,8 @@ DataProtector focuses on four business problems that often appear together:
 | DLP 工作流 | 安全目录审计、剪贴板与截图控制、敏感文件读取遥测、移动介质暂存可见性和中央策略下发。 |
 | Secure USB | Removable device inventory, central authorization, USB layout initialization, public tool area, protected private area, metadata writing, and unlock tooling. |
 | 安全 U 盘 | 可移动设备清点、中央授权、U 盘布局初始化、公开工具区、受保护私有区、元数据写入和解锁工具。 |
-| Operator surfaces | WebAdmin for central operations, WPF Admin for local policy, WPF Agent Client for endpoint status, and a standalone bilingual project website. |
-| 操作界面 | WebAdmin 集中运营、WPF Admin 本机策略、WPF Agent Client 终端状态展示，以及独立中英双语官网。 |
+| Operator surfaces | WebAdmin for central operations, WPF Admin for local policy, and WPF Agent Client for endpoint status. |
+| 操作界面 | WebAdmin 集中运营、WPF Admin 本机策略、WPF Agent Client 终端状态展示。 |
 
 ## Typical Scenarios / 典型场景
 
@@ -151,21 +151,7 @@ DataProtector/
   DataProtectorSandboxTelemetry/ Windows Sandbox telemetry runner
   DataProtectorStaticAnalyzer/   Ghidra/static-analysis tooling
   UserHookTriggerTest/           Runtime hook test utility
-  Website/                       Standalone Chinese/English project website
   third_party/yara-rules/        Bundled YARA rule assets
-```
-
-## Standalone Website / 独立官网
-
-`Website/` is a static bilingual project website. It is separate from
-`DataProtectorWebAdmin`, which is the product's operator console.
-
-`Website/` 是独立中英双语官网，用来介绍项目业务价值、能力、场景和开源定位；
-它不是 `DataProtectorWebAdmin` 管理后台。
-
-```text
-Website/index.html?lang=zh
-Website/index.html?lang=en
 ```
 
 ## Build Requirements / 构建要求
