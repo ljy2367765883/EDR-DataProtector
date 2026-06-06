@@ -271,8 +271,8 @@ Please keep the kernel thin and stable. Detection content belongs in user mode.
 
 ## License / 许可证
 
-No root repository license has been added yet. Choose and add a license before
-advertising the project as reusable open-source software.
+This repository is released under the GNU General Public License v3.0. See
+`LICENSE` for the full license text.
 
-当前根仓库尚未添加许可证。若要作为可复用开源项目正式发布，请先选择并添加
-许可证。
+本仓库使用 GNU General Public License v3.0 发布。完整许可证内容请查看
+`LICENSE`。
