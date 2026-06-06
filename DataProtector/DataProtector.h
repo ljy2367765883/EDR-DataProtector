@@ -813,7 +813,7 @@ typedef enum _DP_USER_HOOK_DEFENSE_OPERATION {
      DP_USER_HOOK_DEFENSE_FLAG_ETW_TAMPER_MONITOR | \
      DP_USER_HOOK_DEFENSE_FLAG_AUDIT_ONLY)
 #define DP_USER_HOOK_DEFENSE_DEFAULT_RUNTIME_DLL_PATH \
-    L"C:\\Program Files\\DataProtector\\DataProtectorUserHookRuntime.dll"
+    L"C:\\ProgramData\\DataProtector\\Runtime\\DataProtectorUserHookRuntime.dll"
 #define DP_USER_HOOK_DEFENSE_ALLOWED_FLAGS \
     (DP_USER_HOOK_DEFENSE_FLAG_ENABLED | \
      DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_MONITOR | \

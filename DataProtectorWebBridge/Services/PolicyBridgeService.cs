@@ -4690,6 +4690,7 @@ namespace DataProtectorWebBridge.Services
             string sourcePath = FindUserHookRuntimeSource();
             string sourceHash;
             string runtimePath;
+            string stableRuntimePath;
 
             Directory.CreateDirectory(runtimeDirectory);
             if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
@@ -4718,7 +4719,41 @@ namespace DataProtectorWebBridge.Services
                 throw new BridgeException(1, "User hook runtime DLL could not be prepared at " + runtimePath + ".");
             }
 
+            stableRuntimePath = Path.Combine(runtimeDirectory, "DataProtectorUserHookRuntime.dll");
+            PrepareStableUserHookRuntimeDll(sourcePath, sourceHash, stableRuntimePath);
+
             return runtimePath;
+        }
+
+        private static void PrepareStableUserHookRuntimeDll(string sourcePath, string sourceHash, string stableRuntimePath)
+        {
+            try
+            {
+                string stableDirectory;
+                if (string.IsNullOrWhiteSpace(sourcePath) ||
+                    string.IsNullOrWhiteSpace(stableRuntimePath) ||
+                    !File.Exists(sourcePath))
+                {
+                    return;
+                }
+
+                stableDirectory = Path.GetDirectoryName(stableRuntimePath);
+                if (!string.IsNullOrWhiteSpace(stableDirectory))
+                {
+                    Directory.CreateDirectory(stableDirectory);
+                }
+
+                if (File.Exists(stableRuntimePath) && FileHashEquals(stableRuntimePath, sourceHash))
+                {
+                    return;
+                }
+
+                File.Copy(sourcePath, stableRuntimePath, true);
+            }
+            catch
+            {
+                // The versioned runtime path remains authoritative; this stable copy only bootstraps kernel defaults.
+            }
         }
 
         private static string BuildVersionedUserHookRuntimePath(string runtimeDirectory, string sha256Hex)

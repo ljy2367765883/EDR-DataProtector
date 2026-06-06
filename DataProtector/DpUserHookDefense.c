@@ -2106,15 +2106,9 @@ DpUserHookApcKernelRoutine(
                        &runtimePath,
                        &processImage,
                        *NormalRoutine);
-    DpUserHookMarkTargetInjectionComplete(context->ProcessId, TRUE);
-    DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionQueued,
-                         context->ProcessId,
-                         context->ParentProcessId,
-                         STATUS_SUCCESS,
-                         &runtimePath,
-                         processImage.Length == 0 ? NULL : &processImage,
-                         DpUserHookReadPolicyFlags());
-
+    DP_USER_HOOK_TRACE("apc normal routine pending runtime image load pid=%Iu runtime=%wZ\n",
+                       (ULONG_PTR)context->ProcessId,
+                       &runtimePath);
     DpUserHookFreeApcContext(context, FALSE);
 }
 
@@ -2600,10 +2594,29 @@ DpUserHookLoadImageNotify(
 {
     ULONG sensitiveMask;
     BOOLEAN duplicateSensitiveImage;
+    UNICODE_STRING emptyImage;
+    PCUNICODE_STRING traceImage;
 
     UNREFERENCED_PARAMETER(ImageInfo);
 
     if (!DpUserHookIsTrackedTargetProcess(ProcessId)) {
+        return;
+    }
+
+    RtlInitUnicodeString(&emptyImage, L"");
+    traceImage = FullImageName != NULL ? FullImageName : &emptyImage;
+    if (DpUserHookImageHasSuffix(FullImageName, L"\\DataProtectorUserHookRuntime.dll")) {
+        DP_USER_HOOK_TRACE("runtime image load confirmed pid=%Iu image=%wZ\n",
+                           (ULONG_PTR)ProcessId,
+                           traceImage);
+        DpUserHookMarkTargetInjectionComplete(ProcessId, TRUE);
+        DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionQueued,
+                             ProcessId,
+                             NULL,
+                             STATUS_SUCCESS,
+                             FullImageName,
+                             NULL,
+                             DpUserHookReadPolicyFlags());
         return;
     }
 
