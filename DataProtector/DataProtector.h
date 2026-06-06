@@ -169,10 +169,12 @@ Abstract:
 #define DP_ENABLE_LATERAL_DEFENSE_TRACE 0
 
 //
-// Application-layer API hook defense diagnostics. The module prints only
-// policy updates, callback registration failures, and queued protection events.
+// Application-layer API hook defense diagnostics. Keep this enabled while
+// validating kernel-owned startup injection so DbgView can show process-create,
+// image-load, export resolution, APC queueing, and skip/failure gates with the
+// DataProtector[UserHook] filter.
 //
-#define DP_ENABLE_USER_HOOK_DEFENSE_TRACE 0
+#define DP_ENABLE_USER_HOOK_DEFENSE_TRACE 1
 
 //
 // Threat engine diagnostics. The module prints only signal ingestion, score

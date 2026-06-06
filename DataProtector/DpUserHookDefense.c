@@ -865,15 +865,28 @@ DpUserHookShouldInjectProcess(
 {
     ULONG flags = DpUserHookReadPolicyFlags();
 
-    if (!FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_ENABLED) ||
-        ImagePath == NULL ||
+    if (!FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_ENABLED)) {
+        DP_USER_HOOK_TRACE("inject skip disabled pid=%Iu flags=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           flags);
+        return FALSE;
+    }
+
+    if (ImagePath == NULL ||
         ImagePath->Buffer == NULL ||
         ImagePath->Length == 0) {
+        DP_USER_HOOK_TRACE("inject skip missing image pid=%Iu flags=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           flags);
         return FALSE;
     }
 
     if (!FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_MONITOR_SYSTEM_PROCESSES) &&
         (ProcessId == NULL || ProcessId == (HANDLE)(ULONG_PTR)4)) {
+        DP_USER_HOOK_TRACE("inject skip system pid=%Iu image=%wZ flags=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           ImagePath,
+                           flags);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionSkipped,
                              ProcessId,
                              NULL,
@@ -930,6 +943,11 @@ DpUserHookShouldInjectProcess(
         return FALSE;
     }
 
+    DP_USER_HOOK_TRACE("inject candidate accepted pid=%Iu image=%wZ flags=0x%08X\n",
+                       (ULONG_PTR)ProcessId,
+                       ImagePath,
+                       flags);
+
     return TRUE;
 }
 
@@ -944,15 +962,22 @@ DpUserHookTrackTargetProcess(
     ULONG index;
     ULONG emptyIndex = MAXULONG;
     ULONG imageBytes = 0;
+    const CHAR *action = "none";
+    UNICODE_STRING emptyImage;
+    PCUNICODE_STRING traceImage;
 
     if (ProcessId == NULL) {
         return;
     }
 
+    RtlInitUnicodeString(&emptyImage, L"");
+    traceImage = ProcessImage != NULL ? ProcessImage : &emptyImage;
+
     KeAcquireSpinLock(&gDpUserHookTargetLock, &oldIrql);
 
     for (index = 0; index < RTL_NUMBER_OF(gDpUserHookTargets); index++) {
         if (gDpUserHookTargets[index].ProcessId == ProcessId) {
+            action = "update";
             gDpUserHookTargets[index].State = DpUserHookTargetPending;
             gDpUserHookTargets[index].AttemptCount = 0;
             if (ProcessImage != NULL && ProcessImage->Buffer != NULL && ProcessImage->Length != 0) {
@@ -962,6 +987,10 @@ DpUserHookTrackTargetProcess(
                 gDpUserHookTargets[index].ProcessImage[imageBytes / sizeof(WCHAR)] = L'\0';
             }
             KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
+            DP_USER_HOOK_TRACE("track target action=%s pid=%Iu image=%wZ\n",
+                               action,
+                               (ULONG_PTR)ProcessId,
+                               traceImage);
             return;
         }
 
@@ -971,6 +1000,7 @@ DpUserHookTrackTargetProcess(
     }
 
     if (emptyIndex != MAXULONG) {
+        action = "new";
         RtlZeroMemory(&gDpUserHookTargets[emptyIndex], sizeof(gDpUserHookTargets[emptyIndex]));
         gDpUserHookTargets[emptyIndex].ProcessId = ProcessId;
         gDpUserHookTargets[emptyIndex].State = DpUserHookTargetPending;
@@ -983,6 +1013,7 @@ DpUserHookTrackTargetProcess(
         }
     } else {
         ULONG replaceIndex = (ULONG)((ULONG_PTR)ProcessId % RTL_NUMBER_OF(gDpUserHookTargets));
+        action = "replace";
         RtlZeroMemory(&gDpUserHookTargets[replaceIndex], sizeof(gDpUserHookTargets[replaceIndex]));
         gDpUserHookTargets[replaceIndex].ProcessId = ProcessId;
         gDpUserHookTargets[replaceIndex].State = DpUserHookTargetPending;
@@ -996,6 +1027,10 @@ DpUserHookTrackTargetProcess(
     }
 
     KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
+    DP_USER_HOOK_TRACE("track target action=%s pid=%Iu image=%wZ\n",
+                       action,
+                       (ULONG_PTR)ProcessId,
+                       traceImage);
 }
 
 static
@@ -1006,6 +1041,7 @@ DpUserHookUntrackTargetProcess(
 {
     KIRQL oldIrql;
     ULONG index;
+    BOOLEAN removed = FALSE;
 
     if (ProcessId == NULL) {
         return;
@@ -1016,11 +1052,15 @@ DpUserHookUntrackTargetProcess(
     for (index = 0; index < RTL_NUMBER_OF(gDpUserHookTargets); index++) {
         if (gDpUserHookTargets[index].ProcessId == ProcessId) {
             RtlZeroMemory(&gDpUserHookTargets[index], sizeof(gDpUserHookTargets[index]));
+            removed = TRUE;
             break;
         }
     }
 
     KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
+    DP_USER_HOOK_TRACE("untrack target pid=%Iu removed=%lu\n",
+                       (ULONG_PTR)ProcessId,
+                       removed ? 1u : 0u);
 }
 
 static
@@ -1171,6 +1211,10 @@ DpUserHookMarkTargetInjectionQueued(
     }
 
     KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
+    DP_USER_HOOK_TRACE("mark injection queued pid=%Iu shouldQueue=%lu attempt=%lu\n",
+                       (ULONG_PTR)ProcessId,
+                       shouldQueue ? 1u : 0u,
+                       AttemptCount != NULL ? *AttemptCount : 0u);
     return shouldQueue;
 }
 
@@ -1183,6 +1227,7 @@ DpUserHookMarkTargetInjectionComplete(
 {
     KIRQL oldIrql;
     ULONG index;
+    BOOLEAN found = FALSE;
 
     if (ProcessId == NULL) {
         return;
@@ -1193,11 +1238,16 @@ DpUserHookMarkTargetInjectionComplete(
     for (index = 0; index < RTL_NUMBER_OF(gDpUserHookTargets); index++) {
         if (gDpUserHookTargets[index].ProcessId == ProcessId) {
             gDpUserHookTargets[index].State = Succeeded ? DpUserHookTargetComplete : DpUserHookTargetFailed;
+            found = TRUE;
             break;
         }
     }
 
     KeReleaseSpinLock(&gDpUserHookTargetLock, oldIrql);
+    DP_USER_HOOK_TRACE("mark injection complete pid=%Iu succeeded=%lu found=%lu\n",
+                       (ULONG_PTR)ProcessId,
+                       Succeeded ? 1u : 0u,
+                       found ? 1u : 0u);
 }
 
 static
@@ -1834,12 +1884,18 @@ DpUserHookFindLoadLibraryWExport(
     NTSTATUS status = STATUS_NOT_FOUND;
 
     if (LoadLibraryAddress == NULL) {
+        DP_USER_HOOK_TRACE("resolve LoadLibraryW invalid output base=%p size=%Iu\n",
+                           ImageBase,
+                           ImageSize);
         return STATUS_INVALID_PARAMETER;
     }
 
     *LoadLibraryAddress = NULL;
 
     if (ImageBase == NULL || ImageSize < sizeof(IMAGE_DOS_HEADER)) {
+        DP_USER_HOOK_TRACE("resolve LoadLibraryW invalid image base=%p size=%Iu\n",
+                           ImageBase,
+                           ImageSize);
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
@@ -1909,17 +1965,33 @@ DpUserHookFindLoadLibraryWExport(
                 if (functionRva >= exportRva &&
                     functionRva < exportRva + exportSize) {
 
+                    DP_USER_HOOK_TRACE("resolve LoadLibraryW forwarded export base=%p rva=0x%08X exportRva=0x%08X exportSize=0x%08X\n",
+                                       ImageBase,
+                                       functionRva,
+                                       exportRva,
+                                       exportSize);
                     status = STATUS_PROCEDURE_NOT_FOUND;
                     break;
                 }
 
                 *LoadLibraryAddress = (PUCHAR)ImageBase + functionRva;
                 status = STATUS_SUCCESS;
+                DP_USER_HOOK_TRACE("resolve LoadLibraryW success base=%p rva=0x%08X address=%p\n",
+                                   ImageBase,
+                                   functionRva,
+                                   *LoadLibraryAddress);
                 break;
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         status = GetExceptionCode();
+    }
+
+    if (!NT_SUCCESS(status)) {
+        DP_USER_HOOK_TRACE("resolve LoadLibraryW done failed base=%p size=%Iu status=0x%08X\n",
+                           ImageBase,
+                           ImageSize,
+                           status);
     }
 
     return status;
@@ -2012,6 +2084,11 @@ DpUserHookApcKernelRoutine(
     RtlInitUnicodeString(&runtimePath, context->RuntimePath);
     RtlInitUnicodeString(&processImage, context->ProcessImage);
     if (NormalRoutine == NULL || *NormalRoutine == NULL) {
+        DP_USER_HOOK_TRACE("apc kernel routine cancelled pid=%Iu runtime=%wZ image=%wZ normal=%p\n",
+                           (ULONG_PTR)context->ProcessId,
+                           &runtimePath,
+                           &processImage,
+                           NormalRoutine != NULL ? *NormalRoutine : NULL);
         DpUserHookMarkTargetInjectionComplete(context->ProcessId, FALSE);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              context->ProcessId,
@@ -2024,6 +2101,11 @@ DpUserHookApcKernelRoutine(
         return;
     }
 
+    DP_USER_HOOK_TRACE("apc kernel routine dispatch pid=%Iu runtime=%wZ image=%wZ normal=%p\n",
+                       (ULONG_PTR)context->ProcessId,
+                       &runtimePath,
+                       &processImage,
+                       *NormalRoutine);
     DpUserHookMarkTargetInjectionComplete(context->ProcessId, TRUE);
     DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionQueued,
                          context->ProcessId,
@@ -2049,6 +2131,10 @@ DpUserHookApcRundownRoutine(
     context = CONTAINING_RECORD(Apc, DP_USER_HOOK_APC_CONTEXT, Apc);
     RtlInitUnicodeString(&runtimePath, context->RuntimePath);
     RtlInitUnicodeString(&processImage, context->ProcessImage);
+    DP_USER_HOOK_TRACE("apc rundown pid=%Iu runtime=%wZ image=%wZ\n",
+                       (ULONG_PTR)context->ProcessId,
+                       &runtimePath,
+                       &processImage);
     DpUserHookMarkTargetInjectionComplete(context->ProcessId, FALSE);
     DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                          context->ProcessId,
@@ -2077,20 +2163,44 @@ DpUserHookQueueRuntimeApc(
     SIZE_T regionSize;
     NTSTATUS status;
     PUCHAR stub;
+    UNICODE_STRING emptyImage;
+    PCUNICODE_STRING traceImage;
+
+    RtlInitUnicodeString(&emptyImage, L"");
+    traceImage = ProcessImage != NULL ? ProcessImage : &emptyImage;
 
     if (Thread == NULL || LoadLibraryW == NULL ||
         RuntimeDllPath == NULL || RuntimeDllPath->Buffer == NULL ||
         RuntimeDllPath->Length == 0) {
 
+        DP_USER_HOOK_TRACE("apc queue invalid args pid=%Iu thread=%p loadLibrary=%p runtime=%p runtimeLength=%hu\n",
+                           (ULONG_PTR)ProcessId,
+                           Thread,
+                           LoadLibraryW,
+                           RuntimeDllPath,
+                           RuntimeDllPath != NULL ? RuntimeDllPath->Length : 0);
         return STATUS_INVALID_PARAMETER;
     }
 
+    DP_USER_HOOK_TRACE("apc queue begin pid=%Iu thread=%p loadLibrary=%p runtime=%wZ image=%wZ\n",
+                       (ULONG_PTR)ProcessId,
+                       Thread,
+                       LoadLibraryW,
+                       RuntimeDllPath,
+                       traceImage);
+
     if ((SIZE_T)RuntimeDllPath->Length > DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS * sizeof(WCHAR) - sizeof(WCHAR)) {
+        DP_USER_HOOK_TRACE("apc queue runtime path too long pid=%Iu length=%hu\n",
+                           (ULONG_PTR)ProcessId,
+                           RuntimeDllPath->Length);
         return STATUS_NAME_TOO_LONG;
     }
 
     pathBytes = RuntimeDllPath->Length + sizeof(WCHAR);
     if (pathBytes > DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS * sizeof(WCHAR)) {
+        DP_USER_HOOK_TRACE("apc queue runtime path bytes too long pid=%Iu bytes=%Iu\n",
+                           (ULONG_PTR)ProcessId,
+                           pathBytes);
         return STATUS_NAME_TOO_LONG;
     }
 
@@ -2122,6 +2232,10 @@ DpUserHookQueueRuntimeApc(
                                      MEM_COMMIT | MEM_RESERVE,
                                      PAGE_READWRITE);
     if (!NT_SUCCESS(status)) {
+        DP_USER_HOOK_TRACE("apc queue allocate remote path failed pid=%Iu status=0x%08X bytes=%Iu\n",
+                           (ULONG_PTR)ProcessId,
+                           status,
+                           pathBytes);
         DpUserHookFreeApcContext(context, TRUE);
         return status;
     }
@@ -2134,6 +2248,9 @@ DpUserHookQueueRuntimeApc(
     }
 
     if (!NT_SUCCESS(status)) {
+        DP_USER_HOOK_TRACE("apc queue copy remote path failed pid=%Iu status=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           status);
         DpUserHookFreeApcContext(context, TRUE);
         return status;
     }
@@ -2146,6 +2263,10 @@ DpUserHookQueueRuntimeApc(
                                      MEM_COMMIT | MEM_RESERVE,
                                      PAGE_EXECUTE_READWRITE);
     if (!NT_SUCCESS(status)) {
+        DP_USER_HOOK_TRACE("apc queue allocate remote stub failed pid=%Iu status=0x%08X bytes=%lu\n",
+                           (ULONG_PTR)ProcessId,
+                           status,
+                           (ULONG)DP_USER_HOOK_INJECT_STUB_BYTES);
         DpUserHookFreeApcContext(context, TRUE);
         return status;
     }
@@ -2153,8 +2274,11 @@ DpUserHookQueueRuntimeApc(
     context->RemoteStubBytes = regionSize;
     stub = ExAllocatePoolWithTag(NonPagedPoolNx,
                                  DP_USER_HOOK_INJECT_STUB_BYTES,
-                                 DP_TAG_USER_HOOK_DEFENSE);
+                                  DP_TAG_USER_HOOK_DEFENSE);
     if (stub == NULL) {
+        DP_USER_HOOK_TRACE("apc queue allocate kernel stub failed pid=%Iu bytes=%lu\n",
+                           (ULONG_PTR)ProcessId,
+                           (ULONG)DP_USER_HOOK_INJECT_STUB_BYTES);
         DpUserHookFreeApcContext(context, TRUE);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -2171,6 +2295,10 @@ DpUserHookQueueRuntimeApc(
 
     ExFreePoolWithTag(stub, DP_TAG_USER_HOOK_DEFENSE);
     if (!NT_SUCCESS(status)) {
+        DP_USER_HOOK_TRACE("apc queue copy remote stub failed pid=%Iu status=0x%08X remoteStub=%p\n",
+                           (ULONG_PTR)ProcessId,
+                           status,
+                           context->RemoteStub);
         DpUserHookFreeApcContext(context, TRUE);
         return status;
     }
@@ -2185,6 +2313,11 @@ DpUserHookQueueRuntimeApc(
                     NULL);
 
     if (!KeInsertQueueApc(&context->Apc, NULL, NULL, 0)) {
+        DP_USER_HOOK_TRACE("apc insert failed pid=%Iu thread=%p remoteStub=%p runtimePath=%p\n",
+                           (ULONG_PTR)ProcessId,
+                           Thread,
+                           context->RemoteStub,
+                           context->RemoteDllPath);
         DpUserHookFreeApcContext(context, TRUE);
         return STATUS_UNSUCCESSFUL;
     }
@@ -2222,25 +2355,57 @@ DpUserHookTryQueueRuntimeInjection(
     PEPROCESS threadProcess;
     PVOID loadLibraryW = NULL;
     BOOLEAN loadLibraryCarrier;
+    BOOLEAN featureEnabled;
+    BOOLEAN tracked;
+    UNICODE_STRING emptyImage;
+    PCUNICODE_STRING traceImage;
 
+    RtlInitUnicodeString(&emptyImage, L"");
+    traceImage = FullImageName != NULL ? FullImageName : &emptyImage;
     loadLibraryCarrier =
         DpUserHookImageHasSuffix(FullImageName, L"\\kernelbase.dll") ||
         DpUserHookImageHasSuffix(FullImageName, L"\\kernel32.dll");
+    featureEnabled = DpUserHookFeatureEnabled(DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION);
+    tracked = DpUserHookIsTrackedTargetProcess(ProcessId);
 
     if (ImageInfo == NULL ||
         ProcessId == NULL ||
-        !DpUserHookFeatureEnabled(DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION) ||
-        !DpUserHookIsTrackedTargetProcess(ProcessId) ||
+        !featureEnabled ||
+        !tracked ||
         !loadLibraryCarrier) {
 
+        if (loadLibraryCarrier || tracked) {
+            DP_USER_HOOK_TRACE("image skip pid=%Iu image=%wZ carrier=%lu feature=%lu tracked=%lu imageInfo=%p flags=0x%08X\n",
+                               (ULONG_PTR)ProcessId,
+                               traceImage,
+                               loadLibraryCarrier ? 1u : 0u,
+                               featureEnabled ? 1u : 0u,
+                               tracked ? 1u : 0u,
+                               ImageInfo,
+                               DpUserHookReadPolicyFlags());
+        }
         return;
     }
 
+    DP_USER_HOOK_TRACE("image carrier hit pid=%Iu image=%wZ base=%p size=%Iu flags=0x%08X\n",
+                       (ULONG_PTR)ProcessId,
+                       traceImage,
+                       ImageInfo->ImageBase,
+                       ImageInfo->ImageSize,
+                       DpUserHookReadPolicyFlags());
+
     if (!DpUserHookMarkTargetInjectionQueued(ProcessId, &attemptCount)) {
+        DP_USER_HOOK_TRACE("image carrier mark queued denied pid=%Iu image=%wZ\n",
+                           (ULONG_PTR)ProcessId,
+                           traceImage);
         return;
     }
 
     if (attemptCount > DP_USER_HOOK_MAX_APC_ATTEMPTS) {
+        DP_USER_HOOK_TRACE("image carrier retry exceeded pid=%Iu image=%wZ attempt=%lu\n",
+                           (ULONG_PTR)ProcessId,
+                           traceImage,
+                           attemptCount);
         DpUserHookMarkTargetInjectionComplete(ProcessId, FALSE);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              ProcessId,
@@ -2256,6 +2421,12 @@ DpUserHookTryQueueRuntimeInjection(
                                               ImageInfo->ImageSize,
                                               &loadLibraryW);
     if (!NT_SUCCESS(status)) {
+        DP_USER_HOOK_TRACE("resolve LoadLibraryW failed pid=%Iu image=%wZ status=0x%08X base=%p size=%Iu\n",
+                           (ULONG_PTR)ProcessId,
+                           traceImage,
+                           status,
+                           ImageInfo->ImageBase,
+                           ImageInfo->ImageSize);
         DpUserHookTrackTargetProcess(ProcessId, NULL);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              ProcessId,
@@ -2270,6 +2441,11 @@ DpUserHookTryQueueRuntimeInjection(
     currentThread = PsGetCurrentThread();
     threadProcess = PsGetThreadProcess(currentThread);
     if (threadProcess == NULL || PsGetProcessId(threadProcess) != ProcessId) {
+        DP_USER_HOOK_TRACE("image callback thread process mismatch pid=%Iu image=%wZ threadProcess=%p threadPid=%Iu\n",
+                           (ULONG_PTR)ProcessId,
+                           traceImage,
+                           threadProcess,
+                           threadProcess != NULL ? (ULONG_PTR)PsGetProcessId(threadProcess) : 0);
         DpUserHookTrackTargetProcess(ProcessId, NULL);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              ProcessId,
@@ -2304,6 +2480,12 @@ DpUserHookTryQueueRuntimeInjection(
     ObDereferenceObject(targetThread);
 
     if (!NT_SUCCESS(status)) {
+        DP_USER_HOOK_TRACE("queue runtime apc failed pid=%Iu image=%wZ status=0x%08X loadLibrary=%p runtime=%wZ\n",
+                           (ULONG_PTR)ProcessId,
+                           traceImage,
+                           status,
+                           loadLibraryW,
+                           &runtimePath);
         DpUserHookTrackTargetProcess(ProcessId, processImage.Length == 0 ? NULL : &processImage);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
                              ProcessId,
@@ -2315,6 +2497,11 @@ DpUserHookTryQueueRuntimeInjection(
         return;
     }
 
+    DP_USER_HOOK_TRACE("queue runtime apc success pid=%Iu image=%wZ loadLibrary=%p runtime=%wZ\n",
+                       (ULONG_PTR)ProcessId,
+                       traceImage,
+                       loadLibraryW,
+                       &runtimePath);
     DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionQueued,
                          ProcessId,
                          NULL,
@@ -2481,17 +2668,36 @@ DpUserHookDefenseObserveProcessCreate(
     WCHAR runtimePathBuffer[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
     ULONG runtimePathBytes;
     UNICODE_STRING runtimeTarget;
+    UNICODE_STRING emptyText;
+    PCUNICODE_STRING traceImage;
+    PCUNICODE_STRING traceCommand;
 
     UNREFERENCED_PARAMETER(Process);
 
     if (!gDpUserHookInitialized) {
+        DP_USER_HOOK_TRACE("process notify ignored not initialized pid=%Iu createInfo=%p\n",
+                           (ULONG_PTR)ProcessId,
+                           CreateInfo);
         return;
     }
 
     if (CreateInfo == NULL) {
+        DP_USER_HOOK_TRACE("process notify exit pid=%Iu\n",
+                           (ULONG_PTR)ProcessId);
         DpUserHookUntrackTargetProcess(ProcessId);
         return;
     }
+
+    RtlInitUnicodeString(&emptyText, L"");
+    traceImage = CreateInfo->ImageFileName != NULL ? CreateInfo->ImageFileName : &emptyText;
+    traceCommand = CreateInfo->CommandLine != NULL ? CreateInfo->CommandLine : &emptyText;
+
+    DP_USER_HOOK_TRACE("process notify create pid=%Iu parent=%Iu image=%wZ command=%wZ flags=0x%08X\n",
+                       (ULONG_PTR)ProcessId,
+                       (ULONG_PTR)CreateInfo->ParentProcessId,
+                       traceImage,
+                       traceCommand,
+                       DpUserHookReadPolicyFlags());
 
     if (!DpUserHookShouldInjectProcess(ProcessId, CreateInfo->ImageFileName)) {
 
@@ -2558,6 +2764,7 @@ DpUserHookDefenseInitialize(
     status = PsSetCreateProcessNotifyRoutineEx(DpUserHookProcessNotify, FALSE);
     if (NT_SUCCESS(status)) {
         gDpUserHookProcessNotifyRegistered = TRUE;
+        DP_USER_HOOK_TRACE("%s registered\n", "PsSetCreateProcessNotifyRoutineEx");
     } else {
         DP_USER_HOOK_TRACE("PsSetCreateProcessNotifyRoutineEx failed status=0x%08X\n", status);
         DpUserHookDefenseUninitialize();
@@ -2567,6 +2774,7 @@ DpUserHookDefenseInitialize(
     status = PsSetLoadImageNotifyRoutine(DpUserHookLoadImageNotify);
     if (NT_SUCCESS(status)) {
         gDpUserHookImageNotifyRegistered = TRUE;
+        DP_USER_HOOK_TRACE("%s registered\n", "PsSetLoadImageNotifyRoutine");
     } else {
         DP_USER_HOOK_TRACE("PsSetLoadImageNotifyRoutine failed status=0x%08X\n", status);
         DpUserHookDefenseUninitialize();
@@ -2576,6 +2784,7 @@ DpUserHookDefenseInitialize(
     status = PsSetCreateThreadNotifyRoutine(DpUserHookThreadNotify);
     if (NT_SUCCESS(status)) {
         gDpUserHookThreadNotifyRegistered = TRUE;
+        DP_USER_HOOK_TRACE("%s registered\n", "PsSetCreateThreadNotifyRoutine");
     } else {
         DP_USER_HOOK_TRACE("PsSetCreateThreadNotifyRoutine failed status=0x%08X\n", status);
         DpUserHookDefenseUninitialize();
@@ -2609,6 +2818,11 @@ DpUserHookDefenseInitialize(
         return status;
     }
 
+    DP_USER_HOOK_TRACE("ObRegisterCallbacks registered handle=%p defaultRuntime=%ws runtimeBytes=%lu flags=0x%08X\n",
+                       gDpUserHookObHandle,
+                       gDpUserHookRuntimeDllPath,
+                       gDpUserHookRuntimeDllPathLengthBytes,
+                       DpUserHookReadPolicyFlags());
     return STATUS_SUCCESS;
 }
 
