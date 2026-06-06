@@ -120,6 +120,7 @@ namespace DataProtectorWebBridge.Services
         private const int MaxBehaviorRuleText = 256;
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
+        private const int MaxUserHookSummaryItems = 12;
 
         private readonly AuditLog auditLog;
         private readonly object userHookCorrelatorLock = new object();
@@ -2130,7 +2131,6 @@ namespace DataProtectorWebBridge.Services
                 if (ShouldUploadAtomicUserHookRecord(record))
                 {
                     records.Add(record);
-                    TryAppendAudit(record);
                 }
             }
 
@@ -2140,11 +2140,16 @@ namespace DataProtectorWebBridge.Services
                 if (ShouldUploadAtomicUserHookRecord(record))
                 {
                     records.Add(record);
-                    TryAppendAudit(record);
                 }
             }
 
-            return records.ToArray();
+            AuditLog.AuditRecord[] aggregated = AggregateUserHookThreatRecords(records);
+            foreach (AuditLog.AuditRecord record in aggregated)
+            {
+                TryAppendAudit(record);
+            }
+
+            return aggregated;
         }
 
         private UserHookBehaviorCorrelator GetUserHookBehaviorCorrelator(UserHookDefensePolicyDto policy)
@@ -2185,7 +2190,6 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 records.Add(match);
-                TryAppendAudit(match);
             }
         }
 
@@ -2227,6 +2231,423 @@ namespace DataProtectorWebBridge.Services
             }
 
             return false;
+        }
+
+        private static AuditLog.AuditRecord[] AggregateUserHookThreatRecords(IEnumerable<AuditLog.AuditRecord> records)
+        {
+            List<AuditLog.AuditRecord> direct = new List<AuditLog.AuditRecord>();
+            List<AuditLog.AuditRecord> threat = new List<AuditLog.AuditRecord>();
+
+            foreach (AuditLog.AuditRecord record in records ?? Enumerable.Empty<AuditLog.AuditRecord>())
+            {
+                if (record == null)
+                {
+                    continue;
+                }
+
+                AuditLog.EnrichRecord(record);
+                if (IsUserHookThreatRecord(record))
+                {
+                    threat.Add(record);
+                }
+                else
+                {
+                    direct.Add(record);
+                }
+            }
+
+            foreach (IGrouping<string, AuditLog.AuditRecord> group in threat.GroupBy(BuildUserHookThreatProcessKey, StringComparer.OrdinalIgnoreCase))
+            {
+                List<AuditLog.AuditRecord> grouped = group
+                    .OrderBy(ParseAuditTimestampUtc)
+                    .ToList();
+
+                if (string.IsNullOrWhiteSpace(group.Key))
+                {
+                    direct.AddRange(grouped);
+                    continue;
+                }
+
+                direct.Add(BuildUserHookThreatSummary(grouped));
+            }
+
+            return direct
+                .OrderBy(ParseAuditTimestampUtc)
+                .ToArray();
+        }
+
+        private static bool IsUserHookThreatRecord(AuditLog.AuditRecord record)
+        {
+            if (record == null)
+            {
+                return false;
+            }
+
+            string action = record.Action ?? string.Empty;
+            if (IsUserHookRuntimeDiagnosticAction(action) || IsUserHookCoverageAction(action))
+            {
+                return false;
+            }
+
+            return action.StartsWith("userhook.", StringComparison.OrdinalIgnoreCase) ||
+                   action.StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsUserHookRuntimeDiagnosticAction(string action)
+        {
+            if (string.IsNullOrWhiteSpace(action))
+            {
+                return false;
+            }
+
+            return action.StartsWith("userhook.runtime.drain.failed", StringComparison.OrdinalIgnoreCase) ||
+                   action.StartsWith("userhook.runtime.parse.failed", StringComparison.OrdinalIgnoreCase) ||
+                   action.StartsWith("userhook.runtime.policy-signer-untrusted", StringComparison.OrdinalIgnoreCase) ||
+                   action.StartsWith("userhook.runtime.policy-signer-excluded", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildUserHookThreatProcessKey(AuditLog.AuditRecord record)
+        {
+            if (record == null)
+            {
+                return string.Empty;
+            }
+
+            string host = FirstNonEmpty(record.SourceHost, record.Host, Environment.MachineName);
+            string pid = FirstNonEmpty(record.SourcePid, ExtractAuditMessagePid(record.Message));
+            if (string.IsNullOrWhiteSpace(pid))
+            {
+                return string.Empty;
+            }
+
+            return host.Trim().ToLowerInvariant() + "|" + pid.Trim();
+        }
+
+        private static AuditLog.AuditRecord BuildUserHookThreatSummary(List<AuditLog.AuditRecord> records)
+        {
+            List<AuditLog.AuditRecord> ordered = (records ?? new List<AuditLog.AuditRecord>())
+                .Where(record => record != null)
+                .OrderBy(ParseAuditTimestampUtc)
+                .ToList();
+            AuditLog.AuditRecord primary = ChooseUserHookSummaryPrimaryRecord(ordered);
+            bool blocked = ordered.Any(IsBlockedAuditRecord);
+            string severity = ResolveUserHookSummarySeverity(ordered);
+            string disposition = blocked ? "blocked" : "observed";
+            string sourceHost = FirstNonEmpty(primary.SourceHost, primary.Host, Environment.MachineName);
+            string sourceProcess = FirstNonEmpty(primary.SourceProcess, primary.Extension, ordered.Select(record => FirstNonEmpty(record.SourceProcess, record.Extension)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)));
+            string sourcePid = FirstNonEmpty(primary.SourcePid, ordered.Select(record => record.SourcePid).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)));
+            string targetPid = JoinDistinctLimited(ordered.Select(record => record.TargetPid), 4);
+            string targetProcess = JoinDistinctLimited(ordered.Select(record => FirstNonEmpty(record.TargetProcess, record.ObjectName, record.Target)), 4);
+            string actions = JoinDistinctLimited(ordered.Select(record => NormalizeUserHookSummaryAction(record.Action)), MaxUserHookSummaryItems);
+            string blockedActions = JoinDistinctLimited(ordered.Where(IsBlockedAuditRecord).Select(record => NormalizeUserHookSummaryAction(record.Action)), MaxUserHookSummaryItems);
+            string rules = JoinDistinctLimited(
+                ordered
+                    .Where(record => (record.Action ?? string.Empty).StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase))
+                    .Select(record => FirstNonEmpty(record.ObjectName, NormalizeUserHookSummaryAction(record.Action))),
+                6);
+            int blockedCount = ordered.Count(IsBlockedAuditRecord);
+            int behaviorCount = ordered.Count(record => (record.Action ?? string.Empty).StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase));
+            string objectName = FirstNonEmpty(
+                rules.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(item => item.Trim()).FirstOrDefault(),
+                primary.ObjectName,
+                "userhook process threat");
+            string objectFormat = BuildUserHookSummaryObjectFormat(ordered.Count, blockedCount, behaviorCount, actions, rules);
+            string message = BuildUserHookThreatSummaryMessage(
+                sourceProcess,
+                sourcePid,
+                targetProcess,
+                targetPid,
+                severity,
+                disposition,
+                ordered.Count,
+                blockedCount,
+                actions,
+                blockedActions,
+                rules);
+
+            return new AuditLog.AuditRecord
+            {
+                TimestampUtc = FirstNonEmpty(ordered.Select(record => record.TimestampUtc).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)), DateTime.UtcNow.ToString("o")),
+                Host = FirstNonEmpty(primary.Host, sourceHost),
+                Actor = "user-hook-defense",
+                Action = "userhook.threat.summary",
+                Target = FirstNonEmpty(targetProcess, primary.Target),
+                Extension = sourceProcess,
+                Succeeded = !blocked,
+                Status = FirstNonEmpty(
+                    ordered.Where(IsBlockedAuditRecord).Select(record => record.Status).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)),
+                    primary.Status,
+                    "0x00000000"),
+                Message = message,
+                SourceHost = sourceHost,
+                SourceProcess = sourceProcess,
+                SourcePid = sourcePid,
+                TargetProcess = targetProcess,
+                TargetPid = targetPid,
+                ObjectType = behaviorCount > 0 ? "behavior-chain" : "process-behavior",
+                ObjectName = objectName,
+                ObjectFormat = objectFormat,
+                PolicyName = "process-threat-insight",
+                Disposition = disposition,
+                Severity = severity,
+                EventDetails = BuildUserHookSummaryDetails(ordered)
+            };
+        }
+
+        private static AuditLog.AuditRecord ChooseUserHookSummaryPrimaryRecord(List<AuditLog.AuditRecord> records)
+        {
+            AuditLog.AuditRecord primary = (records ?? new List<AuditLog.AuditRecord>())
+                .OrderByDescending(record => (record.Action ?? string.Empty).StartsWith("behavior.chain.", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                .ThenByDescending(record => SeverityRank(record.Severity))
+                .ThenByDescending(record => IsBlockedAuditRecord(record) ? 1 : 0)
+                .ThenByDescending(record => ExtractObjectFormatInt(record.ObjectFormat, "score="))
+                .ThenByDescending(record => ParseAuditTimestampUtc(record).Ticks)
+                .FirstOrDefault();
+
+            return primary ?? new AuditLog.AuditRecord();
+        }
+
+        private static string ResolveUserHookSummarySeverity(List<AuditLog.AuditRecord> records)
+        {
+            int rank = (records ?? new List<AuditLog.AuditRecord>())
+                .Select(record => SeverityRank(record == null ? string.Empty : record.Severity))
+                .DefaultIfEmpty(0)
+                .Max();
+
+            if (rank >= 4) return "critical";
+            if (rank >= 3) return "warning";
+            if (rank >= 2) return "info";
+            return "info";
+        }
+
+        private static int SeverityRank(string severity)
+        {
+            if (string.Equals(severity, "critical", StringComparison.OrdinalIgnoreCase)) return 4;
+            if (string.Equals(severity, "warning", StringComparison.OrdinalIgnoreCase)) return 3;
+            if (string.Equals(severity, "info", StringComparison.OrdinalIgnoreCase)) return 2;
+            if (string.Equals(severity, "operational", StringComparison.OrdinalIgnoreCase)) return 1;
+            return 0;
+        }
+
+        private static bool IsBlockedAuditRecord(AuditLog.AuditRecord record)
+        {
+            if (record == null)
+            {
+                return false;
+            }
+
+            string action = record.Action ?? string.Empty;
+            return string.Equals(record.Disposition, "blocked", StringComparison.OrdinalIgnoreCase) ||
+                   action.IndexOf(".blocked.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   string.Equals(record.Status, "0xC0000022", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildUserHookSummaryObjectFormat(int eventCount, int blockedCount, int behaviorCount, string actions, string rules)
+        {
+            List<string> parts = new List<string>
+            {
+                "events=" + eventCount.ToString(CultureInfo.InvariantCulture),
+                "blocked=" + blockedCount.ToString(CultureInfo.InvariantCulture),
+                "chains=" + behaviorCount.ToString(CultureInfo.InvariantCulture)
+            };
+
+            if (!string.IsNullOrWhiteSpace(rules))
+            {
+                parts.Add("rules=" + rules);
+            }
+
+            if (!string.IsNullOrWhiteSpace(actions))
+            {
+                parts.Add("actions=" + actions);
+            }
+
+            return string.Join(";", parts.ToArray());
+        }
+
+        private static string BuildUserHookThreatSummaryMessage(
+            string sourceProcess,
+            string sourcePid,
+            string targetProcess,
+            string targetPid,
+            string severity,
+            string disposition,
+            int eventCount,
+            int blockedCount,
+            string actions,
+            string blockedActions,
+            string rules)
+        {
+            List<string> parts = new List<string>
+            {
+                "Process threat insight summary",
+                "process=" + FirstNonEmpty(sourceProcess, "unknown"),
+                "pid=" + FirstNonEmpty(sourcePid, "unknown"),
+                "severity=" + severity,
+                "disposition=" + disposition,
+                "events=" + eventCount.ToString(CultureInfo.InvariantCulture),
+                "blocked=" + blockedCount.ToString(CultureInfo.InvariantCulture)
+            };
+
+            if (!string.IsNullOrWhiteSpace(targetProcess))
+            {
+                parts.Add("target=" + targetProcess);
+            }
+
+            if (!string.IsNullOrWhiteSpace(targetPid))
+            {
+                parts.Add("targetPid=" + targetPid);
+            }
+
+            if (!string.IsNullOrWhiteSpace(rules))
+            {
+                parts.Add("rules=" + rules);
+            }
+
+            if (!string.IsNullOrWhiteSpace(actions))
+            {
+                parts.Add("actions=" + actions);
+            }
+
+            if (!string.IsNullOrWhiteSpace(blockedActions))
+            {
+                parts.Add("blockedActions=" + blockedActions);
+            }
+
+            return string.Join("; ", parts.ToArray()) + ".";
+        }
+
+        private static string BuildUserHookSummaryDetails(List<AuditLog.AuditRecord> records)
+        {
+            return string.Join(" | ",
+                (records ?? new List<AuditLog.AuditRecord>())
+                    .OrderBy(ParseAuditTimestampUtc)
+                    .Take(MaxUserHookSummaryItems)
+                    .Select(record =>
+                        NormalizeUserHookSummaryAction(record.Action) +
+                        " -> " +
+                        FirstNonEmpty(record.TargetProcess, record.ObjectName, record.Target, "-") +
+                        (string.IsNullOrWhiteSpace(record.TargetPid) ? string.Empty : " PID " + record.TargetPid))
+                    .ToArray());
+        }
+
+        private static string NormalizeUserHookSummaryAction(string action)
+        {
+            string value = action ?? string.Empty;
+            string[] prefixes =
+            {
+                "userhook.blocked.",
+                "userhook.observed.",
+                "behavior.chain.",
+                "userhook."
+            };
+
+            foreach (string prefix in prefixes)
+            {
+                if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return value.Substring(prefix.Length);
+                }
+            }
+
+            return value;
+        }
+
+        private static string JoinDistinctLimited(IEnumerable<string> values, int limit)
+        {
+            List<string> distinct = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int max = Math.Max(1, limit);
+
+            foreach (string value in values ?? Enumerable.Empty<string>())
+            {
+                string trimmed = (value ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(trimmed) || !seen.Add(trimmed))
+                {
+                    continue;
+                }
+
+                distinct.Add(trimmed);
+                if (distinct.Count >= max)
+                {
+                    break;
+                }
+            }
+
+            return string.Join(",", distinct.ToArray());
+        }
+
+        private static DateTime ParseAuditTimestampUtc(AuditLog.AuditRecord record)
+        {
+            DateTime timestamp;
+            if (record != null &&
+                DateTime.TryParse(record.TimestampUtc, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out timestamp))
+            {
+                return timestamp.ToUniversalTime();
+            }
+
+            return DateTime.MinValue;
+        }
+
+        private static int ExtractObjectFormatInt(string objectFormat, string prefix)
+        {
+            string value = ExtractSemicolonField(objectFormat, prefix);
+            int parsed;
+            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed) ? parsed : 0;
+        }
+
+        private static string ExtractSemicolonField(string text, string prefix)
+        {
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(prefix))
+            {
+                return string.Empty;
+            }
+
+            int index = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return string.Empty;
+            }
+
+            index += prefix.Length;
+            int end = text.IndexOf(';', index);
+            if (end < 0)
+            {
+                end = text.Length;
+            }
+
+            return text.Substring(index, end - index).Trim();
+        }
+
+        private static string ExtractAuditMessagePid(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return string.Empty;
+            }
+
+            int index = message.IndexOf("PID ", StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                index = message.IndexOf("pid=", StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                {
+                    return string.Empty;
+                }
+
+                index += "pid=".Length;
+            }
+            else
+            {
+                index += "PID ".Length;
+            }
+
+            int end = index;
+            while (end < message.Length && char.IsDigit(message[end]))
+            {
+                end++;
+            }
+
+            return end > index ? message.Substring(index, end - index) : string.Empty;
         }
 
         private static string BuildUserHookAuditMessage(UserHookDefenseEventDto item)
