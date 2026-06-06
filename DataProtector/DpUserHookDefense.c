@@ -2425,6 +2425,8 @@ DpUserHookDefenseObserveProcessCreate(
     )
 {
     HANDLE parentProcessId = NULL;
+    WCHAR runtimePathBuffer[DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS];
+    ULONG runtimePathBytes;
     UNICODE_STRING runtimeTarget;
 
     UNREFERENCED_PARAMETER(Process);
@@ -2442,13 +2444,18 @@ DpUserHookDefenseObserveProcessCreate(
     parentProcessId = CreateInfo->ParentProcessId;
     DpUserHookTrackTargetProcess(ProcessId, CreateInfo->ImageFileName);
 
-    RtlInitUnicodeString(&runtimeTarget, L"DataProtectorUserHookRuntime.dll");
+    DpUserHookGetRuntimeDllPath(runtimePathBuffer,
+                                RTL_NUMBER_OF(runtimePathBuffer),
+                                &runtimePathBytes);
+    runtimeTarget.Buffer = runtimePathBuffer;
+    runtimeTarget.Length = (USHORT)runtimePathBytes;
+    runtimeTarget.MaximumLength = sizeof(runtimePathBuffer);
 
     DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionRequired,
                          ProcessId,
                          parentProcessId,
                          STATUS_PENDING,
-                         &runtimeTarget,
+                         runtimeTarget.Length == 0 ? CreateInfo->ImageFileName : &runtimeTarget,
                          CreateInfo->ImageFileName,
                          DpUserHookReadPolicyFlags());
 }

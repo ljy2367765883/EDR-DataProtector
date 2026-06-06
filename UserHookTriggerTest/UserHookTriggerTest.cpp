@@ -106,9 +106,8 @@ typedef NTSTATUS (NTAPI *PFN_NtSuspendProcess)(
     HANDLE ProcessHandle
     );
 
-typedef BOOL (WINAPI *PFN_DpUserHookRuntimeInitialize)(VOID);
-
 static const wchar_t *kDefaultTarget = L"%SystemRoot%\\System32\\notepad.exe";
+static const wchar_t *kAttackChildArg = L"--attack-child";
 static const wchar_t *kRuntimeDllName = L"DataProtectorUserHookRuntime.dll";
 static const wchar_t *kRuntimeEventPath = L"C:\\ProgramData\\DataProtector\\UserHookRuntimeEvents.jsonl";
 
@@ -141,15 +140,20 @@ struct TestContext
 
 static void PrintUsage()
 {
-    wprintf(L"UserHookTriggerTest - benign trigger program for DataProtector userhook injection defense\n");
+    wprintf(L"UserHookTriggerTest - benign kernel-injection trigger for DataProtector userhook defense\n");
     wprintf(L"\n");
     wprintf(L"Usage:\n");
-    wprintf(L"  UserHookTriggerTest.exe [--target <exe>] [--no-runtime] [--resume-remote-thread]\n");
+    wprintf(L"  UserHookTriggerTest.exe [--target <exe>] [--resume-remote-thread] [--resume-primary-thread]\n");
     wprintf(L"\n");
     wprintf(L"Default behavior:\n");
-    wprintf(L"  Loads DataProtectorUserHookRuntime.dll from the executable directory,\n");
-    wprintf(L"  creates a suspended child process, triggers remote memory/write/thread/APC/native\n");
-    wprintf(L"  telemetry against that child, then terminates the child process.\n");
+    wprintf(L"  Launches a fresh child copy of this executable and waits for the kernel\n");
+    wprintf(L"  userhook defense to inject DataProtectorUserHookRuntime.dll into that child.\n");
+    wprintf(L"  The test does not self-load the runtime. If kernel startup injection fails,\n");
+    wprintf(L"  the child exits before generating injection behavior.\n");
+    wprintf(L"\n");
+    wprintf(L"Child behavior after kernel injection is confirmed:\n");
+    wprintf(L"  Creates a suspended target process, triggers remote memory/write/thread/APC/native\n");
+    wprintf(L"  telemetry against that target, then terminates the target process.\n");
     wprintf(L"\n");
     wprintf(L"Event log:\n");
     wprintf(L"  %s\n", kRuntimeEventPath);
@@ -225,72 +229,53 @@ static bool ExpandPath(const wchar_t *input, wchar_t *output, DWORD chars)
     return result > 0 && result < chars;
 }
 
-static bool GetExecutableDirectory(wchar_t *directory, DWORD chars)
+static bool GetCurrentExecutablePath(wchar_t *path, DWORD chars)
 {
     DWORD length;
-    wchar_t *slash;
 
-    if (directory == NULL || chars == 0) {
+    if (path == NULL || chars == 0) {
         return false;
     }
 
-    length = GetModuleFileNameW(NULL, directory, chars);
+    length = GetModuleFileNameW(NULL, path, chars);
     if (length == 0 || length >= chars) {
         return false;
     }
 
-    slash = wcsrchr(directory, L'\\');
-    if (slash == NULL) {
-        return false;
-    }
-
-    *slash = L'\0';
     return true;
 }
 
-static bool LoadRuntimeFromExecutableDirectory()
+static bool WaitForKernelInjectedRuntime(DWORD timeoutMs)
 {
-    wchar_t directory[MAX_PATH];
-    wchar_t runtimePath[MAX_PATH];
-    HMODULE runtime;
-    PFN_DpUserHookRuntimeInitialize initializeRuntime;
+    DWORD startTick = GetTickCount();
 
-    if (!GetExecutableDirectory(directory, ARRAYSIZE(directory))) {
-        wprintf(L"[WARN]   Cannot locate executable directory; runtime auto-load skipped.\n");
-        return false;
+    for (;;) {
+        HMODULE runtime = GetModuleHandleW(kRuntimeDllName);
+        if (runtime != NULL) {
+            wchar_t runtimePath[MAX_PATH];
+            DWORD length = GetModuleFileNameW(runtime, runtimePath, ARRAYSIZE(runtimePath));
+            if (length == 0 || length >= ARRAYSIZE(runtimePath)) {
+                wprintf(L"[OK]      Kernel-injected runtime is loaded: %s\n", kRuntimeDllName);
+            } else {
+                wprintf(L"[OK]      Kernel-injected runtime is loaded: %s\n", runtimePath);
+            }
+
+            Sleep(1000);
+            return true;
+        }
+
+        if (GetTickCount() - startTick >= timeoutMs) {
+            break;
+        }
+
+        SleepEx(250, TRUE);
     }
 
-    if (FAILED(StringCchPrintfW(runtimePath,
-                               ARRAYSIZE(runtimePath),
-                               L"%s\\%s",
-                               directory,
-                               kRuntimeDllName))) {
-        wprintf(L"[WARN]   Runtime path is too long; runtime auto-load skipped.\n");
-        return false;
-    }
-
-    runtime = LoadLibraryW(runtimePath);
-    if (runtime == NULL) {
-        wchar_t message[256];
-        FormatWin32Error(GetLastError(), message, ARRAYSIZE(message));
-        wprintf(L"[WARN]   LoadLibrary(%s) failed: %s\n", runtimePath, message);
-        return false;
-    }
-
-    initializeRuntime = (PFN_DpUserHookRuntimeInitialize)GetProcAddress(runtime, "DpUserHookRuntimeInitialize");
-    if (initializeRuntime == NULL) {
-        wprintf(L"[WARN]   Runtime loaded, but DpUserHookRuntimeInitialize export was not found.\n");
-        return true;
-    }
-
-    if (!initializeRuntime()) {
-        wprintf(L"[WARN]   DpUserHookRuntimeInitialize returned FALSE.\n");
-        return false;
-    }
-
-    Sleep(750);
-    wprintf(L"[OK]      Runtime loaded: %s\n", runtimePath);
-    return true;
+    wprintf(L"[FAIL]   Kernel did not inject %s into this child within %lu ms.\n",
+            kRuntimeDllName,
+            timeoutMs);
+    wprintf(L"[INFO]    Check kernel userhook events for runtime-injection-required, queued, or failed.\n");
+    return false;
 }
 
 static bool LoadNativeApi(NativeApi *api)
@@ -714,60 +699,16 @@ static void CleanupContext(const NativeApi *api, TestContext *ctx)
     }
 }
 
-int wmain(int argc, wchar_t **argv)
+static int RunAttackChild(const wchar_t *target, bool resumeRemoteThread, bool resumePrimaryThread)
 {
-    const wchar_t *target = kDefaultTarget;
-    bool loadRuntime = true;
-    bool resumeRemoteThread = false;
-    bool resumePrimaryThread = false;
     NativeApi api;
     TestContext ctx;
-    int i;
-
-    for (i = 1; i < argc; i++) {
-        if (EqualsArg(argv[i], L"--help") || EqualsArg(argv[i], L"-h") || EqualsArg(argv[i], L"/?")) {
-            PrintUsage();
-            return 0;
-        }
-
-        if (EqualsArg(argv[i], L"--target")) {
-            if (i + 1 >= argc) {
-                wprintf(L"[FAIL]   --target requires a path.\n");
-                return 2;
-            }
-            target = argv[++i];
-            continue;
-        }
-
-        if (EqualsArg(argv[i], L"--no-runtime")) {
-            loadRuntime = false;
-            continue;
-        }
-
-        if (EqualsArg(argv[i], L"--resume-remote-thread")) {
-            resumeRemoteThread = true;
-            continue;
-        }
-
-        if (EqualsArg(argv[i], L"--resume-primary-thread")) {
-            resumePrimaryThread = true;
-            continue;
-        }
-
-        wprintf(L"[FAIL]   Unknown argument: %s\n", argv[i]);
-        PrintUsage();
-        return 2;
-    }
 
     ZeroMemory(&ctx, sizeof(ctx));
 
-    wprintf(L"[INFO]    DataProtector userhook trigger test starting.\n");
-    wprintf(L"[INFO]    This program only targets its own suspended child process.\n");
-
-    if (loadRuntime) {
-        (void)LoadRuntimeFromExecutableDirectory();
-    } else {
-        wprintf(L"[INFO]    Runtime auto-load disabled by --no-runtime.\n");
+    wprintf(L"[INFO]    Attack child started. Waiting for kernel userhook runtime injection.\n");
+    if (!WaitForKernelInjectedRuntime(15000)) {
+        return 5;
     }
 
     if (!LoadNativeApi(&api)) {
@@ -789,4 +730,133 @@ int wmain(int argc, wchar_t **argv)
     CleanupContext(&api, &ctx);
     wprintf(L"[INFO]    Suspended child process cleaned up.\n");
     return 0;
+}
+
+static int LaunchAttackChild(const wchar_t *target, bool resumeRemoteThread, bool resumePrimaryThread)
+{
+    wchar_t exePath[MAX_PATH];
+    wchar_t commandLine[32768];
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION processInfo;
+    DWORD waitResult;
+    DWORD exitCode = 1;
+    HRESULT hr;
+    BOOL ok;
+
+    if (!GetCurrentExecutablePath(exePath, ARRAYSIZE(exePath))) {
+        wprintf(L"[FAIL]   Cannot resolve current executable path.\n");
+        return 6;
+    }
+
+    hr = StringCchPrintfW(commandLine,
+                         ARRAYSIZE(commandLine),
+                         L"\"%s\" %s --target \"%s\"%s%s",
+                         exePath,
+                         kAttackChildArg,
+                         target,
+                         resumeRemoteThread ? L" --resume-remote-thread" : L"",
+                         resumePrimaryThread ? L" --resume-primary-thread" : L"");
+    if (FAILED(hr)) {
+        wprintf(L"[FAIL]   Attack child command line is too long.\n");
+        return 7;
+    }
+
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&processInfo, sizeof(processInfo));
+    startup.cb = sizeof(startup);
+
+    ok = CreateProcessW(exePath,
+                        commandLine,
+                        NULL,
+                        NULL,
+                        FALSE,
+                        0,
+                        NULL,
+                        NULL,
+                        &startup,
+                        &processInfo);
+    PrintWin32Result(L"CreateProcessW(attack child for kernel injection)", ok);
+    if (!ok) {
+        return 8;
+    }
+
+    wprintf(L"[INFO]    Attack child PID=%lu. Waiting for it to complete.\n",
+            processInfo.dwProcessId);
+
+    waitResult = WaitForSingleObject(processInfo.hProcess, 120000);
+    if (waitResult == WAIT_TIMEOUT) {
+        wprintf(L"[FAIL]   Attack child timed out.\n");
+        TerminateProcess(processInfo.hProcess, 9);
+        exitCode = 9;
+    } else if (waitResult != WAIT_OBJECT_0) {
+        wprintf(L"[FAIL]   WaitForSingleObject(attack child) returned 0x%08lX.\n", waitResult);
+        exitCode = 10;
+    } else if (!GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+        PrintWin32Result(L"GetExitCodeProcess(attack child)", FALSE);
+        exitCode = 11;
+    }
+
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
+
+    if (exitCode == 0) {
+        wprintf(L"[OK]      Kernel-injected attack child completed trigger pass.\n");
+    } else {
+        wprintf(L"[FAIL]   Attack child exited with code %lu.\n", exitCode);
+    }
+
+    return (int)exitCode;
+}
+
+int wmain(int argc, wchar_t **argv)
+{
+    const wchar_t *target = kDefaultTarget;
+    bool attackChild = false;
+    bool resumeRemoteThread = false;
+    bool resumePrimaryThread = false;
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (EqualsArg(argv[i], L"--help") || EqualsArg(argv[i], L"-h") || EqualsArg(argv[i], L"/?")) {
+            PrintUsage();
+            return 0;
+        }
+
+        if (EqualsArg(argv[i], L"--target")) {
+            if (i + 1 >= argc) {
+                wprintf(L"[FAIL]   --target requires a path.\n");
+                return 2;
+            }
+            target = argv[++i];
+            continue;
+        }
+
+        if (EqualsArg(argv[i], kAttackChildArg)) {
+            attackChild = true;
+            continue;
+        }
+
+        if (EqualsArg(argv[i], L"--resume-remote-thread")) {
+            resumeRemoteThread = true;
+            continue;
+        }
+
+        if (EqualsArg(argv[i], L"--resume-primary-thread")) {
+            resumePrimaryThread = true;
+            continue;
+        }
+
+        wprintf(L"[FAIL]   Unknown argument: %s\n", argv[i]);
+        PrintUsage();
+        return 2;
+    }
+
+    wprintf(L"[INFO]    DataProtector userhook kernel-injection trigger test starting.\n");
+    wprintf(L"[INFO]    Runtime self-load is intentionally disabled; kernel startup injection is required.\n");
+
+    if (attackChild) {
+        return RunAttackChild(target, resumeRemoteThread, resumePrimaryThread);
+    }
+
+    return LaunchAttackChild(target, resumeRemoteThread, resumePrimaryThread);
 }
