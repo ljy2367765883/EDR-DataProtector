@@ -745,8 +745,6 @@ DpProcessPolicyCreateProcessNotify(
         return;
     }
 
-    DpUserHookDefenseObserveProcessCreate(Process, ProcessId, CreateInfo);
-
     status = DpProcessPolicyCreateEntry(ProcessId,
                                         Process,
                                         CreateInfo->ImageFileName,

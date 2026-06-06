@@ -266,6 +266,7 @@ static ULONG gDpUserHookExcludedProcessPathsLengthBytes = 0;
 static ULONG gDpUserHookTrustedSignerSubjectsLengthBytes = 0;
 static ULONG gDpUserHookRuntimeDllPathLengthBytes = 0;
 static BOOLEAN gDpUserHookInitialized = FALSE;
+static BOOLEAN gDpUserHookProcessNotifyRegistered = FALSE;
 static BOOLEAN gDpUserHookImageNotifyRegistered = FALSE;
 static BOOLEAN gDpUserHookThreadNotifyRegistered = FALSE;
 static PVOID gDpUserHookObHandle = NULL;
@@ -311,6 +312,14 @@ static
 BOOLEAN
 DpUserHookRuntimePathConfigured(
     VOID
+    );
+
+static
+VOID
+DpUserHookProcessNotify(
+    _Inout_ PEPROCESS Process,
+    _In_ HANDLE ProcessId,
+    _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
     );
 
 static
@@ -857,18 +866,9 @@ DpUserHookShouldInjectProcess(
     ULONG flags = DpUserHookReadPolicyFlags();
 
     if (!FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_ENABLED) ||
-        !FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION) ||
         ImagePath == NULL ||
         ImagePath->Buffer == NULL ||
         ImagePath->Length == 0) {
-        return FALSE;
-    }
-
-    if (!DpUserHookRuntimePathConfigured()) {
-        DP_USER_HOOK_TRACE("inject skip runtime path missing pid=%Iu image=%wZ flags=0x%08X\n",
-                           (ULONG_PTR)ProcessId,
-                           ImagePath,
-                           flags);
         return FALSE;
     }
 
@@ -894,6 +894,36 @@ DpUserHookShouldInjectProcess(
                              ProcessId,
                              NULL,
                              STATUS_SUCCESS,
+                             ImagePath,
+                             ImagePath,
+                             flags);
+        return FALSE;
+    }
+
+    if (!FlagOn(flags, DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION)) {
+        DP_USER_HOOK_TRACE("inject skip early injection disabled pid=%Iu image=%wZ flags=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           ImagePath,
+                           flags);
+        DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionSkipped,
+                             ProcessId,
+                             NULL,
+                             (ULONG)STATUS_NOT_SUPPORTED,
+                             ImagePath,
+                             ImagePath,
+                             flags);
+        return FALSE;
+    }
+
+    if (!DpUserHookRuntimePathConfigured()) {
+        DP_USER_HOOK_TRACE("inject skip runtime path missing pid=%Iu image=%wZ flags=0x%08X\n",
+                           (ULONG_PTR)ProcessId,
+                           ImagePath,
+                           flags);
+        DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionSkipped,
+                             ProcessId,
+                             NULL,
+                             (ULONG)STATUS_DLL_NOT_FOUND,
                              ImagePath,
                              ImagePath,
                              flags);
@@ -1786,7 +1816,7 @@ DpUserHookRuntimePathConfigured(
 
 static
 NTSTATUS
-DpUserHookFindKernel32LoadLibraryW(
+DpUserHookFindLoadLibraryWExport(
     _In_ PVOID ImageBase,
     _In_ SIZE_T ImageSize,
     _Outptr_ PVOID *LoadLibraryAddress
@@ -1873,6 +1903,13 @@ DpUserHookFindKernel32LoadLibraryW(
 
                 functionRva = functions[ordinal];
                 if (functionRva == 0 || functionRva >= ImageSize) {
+                    break;
+                }
+
+                if (functionRva >= exportRva &&
+                    functionRva < exportRva + exportSize) {
+
+                    status = STATUS_PROCEDURE_NOT_FOUND;
                     break;
                 }
 
@@ -2184,12 +2221,17 @@ DpUserHookTryQueueRuntimeInjection(
     PETHREAD targetThread = NULL;
     PEPROCESS threadProcess;
     PVOID loadLibraryW = NULL;
+    BOOLEAN loadLibraryCarrier;
+
+    loadLibraryCarrier =
+        DpUserHookImageHasSuffix(FullImageName, L"\\kernelbase.dll") ||
+        DpUserHookImageHasSuffix(FullImageName, L"\\kernel32.dll");
 
     if (ImageInfo == NULL ||
         ProcessId == NULL ||
         !DpUserHookFeatureEnabled(DP_USER_HOOK_DEFENSE_FLAG_EARLY_PROCESS_INJECTION) ||
         !DpUserHookIsTrackedTargetProcess(ProcessId) ||
-        !DpUserHookImageHasSuffix(FullImageName, L"\\kernel32.dll")) {
+        !loadLibraryCarrier) {
 
         return;
     }
@@ -2210,9 +2252,9 @@ DpUserHookTryQueueRuntimeInjection(
         return;
     }
 
-    status = DpUserHookFindKernel32LoadLibraryW(ImageInfo->ImageBase,
-                                                ImageInfo->ImageSize,
-                                                &loadLibraryW);
+    status = DpUserHookFindLoadLibraryWExport(ImageInfo->ImageBase,
+                                              ImageInfo->ImageSize,
+                                              &loadLibraryW);
     if (!NT_SUCCESS(status)) {
         DpUserHookTrackTargetProcess(ProcessId, NULL);
         DpUserHookQueueEvent(DpUserHookDefenseOperationRuntimeInjectionFailed,
@@ -2417,6 +2459,17 @@ DpUserHookLoadImageNotify(
     }
 }
 
+static
+VOID
+DpUserHookProcessNotify(
+    _Inout_ PEPROCESS Process,
+    _In_ HANDLE ProcessId,
+    _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo
+    )
+{
+    DpUserHookDefenseObserveProcessCreate(Process, ProcessId, CreateInfo);
+}
+
 VOID
 DpUserHookDefenseObserveProcessCreate(
     _In_ PEPROCESS Process,
@@ -2430,6 +2483,10 @@ DpUserHookDefenseObserveProcessCreate(
     UNICODE_STRING runtimeTarget;
 
     UNREFERENCED_PARAMETER(Process);
+
+    if (!gDpUserHookInitialized) {
+        return;
+    }
 
     if (CreateInfo == NULL) {
         DpUserHookUntrackTargetProcess(ProcessId);
@@ -2486,12 +2543,26 @@ DpUserHookDefenseInitialize(
     RtlZeroMemory(gDpUserHookExcludedProcessPaths, sizeof(gDpUserHookExcludedProcessPaths));
     RtlZeroMemory(gDpUserHookTrustedSignerSubjects, sizeof(gDpUserHookTrustedSignerSubjects));
     RtlZeroMemory(gDpUserHookRuntimeDllPath, sizeof(gDpUserHookRuntimeDllPath));
+    (VOID)RtlStringCchCopyW(gDpUserHookRuntimeDllPath,
+                            RTL_NUMBER_OF(gDpUserHookRuntimeDllPath),
+                            DP_USER_HOOK_DEFENSE_DEFAULT_RUNTIME_DLL_PATH);
     gDpUserHookExcludedProcessNamesLengthBytes = 0;
     gDpUserHookExcludedProcessDirectoriesLengthBytes = 0;
     gDpUserHookExcludedProcessPathsLengthBytes = 0;
     gDpUserHookTrustedSignerSubjectsLengthBytes = 0;
-    gDpUserHookRuntimeDllPathLengthBytes = 0;
+    gDpUserHookRuntimeDllPathLengthBytes =
+        DpUserHookBoundedStringBytes(gDpUserHookRuntimeDllPath,
+                                     DP_USER_HOOK_DEFENSE_RUNTIME_PATH_CHARS);
     gDpUserHookInitialized = TRUE;
+
+    status = PsSetCreateProcessNotifyRoutineEx(DpUserHookProcessNotify, FALSE);
+    if (NT_SUCCESS(status)) {
+        gDpUserHookProcessNotifyRegistered = TRUE;
+    } else {
+        DP_USER_HOOK_TRACE("PsSetCreateProcessNotifyRoutineEx failed status=0x%08X\n", status);
+        DpUserHookDefenseUninitialize();
+        return status;
+    }
 
     status = PsSetLoadImageNotifyRoutine(DpUserHookLoadImageNotify);
     if (NT_SUCCESS(status)) {
@@ -2554,6 +2625,11 @@ DpUserHookDefenseUninitialize(
     if (gDpUserHookThreadNotifyRegistered) {
         PsRemoveCreateThreadNotifyRoutine(DpUserHookThreadNotify);
         gDpUserHookThreadNotifyRegistered = FALSE;
+    }
+
+    if (gDpUserHookProcessNotifyRegistered) {
+        (VOID)PsSetCreateProcessNotifyRoutineEx(DpUserHookProcessNotify, TRUE);
+        gDpUserHookProcessNotifyRegistered = FALSE;
     }
 
     if (gDpUserHookImageNotifyRegistered) {
