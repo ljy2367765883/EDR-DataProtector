@@ -142,6 +142,7 @@ $usbCryptDriverCertificate = Join-Path $root "DataProtectorUsbCrypt\$Platform\$C
 $usbToolOutput = Join-Path $root "DataProtectorUsbTool\$Platform\$Configuration\DataProtectorUsbTool.exe"
 $userHookRuntimeOutput = Join-Path $root "DataProtectorUserHookRuntime\$Platform\$Configuration\DataProtectorUserHookRuntime.dll"
 $userHookRuntimeX86Output = Join-Path $root "DataProtectorUserHookRuntime\Win32\$Configuration\DataProtectorUserHookRuntime.dll"
+$userHookTriggerTestOutput = Join-Path $root "UserHookTriggerTest\$Platform\$Configuration\UserHookTriggerTest.exe"
 $sandboxTelemetryOutput = Join-Path $root "DataProtectorSandboxTelemetry\bin\$Platform\$Configuration\DataProtectorSandboxTelemetry.exe"
 $sandboxTelemetryX86Output = Join-Path $root "DataProtectorSandboxTelemetry\bin\x86\$Configuration\DataProtectorSandboxTelemetry.exe"
 
@@ -159,6 +160,7 @@ try {
     Invoke-Checked $msBuild @(".\DataProtectorUsbTool\DataProtectorUsbTool.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUsbTool build"
     Invoke-Checked $msBuild @(".\DataProtectorUserHookRuntime\DataProtectorUserHookRuntime.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorUserHookRuntime build"
     Invoke-Checked $msBuild @(".\DataProtectorUserHookRuntime\DataProtectorUserHookRuntime.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=Win32") "DataProtectorUserHookRuntime x86 build"
+    Invoke-Checked $msBuild @(".\UserHookTriggerTest\UserHookTriggerTest.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "UserHookTriggerTest build"
     Invoke-Checked $msBuild @(".\DataProtectorSandboxTelemetry\DataProtectorSandboxTelemetry.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorSandboxTelemetry build"
     Invoke-Checked $msBuild @(".\DataProtectorSandboxTelemetry\DataProtectorSandboxTelemetry.csproj", "/p:Configuration=$Configuration", "/p:Platform=x86") "DataProtectorSandboxTelemetry x86 build"
     Invoke-Checked $msBuild @(".\DataProtectorWebBridge\DataProtectorWebBridge.csproj", "/p:Configuration=$Configuration", "/p:Platform=$Platform") "DataProtectorWebBridge build"
@@ -205,6 +207,10 @@ try {
         throw "User hook runtime x86 output was not found: $userHookRuntimeX86Output"
     }
 
+    if (-not (Test-Path -LiteralPath $userHookTriggerTestOutput)) {
+        throw "User hook trigger test output was not found: $userHookTriggerTestOutput"
+    }
+
     if (-not (Test-Path -LiteralPath $sandboxTelemetryOutput)) {
         throw "Sandbox telemetry output was not found: $sandboxTelemetryOutput"
     }
@@ -233,7 +239,9 @@ try {
     $staticOutput = Join-Path $serverPublish "web"
     $serverUsbRuntimePublish = Join-Path $serverPublish "usbcrypt-runtime"
     $serverStaticAnalyzerPublish = Join-Path $serverPublish "static-analyzer"
-    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish, $serverUsbRuntimePublish, $serverStaticAnalyzerPublish | Out-Null
+    $serverUserHookToolsPublish = Join-Path $serverPublish "tools\UserHookTriggerTest"
+    $agentUserHookToolsPublish = Join-Path $agentPublish "tools\UserHookTriggerTest"
+    New-Item -ItemType Directory -Force -Path $staticOutput, $serverPublish, $agentPublish, $agentDriverPublish, $serverUsbRuntimePublish, $serverStaticAnalyzerPublish, $serverUserHookToolsPublish, $agentUserHookToolsPublish | Out-Null
 
     Copy-Item -Path (Join-Path $webDist "*") -Destination $staticOutput -Recurse -Force
     Copy-Item -Path (Join-Path $root "DataProtectorStaticAnalyzer\*") -Destination $serverStaticAnalyzerPublish -Recurse -Force
@@ -254,6 +262,10 @@ try {
 
     Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $agentPublish -Force
     Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $serverPublish -Force
+    Copy-Item -LiteralPath $userHookTriggerTestOutput -Destination $serverUserHookToolsPublish -Force
+    Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $serverUserHookToolsPublish -Force
+    Copy-Item -LiteralPath $userHookTriggerTestOutput -Destination $agentUserHookToolsPublish -Force
+    Copy-Item -LiteralPath $userHookRuntimeOutput -Destination $agentUserHookToolsPublish -Force
     Copy-Item -LiteralPath $sandboxTelemetryOutput -Destination $serverPublish -Force
 
     $serverSandboxX64Publish = Join-Path $serverPublish "sandbox-telemetry\x64"
