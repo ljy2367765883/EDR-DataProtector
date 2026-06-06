@@ -84,6 +84,8 @@ namespace DataProtectorWebBridge.Services
             Console.WriteLine("Agent PID: " + System.Diagnostics.Process.GetCurrentProcess().Id);
             Console.WriteLine("Policy API DLL: " + GetPolicyApiPath());
 
+            BootstrapUserHookRuntime();
+
             while (true)
             {
                 try
@@ -98,6 +100,19 @@ namespace DataProtectorWebBridge.Services
                 }
 
                 Thread.Sleep(interval);
+            }
+        }
+
+        private void BootstrapUserHookRuntime()
+        {
+            try
+            {
+                string runtimePath = policyService.EnsureUserHookRuntimePrepared();
+                Console.WriteLine(DateTime.Now.ToString("s") + " User hook runtime prepared: " + runtimePath);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " user hook runtime bootstrap failed: " + ex.Message);
             }
         }
 

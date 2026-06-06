@@ -90,12 +90,27 @@ namespace DataProtectorWebBridge
             AuditLog auditLog = new AuditLog();
             PolicyBridgeService policyService = new PolicyBridgeService(auditLog);
 
+            TryPrepareUserHookRuntime(policyService);
+
             using (HttpBridgeServer server = new HttpBridgeServer(NormalizeHttpSysPrefix(prefix), policyService, auditLog, webRoot))
             {
                 server.Start();
             }
 
             return 0;
+        }
+
+        private static void TryPrepareUserHookRuntime(PolicyBridgeService policyService)
+        {
+            try
+            {
+                string runtimePath = policyService.EnsureUserHookRuntimePrepared();
+                Console.WriteLine(DateTime.Now.ToString("s") + " User hook runtime prepared: " + runtimePath);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(DateTime.Now.ToString("s") + " user hook runtime bootstrap failed: " + ex.Message);
+            }
         }
 
         private static string GetArg(string[] args, int index, string fallback)

@@ -1211,6 +1211,11 @@ namespace DataProtectorWebBridge.Services
             return result;
         }
 
+        internal string EnsureUserHookRuntimePrepared()
+        {
+            return PrepareUserHookRuntimeDll();
+        }
+
         public NetworkConnectionEventDto[] QueryNetworkConnectionEvents()
         {
             uint status = SuccessStatus;
