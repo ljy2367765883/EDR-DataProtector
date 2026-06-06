@@ -1,0 +1,549 @@
+/*++
+
+Module Name:
+
+    DpControl.c
+
+Abstract:
+
+    Filter Manager communication port used by the policy service to update
+    process trust rules.
+
+--*/
+
+#include "DataProtector.h"
+
+static PFLT_PORT gDpControlServerPort = NULL;
+
+static
+NTSTATUS
+FLTAPI
+DpControlConnectNotify(
+    _In_ PFLT_PORT ClientPort,
+    _In_opt_ PVOID ServerPortCookie,
+    _In_reads_bytes_opt_(SizeOfContext) PVOID ConnectionContext,
+    _In_ ULONG SizeOfContext,
+    _Outptr_result_maybenull_ PVOID *ConnectionPortCookie
+    )
+{
+    UNREFERENCED_PARAMETER(ServerPortCookie);
+    UNREFERENCED_PARAMETER(ConnectionContext);
+    UNREFERENCED_PARAMETER(SizeOfContext);
+
+    if (ClientPort == NULL || ConnectionPortCookie == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ConnectionPortCookie = ClientPort;
+
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+FLTAPI
+DpControlDisconnectNotify(
+    _In_opt_ PVOID ConnectionCookie
+    )
+{
+    PFLT_PORT clientPort = (PFLT_PORT)ConnectionCookie;
+
+    if (clientPort != NULL && gDataProtectorFilter != NULL) {
+        FltCloseClientPort(gDataProtectorFilter, &clientPort);
+    }
+}
+
+static
+NTSTATUS
+FLTAPI
+DpControlMessageNotify(
+    _In_opt_ PVOID PortCookie,
+    _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_ PULONG ReturnOutputBufferLength
+    )
+{
+    NTSTATUS status;
+    PDP_POLICY_MESSAGE message = (PDP_POLICY_MESSAGE)InputBuffer;
+    UNICODE_STRING value;
+    UNICODE_STRING extension;
+
+    UNREFERENCED_PARAMETER(PortCookie);
+
+    if (ReturnOutputBufferLength == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ReturnOutputBufferLength = 0;
+
+    if (InputBuffer == NULL ||
+        InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE ||
+        message->Version != DP_POLICY_MESSAGE_VERSION) {
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (message->Command == DpPolicyCommandQueryProcessRules) {
+        return DpProcessPolicyQueryRules(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryNetworkRules) {
+        return DpNetFilterQueryRules(OutputBuffer,
+                                     OutputBufferLength,
+                                     ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQuerySmtpEvents) {
+        return DpNetFilterQuerySmtpEvents(OutputBuffer,
+                                          OutputBufferLength,
+                                          ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryNetworkConnectionEvents) {
+        return DpNetFilterQueryConnectionEvents(OutputBuffer,
+                                                OutputBufferLength,
+                                                ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryWebShellRules) {
+        return DpWebShellQueryRules(OutputBuffer,
+                                    OutputBufferLength,
+                                    ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryWebShellEvents) {
+        return DpWebShellQueryEvents(OutputBuffer,
+                                     OutputBufferLength,
+                                     ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryFileHunterRules) {
+        return DpFileHunterQueryRules(OutputBuffer,
+                                      OutputBufferLength,
+                                      ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryFileHunterEvents) {
+        return DpFileHunterQueryEvents(OutputBuffer,
+                                       OutputBufferLength,
+                                       ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryDeviceRules) {
+        return DpDeviceControlQueryRules(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryHashProtectEvents) {
+        return DpHashProtectQueryEvents(OutputBuffer,
+                                        OutputBufferLength,
+                                        ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryHashProtectPolicy) {
+        return DpHashProtectQueryPolicy(OutputBuffer,
+                                        OutputBufferLength,
+                                        ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryLateralDefenseEvents) {
+        return DpLateralDefenseQueryEvents(OutputBuffer,
+                                           OutputBufferLength,
+                                           ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryLateralDefensePolicy) {
+        return DpLateralDefenseQueryPolicy(OutputBuffer,
+                                           OutputBufferLength,
+                                           ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryUserHookDefenseEvents) {
+        return DpUserHookDefenseQueryEvents(OutputBuffer,
+                                            OutputBufferLength,
+                                            ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryUserHookDefensePolicy) {
+        return DpUserHookDefenseQueryPolicy(OutputBuffer,
+                                            OutputBufferLength,
+                                            ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryThreatEvents) {
+        return DpThreatEngineQueryEvents(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryThreatProcesses) {
+        return DpThreatEngineQueryProcesses(OutputBuffer,
+                                            OutputBufferLength,
+                                            ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryThreatPolicy) {
+        return DpThreatEngineQueryPolicy(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandClearThreatEvents) {
+        DpThreatEngineClearEvents();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandSetThreatPolicy) {
+        PDP_THREAT_ENGINE_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_THREAT_ENGINE_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_THREAT_ENGINE_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_THREAT_ENGINE_POLICY)message->Data;
+        return DpThreatEngineSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandRespondThreatProcess) {
+        PDP_THREAT_RESPONSE_REQUEST request;
+
+        if (message->ValueLengthBytes != sizeof(DP_THREAT_RESPONSE_REQUEST) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_THREAT_RESPONSE_REQUEST)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        request = (PDP_THREAT_RESPONSE_REQUEST)message->Data;
+        return DpThreatEngineRespond(request);
+    }
+
+    if (message->Command == DpPolicyCommandQueryThreatStorylines) {
+        return DpThreatEngineQueryStorylines(OutputBuffer,
+                                             OutputBufferLength,
+                                             ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryStaticScanEvents) {
+        return DpStaticScanQueryEvents(OutputBuffer,
+                                       OutputBufferLength,
+                                       ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandQueryStaticScanRequests) {
+        return DpStaticScanQueryRequests(OutputBuffer,
+                                         OutputBufferLength,
+                                         ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandSubmitStaticScanVerdict) {
+        PDP_STATIC_SCAN_VERDICT_MESSAGE verdict;
+
+        if (message->ValueLengthBytes != sizeof(DP_STATIC_SCAN_VERDICT_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_STATIC_SCAN_VERDICT_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        verdict = (PDP_STATIC_SCAN_VERDICT_MESSAGE)message->Data;
+        return DpStaticScanSubmitVerdict(verdict);
+    }
+
+    if (message->Command == DpPolicyCommandQueryStaticScanPolicy) {
+        return DpStaticScanQueryPolicy(OutputBuffer,
+                                       OutputBufferLength,
+                                       ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandClearStaticScanEvents) {
+        DpStaticScanClearEvents();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandSetStaticScanPolicy) {
+        PDP_STATIC_SCAN_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_STATIC_SCAN_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_STATIC_SCAN_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_STATIC_SCAN_POLICY)message->Data;
+        return DpStaticScanSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandWriteUsbMetadata) {
+        PDP_USB_METADATA_WRITE_MESSAGE request;
+
+        if (message->ValueLengthBytes != sizeof(DP_USB_METADATA_WRITE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_USB_METADATA_WRITE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        request = (PDP_USB_METADATA_WRITE_MESSAGE)message->Data;
+        return DpUsbMetadataWrite(request,
+                                  OutputBuffer,
+                                  OutputBufferLength,
+                                  ReturnOutputBufferLength);
+    }
+
+    if (message->Command == DpPolicyCommandSetHashProtectPolicy) {
+        PDP_HASH_PROTECT_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_HASH_PROTECT_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_HASH_PROTECT_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_HASH_PROTECT_POLICY)message->Data;
+        return DpHashProtectSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandSetLateralDefensePolicy) {
+        PDP_LATERAL_DEFENSE_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_LATERAL_DEFENSE_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_LATERAL_DEFENSE_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_LATERAL_DEFENSE_POLICY)message->Data;
+        return DpLateralDefenseSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandSetUserHookDefensePolicy) {
+        PDP_USER_HOOK_DEFENSE_POLICY policy;
+
+        if (message->ValueLengthBytes != sizeof(DP_USER_HOOK_DEFENSE_POLICY) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_USER_HOOK_DEFENSE_POLICY)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        policy = (PDP_USER_HOOK_DEFENSE_POLICY)message->Data;
+        return DpUserHookDefenseSetPolicy(policy);
+    }
+
+    if (message->Command == DpPolicyCommandAddDeviceRule ||
+        message->Command == DpPolicyCommandRemoveDeviceRule) {
+
+        PDP_DEVICE_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_DEVICE_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_DEVICE_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_DEVICE_RULE_MESSAGE)message->Data;
+        if (message->Command == DpPolicyCommandAddDeviceRule) {
+            return DpDeviceControlAddRule(rule);
+        }
+
+        return DpDeviceControlRemoveRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandClearDeviceRules) {
+        DpDeviceControlClearRules();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandAddNetworkRule) {
+        PDP_NETWORK_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_NETWORK_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_NETWORK_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_NETWORK_RULE_MESSAGE)message->Data;
+        return DpNetFilterAddRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandRemoveNetworkRule) {
+        PULONG ruleId = (PULONG)message->Data;
+
+        if (message->ValueLengthBytes != sizeof(ULONG) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(ULONG)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        return DpNetFilterRemoveRule(*ruleId);
+    }
+
+    if (message->Command == DpPolicyCommandClearNetworkRules) {
+        DpNetFilterClearRules();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandAddWebShellRule ||
+        message->Command == DpPolicyCommandRemoveWebShellRule) {
+
+        PDP_WEBSHELL_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_WEBSHELL_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_WEBSHELL_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_WEBSHELL_RULE_MESSAGE)message->Data;
+        if (message->Command == DpPolicyCommandAddWebShellRule) {
+            return DpWebShellAddRule(rule);
+        }
+
+        return DpWebShellRemoveRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandClearWebShellRules) {
+        DpWebShellClearRules();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command == DpPolicyCommandAddFileHunterRule ||
+        message->Command == DpPolicyCommandRemoveFileHunterRule) {
+
+        PDP_FILE_HUNTER_RULE_MESSAGE rule;
+
+        if (message->ValueLengthBytes != sizeof(DP_FILE_HUNTER_RULE_MESSAGE) ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE + sizeof(DP_FILE_HUNTER_RULE_MESSAGE)) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        rule = (PDP_FILE_HUNTER_RULE_MESSAGE)message->Data;
+        if (message->Command == DpPolicyCommandAddFileHunterRule) {
+            return DpFileHunterAddRule(rule);
+        }
+
+        return DpFileHunterRemoveRule(rule);
+    }
+
+    if (message->Command == DpPolicyCommandClearFileHunterRules) {
+        DpFileHunterClearRules();
+        return STATUS_SUCCESS;
+    }
+
+    if (message->Command != DpPolicyCommandClearProcessRules) {
+        if (message->ValueLengthBytes == 0 ||
+            message->ValueLengthBytes > DP_POLICY_MAX_RULE_BYTES ||
+            message->ExtensionLengthBytes == 0 ||
+            message->ExtensionLengthBytes > DP_POLICY_MAX_EXTENSION_BYTES ||
+            InputBufferLength < (ULONG)DP_POLICY_MESSAGE_HEADER_SIZE +
+                message->ValueLengthBytes +
+                message->ExtensionLengthBytes) {
+
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        value.Buffer = message->Data;
+        value.Length = (USHORT)message->ValueLengthBytes;
+        value.MaximumLength = value.Length;
+
+        extension.Buffer = (PWCH)((PUCHAR)message->Data + message->ValueLengthBytes);
+        extension.Length = (USHORT)message->ExtensionLengthBytes;
+        extension.MaximumLength = extension.Length;
+    } else {
+        RtlZeroMemory(&value, sizeof(value));
+        RtlZeroMemory(&extension, sizeof(extension));
+    }
+
+    switch (message->Command) {
+    case DpPolicyCommandAddProcessNameRule:
+        status = DpProcessPolicyAddRule(DpProcessTrustRuleImageName, &value, &extension);
+        break;
+
+    case DpPolicyCommandRemoveProcessNameRule:
+        status = DpProcessPolicyRemoveRule(DpProcessTrustRuleImageName, &value, &extension);
+        break;
+
+    case DpPolicyCommandAddProcessDirectoryRule:
+        status = DpProcessPolicyAddRule(DpProcessTrustRuleImageDirectory, &value, &extension);
+        break;
+
+    case DpPolicyCommandRemoveProcessDirectoryRule:
+        status = DpProcessPolicyRemoveRule(DpProcessTrustRuleImageDirectory, &value, &extension);
+        break;
+
+    case DpPolicyCommandAddExcludedDirectoryRule:
+        status = DpProcessPolicyAddRule(DpProcessTrustRuleExcludedDirectory, &value, &extension);
+        break;
+
+    case DpPolicyCommandRemoveExcludedDirectoryRule:
+        status = DpProcessPolicyRemoveRule(DpProcessTrustRuleExcludedDirectory, &value, &extension);
+        break;
+
+    case DpPolicyCommandClearProcessRules:
+        DpProcessPolicyClearRules();
+        status = STATUS_SUCCESS;
+        break;
+
+    default:
+        status = STATUS_INVALID_PARAMETER;
+        break;
+    }
+
+    return status;
+}
+
+NTSTATUS
+DpControlInitialize(
+    VOID
+    )
+{
+    NTSTATUS status;
+    UNICODE_STRING portName;
+    OBJECT_ATTRIBUTES objectAttributes;
+    PSECURITY_DESCRIPTOR securityDescriptor = NULL;
+
+    RtlInitUnicodeString(&portName, DP_POLICY_PORT_NAME);
+
+    status = FltBuildDefaultSecurityDescriptor(&securityDescriptor,
+                                               FLT_PORT_ALL_ACCESS);
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    InitializeObjectAttributes(&objectAttributes,
+                               &portName,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               securityDescriptor);
+
+    status = FltCreateCommunicationPort(gDataProtectorFilter,
+                                        &gDpControlServerPort,
+                                        &objectAttributes,
+                                        NULL,
+                                        DpControlConnectNotify,
+                                        DpControlDisconnectNotify,
+                                        DpControlMessageNotify,
+                                        1);
+
+    FltFreeSecurityDescriptor(securityDescriptor);
+
+    return status;
+}
+
+VOID
+DpControlUninitialize(
+    VOID
+    )
+{
+    if (gDpControlServerPort != NULL) {
+        FltCloseCommunicationPort(gDpControlServerPort);
+        gDpControlServerPort = NULL;
+    }
+}

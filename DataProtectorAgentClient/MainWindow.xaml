@@ -1,0 +1,584 @@
+<ui:FluentWindow x:Class="DataProtectorAgentClient.MainWindow"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 xmlns:infra="clr-namespace:DataProtectorAgentClient.Infrastructure"
+                 Title="DataProtector 终端客户端"
+                 Icon="AppIcon.ico"
+                 Width="1180"
+                 Height="760"
+                 MinWidth="1040"
+                 MinHeight="660"
+                 Background="Transparent"
+                 WindowStartupLocation="CenterScreen"
+                 ResizeMode="CanResize"
+                 WindowBackdropType="Acrylic"
+                 WindowCornerPreference="Round"
+                 ExtendsContentIntoTitleBar="True">
+    <Window.Resources>
+        <infra:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <infra:ResourceBrushConverter x:Key="ResourceBrushConverter" />
+        <infra:StringEqualsToVisibilityConverter x:Key="StringEqualsToVisibilityConverter" />
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ui:TitleBar Grid.Row="0"
+                     Title="DataProtector 终端客户端"
+                     Height="48"
+                     Padding="16,0,0,0"
+                     Background="Transparent"
+                     Foreground="{StaticResource DpInkBrush}"
+                     ButtonsBackground="Transparent"
+                     ButtonsForeground="{StaticResource DpInkBrush}"
+                     ShowMinimize="True"
+                     ShowMaximize="True"
+                     ShowClose="True"
+                     CanMaximize="True">
+            <ui:TitleBar.Icon>
+                <ui:SymbolIcon Symbol="Shield24" />
+            </ui:TitleBar.Icon>
+        </ui:TitleBar>
+
+        <Grid Grid.Row="1" Background="{StaticResource DpShellGradientBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="250" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0"
+                    Background="{StaticResource DpSideGlassBrush}"
+                    BorderBrush="{StaticResource DpLineBrush}"
+                    BorderThickness="0,0,1,0">
+                <DockPanel LastChildFill="True">
+                    <StackPanel DockPanel.Dock="Top" Margin="24,26,24,18">
+                        <Grid Height="54">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="50" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="46"
+                                    Height="46"
+                                    CornerRadius="8"
+                                    Background="{Binding DriverStatusBrushKey, Converter={StaticResource ResourceBrushConverter}}">
+                                <ui:SymbolIcon Symbol="ShieldCheckmark24"
+                                               Foreground="#0F0920"
+                                               FontSize="24"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="12,1,0,0" VerticalAlignment="Center">
+                                <TextBlock Text="DataProtector"
+                                           FontSize="18"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource DpInkBrush}" />
+                                <TextBlock Text="终端安全中心"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,2,0,0" />
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel DockPanel.Dock="Bottom" Margin="18,10,18,22">
+                        <Border Background="{StaticResource DpGlassStrongBrush}"
+                                BorderBrush="{StaticResource DpLineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="14">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="34" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border Width="30"
+                                        Height="30"
+                                        CornerRadius="8"
+                                        Background="{Binding DriverStatusBrushKey, Converter={StaticResource ResourceBrushConverter}}">
+                                    <ui:SymbolIcon Symbol="PlugConnected24"
+                                                   Foreground="#0F0920"
+                                                   FontSize="16"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center" />
+                                </Border>
+                                <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                    <TextBlock Text="{Binding DriverStatusText}"
+                                               FontWeight="SemiBold"
+                                               Foreground="{StaticResource DpInkBrush}" />
+                                    <TextBlock Text="{Binding DriverStatusCaption}"
+                                               Style="{StaticResource DpCaptionStyle}"
+                                               Margin="0,2,0,0"
+                                               MaxHeight="52" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+
+                    <StackPanel Margin="14,4,14,0">
+                        <ui:Button Style="{StaticResource DpNavButtonStyle}"
+                                   Command="{Binding NavigateCommand}"
+                                   CommandParameter="Overview">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <ui:SymbolIcon Symbol="Home24" Width="24" Foreground="{StaticResource DpCommandBrush}" />
+                                <TextBlock Text="安全概览" Margin="12,0,0,0" />
+                            </StackPanel>
+                        </ui:Button>
+                        <ui:Button Style="{StaticResource DpNavButtonStyle}"
+                                   Command="{Binding NavigateCommand}"
+                                   CommandParameter="Rules">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <ui:SymbolIcon Symbol="DocumentBulletList24" Width="24" Foreground="{StaticResource DpTealBrush}" />
+                                <TextBlock Text="查看规则" Margin="12,0,0,0" />
+                            </StackPanel>
+                        </ui:Button>
+                        <ui:Button Style="{StaticResource DpNavButtonStyle}"
+                                   Command="{Binding NavigateCommand}"
+                                   CommandParameter="Events">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <ui:SymbolIcon Symbol="Warning24" Width="24" Foreground="{StaticResource DpWarningBrush}" />
+                                <TextBlock Text="危险事件" Margin="12,0,0,0" />
+                            </StackPanel>
+                        </ui:Button>
+                        <ui:Button Style="{StaticResource DpNavButtonStyle}"
+                                   Command="{Binding NavigateCommand}"
+                                   CommandParameter="Extensions">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <ui:SymbolIcon Symbol="PuzzlePiece24" Width="24" Foreground="{StaticResource DpMutedBrush}" />
+                                <TextBlock Text="扩展能力" Margin="12,0,0,0" />
+                            </StackPanel>
+                        </ui:Button>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <Grid Grid.Column="1" Margin="30,24,32,30">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="0,0,0,20">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="{Binding OverviewTitle}"
+                                           FontSize="27"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource DpInkBrush}" />
+                        <ui:InfoBar Title="终端状态"
+                                    Message="{Binding StatusMessage}"
+                                    Severity="Informational"
+                                    IsOpen="True"
+                                    IsClosable="False"
+                                    Margin="0,10,0,0"
+                                    MaxWidth="620"
+                                    HorizontalAlignment="Left" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                        <ui:ProgressRing Width="22"
+                                         Height="22"
+                                         IsIndeterminate="True"
+                                         Visibility="{Binding IsRefreshing, Converter={StaticResource BoolToVisibilityConverter}}"
+                                         Margin="0,0,12,0" />
+                        <TextBlock Text="{Binding LastUpdatedText}"
+                                   Style="{StaticResource DpCaptionStyle}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,12,0" />
+                        <ui:Button Command="{Binding RefreshCommand}"
+                                   ToolTip="刷新本机状态"
+                                   Style="{StaticResource DpIconButtonStyle}">
+                            <ui:SymbolIcon Symbol="ArrowSync24" />
+                        </ui:Button>
+                    </StackPanel>
+                </Grid>
+
+                <Grid Grid.Row="1">
+                    <Grid Visibility="{Binding IsOverviewVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <Grid Grid.Row="0" Margin="0,0,0,16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,12,0">
+                                <StackPanel>
+                                    <TextBlock Text="策略版本" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding PolicyVersionText}" Style="{StaticResource DpMetricValueStyle}" Margin="0,7,0,0" />
+                                    <TextBlock Text="{Binding LastStateWriteText}" Style="{StaticResource DpCaptionStyle}" Margin="0,4,0,0" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Column="1" Style="{StaticResource DpPanelStyle}" Margin="0,0,12,0">
+                                <StackPanel>
+                                    <TextBlock Text="规则数量" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding RuleCountText}" Style="{StaticResource DpMetricValueStyle}" Margin="0,7,0,0" />
+                                    <TextBlock Text="本机驱动当前策略" Style="{StaticResource DpCaptionStyle}" Margin="0,4,0,0" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Column="2" Style="{StaticResource DpPanelStyle}" Margin="0,0,12,0">
+                                <StackPanel>
+                                    <TextBlock Text="危险事件" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding RiskEventCountText}" Style="{StaticResource DpMetricValueStyle}" Margin="0,7,0,0" />
+                                    <TextBlock Text="{Binding UrgentEventCountText, StringFormat=紧急/阻止 {0} 条}" Style="{StaticResource DpCaptionStyle}" Margin="0,4,0,0" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Column="3" Style="{StaticResource DpPanelStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="防护模块" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding EnabledFeatureCountText}" Style="{StaticResource DpMetricValueStyle}" Margin="0,7,0,0" />
+                                    <TextBlock Text="已开启能力" Style="{StaticResource DpCaptionStyle}" Margin="0,4,0,0" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <Grid Grid.Row="1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.15*" />
+                                <ColumnDefinition Width="0.85*" />
+                            </Grid.ColumnDefinitions>
+
+                            <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,16,0">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Margin="0,0,0,14">
+                                        <TextBlock Text="防护状态" Style="{StaticResource DpSectionTitleStyle}" />
+                                        <TextBlock Text="{Binding OverviewCaption}" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,0" />
+                                    </StackPanel>
+                                    <ItemsControl Grid.Row="1" ItemsSource="{Binding Features}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border BorderBrush="{StaticResource DpLineBrush}"
+                                                        BorderThickness="0,0,0,1"
+                                                        Padding="0,12"
+                                                        MinHeight="86">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="34" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="Auto" />
+                                                        </Grid.RowDefinitions>
+                                                        <Border Width="24"
+                                                                Height="24"
+                                                                CornerRadius="6"
+                                                                VerticalAlignment="Top"
+                                                                Margin="0,2,0,0"
+                                                                Background="{Binding AccentBrushKey, Converter={StaticResource ResourceBrushConverter}}">
+                                                            <ui:SymbolIcon Symbol="Checkmark24"
+                                                                           Foreground="#0F0920"
+                                                                           FontSize="14"
+                                                                           HorizontalAlignment="Center"
+                                                                           VerticalAlignment="Center" />
+                                                        </Border>
+                                                        <Grid Grid.Column="1" Grid.Row="0">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Text="{Binding Name}"
+                                                                       FontSize="15"
+                                                                       FontWeight="SemiBold"
+                                                                       Foreground="{StaticResource DpInkBrush}" />
+                                                            <Border Grid.Column="1"
+                                                                    Background="{StaticResource DpCommandSoftBrush}"
+                                                                    BorderBrush="{StaticResource DpLineBrush}"
+                                                                    BorderThickness="1"
+                                                                    CornerRadius="6"
+                                                                    Padding="9,3"
+                                                                    Margin="12,0,0,0"
+                                                                    VerticalAlignment="Top">
+                                                                <TextBlock Text="{Binding State}"
+                                                                           Foreground="{Binding AccentBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                                           FontSize="13"
+                                                                           FontWeight="SemiBold" />
+                                                            </Border>
+                                                        </Grid>
+                                                        <TextBlock Grid.Column="1"
+                                                                   Grid.Row="1"
+                                                                   Text="{Binding Description}"
+                                                                   Style="{StaticResource DpCaptionStyle}"
+                                                                   Margin="0,7,0,0"
+                                                                   TextWrapping="Wrap" />
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Grid>
+                            </Border>
+
+                            <Border Grid.Column="1" Style="{StaticResource DpPanelStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="终端信息" Style="{StaticResource DpSectionTitleStyle}" />
+                                    <TextBlock Text="只展示本机客户端运行与同步信息" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,16" />
+                                    <TextBlock Text="主机名" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding MachineText}" Foreground="{StaticResource DpInkBrush}" FontWeight="SemiBold" Margin="0,3,0,12" />
+                                    <TextBlock Text="当前用户" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding UserText}" Foreground="{StaticResource DpInkBrush}" FontWeight="SemiBold" Margin="0,3,0,12" />
+                                    <TextBlock Text="设备 ID" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding DeviceIdText}" Foreground="{StaticResource DpInkBrush}" TextWrapping="Wrap" Margin="0,3,0,12" />
+                                    <TextBlock Text="策略应用状态" Style="{StaticResource DpCaptionStyle}" />
+                                    <TextBlock Text="{Binding LastApplyStatusText}" Foreground="{StaticResource DpInkBrush}" FontWeight="SemiBold" Margin="0,3,0,8" />
+                                    <TextBlock Text="{Binding LastApplyMessageText}" Style="{StaticResource DpCaptionStyle}" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Grid>
+
+                    <Grid Visibility="{Binding IsRulesVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <Border Style="{StaticResource DpPanelStyle}">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Margin="0,0,0,14">
+                                    <TextBlock Text="当前规则" Style="{StaticResource DpSectionTitleStyle}" />
+                                    <TextBlock Text="此处为只读视图，展示本机驱动已经加载的策略。" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,0" />
+                                </StackPanel>
+                                <ListBox Grid.Row="1"
+                                         ItemsSource="{Binding Rules}"
+                                         Style="{StaticResource DpListBoxStyle}"
+                                         ItemContainerStyle="{StaticResource DpListBoxItemStyle}">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="16,14" MinHeight="74">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="160" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="92" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <Grid Grid.Column="0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="38" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Width="30"
+                                                            Height="30"
+                                                            CornerRadius="8"
+                                                            Background="{Binding StateBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                            VerticalAlignment="Top">
+                                                        <ui:SymbolIcon Symbol="ShieldTask24"
+                                                                       Foreground="#10091F"
+                                                                       FontSize="16"
+                                                                       HorizontalAlignment="Center"
+                                                                       VerticalAlignment="Center" />
+                                                    </Border>
+                                                    <StackPanel Grid.Column="1" Margin="10,0,10,0">
+                                                        <TextBlock Text="{Binding Category}"
+                                                                   FontWeight="SemiBold"
+                                                                   FontSize="15"
+                                                                   Foreground="{StaticResource DpInkBrush}"
+                                                                   TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{Binding Name}"
+                                                                   Style="{StaticResource DpMetaTextStyle}"
+                                                                   Margin="0,5,0,0" />
+                                                    </StackPanel>
+                                                </Grid>
+
+                                                <StackPanel Grid.Column="1" Margin="6,0,18,0">
+                                                    <TextBlock Text="{Binding Target}"
+                                                               FontSize="14"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{StaticResource DpInkBrush}"
+                                                               TextWrapping="Wrap"
+                                                               LineHeight="20" />
+                                                    <Border Background="{StaticResource DpGlassStrongBrush}"
+                                                            BorderBrush="{StaticResource DpLineBrush}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="7"
+                                                            Padding="9,5"
+                                                            HorizontalAlignment="Left"
+                                                            Margin="0,10,0,0">
+                                                        <TextBlock Text="{Binding Detail}"
+                                                                   Style="{StaticResource DpMetaTextStyle}"
+                                                                   TextWrapping="Wrap" />
+                                                    </Border>
+                                                </StackPanel>
+
+                                                <Border Grid.Column="2"
+                                                        Style="{StaticResource DpStatusBadgeStyle}"
+                                                        Background="{StaticResource DpGlassStrongBrush}">
+                                                    <TextBlock Text="{Binding State}"
+                                                               Foreground="{Binding StateBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                               FontSize="13"
+                                                               FontWeight="SemiBold"
+                                                               HorizontalAlignment="Center" />
+                                                </Border>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </Grid>
+                        </Border>
+                    </Grid>
+
+                    <Grid Visibility="{Binding IsEventsVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <Border Style="{StaticResource DpPanelStyle}">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Margin="0,0,0,14">
+                                    <TextBlock Text="危险事件" Style="{StaticResource DpSectionTitleStyle}" />
+                                    <TextBlock Text="读取本机审计文件中的最近安全事件，不消费内核事件队列。" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,0" />
+                                </StackPanel>
+                                <ListBox Grid.Row="1"
+                                         ItemsSource="{Binding SecurityEvents}"
+                                         Style="{StaticResource DpListBoxStyle}"
+                                         ItemContainerStyle="{StaticResource DpListBoxItemStyle}">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="16,14" MinHeight="86">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="118" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="170" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <Grid Grid.Column="0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="6" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Width="4"
+                                                            CornerRadius="4"
+                                                            Background="{Binding SeverityBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                            HorizontalAlignment="Left" />
+                                                    <StackPanel Grid.Column="1" Margin="14,0,8,0">
+                                                        <TextBlock Text="{Binding Category}"
+                                                                   FontWeight="SemiBold"
+                                                                   FontSize="15"
+                                                                   Foreground="{StaticResource DpInkBrush}" />
+                                                        <TextBlock Text="{Binding TimeText}"
+                                                                   Style="{StaticResource DpMetaTextStyle}"
+                                                                   Margin="0,6,0,0" />
+                                                    </StackPanel>
+                                                </Grid>
+
+                                                <StackPanel Grid.Column="1" Margin="10,0,18,0">
+                                                    <TextBlock Text="{Binding Target}"
+                                                               FontSize="14"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{StaticResource DpInkBrush}"
+                                                               TextWrapping="Wrap"
+                                                               LineHeight="20" />
+                                                    <TextBlock Text="{Binding Message}"
+                                                               Style="{StaticResource DpCaptionStyle}"
+                                                               Margin="0,7,0,0"
+                                                               MaxHeight="40"
+                                                               TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding Source, StringFormat=来源：{0}}"
+                                                               Style="{StaticResource DpMetaTextStyle}"
+                                                               Margin="0,9,0,0" />
+                                                </StackPanel>
+
+                                                <StackPanel Grid.Column="2" HorizontalAlignment="Right">
+                                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                                        <Border Style="{StaticResource DpStatusBadgeStyle}"
+                                                                Background="{StaticResource DpGlassStrongBrush}"
+                                                                Margin="0,0,8,0">
+                                                            <TextBlock Text="{Binding Severity}"
+                                                                       Foreground="{Binding SeverityBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                                       FontSize="13"
+                                                                       FontWeight="SemiBold"
+                                                                       HorizontalAlignment="Center" />
+                                                        </Border>
+                                                        <Border Style="{StaticResource DpStatusBadgeStyle}"
+                                                                Background="{StaticResource DpGlassStrongBrush}">
+                                                            <TextBlock Text="{Binding Disposition}"
+                                                                       Foreground="{StaticResource DpInkBrush}"
+                                                                       FontSize="13"
+                                                                       FontWeight="SemiBold"
+                                                                       HorizontalAlignment="Center" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <TextBlock Text="{Binding Status}"
+                                                               Style="{StaticResource DpMetaTextStyle}"
+                                                               HorizontalAlignment="Right"
+                                                               Margin="0,11,0,0" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <TextBlock Grid.Row="2"
+                                           Text="{Binding AuditPathText}"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,12,0,0" />
+                            </Grid>
+                        </Border>
+                    </Grid>
+
+                    <Grid Visibility="{Binding IsExtensionsVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <StackPanel Margin="0,0,0,16">
+                            <TextBlock Text="扩展能力" Style="{StaticResource DpSectionTitleStyle}" />
+                            <TextBlock Text="客户端已预留本机交互能力，后续可以接入弹窗拦截、通知中心和终端自检。" Style="{StaticResource DpCaptionStyle}" Margin="0,5,0,0" />
+                        </StackPanel>
+                        <ItemsControl Grid.Row="1" ItemsSource="{Binding ExtensionCards}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <UniformGrid Columns="3" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,14,0">
+                                        <StackPanel>
+                                            <Border Width="40"
+                                                    Height="40"
+                                                    CornerRadius="8"
+                                                    HorizontalAlignment="Left"
+                                                   Background="{Binding AccentBrushKey, Converter={StaticResource ResourceBrushConverter}}">
+                                                <ui:SymbolIcon Symbol="Sparkle24"
+                                                               Foreground="#0F0920"
+                                                               FontSize="20"
+                                                               HorizontalAlignment="Center"
+                                                               VerticalAlignment="Center" />
+                                            </Border>
+                                            <TextBlock Text="{Binding Name}"
+                                                       Style="{StaticResource DpSectionTitleStyle}"
+                                                       Margin="0,16,0,0" />
+                                            <TextBlock Text="{Binding Description}"
+                                                       Style="{StaticResource DpCaptionStyle}"
+                                                       Margin="0,8,0,18" />
+                                            <TextBlock Text="{Binding State}"
+                                                       Foreground="{Binding AccentBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                                       FontWeight="SemiBold" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Grid>
+                </Grid>
+            </Grid>
+        </Grid>
+    </Grid>
+</ui:FluentWindow>

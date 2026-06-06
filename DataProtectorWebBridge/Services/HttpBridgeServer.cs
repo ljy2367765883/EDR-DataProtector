@@ -1,0 +1,500 @@
+using System;
+using System.Globalization;
+using System.Net;
+using System.Threading;
+
+namespace DataProtectorWebBridge.Services
+{
+    internal sealed class HttpBridgeServer : IDisposable
+    {
+        private readonly HttpListener listener = new HttpListener();
+        private readonly PolicyBridgeService policyService;
+        private readonly AuditLog auditLog;
+        private readonly StaticWebContent staticWebContent;
+        private readonly DlpProtectionService dlpProtectionService = new DlpProtectionService();
+        private readonly StaticScanService staticScanService;
+        private bool disposed;
+
+        public HttpBridgeServer(string prefix, PolicyBridgeService policyService, AuditLog auditLog, string webRoot)
+        {
+            if (string.IsNullOrWhiteSpace(prefix))
+            {
+                throw new ArgumentException("A listener prefix is required.", "prefix");
+            }
+
+            this.policyService = policyService ?? throw new ArgumentNullException("policyService");
+            this.auditLog = auditLog ?? throw new ArgumentNullException("auditLog");
+            staticWebContent = new StaticWebContent(webRoot);
+            staticScanService = new StaticScanService(this.policyService,
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DataProtector"));
+            listener.Prefixes.Add(prefix);
+            Prefix = prefix;
+        }
+
+        public string Prefix { get; private set; }
+
+        public void Start()
+        {
+            listener.Start();
+            Console.WriteLine("DataProtector Web Bridge listening on " + Prefix);
+
+            while (listener.IsListening)
+            {
+                HttpListenerContext context = listener.GetContext();
+                ThreadPool.QueueUserWorkItem(_ => HandleContext(context));
+            }
+        }
+
+        private void HandleContext(HttpListenerContext context)
+        {
+            try
+            {
+                AddCorsHeaders(context.Response);
+
+                if (context.Request.HttpMethod.Equals("OPTIONS", StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Response.StatusCode = (int)HttpStatusCode.NoContent;
+                    return;
+                }
+
+                string path = context.Request.Url.AbsolutePath.TrimEnd('/').ToLowerInvariant();
+                string method = context.Request.HttpMethod.ToUpperInvariant();
+
+                if (method == "GET" && path == "/api/status")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.GetStatus());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/policy/rules")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryRules());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/policy/rules")
+                {
+                    PolicyBridgeService.PolicyRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.PolicyRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.AddRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/policy/rules")
+                {
+                    PolicyBridgeService.PolicyRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.PolicyRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.RemoveRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/policy/clear")
+                {
+                    PolicyBridgeService.OperationResult result = policyService.ClearRules(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/network/rules")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryNetworkRules());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/network/rules")
+                {
+                    PolicyBridgeService.NetworkRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.NetworkRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.AddNetworkRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/network/rules")
+                {
+                    PolicyBridgeService.NetworkRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.NetworkRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.RemoveNetworkRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/network/clear")
+                {
+                    PolicyBridgeService.OperationResult result = policyService.ClearNetworkRules(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/webshell/rules")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryWebShellRules());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/webshell/rules")
+                {
+                    PolicyBridgeService.WebShellRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.WebShellRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.AddWebShellRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/webshell/rules")
+                {
+                    PolicyBridgeService.WebShellRuleRequest request =
+                        JsonResponse.Read<PolicyBridgeService.WebShellRuleRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.RemoveWebShellRule(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/webshell/clear")
+                {
+                    PolicyBridgeService.OperationResult result = policyService.ClearWebShellRules(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/hashprotect/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryHashProtectPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/hashprotect/policy")
+                {
+                    PolicyBridgeService.HashProtectPolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.HashProtectPolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetHashProtectPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/lateral/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryLateralDefensePolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/lateral/policy")
+                {
+                    PolicyBridgeService.LateralDefensePolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.LateralDefensePolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetLateralDefensePolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/userhook/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryUserHookDefensePolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/userhook/policy")
+                {
+                    PolicyBridgeService.UserHookDefensePolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.UserHookDefensePolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetUserHookDefensePolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/threat/events")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatEvents());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/threat/processes")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatProcesses());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/threat/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/threat/policy")
+                {
+                    PolicyBridgeService.ThreatPolicyDto request =
+                        JsonResponse.Read<PolicyBridgeService.ThreatPolicyDto>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetThreatPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/threat/respond")
+                {
+                    PolicyBridgeService.ThreatResponseRequest request =
+                        JsonResponse.Read<PolicyBridgeService.ThreatResponseRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result =
+                        policyService.RespondThreatProcess(request.processId, request.action);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/threat/clear")
+                {
+                    PolicyBridgeService.OperationResult result = policyService.ClearThreatEvents();
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/threat/storylines")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryThreatStorylines());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/staticscan/events")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryStaticScanEvents());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/staticscan/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryStaticScanPolicy());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/staticscan/policy")
+                {
+                    PolicyBridgeService.StaticScanPolicyDto request =
+                        JsonResponse.Read<PolicyBridgeService.StaticScanPolicyDto>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = policyService.SetStaticScanPolicy(request);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/staticscan/clear")
+                {
+                    PolicyBridgeService.OperationResult result = policyService.ClearStaticScanEvents();
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/staticscan/requests")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryStaticScanRequests());
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/staticscan/scan-now")
+                {
+                    int processed = staticScanService.ProcessPendingRequests();
+                    JsonResponse.Write(context.Response, "0000", "Success.", new
+                    {
+                        processed = processed,
+                        engines = staticScanService.EngineStatus()
+                    });
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/dlp/policy")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", dlpProtectionService.QueryPolicy());
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/filehunter/diagnostics")
+                {
+                    JsonResponse.Write(context.Response, "0000", "Success.", policyService.QueryFileHunterDiagnostics(dlpProtectionService.QueryPolicy()));
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/dlp/policy")
+                {
+                    PolicyBridgeService.DlpProtectionPolicyRequest request =
+                        JsonResponse.Read<PolicyBridgeService.DlpProtectionPolicyRequest>(context.Request.InputStream);
+                    PolicyBridgeService.OperationResult result = dlpProtectionService.SetPolicy(request);
+                    if (result.succeeded)
+                    {
+                        PolicyBridgeService.OperationResult clear = policyService.ClearFileHunterRules(
+                            string.IsNullOrWhiteSpace(request == null ? string.Empty : request.actor) ? context.Request.UserHostAddress : request.actor);
+                        if (!clear.succeeded)
+                        {
+                            result = clear;
+                        }
+                        else
+                        {
+                            PolicyBridgeService.DlpProtectionPolicyDto localPolicy = dlpProtectionService.QueryPolicy();
+                            foreach (string safeFolder in localPolicy.safeFolders ?? new string[0])
+                            {
+                                PolicyBridgeService.OperationResult add = policyService.AddFileHunterRule(new PolicyBridgeService.FileHunterRuleRequest
+                                {
+                                    directory = safeFolder,
+                                    actor = string.IsNullOrWhiteSpace(localPolicy.actor) ? "web-admin" : localPolicy.actor
+                                });
+                                if (!add.succeeded)
+                                {
+                                    result = add;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    auditLog.Append(
+                        string.IsNullOrWhiteSpace(request == null ? string.Empty : request.actor) ? context.Request.UserHostAddress : request.actor,
+                        "policy.dlp.update",
+                        "dlp-protection",
+                        PolicyBridgeService.DlpProtectionPolicySummary(dlpProtectionService.QueryPolicy()),
+                        result.succeeded,
+                        result.status,
+                        result.message);
+                    JsonResponse.Write(context.Response, result.succeeded ? "0000" : result.statusText, result.message, result);
+                    return;
+                }
+
+                if (method == "GET" && path == "/api/audit/events")
+                {
+                    try
+                    {
+                        policyService.DrainSecurityAuditRecords();
+                        foreach (AuditLog.AuditRecord record in dlpProtectionService.DrainAuditRecords())
+                        {
+                            auditLog.AppendRecord(record);
+                        }
+                    }
+                    catch
+                    {
+                    }
+
+                    JsonResponse.Write(context.Response, "0000", "Success.", auditLog.ReadPage(ParseAuditQuery(context.Request)));
+                    return;
+                }
+
+                if (method == "DELETE" && path == "/api/audit/events")
+                {
+                    AuditLog.AuditDeleteOptions request =
+                        JsonResponse.Read<AuditLog.AuditDeleteOptions>(context.Request.InputStream);
+                    int removed = auditLog.Remove(request);
+                    auditLog.Append(request == null ? context.Request.UserHostAddress : request.Actor, "audit.event.remove", request == null ? string.Empty : request.Target, string.Empty, true, 0, "Audit event delete request removed " + removed + " record(s).");
+                    JsonResponse.Write(context.Response, "0000", "Audit event delete request completed.", new PolicyBridgeService.OperationResult
+                    {
+                        succeeded = true,
+                        status = 0,
+                        statusText = "0x00000000",
+                        message = "Audit event delete request completed."
+                    });
+                    return;
+                }
+
+                if (method == "POST" && path == "/api/audit/clear")
+                {
+                    auditLog.Clear(context.Request.UserHostAddress);
+                    JsonResponse.Write(context.Response, "0000", "Audit log cleared.", new PolicyBridgeService.OperationResult
+                    {
+                        succeeded = true,
+                        status = 0,
+                        statusText = "0x00000000",
+                        message = "Audit log cleared."
+                    });
+                    return;
+                }
+
+                if (method == "GET" || method == "HEAD")
+                {
+                    if (!staticWebContent.TryServe(context, method == "HEAD"))
+                    {
+                        JsonResponse.WriteError(context.Response, HttpStatusCode.NotFound, "Web admin static file not found.");
+                    }
+
+                    return;
+                }
+
+                JsonResponse.WriteError(context.Response, HttpStatusCode.NotFound, "Route not found.");
+            }
+            catch (PolicyBridgeService.BridgeException ex)
+            {
+                JsonResponse.Write(context.Response, "0x" + ex.Status.ToString("X8"), ex.Message, null);
+            }
+            catch (Exception ex)
+            {
+                JsonResponse.WriteError(context.Response, HttpStatusCode.InternalServerError, ex.Message);
+            }
+            finally
+            {
+                context.Response.OutputStream.Close();
+            }
+        }
+
+        private static int ParseLimit(string value)
+        {
+            int limit;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out limit))
+            {
+                return 200;
+            }
+
+            return Math.Max(1, Math.Min(limit, 1000));
+        }
+
+        private static AuditLog.AuditQueryOptions ParseAuditQuery(HttpListenerRequest request)
+        {
+            return new AuditLog.AuditQueryOptions
+            {
+                Limit = ParseLimit(request.QueryString["limit"]),
+                Page = ParsePage(request.QueryString["page"]),
+                PageSize = ParseOptionalLimit(request.QueryString["pageSize"]),
+                Category = request.QueryString["category"],
+                Host = request.QueryString["host"],
+                Result = request.QueryString["result"],
+                Severity = request.QueryString["severity"],
+                Disposition = request.QueryString["disposition"],
+                FromUtc = request.QueryString["fromUtc"],
+                ToUtc = request.QueryString["toUtc"],
+                Search = request.QueryString["search"]
+            };
+        }
+
+        private static int ParsePage(string value)
+        {
+            int page;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out page))
+            {
+                return 1;
+            }
+
+            return Math.Max(1, Math.Min(page, 1000000));
+        }
+
+        private static int ParseOptionalLimit(string value)
+        {
+            int limit;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out limit))
+            {
+                return 0;
+            }
+
+            return Math.Max(1, Math.Min(limit, 1000));
+        }
+
+        private static void AddCorsHeaders(HttpListenerResponse response)
+        {
+            response.Headers["Access-Control-Allow-Origin"] = "*";
+            response.Headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS";
+            response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            dlpProtectionService.Dispose();
+            listener.Close();
+        }
+    }
+}

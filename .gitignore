@@ -1,0 +1,69 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+[Bb]in/
+[Oo]bj/
+x64/
+x86/
+Win32/
+Debug/
+Release/
+publish/
+publish-logs/
+
+# Driver/package generated files
+*.aps
+RC[0-9A-Fa-f]*
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.sys
+*.cat
+*.cer
+*.pfx
+*.log
+*.tlog
+*.lastbuildstate
+*.recipe
+*.manifest
+*.cache
+
+# NuGet/package restore
+packages/
+*.nupkg
+
+# Node/web outputs
+node_modules/
+DataProtectorWebAdmin/node_modules/
+DataProtectorWebAdmin/dist/
+DataProtectorWebAdmin/dist-ssr/
+DataProtectorWebAdmin/.vite/
+DataProtectorWebAdmin/coverage/
+DataProtectorWebAdmin/pnpm-debug.log*
+
+# Local diagnostics and captures
+Logfile.XML
+*.etl
+*.evtx
+*.dmp
+*.mdmp
+*.tmp
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+
+# Malware test samples - never commit live samples to the repo
+Shellcode.x64.EXE
+*.malware
+test-samples/
+samples/

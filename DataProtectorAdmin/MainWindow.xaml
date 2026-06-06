@@ -1,0 +1,772 @@
+<ui:FluentWindow x:Class="DataProtectorAdmin.MainWindow"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 xmlns:infra="clr-namespace:DataProtectorAdmin.Infrastructure"
+                 Title="DataProtector"
+                 Icon="Assets/AppIcon.ico"
+                 Width="1260"
+                 Height="790"
+                 MinWidth="1100"
+                 MinHeight="700"
+                 Background="{StaticResource DpShellBrush}"
+                 WindowStartupLocation="CenterScreen"
+                 ResizeMode="CanResize"
+                 ExtendsContentIntoTitleBar="True">
+    <Window.Resources>
+        <infra:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+        <infra:ResourceBrushConverter x:Key="ResourceBrushConverter" />
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ui:TitleBar Grid.Row="0"
+                     Title="DataProtector"
+                     Height="48"
+                     Padding="16,0,0,0"
+                     Background="{StaticResource DpShellBrush}"
+                     ButtonsBackground="{StaticResource DpShellBrush}"
+                     ButtonsForeground="{StaticResource DpInkBrush}"
+                     ShowMinimize="True"
+                     ShowMaximize="True"
+                     ShowClose="True"
+                     CanMaximize="True">
+            <ui:TitleBar.Icon>
+                <ui:SymbolIcon Symbol="Shield24" />
+            </ui:TitleBar.Icon>
+        </ui:TitleBar>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="268" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0"
+                Background="#FBFCFE"
+                BorderBrush="{StaticResource DpLineBrush}"
+                BorderThickness="0,0,1,0">
+            <DockPanel LastChildFill="True">
+                <StackPanel DockPanel.Dock="Top" Margin="24,28,24,22">
+                    <Grid Height="52">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="48" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="44"
+                                Height="44"
+                                CornerRadius="8"
+                                Background="{StaticResource DpCommandBrush}">
+                            <ui:SymbolIcon Symbol="Shield24"
+                                           Foreground="White"
+                                           FontSize="24"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="12,1,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="DataProtector"
+                                       FontSize="18"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource DpInkBrush}" />
+                            <TextBlock Text="Policy Control Center"
+                                       Style="{StaticResource DpCaptionStyle}"
+                                       Margin="0,1,0,0" />
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+
+                <StackPanel DockPanel.Dock="Bottom" Margin="18,10,18,24">
+                    <Border Background="#FFFFFF"
+                            BorderBrush="{StaticResource DpLineBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="14">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="34" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="30"
+                                    Height="30"
+                                    CornerRadius="8"
+                                    Background="{Binding DriverStatusBrushKey, Converter={StaticResource ResourceBrushConverter}}">
+                                <ui:SymbolIcon Symbol="PlugConnected24"
+                                               Foreground="White"
+                                               FontSize="16"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                <TextBlock Text="{Binding DriverStatusText}"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource DpInkBrush}" />
+                                <TextBlock Text="{Binding DriverStatusCaption}"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,2,0,0" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Margin="14,2,14,0">
+                    <Button Style="{StaticResource DpNavButtonStyle}"
+                            Command="{Binding NavigateCommand}"
+                            CommandParameter="Dashboard">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ui:SymbolIcon Symbol="Home24" Width="24" Foreground="{StaticResource DpCommandBrush}" />
+                            <TextBlock Text="安全总览" Margin="12,0,0,0" />
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource DpNavButtonStyle}"
+                            Command="{Binding NavigateCommand}"
+                            CommandParameter="TrustedApps">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ui:SymbolIcon Symbol="WindowApps24" Width="24" Foreground="{StaticResource DpSuccessBrush}" />
+                            <TextBlock Text="可信进程" Margin="12,0,0,0" />
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource DpNavButtonStyle}"
+                            Command="{Binding NavigateCommand}"
+                            CommandParameter="Folders">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ui:SymbolIcon Symbol="Folder24" Width="24" Foreground="{StaticResource DpWarningBrush}" />
+                            <TextBlock Text="可信文件夹" Margin="12,0,0,0" />
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource DpNavButtonStyle}"
+                            Command="{Binding NavigateCommand}"
+                            CommandParameter="ExcludedFolders">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ui:SymbolIcon Symbol="FolderProhibited24" Width="24" Foreground="{StaticResource DpDangerBrush}" />
+                            <TextBlock Text="排除目录" Margin="12,0,0,0" />
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource DpNavButtonStyle}"
+                            Command="{Binding NavigateCommand}"
+                            CommandParameter="Settings">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ui:SymbolIcon Symbol="Settings24" Width="24" Foreground="{StaticResource DpMutedBrush}" />
+                            <TextBlock Text="维护设置" Margin="12,0,0,0" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <Grid Grid.Column="1" Margin="32,26,34,30">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="0,0,0,22">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel>
+                    <TextBlock Text="透明加解密策略中心"
+                               FontSize="27"
+                               FontWeight="SemiBold"
+                               Foreground="{StaticResource DpInkBrush}" />
+                    <TextBlock Text="{Binding StatusMessage}"
+                               Style="{StaticResource DpCaptionStyle}"
+                               Margin="0,7,0,0" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                    <Button Command="{Binding CheckConnectionCommand}"
+                            ToolTip="检测驱动通信状态"
+                            Style="{StaticResource DpIconButtonStyle}"
+                            Margin="0,0,10,0">
+                        <ui:SymbolIcon Symbol="ArrowSync24" />
+                    </Button>
+                    <Button Command="{Binding QueryRulesCommand}"
+                            ToolTip="从驱动读取当前运行时规则"
+                            Style="{StaticResource DpIconButtonStyle}"
+                            Margin="0,0,10,0">
+                        <ui:SymbolIcon Symbol="Search24" />
+                    </Button>
+                    <Button Command="{Binding SynchronizeRulesCommand}"
+                            Background="{StaticResource DpCommandBrush}"
+                            Foreground="White"
+                            Padding="18,8">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="CloudArrowUp24" Foreground="White" Width="22" />
+                            <TextBlock Text="同步到驱动" Margin="8,0,0,0" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid Grid.Row="1">
+                <Grid Visibility="{Binding IsDashboardVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,14,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="44" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="38"
+                                    Height="38"
+                                    CornerRadius="8"
+                                    Background="{StaticResource DpSuccessSoftBrush}">
+                                <ui:SymbolIcon Symbol="ShieldCheckmark24"
+                                               Foreground="{StaticResource DpSuccessBrush}"
+                                               FontSize="21"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                                <TextBlock Text="驱动状态" Style="{StaticResource DpCaptionStyle}" />
+                                <TextBlock Text="{Binding DriverStatusText}"
+                                           Style="{StaticResource DpMetricValueStyle}"
+                                           Foreground="{Binding DriverStatusBrushKey, Converter={StaticResource ResourceBrushConverter}}"
+                                           Margin="0,3,0,0" />
+                                <TextBlock Text="Filter Manager 策略端口实时可用性"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,4,0,0" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Column="1" Style="{StaticResource DpPanelStyle}" Margin="0,0,14,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="44" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="38"
+                                    Height="38"
+                                    CornerRadius="8"
+                                    Background="{StaticResource DpCommandSoftBrush}">
+                                <ui:SymbolIcon Symbol="Key24"
+                                               Foreground="{StaticResource DpCommandBrush}"
+                                               FontSize="21"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                                <TextBlock Text="授信规则" Style="{StaticResource DpCaptionStyle}" />
+                                <TextBlock Text="{Binding TotalRuleCount}"
+                                           Style="{StaticResource DpMetricValueStyle}"
+                                           Margin="0,3,0,0" />
+                                <TextBlock Text="进程名规则与目录规则的合计数量"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,4,0,0" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Column="2" Style="{StaticResource DpPanelStyle}" Margin="0,0,0,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="44" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="38"
+                                    Height="38"
+                                    CornerRadius="8"
+                                    Background="{StaticResource DpWarningSoftBrush}">
+                                <ui:SymbolIcon Symbol="Clock24"
+                                               Foreground="{StaticResource DpWarningBrush}"
+                                               FontSize="21"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" />
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                                <TextBlock Text="最近同步" Style="{StaticResource DpCaptionStyle}" />
+                                <TextBlock Text="{Binding LastSyncText}"
+                                           FontSize="16"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource DpInkBrush}"
+                                           Margin="0,12,0,0" />
+                                <TextBlock Text="运行时策略完整下发时间"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,6,0,0" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="1"
+                            Grid.ColumnSpan="3"
+                            Style="{StaticResource DpPanelStyle}"
+                            Padding="22">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.15*" />
+                                <ColumnDefinition Width="0.85*" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Margin="0,0,36,0">
+                                <TextBlock Text="双缓冲透明访问模型" Style="{StaticResource DpTitleStyle}" />
+                                <TextBlock Margin="0,12,0,0"
+                                           Foreground="{StaticResource DpMutedBrush}"
+                                           FontSize="13"
+                                           LineHeight="21"
+                                           TextWrapping="Wrap"
+                                           Text="授权进程打开匹配扩展名的受保护文件时访问解密后的影子数据，非授权进程保持读取原始密文。策略中心负责维护进程名、程序目录、排除目录与文件扩展名绑定的运行时规则。" />
+
+                                <Grid Margin="0,28,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Background="{StaticResource DpSuccessSoftBrush}"
+                                            BorderBrush="#C7E8DD"
+                                            BorderThickness="1"
+                                            CornerRadius="8"
+                                            Padding="16"
+                                            Margin="0,0,10,0">
+                                        <StackPanel>
+                                            <ui:SymbolIcon Symbol="DocumentBulletList24"
+                                                           Foreground="{StaticResource DpSuccessBrush}"
+                                                           Width="26" />
+                                            <TextBlock Text="授权读取"
+                                                       Style="{StaticResource DpSectionTitleStyle}"
+                                                       Margin="0,11,0,0" />
+                                            <TextBlock Text="进入明文视图，写回时同步加密落到原始文件。"
+                                                       Style="{StaticResource DpCaptionStyle}"
+                                                       Margin="0,6,0,0" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1"
+                                            Background="{StaticResource DpDangerSoftBrush}"
+                                            BorderBrush="#F0C9C5"
+                                            BorderThickness="1"
+                                            CornerRadius="8"
+                                            Padding="16"
+                                            Margin="10,0,0,0">
+                                        <StackPanel>
+                                            <ui:SymbolIcon Symbol="LockClosed24"
+                                                           Foreground="{StaticResource DpDangerBrush}"
+                                                           Width="26" />
+                                            <TextBlock Text="非授权读取"
+                                                       Style="{StaticResource DpSectionTitleStyle}"
+                                                       Margin="0,11,0,0" />
+                                            <TextBlock Text="只暴露密文缓冲区，不进入透明解密路径。"
+                                                       Style="{StaticResource DpCaptionStyle}"
+                                                       Margin="0,6,0,0" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+                            </StackPanel>
+
+                            <Border Grid.Column="1"
+                                    Background="#FAFBFD"
+                                    BorderBrush="{StaticResource DpLineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8"
+                                    Padding="18">
+                                <StackPanel>
+                                    <TextBlock Text="当前策略结构" Style="{StaticResource DpSectionTitleStyle}" />
+                                    <Grid Margin="0,16,0,0">
+                                       <Grid.RowDefinitions>
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                           <RowDefinition Height="Auto" />
+                                       </Grid.RowDefinitions>
+
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="进程名规则" Style="{StaticResource DpCaptionStyle}" />
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding ProcessRuleCount}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{StaticResource DpInkBrush}" />
+                                        </Grid>
+                                        <Border Grid.Row="1"
+                                                Height="1"
+                                                Background="{StaticResource DpLineBrush}"
+                                                Margin="0,12,0,12" />
+                                        <Grid Grid.Row="2" Margin="0,0,0,12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="文件夹规则" Style="{StaticResource DpCaptionStyle}" />
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding DirectoryRuleCount}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{StaticResource DpInkBrush}" />
+                                        </Grid>
+                                        <Border Grid.Row="3"
+                                                Height="1"
+                                                Background="{StaticResource DpLineBrush}"
+                                                Margin="0,0,0,12" />
+                                        <Grid Grid.Row="4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="排除目录" Style="{StaticResource DpCaptionStyle}" />
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding ExcludedDirectoryRuleCount}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{StaticResource DpInkBrush}" />
+                                        </Grid>
+                                    </Grid>
+
+                                    <Button Command="{Binding QueryRulesCommand}"
+                                            Margin="0,26,0,0"
+                                            HorizontalAlignment="Stretch"
+                                            Padding="0,9">
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <ui:SymbolIcon Symbol="Search24" Width="22" />
+                                            <TextBlock Text="读取驱动运行时策略" Margin="8,0,0,0" />
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Command="{Binding SynchronizeRulesCommand}"
+                                            Margin="0,10,0,0"
+                                            Background="{StaticResource DpCommandBrush}"
+                                            Foreground="White"
+                                            HorizontalAlignment="Stretch"
+                                            Padding="0,9">
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <ui:SymbolIcon Symbol="ArrowSyncCircle24" Foreground="White" Width="22" />
+                                            <TextBlock Text="完整同步运行时策略" Margin="8,0,0,0" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <Grid Visibility="{Binding IsTrustedAppsVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,0,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="可信进程名" Style="{StaticResource DpTitleStyle}" />
+                                <TextBlock Text="适合固定授权工具，规则会绑定到指定受保护文件扩展名。"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,7,0,0" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox Width="278"
+                                         Height="36"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewProcessName, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox Width="88"
+                                         Height="36"
+                                         Margin="8,0,0,0"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewProcessExtension, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button Command="{Binding AddProcessNameCommand}"
+                                        Margin="10,0,0,0"
+                                        Padding="16,7"
+                                        Background="{StaticResource DpCommandBrush}"
+                                        Foreground="White">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="Add24" Foreground="White" Width="22" />
+                                        <TextBlock Text="添加进程" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource DpPanelStyle}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,14">
+                                <TextBlock Text="进程规则列表" Style="{StaticResource DpSectionTitleStyle}" />
+                                <Button Command="{Binding RemoveProcessNameCommand}"
+                                        HorizontalAlignment="Right"
+                                        ToolTip="移除选中的进程规则"
+                                        Style="{StaticResource DpIconButtonStyle}">
+                                    <ui:SymbolIcon Symbol="Delete24" />
+                                </Button>
+                            </Grid>
+                            <DataGrid Grid.Row="1"
+                                      ItemsSource="{Binding ProcessNameRules}"
+                                      SelectedItem="{Binding SelectedProcessNameRule}"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      CanUserDeleteRows="False"
+                                      IsReadOnly="True"
+                                      RowHeight="38"
+                                      GridLinesVisibility="Horizontal"
+                                      HeadersVisibility="Column"
+                                      BorderThickness="0"
+                                      Background="Transparent">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="进程名"
+                                                        Binding="{Binding DisplayValue}"
+                                                        Width="*" />
+                                    <DataGridTextColumn Header="驱动规则"
+                                                        Binding="{Binding DriverValue}"
+                                                        Width="*" />
+                                    <DataGridTextColumn Header="扩展名"
+                                                        Binding="{Binding Extension}"
+                                                        Width="120" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <Grid Visibility="{Binding IsFoldersVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,0,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="可信程序文件夹" Style="{StaticResource DpTitleStyle}" />
+                                <TextBlock Text="目录规则按进程镜像路径匹配，并且只对绑定扩展名的文件生效。"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,7,0,0" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox Width="380"
+                                         Height="36"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewDirectoryPath, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox Width="88"
+                                         Height="36"
+                                         Margin="8,0,0,0"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewDirectoryExtension, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button Command="{Binding BrowseDirectoryCommand}"
+                                        Margin="10,0,0,0"
+                                        ToolTip="选择文件夹"
+                                        Style="{StaticResource DpIconButtonStyle}">
+                                    <ui:SymbolIcon Symbol="FolderOpen24" />
+                                </Button>
+                                <Button Command="{Binding AddDirectoryCommand}"
+                                        Margin="8,0,0,0"
+                                        Padding="16,7"
+                                        Background="{StaticResource DpCommandBrush}"
+                                        Foreground="White">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="Add24" Foreground="White" Width="22" />
+                                        <TextBlock Text="添加目录" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource DpPanelStyle}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,14">
+                                <TextBlock Text="文件夹规则列表" Style="{StaticResource DpSectionTitleStyle}" />
+                                <Button Command="{Binding RemoveDirectoryCommand}"
+                                        HorizontalAlignment="Right"
+                                        ToolTip="移除选中的文件夹规则"
+                                        Style="{StaticResource DpIconButtonStyle}">
+                                    <ui:SymbolIcon Symbol="Delete24" />
+                                </Button>
+                            </Grid>
+                            <DataGrid Grid.Row="1"
+                                      ItemsSource="{Binding ProcessDirectoryRules}"
+                                      SelectedItem="{Binding SelectedDirectoryRule}"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      CanUserDeleteRows="False"
+                                      IsReadOnly="True"
+                                      RowHeight="38"
+                                      GridLinesVisibility="Horizontal"
+                                      HeadersVisibility="Column"
+                                      BorderThickness="0"
+                                      Background="Transparent">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="显示路径"
+                                                        Binding="{Binding DisplayValue}"
+                                                        Width="*" />
+                                    <DataGridTextColumn Header="驱动 NT 路径"
+                                                        Binding="{Binding DriverValue}"
+                                                        Width="1.45*" />
+                                    <DataGridTextColumn Header="扩展名"
+                                                        Binding="{Binding Extension}"
+                                                        Width="120" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <Grid Visibility="{Binding IsExcludedFoldersVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Border Style="{StaticResource DpPanelStyle}" Margin="0,0,0,16">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="排除目录" Style="{StaticResource DpTitleStyle}" />
+                                <TextBlock Text="命中排除目录时，即使扩展名受保护也保持原始读写，不进入透明加解密。"
+                                           Style="{StaticResource DpCaptionStyle}"
+                                           Margin="0,7,0,0" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox Width="380"
+                                         Height="36"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewExcludedDirectoryPath, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBox Width="88"
+                                         Height="36"
+                                         Margin="8,0,0,0"
+                                         VerticalContentAlignment="Center"
+                                         Text="{Binding NewExcludedDirectoryExtension, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button Command="{Binding BrowseExcludedDirectoryCommand}"
+                                        Margin="10,0,0,0"
+                                        ToolTip="选择排除目录"
+                                        Style="{StaticResource DpIconButtonStyle}">
+                                    <ui:SymbolIcon Symbol="FolderOpen24" />
+                                </Button>
+                                <Button Command="{Binding AddExcludedDirectoryCommand}"
+                                        Margin="8,0,0,0"
+                                        Padding="16,7"
+                                        Background="{StaticResource DpCommandBrush}"
+                                        Foreground="White">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="Add24" Foreground="White" Width="22" />
+                                        <TextBlock Text="添加排除" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource DpPanelStyle}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Grid Margin="0,0,0,14">
+                                <TextBlock Text="排除目录规则列表" Style="{StaticResource DpSectionTitleStyle}" />
+                                <Button Command="{Binding RemoveExcludedDirectoryCommand}"
+                                        HorizontalAlignment="Right"
+                                        ToolTip="移除选中的排除目录"
+                                        Style="{StaticResource DpIconButtonStyle}">
+                                    <ui:SymbolIcon Symbol="Delete24" />
+                                </Button>
+                            </Grid>
+                            <DataGrid Grid.Row="1"
+                                      ItemsSource="{Binding ExcludedDirectoryRules}"
+                                      SelectedItem="{Binding SelectedExcludedDirectoryRule}"
+                                      AutoGenerateColumns="False"
+                                      CanUserAddRows="False"
+                                      CanUserDeleteRows="False"
+                                      IsReadOnly="True"
+                                      RowHeight="38"
+                                      GridLinesVisibility="Horizontal"
+                                      HeadersVisibility="Column"
+                                      BorderThickness="0"
+                                      Background="Transparent">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="显示路径"
+                                                        Binding="{Binding DisplayValue}"
+                                                        Width="*" />
+                                    <DataGridTextColumn Header="驱动 NT 路径"
+                                                        Binding="{Binding DriverValue}"
+                                                        Width="1.45*" />
+                                    <DataGridTextColumn Header="扩展名"
+                                                        Binding="{Binding Extension}"
+                                                        Width="120" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <Grid Visibility="{Binding IsSettingsVisible, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Border Style="{StaticResource DpPanelStyle}" VerticalAlignment="Top" Padding="22">
+                        <StackPanel>
+                            <TextBlock Text="维护设置" Style="{StaticResource DpTitleStyle}" />
+                            <TextBlock Text="重新下发会清空驱动运行时规则，再按本地保存的策略完整同步。清空规则会同时清除本地配置和运行时配置。"
+                                       Style="{StaticResource DpCaptionStyle}"
+                                       Margin="0,8,0,20" />
+                            <StackPanel Orientation="Horizontal">
+                                <Button Command="{Binding CheckConnectionCommand}"
+                                        Padding="16,7"
+                                        Margin="0,0,10,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="PlugConnected24" Width="22" />
+                                        <TextBlock Text="检测驱动" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                                <Button Command="{Binding SynchronizeRulesCommand}"
+                                        Padding="16,7"
+                                        Background="{StaticResource DpCommandBrush}"
+                                        Foreground="White"
+                                        Margin="0,0,10,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="ArrowSync24" Foreground="White" Width="22" />
+                                        <TextBlock Text="重新下发规则" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                                <Button Command="{Binding QueryRulesCommand}"
+                                        Padding="16,7"
+                                        Margin="0,0,10,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="Search24" Width="22" />
+                                        <TextBlock Text="读取驱动规则" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                                <Button Command="{Binding ClearRulesCommand}"
+                                        Padding="16,7"
+                                        BorderBrush="{StaticResource DpDangerBrush}"
+                                        Foreground="{StaticResource DpDangerBrush}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <ui:SymbolIcon Symbol="DeleteDismiss24" Width="22" />
+                                        <TextBlock Text="清空规则" Margin="7,0,0,0" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Grid>
+        </Grid>
+        </Grid>
+    </Grid>
+</ui:FluentWindow>

@@ -1,0 +1,191 @@
+#pragma once
+
+#include <ntddk.h>
+#include <ntdddisk.h>
+#include <scsi.h>
+#include <ntddstor.h>
+#include <ntddvol.h>
+#include <mountdev.h>
+#include <mountmgr.h>
+#include <ntstrsafe.h>
+
+#define DPUSB_DEVICE_NAME L"\\Device\\DataProtectorUsbCrypt"
+#define DPUSB_DOS_DEVICE_NAME L"\\DosDevices\\DataProtectorUsbCrypt"
+#define DPUSB_VOLUME_DEVICE_NAME L"\\Device\\DataProtectorUsbCryptVolume0"
+
+#define DPUSB_TAG_STATE 'sUpD'
+#define DPUSB_TAG_TEXT  'tUpD'
+#define DPUSB_TAG_IO    'iUpD'
+#define DPUSB_TAG_WORK  'wUpD'
+
+// Compile-time investigation switch for Secure USB virtual disk hangs.
+// Set to 1 only when investigating I/O hangs; per-IRP tracing is very expensive.
+#ifndef DPUSB_TRACE_ENABLED
+#define DPUSB_TRACE_ENABLED 0
+#endif
+
+#define DPUSB_IOCTL_INDEX 0x900
+#define IOCTL_DPUSB_QUERY_STATUS CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 0, METHOD_BUFFERED, FILE_READ_ACCESS)
+#define IOCTL_DPUSB_OPEN_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 1, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_CLOSE_SESSION CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 2, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_MOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 3, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_UNMOUNT_DRIVE CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 4, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_RAW_WRITE_ALIGNED CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 5, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+#define IOCTL_DPUSB_RAW_READ_ALIGNED CTL_CODE(FILE_DEVICE_DISK, DPUSB_IOCTL_INDEX + 6, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+#ifndef FSCTL_LOCK_VOLUME
+#define FSCTL_LOCK_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 6, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+#ifndef FSCTL_UNLOCK_VOLUME
+#define FSCTL_UNLOCK_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 7, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+#ifndef FSCTL_DISMOUNT_VOLUME
+#define FSCTL_DISMOUNT_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 8, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+#ifndef FSCTL_IS_VOLUME_MOUNTED
+#define FSCTL_IS_VOLUME_MOUNTED CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 10, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+#ifndef FSCTL_ALLOW_EXTENDED_DASD_IO
+#define FSCTL_ALLOW_EXTENDED_DASD_IO CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 32, METHOD_NEITHER, FILE_ANY_ACCESS)
+#endif
+
+#define DPUSB_MAX_DEVICE_ID_CHARS 260
+#define DPUSB_MAX_KEY_BYTES 64
+#define DPUSB_ALGORITHM_RC4 1
+#define DPUSB_CRYPTO_VERSION_LEGACY_RC4_OFFSET 2
+#define DPUSB_CRYPTO_VERSION_FAST_BLOCK_RC4 3
+#define DPUSB_SECTOR_BYTES 512
+#define DPUSB_CRYPTO_BLOCK_BYTES (4 * 1024)
+#define DPUSB_RAW_WRITE_MAX_BYTES (1024 * 1024)
+#define DPUSB_VIRTUAL_PARTITION_OFFSET_BYTES (1024ull * 1024ull)
+#define DPUSB_METADATA_RESERVED_BYTES (2ull * 1024ull * 1024ull)
+#define DPUSB_MIN_TOOL_BYTES (5ull * 1024ull * 1024ull)
+#define DPUSB_DATA_OFFSET_BYTES (DPUSB_METADATA_RESERVED_BYTES + DPUSB_MIN_TOOL_BYTES)
+#define DPUSB_RUNTIME_VERSION 0x20260523u
+#define DPUSB_CAP_SPLIT_VOLUME_DEVICE 0x00000001u
+#define DPUSB_CAP_ALIGNED_KERNEL_BACKING_IO 0x00000002u
+#define DPUSB_CAP_FAST_RANDOM_ACCESS_CRYPTO 0x00000004u
+#define DPUSB_HEADER_SIGNATURE 'CPUDP001'
+#ifndef PARTITION_FAT32
+#define PARTITION_FAT32 0x0B
+#endif
+
+typedef struct _DPUSB_OPEN_SESSION {
+    ULONG Version;
+    ULONG Algorithm;
+    ULONGLONG ToolAreaBytes;
+    ULONGLONG DataOffsetBytes;
+    ULONGLONG DataLengthBytes;
+    ULONG KeyLength;
+    WCHAR PhysicalDrivePath[128];
+    UCHAR Key[DPUSB_MAX_KEY_BYTES];
+    WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
+    ULONG CryptoVersion;
+} DPUSB_OPEN_SESSION, *PDPUSB_OPEN_SESSION;
+
+typedef struct _DPUSB_STATUS {
+    ULONG Version;
+    BOOLEAN SessionOpen;
+    UCHAR Reserved0[3];
+    ULONG RuntimeVersion;
+    ULONG Capabilities;
+    ULONG Algorithm;
+    ULONGLONG ToolAreaBytes;
+    ULONGLONG DataOffsetBytes;
+    ULONGLONG DataLengthBytes;
+    WCHAR PhysicalDrivePath[128];
+    WCHAR DeviceId[DPUSB_MAX_DEVICE_ID_CHARS];
+} DPUSB_STATUS, *PDPUSB_STATUS;
+
+typedef struct _DPUSB_DRIVE_MOUNT {
+    ULONG Version;
+    WCHAR DriveLetter;
+} DPUSB_DRIVE_MOUNT, *PDPUSB_DRIVE_MOUNT;
+
+typedef struct _DPUSB_RAW_WRITE_REQUEST {
+    ULONG Version;
+    ULONG DataLength;
+    ULONGLONG LogicalOffset;
+    UCHAR Data[1];
+} DPUSB_RAW_WRITE_REQUEST, *PDPUSB_RAW_WRITE_REQUEST;
+
+typedef struct _DPUSB_RAW_READ_REQUEST {
+    ULONG Version;
+    ULONG DataLength;
+    ULONGLONG LogicalOffset;
+    UCHAR Data[1];
+} DPUSB_RAW_READ_REQUEST, *PDPUSB_RAW_READ_REQUEST;
+
+typedef struct _DPUSB_RC4_STATE {
+    UCHAR S[256];
+    UCHAR I;
+    UCHAR J;
+} DPUSB_RC4_STATE, *PDPUSB_RC4_STATE;
+
+DRIVER_INITIALIZE DriverEntry;
+DRIVER_UNLOAD DpUsbUnload;
+
+_Dispatch_type_(IRP_MJ_CREATE)
+DRIVER_DISPATCH DpUsbCreateClose;
+
+_Dispatch_type_(IRP_MJ_CLOSE)
+DRIVER_DISPATCH DpUsbCreateClose;
+
+_Dispatch_type_(IRP_MJ_CLEANUP)
+DRIVER_DISPATCH DpUsbCreateClose;
+
+_Dispatch_type_(IRP_MJ_QUERY_INFORMATION)
+DRIVER_DISPATCH DpUsbQueryInformation;
+
+_Dispatch_type_(IRP_MJ_SET_INFORMATION)
+DRIVER_DISPATCH DpUsbSetInformation;
+
+_Dispatch_type_(IRP_MJ_FLUSH_BUFFERS)
+DRIVER_DISPATCH DpUsbFlushBuffers;
+
+_Dispatch_type_(IRP_MJ_DEVICE_CONTROL)
+DRIVER_DISPATCH DpUsbDeviceControl;
+
+_Dispatch_type_(IRP_MJ_FILE_SYSTEM_CONTROL)
+DRIVER_DISPATCH DpUsbFileSystemControl;
+
+_Dispatch_type_(IRP_MJ_PNP)
+DRIVER_DISPATCH DpUsbPnp;
+
+_Dispatch_type_(IRP_MJ_READ)
+DRIVER_DISPATCH DpUsbReadWrite;
+
+_Dispatch_type_(IRP_MJ_WRITE)
+DRIVER_DISPATCH DpUsbReadWrite;
+
+VOID
+DpUsbRc4Initialize(
+    _Out_ PDPUSB_RC4_STATE State,
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength
+    );
+
+VOID
+DpUsbRc4Apply(
+    _Inout_ PDPUSB_RC4_STATE State,
+    _Inout_updates_bytes_(Length) UCHAR *Buffer,
+    _In_ ULONG Length
+    );
+
+VOID
+DpUsbRc4CryptAtOffset(
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength,
+    _In_ ULONGLONG Offset,
+    _Inout_updates_bytes_(Length) UCHAR *Buffer,
+    _In_ ULONG Length
+    );
+
+VOID
+DpUsbRc4CryptAtOffsetLegacy(
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength,
+    _In_ ULONGLONG Offset,
+    _Inout_updates_bytes_(Length) UCHAR *Buffer,
+    _In_ ULONG Length
+    );
