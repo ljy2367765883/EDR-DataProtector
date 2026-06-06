@@ -4187,7 +4187,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.injection-chain",
                     "跨进程注入链",
-                    new[] { "userhook.behavior-process-access", "userhook.behavior-thread-access", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.behavior-remote-thread-create", "userhook.observed.create-remote-thread", "userhook.observed.nt-create-thread-ex" },
+                    new[] { "userhook.behavior-process-access", "userhook.observed.open-process", "userhook.observed.nt-open-process", "userhook.observed.duplicate-process-handle", "userhook.observed.nt-duplicate-process-handle", "userhook.behavior-thread-access", "userhook.observed.open-thread", "userhook.observed.nt-open-thread", "userhook.observed.duplicate-thread-handle", "userhook.observed.nt-duplicate-thread-handle", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.behavior-remote-thread-create", "userhook.observed.create-remote-thread", "userhook.observed.nt-create-thread-ex" },
                     null,
                     90,
                     4,
@@ -4200,7 +4200,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.remote-dll-injection",
                     "远程 DLL 注入链",
-                    new[] { "userhook.behavior-process-access", "userhook.observed.remote-dll-path-write", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.create-remote-thread", "userhook.observed.create-remote-thread-ex", "userhook.observed.nt-create-thread-ex", "userhook.behavior-remote-thread-create" },
+                    new[] { "userhook.behavior-process-access", "userhook.observed.open-process", "userhook.observed.nt-open-process", "userhook.observed.duplicate-process-handle", "userhook.observed.nt-duplicate-process-handle", "userhook.observed.remote-dll-path-write", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.create-remote-thread", "userhook.observed.create-remote-thread-ex", "userhook.observed.nt-create-thread-ex", "userhook.behavior-remote-thread-create" },
                     new[] { "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory" },
                     90,
                     4,
@@ -4213,7 +4213,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.shellcode-injection",
                     "远程 Shellcode 注入链",
-                    new[] { "userhook.behavior-process-access", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.remote-executable-protect", "userhook.observed.nt-protect-executable-memory", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.remote-pe-image-write", "userhook.observed.create-remote-thread", "userhook.observed.nt-create-thread-ex", "userhook.behavior-remote-thread-create" },
+                    new[] { "userhook.behavior-process-access", "userhook.observed.open-process", "userhook.observed.nt-open-process", "userhook.observed.duplicate-process-handle", "userhook.observed.nt-duplicate-process-handle", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.remote-executable-protect", "userhook.observed.nt-protect-executable-memory", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.remote-pe-image-write", "userhook.observed.create-remote-thread", "userhook.observed.nt-create-thread-ex", "userhook.behavior-remote-thread-create" },
                     null,
                     90,
                     4,
@@ -4252,7 +4252,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.thread-hijack",
                     "线程劫持注入链",
-                    new[] { "userhook.behavior-thread-access", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.set-thread-context", "userhook.observed.resume-thread" },
+                    new[] { "userhook.behavior-thread-access", "userhook.observed.open-thread", "userhook.observed.nt-open-thread", "userhook.observed.duplicate-thread-handle", "userhook.observed.nt-duplicate-thread-handle", "userhook.observed.write-process-memory", "userhook.observed.nt-write-virtual-memory", "userhook.observed.remote-executable-memory", "userhook.observed.nt-allocate-executable-memory", "userhook.observed.set-thread-context", "userhook.observed.resume-thread" },
                     null,
                     120,
                     4,
@@ -4356,7 +4356,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.persistence-autostart",
                     "自启动持久化",
-                    new[] { "userhook.observed.registry-set-value", "userhook.observed.process-create" },
+                    new[] { "userhook.observed.registry-set-value", "userhook.observed.registry-create-key", "userhook.observed.create-service", "userhook.observed.change-service-config", "userhook.observed.start-service", "userhook.observed.process-create" },
                     null,
                     180,
                     1,
@@ -4395,7 +4395,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.credential-dump-chain",
                     "凭据转储链",
-                    new[] { "userhook.behavior-process-access", "userhook.observed.process-create" },
+                    new[] { "userhook.behavior-process-access", "userhook.observed.open-process", "userhook.observed.nt-open-process", "userhook.observed.duplicate-process-handle", "userhook.observed.nt-duplicate-process-handle", "userhook.observed.minidump-write", "userhook.observed.process-create" },
                     null,
                     120,
                     1,
@@ -4408,7 +4408,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.defense-impairment",
                     "安全防护削弱链",
-                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value" },
+                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value", "userhook.observed.registry-create-key", "userhook.observed.registry-delete-value", "userhook.observed.registry-delete-key", "userhook.observed.change-service-config", "userhook.observed.start-service" },
                     null,
                     120,
                     1,
@@ -4421,7 +4421,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.service-persistence",
                     "服务持久化链",
-                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value" },
+                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value", "userhook.observed.registry-create-key", "userhook.observed.create-service", "userhook.observed.change-service-config", "userhook.observed.start-service" },
                     null,
                     120,
                     1,
@@ -4460,7 +4460,7 @@ namespace DataProtectorWebBridge.Services
                 NewBehaviorRule(
                     "dp.behavior.ransomware-impact-chain",
                     "勒索破坏前置链",
-                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value" },
+                    new[] { "userhook.observed.process-create", "userhook.observed.registry-set-value", "userhook.observed.registry-create-key", "userhook.observed.registry-delete-value", "userhook.observed.registry-delete-key", "userhook.observed.change-service-config", "userhook.observed.start-service" },
                     null,
                     180,
                     1,
@@ -6962,7 +6962,7 @@ namespace DataProtectorWebBridge.Services
 
                 if (id.IndexOf("thread-hijack", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    if (!candidates.Any(item => item.Action.IndexOf("thread-access", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                    if (!HasActionLike(matchedActions, "thread-access") ||
                         (!candidates.Any(item => item.EvidenceClass == "write" || IsRemotePayloadWriteAtom(item)) && !HasActionLike(matchedActions, "write-memory")) ||
                         !candidates.Any(item => item.Action.IndexOf("set-thread-context", StringComparison.OrdinalIgnoreCase) >= 0) ||
                         !candidates.Any(item => item.Action.IndexOf("resume-thread", StringComparison.OrdinalIgnoreCase) >= 0))
@@ -7627,19 +7627,42 @@ namespace DataProtectorWebBridge.Services
                     return "executable-memory";
                 }
 
-                if (value == "queueuserapc")
+                if (value == "queueuserapc" || value == "queueapcthread")
                 {
                     return "queue-apc";
                 }
 
-                if (value == "processaccess")
+                if (value == "processaccess" ||
+                    value == "openprocess" ||
+                    value == "duplicateprocesshandle")
                 {
                     return "process-access";
                 }
 
-                if (value == "threadaccess")
+                if (value == "threadaccess" ||
+                    value == "openthread" ||
+                    value == "duplicatethreadhandle")
                 {
                     return "thread-access";
+                }
+
+                if (value == "createservice" ||
+                    value == "changeserviceconfig" ||
+                    value == "startservice")
+                {
+                    return "service-control";
+                }
+
+                if (value == "registrycreatekey" ||
+                    value == "registrydeletevalue" ||
+                    value == "registrydeletekey")
+                {
+                    return "registry-change";
+                }
+
+                if (value == "minidumpwrite")
+                {
+                    return "credential-dump";
                 }
 
                 return value;
@@ -7750,6 +7773,21 @@ namespace DataProtectorWebBridge.Services
                 string action = atom == null ? string.Empty : (atom.Action ?? string.Empty);
                 string api = (atom == null ? string.Empty : (atom.Target ?? string.Empty)) + " " + (atom == null ? string.Empty : (atom.CommandLine ?? string.Empty));
 
+                if (action.IndexOf("open-process", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("open-thread", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("duplicate-process-handle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("duplicate-thread-handle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("behavior-process-access", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("behavior-thread-access", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "access";
+                }
+
+                if (action.IndexOf("minidump-write", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "credential";
+                }
+
                 if (action.IndexOf("write-process-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     action.IndexOf("nt-write-virtual-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     action.IndexOf("remote-dll-path-write", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -7761,6 +7799,7 @@ namespace DataProtectorWebBridge.Services
                 if (action.IndexOf("remote-executable-memory", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     action.IndexOf("allocate-executable", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     action.IndexOf("protect-executable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-map-view-of-section", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     action.IndexOf("memory-rwx", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     action.IndexOf("memory-private-executable", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
@@ -7773,7 +7812,8 @@ namespace DataProtectorWebBridge.Services
                     return "execute";
                 }
 
-                if (action.IndexOf("queue-user-apc", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (action.IndexOf("queue-user-apc", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("nt-queue-apc-thread", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return "apc";
                 }
@@ -7797,9 +7837,19 @@ namespace DataProtectorWebBridge.Services
                     return "network";
                 }
 
-                if (action.IndexOf("registry-set-value", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (action.IndexOf("registry-set-value", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("registry-create-key", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("registry-delete-value", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("registry-delete-key", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return "registry";
+                }
+
+                if (action.IndexOf("create-service", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("change-service-config", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    action.IndexOf("start-service", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "service";
                 }
 
                 if (action.IndexOf("load-library", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -7965,7 +8015,11 @@ namespace DataProtectorWebBridge.Services
             {
                 string action = atom == null ? string.Empty : (atom.Action ?? string.Empty);
                 if (action.IndexOf("process-access", StringComparison.OrdinalIgnoreCase) < 0 &&
-                    action.IndexOf("thread-access", StringComparison.OrdinalIgnoreCase) < 0)
+                    action.IndexOf("thread-access", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    action.IndexOf("open-process", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    action.IndexOf("open-thread", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    action.IndexOf("duplicate-process-handle", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    action.IndexOf("duplicate-thread-handle", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     return false;
                 }
@@ -8095,7 +8149,7 @@ namespace DataProtectorWebBridge.Services
                 {
                     "sekurlsa", "lsadump", "privilege::debug", "token::", "vault::", "kerberos::",
                     "hklm\\sam", "hklm\\system", "hklm\\security", "reg save hklm\\sam", "reg save hklm\\system",
-                    "ntds.dit", "lsass", "comsvcs.dll", "minidump", "procdump"
+                    "ntds.dit", "lsass", "comsvcs.dll", "minidump", "minidumpwritedump", "procdump"
                 };
 
                 return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
@@ -8111,7 +8165,8 @@ namespace DataProtectorWebBridge.Services
                 string[] tokens =
                 {
                     "currentversion\\run", "\\runonce", "startup", "schtasks /create", "schtasks.exe /create",
-                    " /create ", "sc create", "new-service", "create service", "start= auto", "autostart"
+                    " /create ", "sc create", "new-service", "create service", "create-service",
+                    "change-service-config", "start-service", "start= auto", "autostart"
                 };
 
                 return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
@@ -8127,7 +8182,8 @@ namespace DataProtectorWebBridge.Services
                 string[] tokens =
                 {
                     "sc create", "sc.exe create", "new-service", "create service", "start= auto",
-                    "binpath=", "\\services\\", "imagepath", "service control", "servicemain"
+                    "create-service", "change-service-config", "start-service", "binpath=", "\\services\\",
+                    "imagepath", "service control", "servicemain", "service=", "bin="
                 };
 
                 return tokens.Any(token => value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
@@ -8274,6 +8330,9 @@ namespace DataProtectorWebBridge.Services
 
                 switch (atom.EvidenceClass)
                 {
+                    case "credential":
+                        score += 30;
+                        break;
                     case "write":
                     case "memory":
                     case "execute":
@@ -8282,6 +8341,8 @@ namespace DataProtectorWebBridge.Services
                         break;
                     case "thread":
                     case "module":
+                    case "service":
+                    case "access":
                         score += 18;
                         break;
                     case "process":

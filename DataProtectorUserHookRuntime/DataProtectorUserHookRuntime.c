@@ -17,7 +17,7 @@
 #define DP_RUNTIME_MAX_TEXT 1024
 #define DP_RUNTIME_MAX_POLICY_TEXT 32768
 #define DP_RUNTIME_STATUS_BLOCKED 0xC0000022u
-#define DP_RUNTIME_MAX_HOOKS 48
+#define DP_RUNTIME_MAX_HOOKS 96
 #define DP_RUNTIME_HOOK_PROBE_BYTES 32
 #define DP_RUNTIME_INTEGRITY_INTERVAL_MS 1500
 #define DP_RUNTIME_TAMPER_REPORT_INTERVAL_MS 30000
@@ -89,13 +89,42 @@ typedef DWORD (WINAPI *PFN_QueueUserAPC)(PAPCFUNC, HANDLE, ULONG_PTR);
 typedef HHOOK (WINAPI *PFN_SetWindowsHookExW)(int, HOOKPROC, HINSTANCE, DWORD);
 typedef HHOOK (WINAPI *PFN_SetWindowsHookExA)(int, HOOKPROC, HINSTANCE, DWORD);
 typedef HMODULE (WINAPI *PFN_LoadLibraryW)(LPCWSTR);
+typedef HMODULE (WINAPI *PFN_LoadLibraryA)(LPCSTR);
 typedef HMODULE (WINAPI *PFN_LoadLibraryExW)(LPCWSTR, HANDLE, DWORD);
+typedef HMODULE (WINAPI *PFN_LoadLibraryExA)(LPCSTR, HANDLE, DWORD);
 typedef LONG (WINAPI *PFN_RegSetValueExW)(HKEY, LPCWSTR, DWORD, DWORD, const BYTE *, DWORD);
 typedef LONG (WINAPI *PFN_RegSetValueExA)(HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD);
+typedef LONG (WINAPI *PFN_RegCreateKeyExW)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM, const SECURITY_ATTRIBUTES *, PHKEY, LPDWORD);
+typedef LONG (WINAPI *PFN_RegCreateKeyExA)(HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM, const SECURITY_ATTRIBUTES *, PHKEY, LPDWORD);
+typedef LONG (WINAPI *PFN_RegDeleteValueW)(HKEY, LPCWSTR);
+typedef LONG (WINAPI *PFN_RegDeleteValueA)(HKEY, LPCSTR);
+typedef LONG (WINAPI *PFN_RegDeleteKeyW)(HKEY, LPCWSTR);
+typedef LONG (WINAPI *PFN_RegDeleteKeyA)(HKEY, LPCSTR);
+typedef HANDLE (WINAPI *PFN_OpenProcess)(DWORD, BOOL, DWORD);
+typedef HANDLE (WINAPI *PFN_OpenThread)(DWORD, BOOL, DWORD);
+typedef BOOL (WINAPI *PFN_DuplicateHandle)(HANDLE, HANDLE, HANDLE, LPHANDLE, DWORD, BOOL, DWORD);
+typedef SC_HANDLE (WINAPI *PFN_CreateServiceW)(
+    SC_HANDLE, LPCWSTR, LPCWSTR, DWORD, DWORD, DWORD, DWORD, LPCWSTR, LPCWSTR, LPDWORD, LPCWSTR, LPCWSTR, LPCWSTR);
+typedef SC_HANDLE (WINAPI *PFN_CreateServiceA)(
+    SC_HANDLE, LPCSTR, LPCSTR, DWORD, DWORD, DWORD, DWORD, LPCSTR, LPCSTR, LPDWORD, LPCSTR, LPCSTR, LPCSTR);
+typedef BOOL (WINAPI *PFN_ChangeServiceConfigW)(
+    SC_HANDLE, DWORD, DWORD, DWORD, LPCWSTR, LPCWSTR, LPDWORD, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR);
+typedef BOOL (WINAPI *PFN_ChangeServiceConfigA)(
+    SC_HANDLE, DWORD, DWORD, DWORD, LPCSTR, LPCSTR, LPDWORD, LPCSTR, LPCSTR, LPCSTR, LPCSTR);
+typedef BOOL (WINAPI *PFN_StartServiceW)(SC_HANDLE, DWORD, LPCWSTR *);
+typedef BOOL (WINAPI *PFN_StartServiceA)(SC_HANDLE, DWORD, LPCSTR *);
+typedef BOOL (WINAPI *PFN_MiniDumpWriteDump)(HANDLE, DWORD, HANDLE, DWORD, PVOID, PVOID, PVOID);
 typedef BOOL (WINAPI *PFN_SetThreadContext)(HANDLE, const CONTEXT *);
 typedef DWORD (WINAPI *PFN_ResumeThread)(HANDLE);
 typedef int (WSAAPI *PFN_connect)(SOCKET, const struct sockaddr *, int);
 typedef int (WSAAPI *PFN_WSAConnect)(SOCKET, const struct sockaddr *, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
+typedef struct _DP_RUNTIME_CLIENT_ID {
+    HANDLE UniqueProcess;
+    HANDLE UniqueThread;
+} DP_RUNTIME_CLIENT_ID, *PDP_RUNTIME_CLIENT_ID;
+typedef NTSTATUS (NTAPI *PFN_NtOpenProcess)(PHANDLE, ACCESS_MASK, PVOID, PDP_RUNTIME_CLIENT_ID);
+typedef NTSTATUS (NTAPI *PFN_NtOpenThread)(PHANDLE, ACCESS_MASK, PVOID, PDP_RUNTIME_CLIENT_ID);
+typedef NTSTATUS (NTAPI *PFN_NtDuplicateObject)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
 typedef NTSTATUS (NTAPI *PFN_NtCreateThreadEx)(
     PHANDLE, ACCESS_MASK, PVOID, HANDLE, PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID);
 typedef NTSTATUS (NTAPI *PFN_NtWriteVirtualMemory)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
@@ -128,13 +157,34 @@ static PFN_QueueUserAPC gRealQueueUserAPC;
 static PFN_SetWindowsHookExW gRealSetWindowsHookExW;
 static PFN_SetWindowsHookExA gRealSetWindowsHookExA;
 static PFN_LoadLibraryW gRealLoadLibraryW;
+static PFN_LoadLibraryA gRealLoadLibraryA;
 static PFN_LoadLibraryExW gRealLoadLibraryExW;
+static PFN_LoadLibraryExA gRealLoadLibraryExA;
 static PFN_RegSetValueExW gRealRegSetValueExW;
 static PFN_RegSetValueExA gRealRegSetValueExA;
+static PFN_RegCreateKeyExW gRealRegCreateKeyExW;
+static PFN_RegCreateKeyExA gRealRegCreateKeyExA;
+static PFN_RegDeleteValueW gRealRegDeleteValueW;
+static PFN_RegDeleteValueA gRealRegDeleteValueA;
+static PFN_RegDeleteKeyW gRealRegDeleteKeyW;
+static PFN_RegDeleteKeyA gRealRegDeleteKeyA;
+static PFN_OpenProcess gRealOpenProcess;
+static PFN_OpenThread gRealOpenThread;
+static PFN_DuplicateHandle gRealDuplicateHandle;
+static PFN_CreateServiceW gRealCreateServiceW;
+static PFN_CreateServiceA gRealCreateServiceA;
+static PFN_ChangeServiceConfigW gRealChangeServiceConfigW;
+static PFN_ChangeServiceConfigA gRealChangeServiceConfigA;
+static PFN_StartServiceW gRealStartServiceW;
+static PFN_StartServiceA gRealStartServiceA;
+static PFN_MiniDumpWriteDump gRealMiniDumpWriteDump;
 static PFN_SetThreadContext gRealSetThreadContext;
 static PFN_ResumeThread gRealResumeThread;
 static PFN_connect gRealConnect;
 static PFN_WSAConnect gRealWSAConnect;
+static PFN_NtOpenProcess gRealNtOpenProcess;
+static PFN_NtOpenThread gRealNtOpenThread;
+static PFN_NtDuplicateObject gRealNtDuplicateObject;
 static PFN_NtCreateThreadEx gRealNtCreateThreadEx;
 static PFN_NtWriteVirtualMemory gRealNtWriteVirtualMemory;
 static PFN_NtAllocateVirtualMemory gRealNtAllocateVirtualMemory;
@@ -199,6 +249,19 @@ DpRuntimeWriteBehaviorEvent(
     _In_ SIZE_T Size,
     _In_ DWORD Flags,
     _In_opt_z_ LPCWSTR CommandLine
+    );
+
+static BOOL
+DpRuntimeHookApi(
+    _In_z_ LPCWSTR ModuleName,
+    _In_z_ LPCSTR ApiName,
+    _In_ LPVOID Detour,
+    _Out_ LPVOID *Original
+    );
+
+static VOID
+DpRuntimeInstallDynamicModuleHooks(
+    _In_opt_z_ LPCWSTR ModuleName
     );
 
 static BOOL
@@ -1037,6 +1100,130 @@ DpRuntimeGetTargetThreadProcessId(
     return GetProcessIdOfThread(ThreadHandle);
 }
 
+static VOID
+DpRuntimeAnsiToWide(
+    _In_opt_z_ LPCSTR Source,
+    _Out_writes_(BufferChars) WCHAR *Buffer,
+    _In_ DWORD BufferChars
+    )
+{
+    int chars;
+
+    if (Buffer == NULL || BufferChars == 0) {
+        return;
+    }
+
+    Buffer[0] = L'\0';
+    if (Source == NULL || Source[0] == '\0') {
+        return;
+    }
+
+    chars = MultiByteToWideChar(CP_ACP, 0, Source, -1, Buffer, (int)BufferChars);
+    if (chars <= 0) {
+        Buffer[0] = L'\0';
+    } else {
+        Buffer[BufferChars - 1] = L'\0';
+    }
+}
+
+static BOOL
+DpRuntimeIsSensitiveProcessAccess(
+    _In_ DWORD DesiredAccess
+    )
+{
+    const DWORD mask =
+        PROCESS_TERMINATE |
+        PROCESS_CREATE_THREAD |
+        PROCESS_SET_SESSIONID |
+        PROCESS_VM_OPERATION |
+        PROCESS_VM_READ |
+        PROCESS_VM_WRITE |
+        PROCESS_DUP_HANDLE |
+        PROCESS_CREATE_PROCESS |
+        PROCESS_SET_QUOTA |
+        PROCESS_SET_INFORMATION |
+        PROCESS_SUSPEND_RESUME;
+
+    return (DesiredAccess & mask) != 0;
+}
+
+static BOOL
+DpRuntimeIsSensitiveThreadAccess(
+    _In_ DWORD DesiredAccess
+    )
+{
+    const DWORD mask =
+        THREAD_TERMINATE |
+        THREAD_SUSPEND_RESUME |
+        THREAD_SET_CONTEXT |
+        THREAD_SET_INFORMATION |
+        THREAD_IMPERSONATE |
+        THREAD_DIRECT_IMPERSONATION;
+
+    return (DesiredAccess & mask) != 0;
+}
+
+static BOOL
+DpRuntimeDescribeHandleTarget(
+    _In_opt_ HANDLE Handle,
+    _Out_writes_(KindChars) WCHAR *Kind,
+    _In_ DWORD KindChars,
+    _Out_writes_(TargetChars) WCHAR *Target,
+    _In_ DWORD TargetChars,
+    _Out_opt_ DWORD *TargetPid
+    )
+{
+    DWORD previousError;
+    DWORD processId;
+    DWORD threadProcessId;
+    DWORD threadId;
+
+    if (Kind != NULL && KindChars != 0) {
+        Kind[0] = L'\0';
+    }
+
+    if (Target != NULL && TargetChars != 0) {
+        Target[0] = L'\0';
+    }
+
+    if (TargetPid != NULL) {
+        *TargetPid = 0;
+    }
+
+    if (Handle == NULL || Kind == NULL || KindChars == 0 || Target == NULL || TargetChars == 0) {
+        return FALSE;
+    }
+
+    previousError = GetLastError();
+    processId = GetProcessId(Handle);
+    if (processId != 0) {
+        (VOID)StringCchCopyW(Kind, KindChars, L"process");
+        (VOID)StringCchPrintfW(Target, TargetChars, L"process pid=%lu", processId);
+        if (TargetPid != NULL) {
+            *TargetPid = processId;
+        }
+
+        SetLastError(previousError);
+        return TRUE;
+    }
+
+    threadProcessId = GetProcessIdOfThread(Handle);
+    if (threadProcessId != 0) {
+        threadId = GetThreadId(Handle);
+        (VOID)StringCchCopyW(Kind, KindChars, L"thread");
+        (VOID)StringCchPrintfW(Target, TargetChars, L"thread pid=%lu thread=%lu", threadProcessId, threadId);
+        if (TargetPid != NULL) {
+            *TargetPid = threadProcessId;
+        }
+
+        SetLastError(previousError);
+        return TRUE;
+    }
+
+    SetLastError(previousError);
+    return FALSE;
+}
+
 static BOOL
 DpRuntimeIsExecutableProtection(
     _In_ DWORD Protection
@@ -1308,6 +1495,105 @@ DpRuntimeBuildRegistryValueTarget(
             (VOID)StringCchCatW(Buffer, BufferChars, L"\\");
             (VOID)StringCchCatW(Buffer, BufferChars, ValueName);
         }
+    }
+}
+
+static VOID
+DpRuntimeBuildRegistryKeyTarget(
+    _In_ HKEY Key,
+    _In_opt_z_ LPCWSTR SubKey,
+    _Out_writes_(BufferChars) WCHAR *Buffer,
+    _In_ DWORD BufferChars
+    )
+{
+    DWORD length;
+
+    if (Buffer == NULL || BufferChars == 0) {
+        return;
+    }
+
+    Buffer[0] = L'\0';
+    if (!DpRuntimeQueryRegistryKeyPath(Key, Buffer, BufferChars)) {
+        (VOID)StringCchCopyW(Buffer, BufferChars, L"registry");
+    }
+
+    if (SubKey != NULL && SubKey[0] != L'\0') {
+        length = (DWORD)wcslen(Buffer);
+        if (length + 1 < BufferChars) {
+            (VOID)StringCchCatW(Buffer, BufferChars, L"\\");
+            (VOID)StringCchCatW(Buffer, BufferChars, SubKey);
+        }
+    }
+}
+
+static VOID
+DpRuntimeBuildServiceTarget(
+    _In_opt_ SC_HANDLE ServiceHandle,
+    _In_opt_z_ LPCWSTR ServiceName,
+    _In_opt_z_ LPCWSTR BinaryPath,
+    _In_ DWORD ServiceType,
+    _In_ DWORD StartType,
+    _Out_writes_(BufferChars) WCHAR *Buffer,
+    _In_ DWORD BufferChars
+    )
+{
+    BYTE configStorage[4096];
+    QUERY_SERVICE_CONFIGW *config;
+    DWORD needed = 0;
+    WCHAR queriedName[256];
+    WCHAR queriedBinary[DP_RUNTIME_MAX_TEXT];
+    LPCWSTR name;
+    LPCWSTR binary;
+
+    if (Buffer == NULL || BufferChars == 0) {
+        return;
+    }
+
+    Buffer[0] = L'\0';
+    queriedName[0] = L'\0';
+    queriedBinary[0] = L'\0';
+
+    name = (ServiceName != NULL && ServiceName[0] != L'\0') ? ServiceName : NULL;
+    binary = (BinaryPath != NULL && BinaryPath[0] != L'\0') ? BinaryPath : NULL;
+
+    if (ServiceHandle != NULL && (name == NULL || binary == NULL)) {
+        ZeroMemory(configStorage, sizeof(configStorage));
+        config = (QUERY_SERVICE_CONFIGW *)configStorage;
+        if (QueryServiceConfigW(ServiceHandle, config, sizeof(configStorage), &needed)) {
+            if (name == NULL && config->lpDisplayName != NULL && config->lpDisplayName[0] != L'\0') {
+                (VOID)StringCchCopyW(queriedName, ARRAYSIZE(queriedName), config->lpDisplayName);
+                name = queriedName;
+            }
+
+            if (binary == NULL && config->lpBinaryPathName != NULL && config->lpBinaryPathName[0] != L'\0') {
+                (VOID)StringCchCopyW(queriedBinary, ARRAYSIZE(queriedBinary), config->lpBinaryPathName);
+                binary = queriedBinary;
+            }
+        }
+    }
+
+    if (name == NULL) {
+        name = L"service";
+    }
+
+    if (binary == NULL) {
+        binary = L"";
+    }
+
+    if (ServiceType == SERVICE_NO_CHANGE && StartType == SERVICE_NO_CHANGE) {
+        (VOID)StringCchPrintfW(Buffer,
+                              BufferChars,
+                              L"service=%s;bin=%s;service-control",
+                              name,
+                              binary);
+    } else {
+        (VOID)StringCchPrintfW(Buffer,
+                              BufferChars,
+                              L"service=%s;bin=%s;type=0x%08lX;start=0x%08lX",
+                              name,
+                              binary,
+                              ServiceType,
+                              StartType);
     }
 }
 
@@ -1914,6 +2200,321 @@ DpRuntimeStopIntegrityMonitor(VOID)
 }
 
 static HANDLE WINAPI
+DpHookOpenProcess(
+    DWORD desiredAccess,
+    BOOL inheritHandle,
+    DWORD processId
+    )
+{
+    HANDLE handle;
+    DWORD lastError;
+
+    handle = gRealOpenProcess(desiredAccess, inheritHandle, processId);
+    lastError = GetLastError();
+
+    if (DpRuntimeIsSensitiveProcessAccess(desiredAccess)) {
+        WCHAR target[160];
+        (VOID)StringCchPrintfW(target,
+                              ARRAYSIZE(target),
+                              L"OpenProcess pid=%lu access=0x%08lX inherit=%lu",
+                              processId,
+                              desiredAccess,
+                              inheritHandle ? 1ul : 0ul);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.open-process",
+                                    L"access",
+                                    L"OpenProcess",
+                                    target,
+                                    handle != NULL ? ERROR_SUCCESS : lastError,
+                                    FALSE,
+                                    processId,
+                                    0,
+                                    desiredAccess,
+                                    NULL);
+    }
+
+    SetLastError(lastError);
+    return handle;
+}
+
+static HANDLE WINAPI
+DpHookOpenThread(
+    DWORD desiredAccess,
+    BOOL inheritHandle,
+    DWORD threadId
+    )
+{
+    HANDLE handle;
+    DWORD lastError;
+    DWORD targetPid = 0;
+
+    handle = gRealOpenThread(desiredAccess, inheritHandle, threadId);
+    lastError = GetLastError();
+    if (handle != NULL) {
+        targetPid = DpRuntimeGetTargetThreadProcessId(handle);
+    }
+
+    if (DpRuntimeIsSensitiveThreadAccess(desiredAccess)) {
+        WCHAR target[160];
+        (VOID)StringCchPrintfW(target,
+                              ARRAYSIZE(target),
+                              L"OpenThread thread=%lu access=0x%08lX inherit=%lu",
+                              threadId,
+                              desiredAccess,
+                              inheritHandle ? 1ul : 0ul);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.open-thread",
+                                    L"access",
+                                    L"OpenThread",
+                                    target,
+                                    handle != NULL ? ERROR_SUCCESS : lastError,
+                                    FALSE,
+                                    targetPid,
+                                    0,
+                                    desiredAccess,
+                                    NULL);
+    }
+
+    SetLastError(lastError);
+    return handle;
+}
+
+static BOOL WINAPI
+DpHookDuplicateHandle(
+    HANDLE sourceProcessHandle,
+    HANDLE sourceHandle,
+    HANDLE targetProcessHandle,
+    LPHANDLE targetHandle,
+    DWORD desiredAccess,
+    BOOL inheritHandle,
+    DWORD options
+    )
+{
+    BOOL ok;
+    DWORD lastError;
+    BOOL sourceIsCurrent;
+    BOOL targetIsCurrent;
+    HANDLE inspectHandle = NULL;
+    WCHAR kind[16];
+    WCHAR targetBase[128];
+    DWORD targetPid = 0;
+
+    ok = gRealDuplicateHandle(sourceProcessHandle,
+                              sourceHandle,
+                              targetProcessHandle,
+                              targetHandle,
+                              desiredAccess,
+                              inheritHandle,
+                              options);
+    lastError = GetLastError();
+
+    sourceIsCurrent = (sourceProcessHandle == GetCurrentProcess() ||
+                       sourceProcessHandle == (HANDLE)(LONG_PTR)-1);
+    targetIsCurrent = (targetProcessHandle == GetCurrentProcess() ||
+                       targetProcessHandle == (HANDLE)(LONG_PTR)-1);
+
+    if (sourceIsCurrent) {
+        inspectHandle = sourceHandle;
+    } else if (ok && targetIsCurrent && targetHandle != NULL) {
+        inspectHandle = *targetHandle;
+    }
+
+    if (DpRuntimeDescribeHandleTarget(inspectHandle,
+                                      kind,
+                                      ARRAYSIZE(kind),
+                                      targetBase,
+                                      ARRAYSIZE(targetBase),
+                                      &targetPid)) {
+        WCHAR target[256];
+        LPCWSTR action = (kind[0] == L'p')
+            ? L"userhook.observed.duplicate-process-handle"
+            : L"userhook.observed.duplicate-thread-handle";
+        (VOID)StringCchPrintfW(target,
+                              ARRAYSIZE(target),
+                              L"DuplicateHandle %s access=0x%08lX options=0x%08lX inherit=%lu",
+                              targetBase,
+                              desiredAccess,
+                              options,
+                              inheritHandle ? 1ul : 0ul);
+        DpRuntimeWriteBehaviorEvent(action,
+                                    L"access",
+                                    L"DuplicateHandle",
+                                    target,
+                                    ok ? ERROR_SUCCESS : lastError,
+                                    FALSE,
+                                    targetPid,
+                                    0,
+                                    desiredAccess != 0 ? desiredAccess : options,
+                                    NULL);
+    }
+
+    SetLastError(lastError);
+    return ok;
+}
+
+static NTSTATUS NTAPI
+DpHookNtOpenProcess(
+    PHANDLE processHandle,
+    ACCESS_MASK desiredAccess,
+    PVOID objectAttributes,
+    PDP_RUNTIME_CLIENT_ID clientId
+    )
+{
+    NTSTATUS status;
+    DWORD targetPid = 0;
+
+    if (clientId != NULL) {
+        __try {
+            targetPid = (DWORD)(ULONG_PTR)clientId->UniqueProcess;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            targetPid = 0;
+        }
+    }
+
+    status = gRealNtOpenProcess(processHandle, desiredAccess, objectAttributes, clientId);
+    if (DpRuntimeIsSensitiveProcessAccess(desiredAccess)) {
+        WCHAR target[160];
+        (VOID)StringCchPrintfW(target,
+                              ARRAYSIZE(target),
+                              L"NtOpenProcess pid=%lu access=0x%08lX",
+                              targetPid,
+                              (DWORD)desiredAccess);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-open-process",
+                                    L"access",
+                                    L"NtOpenProcess",
+                                    target,
+                                    NT_SUCCESS(status) ? ERROR_SUCCESS : (DWORD)status,
+                                    FALSE,
+                                    targetPid,
+                                    0,
+                                    (DWORD)desiredAccess,
+                                    NULL);
+    }
+
+    return status;
+}
+
+static NTSTATUS NTAPI
+DpHookNtOpenThread(
+    PHANDLE threadHandle,
+    ACCESS_MASK desiredAccess,
+    PVOID objectAttributes,
+    PDP_RUNTIME_CLIENT_ID clientId
+    )
+{
+    NTSTATUS status;
+    DWORD targetPid = 0;
+    DWORD threadId = 0;
+
+    if (clientId != NULL) {
+        __try {
+            targetPid = (DWORD)(ULONG_PTR)clientId->UniqueProcess;
+            threadId = (DWORD)(ULONG_PTR)clientId->UniqueThread;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            targetPid = 0;
+            threadId = 0;
+        }
+    }
+
+    status = gRealNtOpenThread(threadHandle, desiredAccess, objectAttributes, clientId);
+    if (NT_SUCCESS(status) && targetPid == 0 && threadHandle != NULL && *threadHandle != NULL) {
+        targetPid = DpRuntimeGetTargetThreadProcessId(*threadHandle);
+    }
+
+    if (DpRuntimeIsSensitiveThreadAccess(desiredAccess)) {
+        WCHAR target[160];
+        (VOID)StringCchPrintfW(target,
+                              ARRAYSIZE(target),
+                              L"NtOpenThread thread=%lu access=0x%08lX",
+                              threadId,
+                              (DWORD)desiredAccess);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.nt-open-thread",
+                                    L"access",
+                                    L"NtOpenThread",
+                                    target,
+                                    NT_SUCCESS(status) ? ERROR_SUCCESS : (DWORD)status,
+                                    FALSE,
+                                    targetPid,
+                                    0,
+                                    (DWORD)desiredAccess,
+                                    NULL);
+    }
+
+    return status;
+}
+
+static NTSTATUS NTAPI
+DpHookNtDuplicateObject(
+    HANDLE sourceProcessHandle,
+    HANDLE sourceHandle,
+    HANDLE targetProcessHandle,
+    PHANDLE targetHandle,
+    ACCESS_MASK desiredAccess,
+    ULONG handleAttributes,
+    ULONG options
+    )
+{
+    NTSTATUS status;
+    BOOL sourceIsCurrent;
+    BOOL targetIsCurrent;
+    HANDLE inspectHandle = NULL;
+    WCHAR kind[16];
+    WCHAR targetBase[128];
+    DWORD targetPid = 0;
+
+    status = gRealNtDuplicateObject(sourceProcessHandle,
+                                    sourceHandle,
+                                    targetProcessHandle,
+                                    targetHandle,
+                                    desiredAccess,
+                                    handleAttributes,
+                                    options);
+
+    sourceIsCurrent = (sourceProcessHandle == GetCurrentProcess() ||
+                       sourceProcessHandle == (HANDLE)(LONG_PTR)-1);
+    targetIsCurrent = (targetProcessHandle == GetCurrentProcess() ||
+                       targetProcessHandle == (HANDLE)(LONG_PTR)-1);
+
+    if (sourceIsCurrent) {
+        inspectHandle = sourceHandle;
+    } else if (NT_SUCCESS(status) && targetIsCurrent && targetHandle != NULL) {
+        __try {
+            inspectHandle = *targetHandle;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            inspectHandle = NULL;
+        }
+    }
+
+    if (DpRuntimeDescribeHandleTarget(inspectHandle,
+                                      kind,
+                                      ARRAYSIZE(kind),
+                                      targetBase,
+                                      ARRAYSIZE(targetBase),
+                                      &targetPid)) {
+        WCHAR target[256];
+        LPCWSTR action = (kind[0] == L'p')
+            ? L"userhook.observed.nt-duplicate-process-handle"
+            : L"userhook.observed.nt-duplicate-thread-handle";
+        (VOID)StringCchPrintfW(target,
+                              ARRAYSIZE(target),
+                              L"NtDuplicateObject %s access=0x%08lX options=0x%08lX",
+                              targetBase,
+                              (DWORD)desiredAccess,
+                              options);
+        DpRuntimeWriteBehaviorEvent(action,
+                                    L"access",
+                                    L"NtDuplicateObject",
+                                    target,
+                                    NT_SUCCESS(status) ? ERROR_SUCCESS : (DWORD)status,
+                                    FALSE,
+                                    targetPid,
+                                    0,
+                                    desiredAccess != 0 ? (DWORD)desiredAccess : options,
+                                    NULL);
+    }
+
+    return status;
+}
+
+static HANDLE WINAPI
 DpHookCreateRemoteThread(
     HANDLE processHandle,
     LPSECURITY_ATTRIBUTES threadAttributes,
@@ -2243,8 +2844,39 @@ DpHookLoadLibraryW(
     LPCWSTR fileName
     )
 {
+    HMODULE module;
+    DWORD lastError;
+
     DpRuntimeWriteBehaviorEvent(L"userhook.observed.load-library", L"module", L"LoadLibraryW", fileName, ERROR_SUCCESS, FALSE, 0, 0, 0, NULL);
-    return gRealLoadLibraryW(fileName);
+    module = gRealLoadLibraryW(fileName);
+    lastError = GetLastError();
+    if (module != NULL) {
+        DpRuntimeInstallDynamicModuleHooks(fileName);
+    }
+
+    SetLastError(lastError);
+    return module;
+}
+
+static HMODULE WINAPI
+DpHookLoadLibraryA(
+    LPCSTR fileName
+    )
+{
+    HMODULE module;
+    DWORD lastError;
+    WCHAR fileNameWide[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeAnsiToWide(fileName, fileNameWide, ARRAYSIZE(fileNameWide));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.load-library", L"module", L"LoadLibraryA", fileNameWide, ERROR_SUCCESS, FALSE, 0, 0, 0, NULL);
+    module = gRealLoadLibraryA(fileName);
+    lastError = GetLastError();
+    if (module != NULL) {
+        DpRuntimeInstallDynamicModuleHooks(fileNameWide);
+    }
+
+    SetLastError(lastError);
+    return module;
 }
 
 static HMODULE WINAPI
@@ -2254,8 +2886,41 @@ DpHookLoadLibraryExW(
     DWORD flags
     )
 {
+    HMODULE module;
+    DWORD lastError;
+
     DpRuntimeWriteBehaviorEvent(L"userhook.observed.load-library-ex", L"module", L"LoadLibraryExW", fileName, ERROR_SUCCESS, FALSE, 0, 0, flags, NULL);
-    return gRealLoadLibraryExW(fileName, file, flags);
+    module = gRealLoadLibraryExW(fileName, file, flags);
+    lastError = GetLastError();
+    if (module != NULL) {
+        DpRuntimeInstallDynamicModuleHooks(fileName);
+    }
+
+    SetLastError(lastError);
+    return module;
+}
+
+static HMODULE WINAPI
+DpHookLoadLibraryExA(
+    LPCSTR fileName,
+    HANDLE file,
+    DWORD flags
+    )
+{
+    HMODULE module;
+    DWORD lastError;
+    WCHAR fileNameWide[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeAnsiToWide(fileName, fileNameWide, ARRAYSIZE(fileNameWide));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.load-library-ex", L"module", L"LoadLibraryExA", fileNameWide, ERROR_SUCCESS, FALSE, 0, 0, flags, NULL);
+    module = gRealLoadLibraryExA(fileName, file, flags);
+    lastError = GetLastError();
+    if (module != NULL) {
+        DpRuntimeInstallDynamicModuleHooks(fileNameWide);
+    }
+
+    SetLastError(lastError);
+    return module;
 }
 
 static LONG WINAPI
@@ -2306,6 +2971,490 @@ DpHookRegSetValueExA(
     DpRuntimeBuildRegistryValueTarget(key, valueNameWide, target, ARRAYSIZE(target));
     DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-set-value", L"registry", L"RegSetValueExA", target, ERROR_SUCCESS, FALSE, 0, dataBytes, type, NULL);
     return gRealRegSetValueExA(key, valueName, reserved, type, data, dataBytes);
+}
+
+static LONG WINAPI
+DpHookRegCreateKeyExW(
+    HKEY key,
+    LPCWSTR subKey,
+    DWORD reserved,
+    LPWSTR className,
+    DWORD options,
+    REGSAM samDesired,
+    const SECURITY_ATTRIBUTES *securityAttributes,
+    PHKEY result,
+    LPDWORD disposition
+    )
+{
+    LONG status;
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeBuildRegistryKeyTarget(key, subKey, target, ARRAYSIZE(target));
+    status = gRealRegCreateKeyExW(key,
+                                  subKey,
+                                  reserved,
+                                  className,
+                                  options,
+                                  samDesired,
+                                  securityAttributes,
+                                  result,
+                                  disposition);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-create-key",
+                                L"registry",
+                                L"RegCreateKeyExW",
+                                target,
+                                (DWORD)status,
+                                FALSE,
+                                0,
+                                0,
+                                samDesired,
+                                NULL);
+    return status;
+}
+
+static LONG WINAPI
+DpHookRegCreateKeyExA(
+    HKEY key,
+    LPCSTR subKey,
+    DWORD reserved,
+    LPSTR className,
+    DWORD options,
+    REGSAM samDesired,
+    const SECURITY_ATTRIBUTES *securityAttributes,
+    PHKEY result,
+    LPDWORD disposition
+    )
+{
+    LONG status;
+    WCHAR subKeyWide[DP_RUNTIME_MAX_TEXT];
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeAnsiToWide(subKey, subKeyWide, ARRAYSIZE(subKeyWide));
+    DpRuntimeBuildRegistryKeyTarget(key, subKeyWide, target, ARRAYSIZE(target));
+    status = gRealRegCreateKeyExA(key,
+                                  subKey,
+                                  reserved,
+                                  className,
+                                  options,
+                                  samDesired,
+                                  securityAttributes,
+                                  result,
+                                  disposition);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-create-key",
+                                L"registry",
+                                L"RegCreateKeyExA",
+                                target,
+                                (DWORD)status,
+                                FALSE,
+                                0,
+                                0,
+                                samDesired,
+                                NULL);
+    return status;
+}
+
+static LONG WINAPI
+DpHookRegDeleteValueW(
+    HKEY key,
+    LPCWSTR valueName
+    )
+{
+    LONG status;
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeBuildRegistryValueTarget(key, valueName, target, ARRAYSIZE(target));
+    status = gRealRegDeleteValueW(key, valueName);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-delete-value",
+                                L"registry",
+                                L"RegDeleteValueW",
+                                target,
+                                (DWORD)status,
+                                FALSE,
+                                0,
+                                0,
+                                0,
+                                NULL);
+    return status;
+}
+
+static LONG WINAPI
+DpHookRegDeleteValueA(
+    HKEY key,
+    LPCSTR valueName
+    )
+{
+    LONG status;
+    WCHAR valueNameWide[DP_RUNTIME_MAX_TEXT];
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeAnsiToWide(valueName, valueNameWide, ARRAYSIZE(valueNameWide));
+    DpRuntimeBuildRegistryValueTarget(key, valueNameWide, target, ARRAYSIZE(target));
+    status = gRealRegDeleteValueA(key, valueName);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-delete-value",
+                                L"registry",
+                                L"RegDeleteValueA",
+                                target,
+                                (DWORD)status,
+                                FALSE,
+                                0,
+                                0,
+                                0,
+                                NULL);
+    return status;
+}
+
+static LONG WINAPI
+DpHookRegDeleteKeyW(
+    HKEY key,
+    LPCWSTR subKey
+    )
+{
+    LONG status;
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeBuildRegistryKeyTarget(key, subKey, target, ARRAYSIZE(target));
+    status = gRealRegDeleteKeyW(key, subKey);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-delete-key",
+                                L"registry",
+                                L"RegDeleteKeyW",
+                                target,
+                                (DWORD)status,
+                                FALSE,
+                                0,
+                                0,
+                                0,
+                                NULL);
+    return status;
+}
+
+static LONG WINAPI
+DpHookRegDeleteKeyA(
+    HKEY key,
+    LPCSTR subKey
+    )
+{
+    LONG status;
+    WCHAR subKeyWide[DP_RUNTIME_MAX_TEXT];
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeAnsiToWide(subKey, subKeyWide, ARRAYSIZE(subKeyWide));
+    DpRuntimeBuildRegistryKeyTarget(key, subKeyWide, target, ARRAYSIZE(target));
+    status = gRealRegDeleteKeyA(key, subKey);
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.registry-delete-key",
+                                L"registry",
+                                L"RegDeleteKeyA",
+                                target,
+                                (DWORD)status,
+                                FALSE,
+                                0,
+                                0,
+                                0,
+                                NULL);
+    return status;
+}
+
+static SC_HANDLE WINAPI
+DpHookCreateServiceW(
+    SC_HANDLE serviceControlManager,
+    LPCWSTR serviceName,
+    LPCWSTR displayName,
+    DWORD desiredAccess,
+    DWORD serviceType,
+    DWORD startType,
+    DWORD errorControl,
+    LPCWSTR binaryPathName,
+    LPCWSTR loadOrderGroup,
+    LPDWORD tagId,
+    LPCWSTR dependencies,
+    LPCWSTR serviceStartName,
+    LPCWSTR password
+    )
+{
+    SC_HANDLE service;
+    DWORD lastError;
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    service = gRealCreateServiceW(serviceControlManager,
+                                  serviceName,
+                                  displayName,
+                                  desiredAccess,
+                                  serviceType,
+                                  startType,
+                                  errorControl,
+                                  binaryPathName,
+                                  loadOrderGroup,
+                                  tagId,
+                                  dependencies,
+                                  serviceStartName,
+                                  password);
+    lastError = GetLastError();
+    DpRuntimeBuildServiceTarget(service, serviceName, binaryPathName, serviceType, startType, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.create-service",
+                                L"service",
+                                L"CreateServiceW",
+                                target,
+                                service != NULL ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                0,
+                                0,
+                                startType,
+                                binaryPathName);
+    SetLastError(lastError);
+    return service;
+}
+
+static SC_HANDLE WINAPI
+DpHookCreateServiceA(
+    SC_HANDLE serviceControlManager,
+    LPCSTR serviceName,
+    LPCSTR displayName,
+    DWORD desiredAccess,
+    DWORD serviceType,
+    DWORD startType,
+    DWORD errorControl,
+    LPCSTR binaryPathName,
+    LPCSTR loadOrderGroup,
+    LPDWORD tagId,
+    LPCSTR dependencies,
+    LPCSTR serviceStartName,
+    LPCSTR password
+    )
+{
+    SC_HANDLE service;
+    DWORD lastError;
+    WCHAR serviceNameWide[256];
+    WCHAR binaryPathWide[DP_RUNTIME_MAX_TEXT];
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeAnsiToWide(serviceName, serviceNameWide, ARRAYSIZE(serviceNameWide));
+    DpRuntimeAnsiToWide(binaryPathName, binaryPathWide, ARRAYSIZE(binaryPathWide));
+    service = gRealCreateServiceA(serviceControlManager,
+                                  serviceName,
+                                  displayName,
+                                  desiredAccess,
+                                  serviceType,
+                                  startType,
+                                  errorControl,
+                                  binaryPathName,
+                                  loadOrderGroup,
+                                  tagId,
+                                  dependencies,
+                                  serviceStartName,
+                                  password);
+    lastError = GetLastError();
+    DpRuntimeBuildServiceTarget(service, serviceNameWide, binaryPathWide, serviceType, startType, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.create-service",
+                                L"service",
+                                L"CreateServiceA",
+                                target,
+                                service != NULL ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                0,
+                                0,
+                                startType,
+                                binaryPathWide);
+    SetLastError(lastError);
+    return service;
+}
+
+static BOOL WINAPI
+DpHookChangeServiceConfigW(
+    SC_HANDLE service,
+    DWORD serviceType,
+    DWORD startType,
+    DWORD errorControl,
+    LPCWSTR binaryPathName,
+    LPCWSTR loadOrderGroup,
+    LPDWORD tagId,
+    LPCWSTR dependencies,
+    LPCWSTR serviceStartName,
+    LPCWSTR password,
+    LPCWSTR displayName
+    )
+{
+    BOOL ok;
+    DWORD lastError;
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    ok = gRealChangeServiceConfigW(service,
+                                   serviceType,
+                                   startType,
+                                   errorControl,
+                                   binaryPathName,
+                                   loadOrderGroup,
+                                   tagId,
+                                   dependencies,
+                                   serviceStartName,
+                                   password,
+                                   displayName);
+    lastError = GetLastError();
+    DpRuntimeBuildServiceTarget(service, displayName, binaryPathName, serviceType, startType, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.change-service-config",
+                                L"service",
+                                L"ChangeServiceConfigW",
+                                target,
+                                ok ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                0,
+                                0,
+                                startType,
+                                binaryPathName);
+    SetLastError(lastError);
+    return ok;
+}
+
+static BOOL WINAPI
+DpHookChangeServiceConfigA(
+    SC_HANDLE service,
+    DWORD serviceType,
+    DWORD startType,
+    DWORD errorControl,
+    LPCSTR binaryPathName,
+    LPCSTR loadOrderGroup,
+    LPDWORD tagId,
+    LPCSTR dependencies,
+    LPCSTR serviceStartName,
+    LPCSTR password,
+    LPCSTR displayName
+    )
+{
+    BOOL ok;
+    DWORD lastError;
+    WCHAR displayNameWide[256];
+    WCHAR binaryPathWide[DP_RUNTIME_MAX_TEXT];
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    DpRuntimeAnsiToWide(displayName, displayNameWide, ARRAYSIZE(displayNameWide));
+    DpRuntimeAnsiToWide(binaryPathName, binaryPathWide, ARRAYSIZE(binaryPathWide));
+    ok = gRealChangeServiceConfigA(service,
+                                   serviceType,
+                                   startType,
+                                   errorControl,
+                                   binaryPathName,
+                                   loadOrderGroup,
+                                   tagId,
+                                   dependencies,
+                                   serviceStartName,
+                                   password,
+                                   displayName);
+    lastError = GetLastError();
+    DpRuntimeBuildServiceTarget(service, displayNameWide, binaryPathWide, serviceType, startType, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.change-service-config",
+                                L"service",
+                                L"ChangeServiceConfigA",
+                                target,
+                                ok ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                0,
+                                0,
+                                startType,
+                                binaryPathWide);
+    SetLastError(lastError);
+    return ok;
+}
+
+static BOOL WINAPI
+DpHookStartServiceW(
+    SC_HANDLE service,
+    DWORD argumentCount,
+    LPCWSTR *arguments
+    )
+{
+    BOOL ok;
+    DWORD lastError;
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    ok = gRealStartServiceW(service, argumentCount, arguments);
+    lastError = GetLastError();
+    DpRuntimeBuildServiceTarget(service, NULL, NULL, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.start-service",
+                                L"service",
+                                L"StartServiceW",
+                                target,
+                                ok ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                0,
+                                0,
+                                argumentCount,
+                                NULL);
+    SetLastError(lastError);
+    return ok;
+}
+
+static BOOL WINAPI
+DpHookStartServiceA(
+    SC_HANDLE service,
+    DWORD argumentCount,
+    LPCSTR *arguments
+    )
+{
+    BOOL ok;
+    DWORD lastError;
+    WCHAR target[DP_RUNTIME_MAX_TEXT];
+
+    ok = gRealStartServiceA(service, argumentCount, arguments);
+    lastError = GetLastError();
+    DpRuntimeBuildServiceTarget(service, NULL, NULL, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, target, ARRAYSIZE(target));
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.start-service",
+                                L"service",
+                                L"StartServiceA",
+                                target,
+                                ok ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                0,
+                                0,
+                                argumentCount,
+                                NULL);
+    SetLastError(lastError);
+    return ok;
+}
+
+static BOOL WINAPI
+DpHookMiniDumpWriteDump(
+    HANDLE processHandle,
+    DWORD processId,
+    HANDLE fileHandle,
+    DWORD dumpType,
+    PVOID exceptionParam,
+    PVOID userStreamParam,
+    PVOID callbackParam
+    )
+{
+    BOOL ok;
+    DWORD lastError;
+    DWORD targetPid;
+
+    ok = gRealMiniDumpWriteDump(processHandle,
+                                processId,
+                                fileHandle,
+                                dumpType,
+                                exceptionParam,
+                                userStreamParam,
+                                callbackParam);
+    lastError = GetLastError();
+    targetPid = processId != 0 ? processId : DpRuntimeGetTargetProcessId(processHandle);
+
+    if (targetPid != 0 && targetPid != gCurrentProcessId) {
+        WCHAR target[160];
+        (VOID)StringCchPrintfW(target,
+                              ARRAYSIZE(target),
+                              L"MiniDumpWriteDump pid=%lu dumpType=0x%08lX",
+                              targetPid,
+                              dumpType);
+        DpRuntimeWriteBehaviorEvent(L"userhook.observed.minidump-write",
+                                    L"credential",
+                                    L"MiniDumpWriteDump",
+                                    target,
+                                    ok ? ERROR_SUCCESS : lastError,
+                                    FALSE,
+                                    targetPid,
+                                    0,
+                                    dumpType,
+                                    NULL);
+    }
+
+    SetLastError(lastError);
+    return ok;
 }
 
 static BOOL WINAPI
@@ -2757,7 +3906,36 @@ DpRuntimeHookApi(
 
     entry->Created = TRUE;
     gHookEntryCount++;
+    if (gHooksEnabled) {
+        MH_STATUS enableStatus = MH_EnableHook((LPVOID)target);
+        if (enableStatus == MH_OK || enableStatus == MH_ERROR_ENABLED) {
+            if (DpRuntimeReadCodeBytes(entry->Target, entry->HookBytes, entry->ProbeLength)) {
+                entry->HookBytesCaptured = TRUE;
+                entry->Enabled = TRUE;
+            }
+        } else {
+            DpRuntimeWriteEvent(L"userhook.runtime.enable-hook-failed", entry->DisplayName, (DWORD)enableStatus, FALSE);
+        }
+    }
+
     return TRUE;
+}
+
+static VOID
+DpRuntimeInstallDynamicModuleHooks(
+    _In_opt_z_ LPCWSTR ModuleName
+    )
+{
+    if (ModuleName != NULL &&
+        ModuleName[0] != L'\0' &&
+        !DpRuntimeContainsWideInsensitive(ModuleName, L"dbghelp")) {
+        return;
+    }
+
+    if (gRealMiniDumpWriteDump == NULL &&
+        GetModuleHandleW(L"dbghelp.dll") != NULL) {
+        DpRuntimeHookApi(L"dbghelp.dll", "MiniDumpWriteDump", DpHookMiniDumpWriteDump, (LPVOID *)&gRealMiniDumpWriteDump);
+    }
 }
 
 static BOOL CALLBACK
@@ -2785,6 +3963,9 @@ DpRuntimeInitializeOnce(
     gMinHookInitialized = TRUE;
 
     if (gMonitorRuntimeApiBehavior) {
+        DpRuntimeHookApi(L"kernel32.dll", "OpenProcess", DpHookOpenProcess, (LPVOID *)&gRealOpenProcess);
+        DpRuntimeHookApi(L"kernel32.dll", "OpenThread", DpHookOpenThread, (LPVOID *)&gRealOpenThread);
+        DpRuntimeHookApi(L"kernel32.dll", "DuplicateHandle", DpHookDuplicateHandle, (LPVOID *)&gRealDuplicateHandle);
         DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThread", DpHookCreateRemoteThread, (LPVOID *)&gRealCreateRemoteThread);
         DpRuntimeHookApi(L"kernel32.dll", "CreateRemoteThreadEx", DpHookCreateRemoteThreadEx, (LPVOID *)&gRealCreateRemoteThreadEx);
         DpRuntimeHookApi(L"kernel32.dll", "CreateProcessW", DpHookCreateProcessW, (LPVOID *)&gRealCreateProcessW);
@@ -2794,15 +3975,32 @@ DpRuntimeInitializeOnce(
         DpRuntimeHookApi(L"kernel32.dll", "VirtualProtectEx", DpHookVirtualProtectEx, (LPVOID *)&gRealVirtualProtectEx);
         DpRuntimeHookApi(L"kernel32.dll", "QueueUserAPC", DpHookQueueUserAPC, (LPVOID *)&gRealQueueUserAPC);
         DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryW", DpHookLoadLibraryW, (LPVOID *)&gRealLoadLibraryW);
+        DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryA", DpHookLoadLibraryA, (LPVOID *)&gRealLoadLibraryA);
         DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryExW", DpHookLoadLibraryExW, (LPVOID *)&gRealLoadLibraryExW);
+        DpRuntimeHookApi(L"kernel32.dll", "LoadLibraryExA", DpHookLoadLibraryExA, (LPVOID *)&gRealLoadLibraryExA);
         DpRuntimeHookApi(L"kernel32.dll", "SetThreadContext", DpHookSetThreadContext, (LPVOID *)&gRealSetThreadContext);
         DpRuntimeHookApi(L"kernel32.dll", "ResumeThread", DpHookResumeThread, (LPVOID *)&gRealResumeThread);
         DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExW", DpHookSetWindowsHookExW, (LPVOID *)&gRealSetWindowsHookExW);
         DpRuntimeHookApi(L"user32.dll", "SetWindowsHookExA", DpHookSetWindowsHookExA, (LPVOID *)&gRealSetWindowsHookExA);
         DpRuntimeHookApi(L"advapi32.dll", "RegSetValueExW", DpHookRegSetValueExW, (LPVOID *)&gRealRegSetValueExW);
         DpRuntimeHookApi(L"advapi32.dll", "RegSetValueExA", DpHookRegSetValueExA, (LPVOID *)&gRealRegSetValueExA);
+        DpRuntimeHookApi(L"advapi32.dll", "RegCreateKeyExW", DpHookRegCreateKeyExW, (LPVOID *)&gRealRegCreateKeyExW);
+        DpRuntimeHookApi(L"advapi32.dll", "RegCreateKeyExA", DpHookRegCreateKeyExA, (LPVOID *)&gRealRegCreateKeyExA);
+        DpRuntimeHookApi(L"advapi32.dll", "RegDeleteValueW", DpHookRegDeleteValueW, (LPVOID *)&gRealRegDeleteValueW);
+        DpRuntimeHookApi(L"advapi32.dll", "RegDeleteValueA", DpHookRegDeleteValueA, (LPVOID *)&gRealRegDeleteValueA);
+        DpRuntimeHookApi(L"advapi32.dll", "RegDeleteKeyW", DpHookRegDeleteKeyW, (LPVOID *)&gRealRegDeleteKeyW);
+        DpRuntimeHookApi(L"advapi32.dll", "RegDeleteKeyA", DpHookRegDeleteKeyA, (LPVOID *)&gRealRegDeleteKeyA);
+        DpRuntimeHookApi(L"advapi32.dll", "CreateServiceW", DpHookCreateServiceW, (LPVOID *)&gRealCreateServiceW);
+        DpRuntimeHookApi(L"advapi32.dll", "CreateServiceA", DpHookCreateServiceA, (LPVOID *)&gRealCreateServiceA);
+        DpRuntimeHookApi(L"advapi32.dll", "ChangeServiceConfigW", DpHookChangeServiceConfigW, (LPVOID *)&gRealChangeServiceConfigW);
+        DpRuntimeHookApi(L"advapi32.dll", "ChangeServiceConfigA", DpHookChangeServiceConfigA, (LPVOID *)&gRealChangeServiceConfigA);
+        DpRuntimeHookApi(L"advapi32.dll", "StartServiceW", DpHookStartServiceW, (LPVOID *)&gRealStartServiceW);
+        DpRuntimeHookApi(L"advapi32.dll", "StartServiceA", DpHookStartServiceA, (LPVOID *)&gRealStartServiceA);
         DpRuntimeHookApi(L"ws2_32.dll", "connect", DpHookConnect, (LPVOID *)&gRealConnect);
         DpRuntimeHookApi(L"ws2_32.dll", "WSAConnect", DpHookWSAConnect, (LPVOID *)&gRealWSAConnect);
+        DpRuntimeHookApi(L"ntdll.dll", "NtOpenProcess", DpHookNtOpenProcess, (LPVOID *)&gRealNtOpenProcess);
+        DpRuntimeHookApi(L"ntdll.dll", "NtOpenThread", DpHookNtOpenThread, (LPVOID *)&gRealNtOpenThread);
+        DpRuntimeHookApi(L"ntdll.dll", "NtDuplicateObject", DpHookNtDuplicateObject, (LPVOID *)&gRealNtDuplicateObject);
         DpRuntimeHookApi(L"ntdll.dll", "NtCreateThreadEx", DpHookNtCreateThreadEx, (LPVOID *)&gRealNtCreateThreadEx);
         DpRuntimeHookApi(L"ntdll.dll", "NtWriteVirtualMemory", DpHookNtWriteVirtualMemory, (LPVOID *)&gRealNtWriteVirtualMemory);
         DpRuntimeHookApi(L"ntdll.dll", "NtAllocateVirtualMemory", DpHookNtAllocateVirtualMemory, (LPVOID *)&gRealNtAllocateVirtualMemory);
@@ -2824,6 +4022,8 @@ DpRuntimeInitializeOnce(
         } else {
             DpRuntimeWriteEvent(L"userhook.runtime.etw-tamper-monitor-disabled", L"policy", ERROR_SUCCESS, FALSE);
         }
+
+        DpRuntimeInstallDynamicModuleHooks(NULL);
 
         if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
             DpRuntimeWriteEvent(L"userhook.runtime.enable-hooks-failed", L"MinHook", GetLastError(), FALSE);
