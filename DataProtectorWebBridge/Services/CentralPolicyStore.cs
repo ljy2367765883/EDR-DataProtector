@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -1731,6 +1732,24 @@ namespace DataProtectorWebBridge.Services
                     continue;
                 }
 
+                AuditAttackFlowEvent[] expandedUserHookEvents = BuildUserHookSummaryAttackFlowEvents(record);
+                if (expandedUserHookEvents.Length > 0)
+                {
+                    foreach (AuditAttackFlowEvent expandedEvent in expandedUserHookEvents)
+                    {
+                        events.Add(expandedEvent);
+                        TrackFlowTime(expandedEvent.timeUtc, ref firstUtc, ref lastUtc);
+                        AddProcessNode(processes, expandedEvent.host, expandedEvent.sourcePid, expandedEvent.sourceProcess, string.Empty, expandedEvent.sourceUser, expandedEvent.severity);
+                        AddProcessNode(processes, expandedEvent.host, expandedEvent.targetPid, expandedEvent.targetProcess, expandedEvent.sourcePid, string.Empty, expandedEvent.severity);
+                        AddEntity(entityMap, "host", expandedEvent.host, expandedEvent.host, expandedEvent.severity);
+                        AddEntity(entityMap, "process", ProcessEntityKey(expandedEvent.host, expandedEvent.sourcePid, expandedEvent.sourceProcess), FirstNonEmpty(expandedEvent.sourceProcess, expandedEvent.sourcePid), expandedEvent.severity);
+                        AddEntity(entityMap, expandedEvent.objectType, FirstNonEmpty(expandedEvent.objectName, expandedEvent.targetProcess, expandedEvent.targetPid, expandedEvent.action), FirstNonEmpty(expandedEvent.objectName, expandedEvent.targetProcess, expandedEvent.action), expandedEvent.severity);
+                        AddToIncident(incidentMap, expandedEvent);
+                    }
+
+                    continue;
+                }
+
                 AuditAttackFlowEvent flowEvent = BuildAttackFlowEvent(record);
                 if (flowEvent == null)
                 {
@@ -1851,6 +1870,102 @@ namespace DataProtectorWebBridge.Services
                 remoteIdentity = IsRemoteStage(stage) ? FirstNonEmpty(record.TargetHost, record.Target, record.ObjectName) : string.Empty,
                 rawMessage = record.Message ?? string.Empty
             };
+        }
+
+        private static AuditAttackFlowEvent[] BuildUserHookSummaryAttackFlowEvents(AuditLog.AuditRecord record)
+        {
+            if (record == null ||
+                !string.Equals(record.Action, "userhook.threat.summary", StringComparison.OrdinalIgnoreCase))
+            {
+                return new AuditAttackFlowEvent[0];
+            }
+
+            Dictionary<string, object> summary = ParseJsonObject(record.EventDetails);
+            List<Dictionary<string, object>> evidence = ReadJsonObjectArray(summary, "evidence");
+            if (evidence.Count == 0)
+            {
+                return new AuditAttackFlowEvent[0];
+            }
+
+            List<AuditAttackFlowEvent> events = new List<AuditAttackFlowEvent>();
+            string fallbackHost = FirstNonEmpty(record.SourceHost, record.Host, record.Actor);
+            string fallbackUser = FirstNonEmpty(record.SourceUser, record.Actor);
+            string fallbackSourceProcess = FirstNonEmpty(record.SourceProcess, record.Extension);
+            string fallbackSourcePid = record.SourcePid ?? string.Empty;
+            string fallbackPolicy = FirstNonEmpty(record.PolicyName, "process-threat-insight");
+            string fallbackSeverity = AuditLog.ResolveSeverity(record);
+            string fallbackDisposition = AuditLog.ResolveDisposition(record);
+
+            for (int index = 0; index < evidence.Count; index++)
+            {
+                Dictionary<string, object> item = evidence[index];
+                string timeUtc = FirstNonEmpty(ReadJsonString(item, "timeUtc"), record.TimestampUtc);
+                string action = FirstNonEmpty(ReadJsonString(item, "action"), record.Action);
+                string objectType = FirstNonEmpty(ReadJsonString(item, "objectType"), "process-behavior");
+                string objectName = FirstNonEmpty(ReadJsonString(item, "objectName"), ReadJsonString(item, "targetProcess"), record.ObjectName, record.Target);
+                string targetProcess = FirstNonEmpty(ReadJsonString(item, "targetProcess"), LooksLikeProcessPath(record.Target) ? record.Target : string.Empty);
+                string rawMessage = FirstNonEmpty(ReadJsonString(item, "rawMessage"), ReadJsonString(item, "detail"), record.Message);
+                string stage = FirstNonEmpty(ReadJsonString(item, "stage"), ClassifyUserHookEvidenceStage(action, objectType));
+                string title = FirstNonEmpty(ReadJsonString(item, "title"), objectName, action);
+                string detail = FirstNonEmpty(ReadJsonString(item, "detail"), rawMessage);
+
+                events.Add(new AuditAttackFlowEvent
+                {
+                    id = BuildStableId(timeUtc, action, index.ToString(CultureInfo.InvariantCulture), objectName, rawMessage),
+                    timeUtc = timeUtc ?? string.Empty,
+                    host = FirstNonEmpty(ReadJsonString(item, "sourceHost"), fallbackHost),
+                    user = FirstNonEmpty(ReadJsonString(item, "sourceUser"), fallbackUser),
+                    stage = stage,
+                    category = "userhook",
+                    action = action,
+                    title = AttackStageLabel(stage) + ": " + title,
+                    detail = detail,
+                    severity = FirstNonEmpty(ReadJsonString(item, "severity"), fallbackSeverity),
+                    disposition = FirstNonEmpty(ReadJsonString(item, "disposition"), fallbackDisposition),
+                    sourceProcess = FirstNonEmpty(ReadJsonString(item, "sourceProcess"), fallbackSourceProcess),
+                    sourcePid = FirstNonEmpty(ReadJsonString(item, "sourcePid"), fallbackSourcePid),
+                    sourceUser = FirstNonEmpty(ReadJsonString(item, "sourceUser"), fallbackUser),
+                    targetProcess = targetProcess,
+                    targetPid = ReadJsonString(item, "targetPid"),
+                    objectType = objectType,
+                    objectName = objectName,
+                    objectFormat = ReadJsonString(item, "objectFormat"),
+                    policyName = FirstNonEmpty(ReadJsonString(item, "policyName"), fallbackPolicy),
+                    remoteIdentity = string.Empty,
+                    rawMessage = rawMessage
+                });
+            }
+
+            return events.ToArray();
+        }
+
+        private static string ClassifyUserHookEvidenceStage(string action, string objectType)
+        {
+            string value = action ?? string.Empty;
+            string kind = objectType ?? string.Empty;
+
+            if (value.IndexOf("process-create", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("suspended-process-create", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "execution";
+            }
+
+            if (value.IndexOf("network", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "network";
+            }
+
+            if (value.IndexOf("registry", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "persistence";
+            }
+
+            if (kind.IndexOf("credential", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "credential";
+            }
+
+            return "behavior";
         }
 
         private static AuditAttackFlowEvent BuildStaticScanAttackFlowEvent(AuditLog.AuditRecord record, string stage, string severity, string disposition)
@@ -2452,6 +2567,33 @@ namespace DataProtectorWebBridge.Services
             }
 
             return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        private static List<Dictionary<string, object>> ReadJsonObjectArray(Dictionary<string, object> data, string key)
+        {
+            List<Dictionary<string, object>> values = new List<Dictionary<string, object>>();
+            object raw;
+            if (data == null || string.IsNullOrWhiteSpace(key) || !data.TryGetValue(key, out raw) || raw == null)
+            {
+                return values;
+            }
+
+            IEnumerable enumerable = raw as IEnumerable;
+            if (enumerable == null || raw is string)
+            {
+                return values;
+            }
+
+            foreach (object item in enumerable)
+            {
+                Dictionary<string, object> dictionary = item as Dictionary<string, object>;
+                if (dictionary != null)
+                {
+                    values.Add(dictionary);
+                }
+            }
+
+            return values;
         }
 
         private static string JoinCompact(string separator, params string[] values)

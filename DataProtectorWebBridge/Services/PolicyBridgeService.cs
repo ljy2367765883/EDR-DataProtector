@@ -121,6 +121,7 @@ namespace DataProtectorWebBridge.Services
         private const int MessageBufferChars = 512;
         private const int MaxQueryAttempts = 4;
         private const int MaxUserHookSummaryItems = 12;
+        private const int MaxUserHookSummaryEvidenceItems = 64;
 
         private readonly AuditLog auditLog;
         private readonly object userHookCorrelatorLock = new object();
@@ -2518,16 +2519,82 @@ namespace DataProtectorWebBridge.Services
 
         private static string BuildUserHookSummaryDetails(List<AuditLog.AuditRecord> records)
         {
-            return string.Join(" | ",
-                (records ?? new List<AuditLog.AuditRecord>())
-                    .OrderBy(ParseAuditTimestampUtc)
-                    .Take(MaxUserHookSummaryItems)
-                    .Select(record =>
-                        NormalizeUserHookSummaryAction(record.Action) +
-                        " -> " +
-                        FirstNonEmpty(record.TargetProcess, record.ObjectName, record.Target, "-") +
-                        (string.IsNullOrWhiteSpace(record.TargetPid) ? string.Empty : " PID " + record.TargetPid))
-                    .ToArray());
+            List<AuditLog.AuditRecord> ordered = (records ?? new List<AuditLog.AuditRecord>())
+                .Where(record => record != null)
+                .OrderBy(ParseAuditTimestampUtc)
+                .ToList();
+            JavaScriptSerializer serializer = JsonResponse.CreateSerializer();
+            object[] evidence = ordered
+                .Take(MaxUserHookSummaryEvidenceItems)
+                .Select(record => new
+                {
+                    timeUtc = record.TimestampUtc ?? string.Empty,
+                    stage = InferUserHookSummaryStage(record),
+                    action = record.Action ?? string.Empty,
+                    title = NormalizeUserHookSummaryAction(record.Action),
+                    detail = FirstNonEmpty(record.EventDetails, record.Message),
+                    severity = record.Severity ?? string.Empty,
+                    disposition = record.Disposition ?? string.Empty,
+                    sourceHost = FirstNonEmpty(record.SourceHost, record.Host, Environment.MachineName),
+                    sourceProcess = FirstNonEmpty(record.SourceProcess, record.Extension),
+                    sourcePid = record.SourcePid ?? string.Empty,
+                    sourceUser = record.SourceUser ?? string.Empty,
+                    targetProcess = FirstNonEmpty(record.TargetProcess, record.ObjectName, record.Target),
+                    targetPid = record.TargetPid ?? string.Empty,
+                    objectType = record.ObjectType ?? string.Empty,
+                    objectName = FirstNonEmpty(record.ObjectName, record.TargetProcess, record.Target),
+                    objectFormat = record.ObjectFormat ?? string.Empty,
+                    policyName = record.PolicyName ?? string.Empty,
+                    rawMessage = record.Message ?? string.Empty
+                })
+                .Cast<object>()
+                .ToArray();
+
+            return serializer.Serialize(new
+            {
+                kind = "userhook-threat-summary",
+                evidenceCount = ordered.Count,
+                summarized = ordered.Count > evidence.Length,
+                summary = string.Join(" | ",
+                    ordered
+                        .Take(MaxUserHookSummaryItems)
+                        .Select(record =>
+                            NormalizeUserHookSummaryAction(record.Action) +
+                            " -> " +
+                            FirstNonEmpty(record.TargetProcess, record.ObjectName, record.Target, "-") +
+                            (string.IsNullOrWhiteSpace(record.TargetPid) ? string.Empty : " PID " + record.TargetPid))
+                        .ToArray()),
+                evidence = evidence
+            });
+        }
+
+        private static string InferUserHookSummaryStage(AuditLog.AuditRecord record)
+        {
+            string action = record == null ? string.Empty : record.Action ?? string.Empty;
+            string objectType = record == null ? string.Empty : record.ObjectType ?? string.Empty;
+
+            if (action.IndexOf("process-create", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.IndexOf("suspended-process-create", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "execution";
+            }
+
+            if (action.IndexOf("network", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "network";
+            }
+
+            if (action.IndexOf("registry", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "persistence";
+            }
+
+            if (objectType.IndexOf("credential", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "credential";
+            }
+
+            return "behavior";
         }
 
         private static string NormalizeUserHookSummaryAction(string action)
