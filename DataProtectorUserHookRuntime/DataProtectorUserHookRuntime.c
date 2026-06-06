@@ -172,6 +172,7 @@ static DWORD gHookEntryCount;
 static DP_RUNTIME_MEMORY_REPORT_ENTRY gMemoryReportCache[DP_RUNTIME_MEMORY_REPORT_CACHE_SIZE];
 static DWORD gLastMemoryScanTick;
 static volatile LONG gEtwUnregisterReports;
+static __declspec(thread) LONG gCreateProcessCallDepth;
 
 typedef struct _DP_RUNTIME_KEY_NAME_INFORMATION {
     ULONG NameLength;
@@ -902,6 +903,8 @@ DpRuntimeWriteBehaviorEvent(
     if (wcscmp(Action, L"userhook.runtime.loaded") == 0 ||
         wcscmp(Action, L"userhook.runtime.minhook-init-failed") == 0 ||
         wcscmp(Action, L"userhook.runtime.enable-hooks-failed") == 0 ||
+        wcscmp(Action, L"userhook.observed.suspended-process-create") == 0 ||
+        wcscmp(Action, L"userhook.observed.process-create-result") == 0 ||
         wcsstr(Action, L".blocked.") != NULL) {
         DpRuntimeDebugTrace(Action, Target, Status);
     }
@@ -966,13 +969,22 @@ DpRuntimeWriteBehaviorEvent(
 }
 
 static BOOL
+DpRuntimeIsCreateProcessCallActive(VOID)
+{
+    return gCreateProcessCallDepth > 0;
+}
+
+static BOOL
 DpRuntimeShouldBlockInjectionPrimitive(
     _In_ HANDLE ProcessHandle
     )
 {
     DWORD targetPid;
 
-    if (gAuditOnly || ProcessHandle == NULL || ProcessHandle == GetCurrentProcess()) {
+    if (gAuditOnly ||
+        DpRuntimeIsCreateProcessCallActive() ||
+        ProcessHandle == NULL ||
+        ProcessHandle == GetCurrentProcess()) {
         return FALSE;
     }
 
@@ -1003,7 +1015,9 @@ DpRuntimeShouldBlockThreadPrimitive(
 {
     DWORD targetPid;
 
-    if (gAuditOnly || ThreadHandle == NULL) {
+    if (gAuditOnly ||
+        DpRuntimeIsCreateProcessCallActive() ||
+        ThreadHandle == NULL) {
         return FALSE;
     }
 
@@ -2101,6 +2115,9 @@ DpHookCreateProcessW(
     )
 {
     WCHAR target[DP_RUNTIME_MAX_TEXT];
+    DWORD lastError;
+    DWORD targetPid = 0;
+    BOOL ok;
 
     target[0] = L'\0';
     if (applicationName != NULL) {
@@ -2115,16 +2132,38 @@ DpHookCreateProcessW(
         DpRuntimeWriteBehaviorEvent(L"userhook.observed.process-create", L"process", L"CreateProcessW", target, ERROR_SUCCESS, FALSE, 0, 0, creationFlags, commandLine);
     }
 
-    return gRealCreateProcessW(applicationName,
-                               commandLine,
-                               processAttributes,
-                               threadAttributes,
-                               inheritHandles,
-                               creationFlags,
-                               environment,
-                               currentDirectory,
-                               startupInfo,
-                               processInformation);
+    gCreateProcessCallDepth++;
+    ok = gRealCreateProcessW(applicationName,
+                             commandLine,
+                             processAttributes,
+                             threadAttributes,
+                             inheritHandles,
+                             creationFlags,
+                             environment,
+                             currentDirectory,
+                             startupInfo,
+                             processInformation);
+    lastError = GetLastError();
+    if (gCreateProcessCallDepth > 0) {
+        gCreateProcessCallDepth--;
+    }
+
+    if (ok && processInformation != NULL) {
+        targetPid = processInformation->dwProcessId;
+    }
+
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.process-create-result",
+                                L"process",
+                                L"CreateProcessW",
+                                target,
+                                ok ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                targetPid,
+                                0,
+                                creationFlags,
+                                commandLine);
+    SetLastError(lastError);
+    return ok;
 }
 
 static BOOL WINAPI
@@ -2143,6 +2182,9 @@ DpHookCreateProcessA(
 {
     WCHAR target[DP_RUNTIME_MAX_TEXT];
     WCHAR command[DP_RUNTIME_MAX_TEXT];
+    DWORD lastError;
+    DWORD targetPid = 0;
+    BOOL ok;
 
     target[0] = L'\0';
     command[0] = L'\0';
@@ -2162,16 +2204,38 @@ DpHookCreateProcessA(
         DpRuntimeWriteBehaviorEvent(L"userhook.observed.process-create", L"process", L"CreateProcessA", target, ERROR_SUCCESS, FALSE, 0, 0, creationFlags, command);
     }
 
-    return gRealCreateProcessA(applicationName,
-                               commandLine,
-                               processAttributes,
-                               threadAttributes,
-                               inheritHandles,
-                               creationFlags,
-                               environment,
-                               currentDirectory,
-                               startupInfo,
-                               processInformation);
+    gCreateProcessCallDepth++;
+    ok = gRealCreateProcessA(applicationName,
+                             commandLine,
+                             processAttributes,
+                             threadAttributes,
+                             inheritHandles,
+                             creationFlags,
+                             environment,
+                             currentDirectory,
+                             startupInfo,
+                             processInformation);
+    lastError = GetLastError();
+    if (gCreateProcessCallDepth > 0) {
+        gCreateProcessCallDepth--;
+    }
+
+    if (ok && processInformation != NULL) {
+        targetPid = processInformation->dwProcessId;
+    }
+
+    DpRuntimeWriteBehaviorEvent(L"userhook.observed.process-create-result",
+                                L"process",
+                                L"CreateProcessA",
+                                target,
+                                ok ? ERROR_SUCCESS : lastError,
+                                FALSE,
+                                targetPid,
+                                0,
+                                creationFlags,
+                                command);
+    SetLastError(lastError);
+    return ok;
 }
 
 static HMODULE WINAPI
